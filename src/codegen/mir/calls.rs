@@ -245,7 +245,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 return Err(NativeMirError::new(
                     subject,
                     format!("Set operation receiver has non-Set layout {layout:?}"),
-                ))
+                ));
             }
         };
         let element_desc = self
@@ -575,6 +575,191 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .ok_or_else(|| NativeMirError::new(subject, "session_lo returned void"))?;
             return Ok(value);
         }
+        if matches!(
+            kind,
+            MirBuiltinKind::Assert
+                | MirBuiltinKind::AssertEq
+                | MirBuiltinKind::AssertNe
+                | MirBuiltinKind::AssertApproxEq
+        ) {
+            let condition = match kind {
+                MirBuiltinKind::Assert => {
+                    let argument = required_assert_argument(
+                        arguments,
+                        0,
+                        "assert argument is absent",
+                        subject,
+                    )?;
+                    let value = self.value(argument, subject)?.into_int_value();
+                    if value.get_type().get_bit_width() == 1 {
+                        value
+                    } else {
+                        self.generator
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                value,
+                                value.get_type().const_zero(),
+                                "mir_assert_condition",
+                            )
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    }
+                }
+                MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe => {
+                    let left = required_assert_argument(
+                        arguments,
+                        0,
+                        "assert comparison left argument is absent",
+                        subject,
+                    )?;
+                    let right = required_assert_argument(
+                        arguments,
+                        1,
+                        "assert comparison right argument is absent",
+                        subject,
+                    )?;
+                    let left_value = self.value(left, subject)?;
+                    let right_value = self.value(right, subject)?;
+                    let equal = match (left_value, right_value) {
+                        (BasicValueEnum::IntValue(left), BasicValueEnum::IntValue(right)) => self
+                            .generator
+                            .builder
+                            .build_int_compare(IntPredicate::EQ, left, right, "mir_assert_eq")
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                        (BasicValueEnum::FloatValue(left), BasicValueEnum::FloatValue(right)) => {
+                            self.generator
+                                .builder
+                                .build_float_compare(
+                                    FloatPredicate::OEQ,
+                                    left,
+                                    right,
+                                    "mir_assert_eq",
+                                )
+                                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        }
+                        (BasicValueEnum::StructValue(left), BasicValueEnum::StructValue(right)) => {
+                            self.emit_string_equality(left, right, subject)?
+                        }
+                        _ => {
+                            return Err(NativeMirError::new(
+                                subject,
+                                "assert comparison values have incompatible native ABI",
+                            ));
+                        }
+                    };
+                    if kind == MirBuiltinKind::AssertNe {
+                        self.generator
+                            .builder
+                            .build_not(equal, "mir_assert_ne")
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                    } else {
+                        equal
+                    }
+                }
+                MirBuiltinKind::AssertApproxEq => {
+                    let left = required_assert_argument(
+                        arguments,
+                        0,
+                        "assert_approx_eq left argument is absent",
+                        subject,
+                    )?;
+                    let right = required_assert_argument(
+                        arguments,
+                        1,
+                        "assert_approx_eq right argument is absent",
+                        subject,
+                    )?;
+                    let left_value = self.value(left, subject)?;
+                    let right_value = self.value(right, subject)?;
+                    match (left_value, right_value) {
+                        (BasicValueEnum::IntValue(left), BasicValueEnum::IntValue(right)) => self
+                            .generator
+                            .builder
+                            .build_int_compare(
+                                IntPredicate::EQ,
+                                left,
+                                right,
+                                "mir_assert_approx_int",
+                            )
+                            .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+                        (BasicValueEnum::FloatValue(left), BasicValueEnum::FloatValue(right)) => {
+                            let diff = self
+                                .generator
+                                .builder
+                                .build_float_sub(left, right, "mir_assert_approx_diff")
+                                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                            let fabs =
+                                self.generator
+                                    .module
+                                    .get_function("fabs")
+                                    .unwrap_or_else(|| {
+                                        let f64_ty = self.generator.context.f64_type();
+                                        self.generator.module.add_function(
+                                            "fabs",
+                                            f64_ty.fn_type(
+                                                &[BasicMetadataTypeEnum::FloatType(f64_ty)],
+                                                false,
+                                            ),
+                                            Some(Linkage::External),
+                                        )
+                                    });
+                            let abs_diff = call_try_basic_value(
+                                &self
+                                    .generator
+                                    .builder
+                                    .build_call(
+                                        fabs,
+                                        &[BasicMetadataValueEnum::FloatValue(diff)],
+                                        "mir_assert_approx_abs",
+                                    )
+                                    .map_err(|error| {
+                                        NativeMirError::new(subject, error.to_string())
+                                    })?,
+                            )
+                            .ok_or_else(|| NativeMirError::new(subject, "fabs returned void"))?
+                            .into_float_value();
+                            self.generator
+                                .builder
+                                .build_float_compare(
+                                    FloatPredicate::OLE,
+                                    abs_diff,
+                                    self.generator.context.f64_type().const_float(1e-6),
+                                    "mir_assert_approx",
+                                )
+                                .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+                        }
+                        _ => {
+                            return Err(NativeMirError::new(
+                                subject,
+                                "assert_approx_eq values have incompatible native ABI",
+                            ));
+                        }
+                    }
+                }
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "unsupported builtin kind reached assertion dispatch",
+                    ));
+                }
+            };
+            let fail = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_assert_fail");
+            let ok = self
+                .generator
+                .context
+                .append_basic_block(self.llvm_function, "mir_assert_ok");
+            self.generator
+                .builder
+                .build_conditional_branch(condition, ok, fail)
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.generator.builder.position_at_end(fail);
+            self.emit_abort_with_message("[E0800] assertion failed", subject)?;
+            self.generator.builder.position_at_end(ok);
+            return Ok(self.generator.context.i64_type().const_zero().into());
+        }
         if kind == MirBuiltinKind::PrintlnString {
             let argument = arguments
                 .first()
@@ -898,6 +1083,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 subject,
                 "session builtin must use the session dispatch path",
             )),
+            // The assertion builtins are handled by the dedicated branch
+            // above. Keep this match exhaustive for callers that reach the
+            // generic builtin path after MIR validation.
+            MirBuiltinKind::Assert
+            | MirBuiltinKind::AssertEq
+            | MirBuiltinKind::AssertNe
+            | MirBuiltinKind::AssertApproxEq => Err(NativeMirError::new(
+                subject,
+                "assert builtin must use the assertion dispatch path",
+            )),
         }
         .inspect(|_| {
             let _ = result;
@@ -1209,7 +1404,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             "session_recv result is outside the signed integer ABI",
-                        ))
+                        ));
                     }
                 };
                 Ok(value)
@@ -1612,8 +1807,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         }
         let mut values = Vec::with_capacity(arguments.len());
         for index in 0..receipt.fixed_argument_count {
-            let argument = &arguments[index];
-            let conversion = &receipt.parameter_conversions[index];
+            let (argument, conversion) =
+                ffi_fixed_argument(arguments, &receipt.parameter_conversions, index, subject)?;
             let value = self.value(argument, subject)?;
             let value = self.coerce_ffi_value(
                 value,
@@ -1826,7 +2021,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             "FFI IntegerToI32 source lost its admitted integer ABI class",
-                        ))
+                        ));
                     }
                 }
             }
@@ -1900,7 +2095,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                             return Err(NativeMirError::new(
                                 subject,
                                 format!("FFI integer width {to_bits} is unsupported"),
-                            ))
+                            ));
                         }
                     },
                     name,
@@ -1955,7 +2150,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             format!("unsupported signed integer result width {width}"),
-                        ))
+                        ));
                     }
                 };
                 self.generator
@@ -2021,7 +2216,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             format!("unsupported signed integer result width {width}"),
-                        ))
+                        ));
                     }
                 };
                 self.generator
@@ -2036,6 +2231,32 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )),
         }
     }
+}
+
+fn required_assert_argument<'a>(
+    arguments: &'a [MirValueId],
+    index: usize,
+    missing_message: &'static str,
+    subject: &str,
+) -> Result<&'a MirValueId, NativeMirError> {
+    arguments
+        .get(index)
+        .ok_or_else(|| NativeMirError::new(subject, missing_message))
+}
+
+fn ffi_fixed_argument<'a>(
+    arguments: &'a [MirValueId],
+    conversions: &'a [crate::core::mir::MirFfiAbiConversion],
+    index: usize,
+    subject: &str,
+) -> Result<(&'a MirValueId, &'a crate::core::mir::MirFfiAbiConversion), NativeMirError> {
+    let argument = arguments.get(index).ok_or_else(|| {
+        NativeMirError::new(subject, "FFI fixed receipt names an absent argument")
+    })?;
+    let conversion = conversions.get(index).ok_or_else(|| {
+        NativeMirError::new(subject, "FFI fixed argument has no ABI conversion receipt")
+    })?;
+    Ok((argument, conversion))
 }
 
 fn native_ffi_value_matches<'ctx>(value: &BasicValueEnum<'ctx>, abi: MirAbiClass) -> bool {
@@ -2094,13 +2315,59 @@ fn native_ffi_basic_type_matches<'ctx>(value: &BasicTypeEnum<'ctx>, abi: MirAbiC
 #[cfg(test)]
 mod tests {
     use super::{
-        native_ffi_basic_type_matches, native_ffi_metadata_type_matches, native_ffi_scalar_shape,
-        native_ffi_value_matches, NativeFfiScalarShape,
+        ffi_fixed_argument, native_ffi_basic_type_matches, native_ffi_metadata_type_matches,
+        native_ffi_scalar_shape, native_ffi_value_matches, required_assert_argument,
+        NativeFfiScalarShape,
     };
     use crate::core::mir::types::{MirAbiClass, MirFfiScalarKind};
+    use crate::core::mir::{MirFfiAbiConversion, MirValueId};
     use inkwell::context::Context;
     use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
     use inkwell::values::BasicValueEnum;
+
+    #[test]
+    fn malformed_assertion_missing_operand_returns_native_error() {
+        let error = required_assert_argument(
+            &[],
+            1,
+            "assert comparison right argument is absent",
+            "assert_eq",
+        )
+        .expect_err("a missing assertion operand must fail closed");
+        assert_eq!(error.subject, "assert_eq");
+        assert_eq!(error.message, "assert comparison right argument is absent");
+    }
+
+    #[test]
+    fn malformed_ffi_fixed_receipt_returns_native_error_without_indexing() {
+        let argument = MirValueId::new("arg:0").expect("fixture value id");
+        let missing_conversion =
+            ffi_fixed_argument(std::slice::from_ref(&argument), &[], 0, "extern f")
+                .expect_err("a fixed argument without a conversion receipt must be rejected");
+        assert_eq!(missing_conversion.subject, "extern f");
+        assert_eq!(
+            missing_conversion.message,
+            "FFI fixed argument has no ABI conversion receipt"
+        );
+
+        let conversion = MirFfiAbiConversion {
+            from: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+            to: MirAbiClass::Integer {
+                bits: 32,
+                signed: true,
+            },
+        };
+        let missing_argument = ffi_fixed_argument(&[], &[conversion], 0, "extern f")
+            .expect_err("a fixed receipt without its MIR argument must be rejected");
+        assert_eq!(missing_argument.subject, "extern f");
+        assert_eq!(
+            missing_argument.message,
+            "FFI fixed receipt names an absent argument"
+        );
+    }
 
     #[test]
     fn native_ffi_scalar_shape_is_the_single_admitted_physical_family() {

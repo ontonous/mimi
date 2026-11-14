@@ -5,105 +5,10 @@
 //! (no object compilation / linking) and fast to run.
 
 use super::*;
-use crate::error::MimiResult;
 use inkwell::context::Context;
 use inkwell::types::BasicType;
 use inkwell::values::BasicValue;
 use std::collections::HashMap;
-
-// The production fifth pass is canonical-only. Keep the old surface emitter
-// reachable solely from this test-module adapter so low-level builder tests
-// can continue to exercise compatibility code without adding a production
-// `compile_func_legacy` call edge.
-impl<'ctx> CodeGenerator<'ctx> {
-    pub(crate) fn compile_legacy_test_function(
-        &mut self,
-        function: &FuncDef,
-    ) -> crate::error::MimiResult<()> {
-        self.compile_func_legacy(function)
-    }
-
-    pub(crate) fn compile_file_with_resolved(
-        &mut self,
-        program: &crate::core::CheckedProgram,
-        eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
-    ) -> crate::error::MimiResult<()> {
-        self.shared_dynamic_any_preflight_passed = false;
-        self.install_checked_declaration_names(program)?;
-        self.compile_file_inner(
-            program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder),
-            Some((program, eligible)),
-            true,
-        )
-    }
-
-    // The following impl-body adapters are deliberately test-only. They keep
-    // compatibility-registry tests able to exercise the retired surface AST
-    // emitter without leaving a production call edge from registry/funcs.rs.
-    pub(in crate::codegen) fn compile_impl_methods(&mut self) -> MimiResult<()> {
-        for (type_name, trait_impls) in self.type_impls.clone() {
-            for (trait_name, methods) in &trait_impls {
-                for method in methods {
-                    let mangled = format!("{}__{}__{}", type_name, trait_name, method.name);
-                    let type_args_for_self = self
-                        .impl_type_args
-                        .get(&type_name)
-                        .cloned()
-                        .unwrap_or_default();
-                    let self_type_name = if type_args_for_self.is_empty() {
-                        Type::Name(type_name.clone(), vec![])
-                    } else {
-                        Type::Name(type_name.clone(), type_args_for_self.clone())
-                    };
-                    let self_ty = match type_name.as_str() {
-                        "i32" | "i64" | "f64" | "bool" | "Record" | "Map" | "Any" => self_type_name,
-                        _ => Type::Ref(None, Box::new(self_type_name)),
-                    };
-                    self.compile_impl_method_body_for_test(
-                        method,
-                        &mangled,
-                        type_args_for_self,
-                        self_ty,
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn compile_impl_method_body_for_test(
-        &mut self,
-        method: &FuncDef,
-        symbol: &str,
-        type_args_for_self: Vec<Type>,
-        self_ty: Type,
-    ) -> MimiResult<()> {
-        let impl_method = self.impl_method_with_self_type(method, symbol, self_ty);
-        let saved_type_map = self.type_map.clone();
-        if !type_args_for_self.is_empty() {
-            let mut identity_map: HashMap<String, Type> = HashMap::new();
-            for argument in &type_args_for_self {
-                if let Type::Name(name, _) = argument.unlocated() {
-                    identity_map.insert(name.clone(), argument.clone());
-                }
-            }
-            if !identity_map.is_empty() && self.type_map.is_empty() {
-                self.type_map.extend(identity_map);
-            }
-        }
-        let result = self.compile_func_legacy(&impl_method);
-        self.type_map = saved_type_map;
-        result
-    }
-
-    pub(crate) fn compile_checked_impl_method_instance_legacy_for_test(
-        &mut self,
-        instance: &FuncDef,
-        type_map: &HashMap<String, Type>,
-    ) -> MimiResult<()> {
-        self.compile_generic_func(instance, type_map)
-    }
-}
 
 fn with_test_function<'ctx, F>(context: &'ctx Context, f: F)
 where
@@ -126,6 +31,77 @@ fn runtime_functions_are_registered() {
     assert!(cg.get_runtime_fn("mimi_lexer_tokenize").is_ok());
     assert!(cg.get_runtime_fn("mimi_parse_source").is_ok());
     assert!(cg.get_runtime_fn("__does_not_exist").is_err());
+}
+
+#[test]
+fn legacy_string_and_all_text_fstring_globals_preserve_embedded_nul_bytes() {
+    let context = Context::create();
+    let mut cg = CodeGenerator::new(&context, "length_safe_string_globals");
+    let function = cg
+        .module
+        .add_function("test_fn", context.void_type().fn_type(&[], false), None);
+    let entry = context.append_basic_block(function, "entry");
+    cg.builder.position_at_end(entry);
+
+    let vars = HashMap::new();
+    let text = "prefix\0left";
+    cg.compile_literal_expr(&crate::ast::Lit::String(text.into()), &vars)
+        .expect("string literal should lower");
+    cg.compile_fstring(&[crate::ast::FStringPart::Text(text.into())], &vars)
+        .expect("all-text f-string should lower");
+    cg.builder
+        .build_return(None)
+        .expect("return from test function");
+
+    let ir = cg.module.print_to_string().to_string();
+    let nul_preserving_global = "c\"prefix\\00left\\00\"";
+    assert_eq!(
+        ir.matches(nul_preserving_global).count(),
+        2,
+        "ordinary string and all-text f-string must both retain the full byte sequence: {ir}"
+    );
+    cg.module
+        .verify()
+        .expect("generated string globals must form valid LLVM IR");
+}
+
+#[test]
+fn extern_string_ensures_use_the_validated_mimi_result_value() {
+    let file = crate::tests::parse_prod(
+        r#"
+        extern "C" {
+            func foreign_text() -> string
+                ensures: len(result) == 1;
+        }
+    "#,
+    );
+    let block = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            crate::ast::Item::ExternBlock(block) => Some(block),
+            _ => None,
+        })
+        .expect("extern block");
+
+    let context = Context::create();
+    let mut cg = CodeGenerator::new(&context, "extern_string_ensures_result");
+    cg.verify_contracts = true;
+    cg.register_extern_block(block)
+        .expect("register extern declaration");
+    cg.generate_extern_fn("foreign_text")
+        .expect("emit validated String return and ensures contract");
+
+    let ir = cg.module.print_to_string().to_string();
+    assert!(ir.contains("mimi_c_string_len_utf8"), "{ir}");
+    assert!(ir.contains("mimi_string_to_cstr_copy"), "{ir}");
+    assert!(
+        ir.contains("result = alloca { ptr, i64 }"),
+        "ensures must bind result as Mimi's pointer-and-length value, not raw C `char*`: {ir}"
+    );
+    cg.module
+        .verify()
+        .expect("extern wrapper must form valid LLVM IR");
 }
 
 #[test]
@@ -629,7 +605,6 @@ fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
     let program = crate::core::check_program(&file).expect("check");
     assert!(crate::core::mir::is_exact_s8_flow_transition(&program));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s10_s8_canonical_route");
     codegen
@@ -640,10 +615,6 @@ fn compile_checked_routes_exact_s8_flow_through_canonical_mir() {
         .get_function("__mimi_transition_Counter__inc__Zero")
         .is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "exact S8 direct native entry must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -666,7 +637,6 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
     crate::core::mir::validate_scalar_collection_island(&canonical)
         .expect("complete scalar collection island");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s12_scalar_collection_route");
     codegen
@@ -677,79 +647,119 @@ fn compile_checked_routes_exact_scalar_collection_through_canonical_mir() {
         .get_function("main")
         .is_some_and(|function| function.count_basic_blocks() > 0));
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "exact scalar collection direct native entry must not access retained legacy bodies"
-    );
 }
 
 #[test]
-fn compile_checked_routes_closed_map_any_owner_v1_without_legacy_access() {
+fn compile_checked_rejects_result_valued_map_any_outside_retired_v1_without_legacy_access() {
     let profiles = [
         (
             "i32",
             r#"
         func main() -> i32 {
-            let root = map_new()
-            let updated = map_set(root, "answer", 42)
-            let size = map_size(updated)
-            println(size)
-            drop(updated)
-            0
+            match map_new() {
+                Ok(root) => {
+                    match map_set(root, "answer", 42) {
+                        Ok(updated) => {
+                            let size = map_size(updated)
+                            println(size)
+                            drop(updated)
+                            0
+                        },
+                        Err(status) => {
+                            drop(root)
+                            status
+                        },
+                    }
+                },
+                Err(status) => { status },
+            }
         }
-    "#,
-            "mimi_mir_map_any_owner_v1_set_i32",
+            "#,
         ),
         (
             "string",
             r#"
         func string_map_size() -> i32 {
-            let root = map_new()
-            let updated = map_set(root, "answer", "a\0b雪")
-            let size = map_size(updated)
-            println(size)
-            drop(updated)
-            size
+            match map_new() {
+                Ok(root) => {
+                    match map_set(root, "answer", "a\0b雪") {
+                        Ok(updated) => {
+                            let size = map_size(updated)
+                            println(size)
+                            drop(updated)
+                            size
+                        },
+                        Err(status) => {
+                            drop(root)
+                            status
+                        },
+                    }
+                },
+                Err(status) => { status },
+            }
         }
         func main() -> i32 {
             let size = string_map_size()
             0
         }
             "#,
-            "mimi_mir_map_any_owner_v1_set_string",
         ),
         (
             "remove",
             r#"
         func main() -> i32 {
-            let root = map_new()
-            let inserted = map_set(root, "remove", "a\0b雪")
-            let with_keep = map_set(inserted, "keep", "stay")
-            let removed = map_remove(with_keep, "remove")
-            let size = map_size(removed)
-            drop(removed)
-            size
+            match map_new() {
+                Ok(root) => {
+                    match map_set(root, "remove", "a\0b雪") {
+                        Ok(inserted) => {
+                            match map_set(inserted, "keep", "stay") {
+                                Ok(with_keep) => {
+                                    let removed = map_remove(with_keep, "remove")
+                                    let size = map_size(removed)
+                                    drop(removed)
+                                    size
+                                },
+                                Err(status) => {
+                                    drop(inserted)
+                                    status
+                                },
+                            }
+                        },
+                        Err(status) => {
+                            drop(root)
+                            status
+                        },
+                    }
+                },
+                Err(status) => { status },
+            }
         }
-    "#,
-            "mimi_mir_map_any_owner_v1_remove",
+            "#,
         ),
         (
             "contains",
             r#"
         func main() -> i32 {
-            let root = map_new()
-            let inserted = map_set(root, "answer", 42)
-            let present = has_key(inserted, "answer")
-            let size = map_size(inserted)
-            println(present)
-            drop(inserted)
-            size
+            match map_new() {
+                Ok(root) => {
+                    match map_set(root, "answer", 42) {
+                        Ok(inserted) => {
+                            let present = has_key(inserted, "answer")
+                            let size = map_size(inserted)
+                            println(present)
+                            drop(inserted)
+                            size
+                        },
+                        Err(status) => { drop(root) status },
+                    }
+                },
+                Err(status) => { status },
+            }
         }
     "#,
-            "mimi_mir_map_any_owner_v1_contains",
         ),
     ];
-    for (profile, source, set_runtime) in profiles {
+    for (profile, source) in profiles {
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()
@@ -759,59 +769,41 @@ fn compile_checked_routes_closed_map_any_owner_v1_without_legacy_access() {
         assert_eq!(
             admission.map_root,
             crate::core::mir::MapRootAdmission::OutsideProfile,
-            "{profile} must not be admitted under the raw MapRoot identity: {admission:#?}"
+            "{profile} Result-valued construction must not enter the retired bare-Record MapRoot profile: {admission:#?}"
         );
         assert_eq!(
             admission.map_any_owner,
-            crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage,
-            "{profile} must have a complete independent MapAnyOwner v1 receipt: {admission:#?}"
+            crate::core::mir::MapAnyOwnerAdmission::OutsideProfile,
+            "{profile} Result-unwrapping does not mint a retired bare-Record MapAnyOwner v1 receipt: {admission:#?}"
         );
-        assert!(crate::core::mir::CanonicalMirRouteProfile::MapAnyOwnerV1.is_admitted(admission));
+        assert_eq!(
+            admission.ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage,
+            "{profile} must retain the independent incomplete V2 boundary instead of borrowing V1: {admission:#?}"
+        );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
+        crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
         let context = Context::create();
         let mut codegen = CodeGenerator::new(
             &context,
-            &format!("map_any_owner_v1_{profile}_direct_route"),
+            &format!("map_any_owner_v1_{profile}_result_fail_closed"),
         );
-        codegen
+        let errors = codegen
             .compile_checked(&program)
-            .expect("direct CheckedProgram native entry must route MapAnyOwner v1 through MIR");
-        codegen
-            .module
-            .verify()
-            .expect("valid direct MapAnyOwner v1 module");
-        let native_ir = codegen.module.print_to_string().to_string();
-        let result_abi = if profile == "contains" {
-            "call i32"
-        } else {
-            "call i64"
-        };
+            .expect_err("Result-valued MapAny outside the closed route must fail at MIR coverage");
         assert!(
-            native_ir.contains(&format!("{result_abi} @{set_runtime}")),
-            "direct {profile} native route must call {set_runtime}; emitted LLVM IR:\n{native_ir}"
+            errors.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            }),
+            "{profile} must report the canonical MIR coverage gate: {errors:?}"
         );
         assert!(
-            !native_ir.contains("call i64 @mimi_mir_map_root_"),
-            "direct {profile} native route must not call the raw MapRoot runtime"
+            codegen.module.get_function("main").is_none(),
+            "{profile} must not leave a partially emitted compatibility function"
         );
-        for runtime in [
-            "mimi_mir_map_any_owner_v1_new",
-            set_runtime,
-            "mimi_mir_map_any_owner_v1_size",
-            "mimi_mir_map_any_owner_v1_drop",
-        ] {
-            assert!(codegen.module.get_function(runtime).is_some(), "{runtime}");
-        }
-        if profile == "remove" {
-            assert!(codegen
-                .module
-                .get_function("mimi_mir_map_any_owner_v1_remove")
-                .is_some());
-        }
         assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "direct {profile} MapAnyOwner v1 native compilation must not access retained legacy bodies"
+            crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+            "{profile} rejected MapAny route must not access the legacy codegen body"
         );
     }
 }
@@ -841,7 +833,6 @@ fn compile_checked_rejects_dynamic_map_key_without_legacy_owner() {
         admission.map_any_owner,
         crate::core::mir::MapAnyOwnerAdmission::OutsideProfile
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "map_dynamic_key_rejected");
     let errors = codegen
@@ -856,7 +847,6 @@ fn compile_checked_rejects_dynamic_map_key_without_legacy_owner() {
         }),
         "unsupported Map operation must fail at the canonical route gate: {errors:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -881,12 +871,16 @@ fn compile_checked_routes_ordinary_map_values_without_legacy_owner() {
         crate::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
     );
     assert_eq!(
+        admission.ordinary_map_owned_any_v2,
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::OutsideProfile,
+        "the incomplete V2 empty-root candidate must yield only to the fully receipted V1 Values route"
+    );
+    assert_eq!(
         admission.ordinary_map_owner_lifecycle_i32_string_v1,
         crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
     );
     assert!(!admission.map_any_owner.is_candidate());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "ordinary_map_values_direct_route");
     codegen
@@ -904,10 +898,6 @@ fn compile_checked_routes_ordinary_map_values_without_legacy_owner() {
     assert!(
         native_ir.contains("@mimi_mir_ordinary_map_owned_get_i32_string_v1_values"),
         "ordinary Map values native route must call its owned-result runtime: {native_ir}"
-    );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "ordinary Map values native compilation must not access retained legacy bodies"
     );
 
     // Keep a negative route fixture on a genuinely unsupported Map operation.
@@ -943,7 +933,6 @@ fn compile_checked_routes_ordinary_map_values_without_legacy_owner() {
         crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::OutsideProfile
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "ordinary_map_incomplete_compatibility");
     let errors = codegen
@@ -958,32 +947,667 @@ fn compile_checked_routes_ordinary_map_values_without_legacy_owner() {
         }),
         "unsupported Map operation must fail at the canonical route gate: {errors:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_rejects_unmigrated_generic_body_without_legacy_owner() {
+fn ordinary_map_owner_lifecycle_observer_v1_native_uses_borrowed_json_and_owned_string_drop() {
+    use crate::core::mir::CanonicalMirRouteProfile as Profile;
+
     let source = r#"
-        func choose<T>(left: T, right: T) -> T { left }
-        func main() -> i64 { choose(42, 43) }
+        func main() -> i32 {
+            let root = map_new()
+            let snapshot = to_json(root)
+            println(root)
+            drop(root)
+            println(snapshot)
+            0
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check observer fixture");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert!(Profile::OrdinaryMapOwnerLifecycleObserverV1.is_admitted(admission));
+    assert!(
+        !admission.ordinary_map_owned_any_v2.has_profile_signal(),
+        "the isolated lifecycle observer profile must not admit broad V2 readiness"
+    );
+
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize the selected lifecycle-v1 observer route");
+    assert!(Profile::OrdinaryMapOwnerLifecycleObserverV1.is_materialized(&route));
+    let receipt = route
+        .ordinary_map_owner_lifecycle_observer_v1_route_receipt
+        .as_ref()
+        .expect("route materialization supplies its exact observer receipt");
+    assert_eq!(
+        receipt.profile,
+        Profile::OrdinaryMapOwnerLifecycleObserverV1.as_str()
+    );
+    let observer_projection =
+        crate::core::mir::validate_ordinary_map_owner_lifecycle_observer_v1_mir_route(
+            &route.program,
+        )
+        .expect("Checker observer receipts bind one-to-one to MIR instructions");
+    let observer_instruction_count = route
+        .program
+        .functions()
+        .values()
+        .flat_map(|function| function.blocks.values())
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson {
+                    ..
+                } | crate::core::mir::MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln {
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(observer_instruction_count, 2);
+    assert_eq!(observer_projection.len(), observer_instruction_count);
+
+    let context = Context::create();
+    let mut no_receipt = CodeGenerator::new(&context, "ordinary_map_observer_without_receipt");
+    let no_receipt_error = no_receipt
+        .compile_mir_native(&route.program)
+        .expect_err("observer MIR cannot enter native emission without the selected route receipt");
+    assert!(no_receipt_error.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(no_receipt.module.get_function("main").is_none());
+    assert!(no_receipt
+        .module
+        .get_function("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_to_json")
+        .is_none());
+
+    let mismatched_receipt = route
+        .program
+        .route_receipt(crate::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE);
+    let mut wrong_receipt = CodeGenerator::new(&context, "ordinary_map_observer_wrong_receipt");
+    let wrong_receipt_error = wrong_receipt
+        .compile_mir_native_with_route_receipt(&route.program, &mismatched_receipt)
+        .expect_err("a general route receipt cannot authorize the observer instructions");
+    assert!(wrong_receipt_error.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    }));
+    assert!(wrong_receipt.module.get_function("main").is_none());
+
+    let mut codegen = CodeGenerator::new(&context, "ordinary_map_observer_native");
+    codegen
+        .compile_mir_native_with_route_receipt(&route.program, receipt)
+        .expect("native consumer accepts the selected observer receipt");
+    codegen
+        .module
+        .verify()
+        .expect("observer native LLVM module verifies");
+    let native_ir = codegen.module.print_to_string().to_string();
+    let call_count = |symbol: &str| {
+        native_ir
+            .lines()
+            .filter(|line| line.contains("call ") && line.contains(&format!("@{symbol}(")))
+            .count()
+    };
+    assert_eq!(
+        call_count("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_to_json"),
+        2,
+        "ToJson yields an owned String, while println performs an independent borrowed snapshot"
+    );
+    assert_eq!(call_count("strlen"), 2);
+    assert_eq!(
+        call_count("mimi_mir_ordinary_map_domain_own_string"),
+        2,
+        "ToJson owns its returned snapshot and println owns its temporary output buffer"
+    );
+    assert_eq!(
+        call_count("mimi_print_bytes"),
+        4,
+        "each observer prints exact payload bytes and one newline"
+    );
+    assert_eq!(
+        call_count("mimi_string_free"),
+        3,
+        "the Map-print scratch buffer, println's owned snapshot temporary, and scope-owned ToJson String are each freed once"
+    );
+    assert_eq!(
+        call_count("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_clone"),
+        0,
+        "observing a Map must not clone or consume its owner handle"
+    );
+
+    if crate::tests::can_link() {
+        let native = crate::tests::link_and_observe_canonical_mir(&codegen)
+            .expect("run native borrowed Map observer fixture");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, "{}\n{}\n");
+        assert_eq!(native.stderr, "");
+    }
+}
+
+#[test]
+fn ordinary_map_owner_lifecycle_native_size_uses_distinct_overflow_status() {
+    let source = r#"
+        func main() -> i32 {
+            let root = map_new()
+            let key = "capacity-probe"
+            let inserted = map_set(root, key, 1)
+            let size = map_size(inserted)
+            drop(root)
+            drop(inserted)
+            size
+        }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let checked = crate::core::check_program(&file).expect("check Map size fixture");
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
+    assert_eq!(
+        admission.ordinary_map_owner_lifecycle_i32_string_v1,
+        crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::CompleteCoverage,
+        "a computed String key selects the distinct ordinary lifecycle size ABI"
+    );
+    assert_eq!(
+        admission.ordinary_map_owned_any_v2,
+        crate::core::mir::OrdinaryMapOwnedAnyV2Admission::OutsideProfile
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "ordinary_map_size_status_native");
+    codegen
+        .compile_checked(&checked)
+        .expect("ordinary Map lifecycle size uses the canonical native route");
+    codegen
+        .module
+        .verify()
+        .expect("ordinary Map lifecycle size native module verifies");
+    let native_ir = codegen.module.print_to_string().to_string();
+
+    assert!(native_ir.contains("@mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size_status"));
+    assert!(native_ir.contains("mir_ordinary_map_size_status_success"));
+    assert!(native_ir.contains("mir_ordinary_map_size_status_overflow"));
+    assert!(native_ir.contains("[E0802] ordinary Map owner lifecycle v1 size overflows i32"));
+    assert!(native_ir.contains("[E0800] ordinary Map lifecycle Size failed"));
+    assert!(
+        !native_ir.contains("call i32 @mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size(")
+    );
+}
+
+#[test]
+fn compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access() {
+    let source = r#"
+        func choose<T>(left: T, right: T) -> T { let ignored = true; right }
+        func main() -> i64 { choose(2147483690, 2147483691) }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program)
+            .scalar_generic_identity_i64,
+        crate::core::mir::ScalarGenericIdentityAdmission::CompleteCoverage,
+        "the checker-owned bool literal binding preserves the selected-formal projection"
+    );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("the exact generic bool-local body must lower to canonical MIR");
+    assert_eq!(mir.instances().len(), 1, "one specialized generic instance");
+    let instance = mir
+        .instances()
+        .values()
+        .next()
+        .expect("one concrete generic instance");
+    assert!(matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarArgumentProjection {
+            parameter_index: 1,
+            parameter_count: 2,
+        }
+    ));
+    let target = mir
+        .functions()
+        .get(&instance.function)
+        .expect("materialized generic body");
+    let concrete = instance.arguments.first().expect("concrete T substitution");
+    crate::core::mir::validate_generic_argument_projection_shape(target, concrete, 1, 2)
+        .expect("the MIR receipt admits only the unused bool binding and selected formal");
+    assert_eq!(
+        crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic projection"),
+        crate::core::mir::reference::MirRuntimeValue::Int(2147483691)
+    );
+    let bytecode = crate::interp::bytecode::compile_mir_program(&mir)
+        .expect("generic bool-local body compiles to AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(matches!(
+        crate::interp::bytecode::BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect("bytecode generic bool-local projection"),
+        crate::interp::Value::Int(2147483691)
+    ));
+
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "legacy_generic_owner");
+    let mut codegen = CodeGenerator::new(&context, "canonical_generic_ignored_bool_binding");
+    codegen
+        .compile_checked(&program)
+        .expect("default native route must emit the admitted generic projection");
+    codegen
+        .module
+        .verify()
+        .expect("native generic bool-local module verifies");
+    assert!(codegen.module.get_function("main").is_some());
+    let native = codegen
+        .module
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .expect("native generic bool-local JIT engine");
+    let finalizer_guard = codegen
+        .module
+        .get_function("mimi_mir_assert_no_live_managed_any_v2_lists")
+        .expect("canonical main installs the managed-Any end-of-run guard");
+    native.add_global_mapping(
+        &finalizer_guard,
+        crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i64;
+    // SAFETY: `compile_checked` emitted `main` with the checked `i64 ()` ABI,
+    // and its only runtime guard is mapped into this direct JIT engine above.
+    let native_main = unsafe {
+        native
+            .get_function::<Main>("main")
+            .expect("native generic main exists")
+    };
+    crate::codegen::assert_execution_engine_linked(&native, "calling native generic main");
+    // SAFETY: `native_main` has the checked no-argument i64 ABI.
+    let native_value = unsafe { native_main.call() };
+    assert_eq!(
+        native_value, 2147483691,
+        "native MIR generic projection result"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "the canonical generic projection must not invoke the legacy emitter"
+    );
+}
+
+#[test]
+fn compile_checked_routes_generic_ignored_integer_binding_projection_without_legacy_access() {
+    let source = r#"
+        func choose<T>(left: T, right: T) -> T { let ignored = 1; right }
+        func main() -> i64 { choose(2147483690, 2147483691) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program)
+            .scalar_generic_identity_i64,
+        crate::core::mir::ScalarGenericIdentityAdmission::CompleteCoverage,
+        "the checker-owned unused integer literal preserves the selected-formal projection"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("the exact generic integer-local body must lower to canonical MIR");
+    assert_eq!(mir.instances().len(), 1, "one specialized generic instance");
+    let instance = mir
+        .instances()
+        .values()
+        .next()
+        .expect("one concrete generic instance");
+    assert!(matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarArgumentProjection {
+            parameter_index: 1,
+            parameter_count: 2,
+        }
+    ));
+    let target = mir
+        .functions()
+        .get(&instance.function)
+        .expect("materialized generic body");
+    let concrete = instance.arguments.first().expect("concrete T substitution");
+    crate::core::mir::validate_generic_argument_projection_shape(target, concrete, 1, 2)
+        .expect("the MIR receipt admits only the unused integer literal and selected formal");
+    assert_eq!(
+        crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic projection"),
+        crate::core::mir::reference::MirRuntimeValue::Int(2147483691)
+    );
+    let bytecode = crate::interp::bytecode::compile_mir_program(&mir)
+        .expect("generic integer-local body compiles to AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(matches!(
+        crate::interp::bytecode::BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect("bytecode generic integer-local projection"),
+        crate::interp::Value::Int(2147483691)
+    ));
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "canonical_generic_ignored_integer_binding");
+    codegen
+        .compile_checked(&program)
+        .expect("default native route must emit the admitted generic projection");
+    codegen
+        .module
+        .verify()
+        .expect("native generic integer-local module verifies");
+    assert!(codegen.module.get_function("main").is_some());
+    let native = codegen
+        .module
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .expect("native generic integer-local JIT engine");
+    let finalizer_guard = codegen
+        .module
+        .get_function("mimi_mir_assert_no_live_managed_any_v2_lists")
+        .expect("canonical main installs the managed-Any end-of-run guard");
+    native.add_global_mapping(
+        &finalizer_guard,
+        crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i64;
+    // SAFETY: `compile_checked` emitted `main` with the checked `i64 ()` ABI,
+    // and its only runtime guard is mapped into this direct JIT engine above.
+    let native_main = unsafe {
+        native
+            .get_function::<Main>("main")
+            .expect("native generic main exists")
+    };
+    crate::codegen::assert_execution_engine_linked(&native, "calling native generic main");
+    // SAFETY: `native_main` has the checked no-argument i64 ABI.
+    let native_value = unsafe { native_main.call() };
+    assert_eq!(
+        native_value, 2147483691,
+        "native MIR generic projection result"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "the canonical generic projection must not invoke the legacy emitter"
+    );
+}
+
+#[test]
+fn compile_checked_rejects_used_generic_integer_side_binding_without_legacy_owner() {
+    let source = r#"
+        func choose<T>(left: T, right: T) -> T {
+            let ignored = 1;
+            let observed = ignored;
+            right
+        }
+        func main() -> i64 { choose(2147483690, 2147483691) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program)
+            .scalar_generic_identity_i64,
+        crate::core::mir::ScalarGenericIdentityAdmission::OutsideProfile,
+        "a used integer local falls outside the single unused literal shape"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "used_generic_integer_side_binding");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("a used integer side binding remains outside the narrow scalar projection");
+    assert!(errors.iter().any(|diagnostic| {
+        diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            && diagnostic.message.contains("NITS")
+    }));
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+}
+
+#[test]
+fn compile_checked_routes_generic_local_alias_projection_without_legacy_access() {
+    let source = r#"
+        func choose<T>(left: T, right: T) -> T { let chosen = right; chosen }
+        func main() -> i32 { choose(42, 43) }
+    "#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program)
+            .scalar_generic_identity_i32,
+        crate::core::mir::ScalarGenericIdentityAdmission::CompleteCoverage,
+        "the Checker exact local alias shape belongs to the existing scalar projection slice"
+    );
+
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("the exact generic local alias must lower to canonical MIR");
+    assert_eq!(mir.instances().len(), 1, "one specialized generic instance");
+    let instance = mir
+        .instances()
+        .values()
+        .next()
+        .expect("one concrete generic instance");
+    assert!(matches!(
+        &instance.contract,
+        crate::core::mir::MirGenericInstanceContract::ScalarArgumentProjection {
+            parameter_index: 1,
+            parameter_count: 2,
+        }
+    ));
+    let target = mir
+        .functions()
+        .get(&instance.function)
+        .expect("generic local alias instance body");
+    let concrete = instance.arguments.first().expect("concrete T substitution");
+    assert!(
+        crate::core::mir::validate_generic_argument_projection_shape(target, concrete, 1, 2)
+            .is_ok()
+    );
+
+    // The instance receipt is insufficient by itself: execution consumers
+    // revalidate that the body is the exact Clone/Move/Clone alias chain.
+    let mut forged_target = target.clone();
+    let forged_source = forged_target.parameters[0].clone();
+    let forged_entry = forged_target.entry.clone();
+    let block = forged_target
+        .blocks
+        .get_mut(&forged_entry)
+        .expect("generic instance entry block");
+    let binding_result = match &block.instructions[1].kind {
+        crate::core::mir::MirInstructionKind::Move { result, .. } => result.clone(),
+        _ => panic!("the local alias lowering must contain its binding Move"),
+    };
+    block.instructions[1].kind = crate::core::mir::MirInstructionKind::Move {
+        result: binding_result,
+        source: forged_source,
+    };
+    let forged_error = crate::core::mir::validate_generic_argument_projection_shape(
+        &forged_target,
+        concrete,
+        1,
+        2,
+    )
+    .expect_err("a forged local binding source must not preserve the projection receipt");
+    assert!(forged_error.contains("local alias"), "{forged_error}");
+
+    assert_eq!(
+        crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic local alias"),
+        crate::core::mir::reference::MirRuntimeValue::Int(43)
+    );
+    let bytecode = crate::interp::bytecode::compile_mir_program(&mir)
+        .expect("generic local alias compiles to AST-free bytecode");
+    assert!(bytecode.ast.is_none());
+    assert!(matches!(
+        crate::interp::bytecode::BytecodeVM::new(bytecode)
+            .run_value_for_component()
+            .expect("bytecode generic local alias"),
+        crate::interp::Value::Int(43)
+    ));
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "canonical_generic_local_alias");
+    codegen
+        .compile_checked(&program)
+        .expect("the default route must emit the admitted local alias through native MIR");
+    codegen
+        .module
+        .verify()
+        .expect("native alias module verifies");
+    assert!(
+        codegen.module.get_function("main").is_some(),
+        "canonical native route emits main"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "canonical generic local alias must not invoke the legacy emitter"
+    );
+}
+
+#[test]
+fn compile_checked_routes_scalar_generic_first_argument_projection_without_legacy_access() {
+    for (module_name, source) in [
+        (
+            "canonical_generic_first_projection_i32",
+            "func choose<T>(left: T, right: T) -> T { left }\nfunc main() -> i32 { choose(41, 43) }",
+        ),
+        (
+            "canonical_generic_first_projection_i64",
+            "func choose<T>(left: T, right: T) -> T { left }\nfunc main() -> i64 { choose(2147483690, 2147483691) }",
+        ),
+        (
+            "canonical_generic_second_projection_i32",
+            "func choose<T>(left: T, right: T) -> T { right }\nfunc main() -> i32 { choose(41, 43) }",
+        ),
+        (
+            "canonical_generic_third_projection_i64",
+            "func choose<T>(a: T, b: T, c: T) -> T { c }\nfunc main() -> i64 { choose(2147483690, 4294967338, 6442450986) }",
+        ),
+    ] {
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+
+        crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+        let context = Context::create();
+        let mut codegen = CodeGenerator::new(&context, module_name);
+        codegen
+            .compile_checked(&program)
+            .expect("exact argument projection must use canonical MIR");
+        codegen.module.verify().expect("LLVM module verifies");
+        assert!(
+            codegen.module.get_function("main").is_some(),
+            "canonical argument projection route must emit main"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+            "the admitted generic projection must not invoke the legacy emitter"
+        );
+    }
+}
+
+#[test]
+fn compile_checked_preserves_baseline_generic_choose_result_without_legacy_access() {
+    let source =
+        "func choose<T>(left: T, right: T) -> T { left }\nfunc main() -> i32 { choose(42, 43) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert_eq!(
+        crate::core::mir::classify_canonical_mir_route_admission(&program)
+            .scalar_generic_identity_i32,
+        crate::core::mir::ScalarGenericIdentityAdmission::CompleteCoverage,
+        "the baseline two-argument generic projection must select its exact MIR profile"
+    );
+
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("baseline generic projection materializes canonical MIR");
+    assert_eq!(
+        crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("reference generic choose"),
+        crate::core::mir::reference::MirRuntimeValue::Int(42),
+        "the MIR route must return the selected first actual"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "baseline_generic_choose_result");
+    codegen
+        .compile_checked(&program)
+        .expect("direct checked-codegen API must emit the canonical generic projection");
+    codegen
+        .module
+        .verify()
+        .expect("direct checked-codegen module verifies");
+    let native = codegen
+        .module
+        .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+        .expect("create direct checked-codegen JIT engine");
+    let finalizer_guard = codegen
+        .module
+        .get_function("mimi_mir_assert_no_live_managed_any_v2_lists")
+        .expect("canonical main installs the managed-Any end-of-run guard");
+    native.add_global_mapping(
+        &finalizer_guard,
+        crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+    );
+    type Main = unsafe extern "C" fn() -> i32;
+    // SAFETY: compile_checked emitted `main` with the checked no-argument i32 ABI.
+    let native_main = unsafe {
+        native
+            .get_function::<Main>("main")
+            .expect("native generic main exists")
+    };
+    crate::codegen::assert_execution_engine_linked(&native, "calling baseline generic main");
+    // SAFETY: native_main has the checked no-argument i32 ABI.
+    let native_value = unsafe { native_main.call() };
+    assert_eq!(native_value, 42, "native generic choose result");
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "baseline-positive generic choose must not invoke a legacy AST emitter"
+    );
+}
+
+#[test]
+fn compile_checked_rejects_unsupported_generic_projection_without_legacy_reentry() {
+    let source = "func choose<T>(left: T, right: T) -> T { let selected = right; let alias = selected; alias }\nfunc main() -> i32 { choose(42, 43) }";
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse");
+    let program =
+        crate::core::check_program(&file).expect("unsupported shape remains checker-valid");
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "unsupported_generic_projection_no_legacy");
     let error = codegen
         .compile_checked(&program)
-        .expect_err("reachable generic compatibility must fail closed");
+        .expect_err("unsupported multi-binding generic projection must fail closed");
     assert_eq!(error[0].code.as_deref(), Some("MIR-COVERAGE-001"));
     assert!(error[0].message.contains("NITS"));
     assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "a rejected generic route must not enter the legacy body"
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "an unsupported generic body must not re-enter the retired AST emitter"
     );
 }
 
@@ -1000,7 +1624,6 @@ fn compile_checked_does_not_reenter_legacy_for_resolved_plain_scalar_body() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "resolved_plain_scalar_no_legacy_reentry");
@@ -1013,14 +1636,109 @@ fn compile_checked_does_not_reenter_legacy_for_resolved_plain_scalar_body() {
         crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
         "a rejected generic route must not invoke the legacy emitter"
     );
+}
+
+#[test]
+fn native_checked_boundary_preserves_positive_rejection_and_bytecode_compatibility() {
+    // Positive checked-native case: the old native fifth pass is not needed
+    // for ordinary scalar bodies, and the canonical emitter still produces a
+    // complete function body through the public CodeGenerator API.
+    let positive_source = "func main() -> i32 { 42 }";
+    let positive_file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(positive_source)
+            .tokenize()
+            .expect("positive source lexes"),
+    )
+    .parse_file()
+    .expect("positive source parses");
+    let positive = crate::core::check_program(&positive_file).expect("positive source checks");
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut native = CodeGenerator::new(&context, "codegen_legacy_remainder_positive");
+    native
+        .compile_checked(&positive)
+        .expect("supported checked scalar still compiles natively");
+    native
+        .module
+        .verify()
+        .expect("positive LLVM module verifies");
+    let main = native
+        .module
+        .get_function("main")
+        .expect("native main exists");
+    assert_ne!(main.count_basic_blocks(), 0, "native main has a body");
     assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "a rejected generic route must not read a legacy body"
+        native
+            .module
+            .print_to_string()
+            .to_string()
+            .contains("ret i32 42"),
+        "the canonical native body preserves the scalar result"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "supported checked-native compilation must not enter the native AST fifth pass"
+    );
+
+    // Negative native control: this managed generic Option shape is outside
+    // the current checked-native profile and must report its existing MIR
+    // boundary without invoking the native AST adapter. The same checked
+    // source remains executable through the separately reachable default
+    // Bytecode AST compatibility compiler; keeping that path alive is part of
+    // the open CodegenLegacyRemainder owner.
+    let compatibility_source =
+        include_str!("../../tests/fixtures/mir_native_generic_option_unwrap_rejected.mimi");
+    let compatibility_file = crate::parser::Parser::new(
+        crate::lexer::Lexer::new(compatibility_source)
+            .tokenize()
+            .expect("compatibility source lexes"),
+    )
+    .parse_file()
+    .expect("compatibility source parses");
+    let compatibility = crate::core::check_program(&compatibility_file)
+        .expect("compatibility source remains checker-legal");
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut native = CodeGenerator::new(&context, "codegen_legacy_remainder_negative");
+    let errors = native
+        .compile_checked(&compatibility)
+        .expect_err("unsupported native generic projection remains outside the closed profile");
+    assert!(
+        errors.iter().any(|diagnostic| matches!(
+            diagnostic.code.as_deref(),
+            Some("MIR-COVERAGE-001" | "MIR-LOWERING-001")
+        )),
+        "native rejection keeps the explicit coverage boundary: {errors:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "an unsupported checked-native profile must not retry through the native AST fifth pass"
+    );
+
+    let mut bytecode = crate::interp::bytecode::BytecodeCompiler::new();
+    bytecode.install_checked_program(&compatibility);
+    let bytecode_program = bytecode
+        .compile_file(&compatibility_file)
+        .expect("default Bytecode AST compatibility still compiles this legal source");
+    assert!(
+        bytecode_program.ast.is_some(),
+        "the default compatibility artifact must retain its AST-backed disposition"
+    );
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode_program);
+    assert!(
+        matches!(
+            vm.run_value_for_component()
+                .expect("default Bytecode AST compatibility still executes the source"),
+            crate::interp::Value::Int(41)
+        ),
+        "the compatibility route preserves the source result"
     );
 }
 
 #[test]
-fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
+fn codegen_folds_progressive_comptime_from_typed_ir() {
     let source = r#"
         comptime func forty_two() -> i32 { 42 }
         func main() -> i32 { comptime { forty_two() } }
@@ -1032,24 +1750,12 @@ fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
     assert!(file.implicit_single);
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "shared_progressive_comptime");
+    let mut codegen = CodeGenerator::new(&context, "typed_progressive_comptime");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("test-only compatibility adapter should retain its comptime input");
-    let codegen_file = codegen
-        .comptime_file
-        .as_ref()
-        .expect("legacy codegen should retain its comptime input");
-
-    let checker_file =
-        program.legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder);
-    assert!(checker_file.implicit_single);
-    assert!(
-        std::sync::Arc::ptr_eq(codegen_file, &checker_file),
-        "Codegen should share the immutable checked AST allocation"
-    );
+        .compile_checked(&program)
+        .expect("production typed codegen should fold the comptime expression");
     assert!(
         codegen
             .module
@@ -1063,15 +1769,11 @@ fn codegen_shares_checker_ast_snapshot_for_progressive_comptime() {
             .print_to_string()
             .to_string()
             .contains("ret i32 42"),
-        "comptime fold should keep its codegen-normalized evaluation context"
+        "typed comptime folding should preserve the result"
     );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        vec![
-            crate::core::LegacyBodyConsumer::CodegenLegacyRemainder,
-            crate::core::LegacyBodyConsumer::CodegenLegacyRemainder,
-        ],
-        "the test's pointer comparison may only cross the same tagged owner"
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "production typed comptime folding must not invoke legacy codegen"
     );
 }
 
@@ -1087,7 +1789,6 @@ fn compile_checked_routes_scalar_generic_identity_without_legacy_access() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "canonical_generic_identity");
     codegen
@@ -1096,11 +1797,6 @@ fn compile_checked_routes_scalar_generic_identity_without_legacy_access() {
     assert!(
         codegen.module.get_function("main").is_some(),
         "canonical generic identity route must emit main"
-    );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        Vec::<crate::core::LegacyBodyConsumer>::new(),
-        "the admitted generic identity must not access a legacy body"
     );
 }
 
@@ -1116,7 +1812,6 @@ fn compile_checked_routes_i64_scalar_generic_identity_without_legacy_access() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "canonical_generic_identity_i64");
     codegen
@@ -1125,11 +1820,6 @@ fn compile_checked_routes_i64_scalar_generic_identity_without_legacy_access() {
     assert!(
         codegen.module.get_function("main").is_some(),
         "canonical i64 generic identity route must emit main"
-    );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        Vec::<crate::core::LegacyBodyConsumer>::new(),
-        "the admitted i64 generic identity must not access a legacy body"
     );
 }
 
@@ -1165,17 +1855,12 @@ fn direct_native_entry_routes_recoverable_retry_profile_through_canonical_mir() 
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "m3_canonical_flow_entry");
     codegen
         .compile_checked(&program)
         .expect("direct native entry must select the canonical retry profile");
     assert!(codegen.module.get_function("main").is_some());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "recoverable Flow direct native entry must not read retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1186,17 +1871,12 @@ fn direct_native_entry_routes_recoverable_string_state_through_canonical_mir() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "m3_canonical_string_flow_entry");
     codegen
         .compile_checked(&program)
         .expect("direct native entry must select the canonical String retry profile");
     assert!(codegen.module.get_function("main").is_some());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "recoverable String Flow direct native entry must not read retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1208,17 +1888,12 @@ fn direct_native_entry_routes_multifield_flow_source_receipt_through_canonical_m
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "m3_canonical_multifield_flow_entry");
     codegen
         .compile_checked(&program)
         .expect("direct native entry must select the canonical multifield Flow profile");
     assert!(codegen.module.get_function("main").is_some());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "multifield Flow direct native entry must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1230,17 +1905,12 @@ fn direct_native_entry_routes_f64_flow_source_receipt_through_canonical_mir() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
     assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).flow_failure_retry);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "r6_canonical_f64_flow_entry");
     codegen
         .compile_checked(&program)
         .expect("direct native entry must select canonical f64 Flow source receipt");
     assert!(codegen.module.get_function("main").is_some());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "f64 Flow direct native entry must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1262,7 +1932,6 @@ fn direct_native_entry_routes_nested_scalar_ffi_through_mir_without_legacy_acces
         "nested extern call is inside checker-owned scalar FFI admission"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "nested_scalar_ffi_receipted");
     codegen
@@ -1287,10 +1956,6 @@ fn direct_native_entry_routes_nested_scalar_ffi_through_mir_without_legacy_acces
         .module
         .verify()
         .expect("valid nested scalar FFI module");
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "a nested scalar FFI route must not touch the legacy body"
-    );
 }
 
 #[test]
@@ -1312,7 +1977,6 @@ fn direct_native_entry_rejects_nested_unit_result_without_legacy_access() {
         "the declaration remains a scalar FFI candidate"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "nested_unit_result_rejected");
     let errors = codegen
@@ -1321,10 +1985,6 @@ fn direct_native_entry_rejects_nested_unit_result_without_legacy_access() {
     assert!(
         !errors.is_empty(),
         "the unsupported MIR ABI must be explicit"
-    );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct native rejection must not retry the legacy body"
     );
 }
 
@@ -1352,7 +2012,6 @@ fn direct_native_entry_rejects_complete_scalar_collection_materialization_failur
         crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s23_scalar_collection_materialization_error");
     let errors = codegen
@@ -1362,7 +2021,6 @@ fn direct_native_entry_rejects_complete_scalar_collection_materialization_failur
         diagnostic.code.as_deref() == Some("MIR-COVERAGE-001")
             || diagnostic.code.as_deref() == Some("MIR-LOWERING-001")
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1383,7 +2041,6 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
     crate::codegen::mir::validate_mir_native(&canonical)
         .expect("flat Copy record native capability");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s15_flat_copy_record_route");
     codegen
@@ -1391,10 +2048,6 @@ fn compile_checked_routes_exact_flat_copy_record_through_canonical_mir() {
         .expect("flat Copy record must use the canonical MIR native consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct flat Copy record native route must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1412,7 +2065,6 @@ fn compile_checked_routes_concrete_protocol_method_without_legacy_access() {
     crate::codegen::mir::validate_mir_native(&canonical)
         .expect("protocol-method native capability");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "flat_record_protocol_default_route");
     codegen
@@ -1420,10 +2072,6 @@ fn compile_checked_routes_concrete_protocol_method_without_legacy_access() {
         .expect("direct native API must use canonical protocol-method MIR");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct protocol-method native route must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -1435,7 +2083,6 @@ fn compile_checked_rejects_dynamic_protocol_method_without_legacy_owner() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "dyn_protocol_rejected");
     let errors = codegen
@@ -1444,7 +2091,6 @@ fn compile_checked_rejects_dynamic_protocol_method_without_legacy_owner() {
     assert!(errors.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1456,7 +2102,6 @@ fn compile_checked_routes_multi_transition_flow_through_canonical_mir() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "flow_transition_canonical_owner");
     codegen
@@ -1465,10 +2110,6 @@ fn compile_checked_routes_multi_transition_flow_through_canonical_mir() {
     assert!(
         codegen.module.get_function("main").is_some(),
         "canonical multi-transition Flow must emit main"
-    );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "canonical multi-transition Flow must not access retained legacy bodies"
     );
 }
 
@@ -1625,7 +2266,6 @@ fn compile_checked_rejects_trait_impl_specialization_without_legacy_owner() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "trait_impl_rejected");
     let errors = codegen
@@ -1634,17 +2274,18 @@ fn compile_checked_rejects_trait_impl_specialization_without_legacy_owner() {
     assert!(errors.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn compile_checked_rejects_captured_nested_helper_without_legacy_owner() {
+fn compile_checked_routes_captured_nested_helper_without_legacy_owner() {
     let source = r#"
-        func main() -> i32 {
-            let offset = 1
-            func nested_increment(value: i32) -> i32 { value + offset }
-            nested_increment(41)
+        func with_parameter(seed: i32) -> i32 {
+            let mut offset = seed
+            func nested_increment(value: i32) -> i32 { value + offset + seed }
+            offset = 100
+            nested_increment(40)
         }
+        func main() -> i32 { with_parameter(1) }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
@@ -1652,21 +2293,32 @@ fn compile_checked_rejects_captured_nested_helper_without_legacy_owner() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "nested_helper_legacy_owner");
-    let error = codegen
-        .compile_checked(&program)
-        .expect_err("captured nested helper must fail closed before legacy codegen");
-    assert!(
-        error
-            .iter()
-            .any(|diagnostic| diagnostic.code.as_deref() == Some("MIR-COVERAGE-001")),
-        "captured nested helper coverage diagnostic: {error:?}"
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("captured Copy i32 helper must lower with a declaration snapshot");
+    assert_eq!(mir.nested_callable_scopes().len(), 1);
+    assert_eq!(
+        mir.nested_callable_scopes()
+            .values()
+            .next()
+            .expect("nested scope receipt")
+            .capture_slots
+            .len(),
+        2
     );
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "nested_helper_canonical_route");
+    codegen
+        .compile_checked(&program)
+        .expect("captured nested helper uses the canonical MIR default route");
+    codegen
+        .module
+        .verify()
+        .expect("captured nested helper LLVM module");
+    assert!(codegen.module.get_function("main").is_some());
     assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "nested coverage rejection must not enter a legacy body"
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "canonical nested capture must not invoke the legacy emitter"
     );
 }
 
@@ -1685,7 +2337,6 @@ fn compile_checked_routes_scalar_export_wrapper_without_legacy_access() {
     let program = crate::core::check_program(&file).expect("check");
     assert!(crate::core::mir::classify_canonical_mir_route_admission(&program).scalar_export);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "export_wrapper_legacy_owner");
     codegen
@@ -1716,7 +2367,6 @@ fn compile_checked_routes_scalar_export_wrapper_without_legacy_access() {
             .get_linkage(),
         inkwell::module::Linkage::Internal
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1732,7 +2382,6 @@ fn compile_checked_routes_scalar_ffi_with_export_body_without_legacy_access() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "scalar_ffi_export_compatibility");
     codegen
@@ -1744,7 +2393,6 @@ fn compile_checked_routes_scalar_ffi_with_export_body_without_legacy_access() {
         .module
         .get_function(&CodeGenerator::export_body_symbol("internal_export"))
         .is_some());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1768,7 +2416,6 @@ fn compile_checked_rejects_export_map_any_owner_composition_without_legacy_acces
         crate::core::mir::classify_canonical_mir_route_admission(&program).map_any_owner_complete()
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "export_body_precedes_map_any_owner");
     let error = codegen
@@ -1776,8 +2423,11 @@ fn compile_checked_rejects_export_map_any_owner_composition_without_legacy_acces
         .expect_err("mixed scalar export and MapAnyOwner must fail closed");
     assert!(error.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            && diagnostic
+                .message
+                .contains("MapAnyOwner v1 profile cannot be combined")
+            && diagnostic.message.contains("scalar C export")
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1798,7 +2448,6 @@ fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "recursive_export_internal_abi");
     codegen
@@ -1852,7 +2501,6 @@ fn compile_checked_routes_recursive_c_export_calls_to_internal_body() {
         .module
         .verify()
         .expect("recursive export LLVM module must verify");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1880,7 +2528,6 @@ fn compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_acce
         "the actor method body must be present in the selected canonical graph"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "actor_body_legacy_owner");
     codegen
@@ -1924,11 +2571,6 @@ fn compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_acce
             .is_none(),
         "the legacy Actor worker must not shadow the canonical body"
     );
-    assert_eq!(
-        crate::core::CheckedProgram::test_legacy_body_access(),
-        Vec::<crate::core::LegacyBodyConsumer>::new(),
-        "closed Actor compilation must not read a legacy body"
-    );
     codegen
         .module
         .verify()
@@ -1967,7 +2609,6 @@ fn compile_checked_rejects_contract_bearing_actor_without_legacy_owner() {
         "a whole-program proof obligation must keep this Actor graph out of ScalarActor"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let errors = CodeGenerator::new(&context, "actor_body_rejected")
         .compile_checked(&program)
@@ -1975,7 +2616,6 @@ fn compile_checked_rejects_contract_bearing_actor_without_legacy_owner() {
     assert!(errors.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1998,7 +2638,6 @@ fn compile_checked_rejects_map_any_borrowed_access_without_legacy_owner() {
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let errors = CodeGenerator::new(&context, "map_any_borrowed_rejected")
         .compile_checked(&program)
@@ -2006,16 +2645,91 @@ fn compile_checked_rejects_map_any_borrowed_access_without_legacy_owner() {
     assert!(errors.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
 fn compile_checked_map_string_copy_keeps_typed_ingress_and_checks_failure() {
+    let cases = [
+        ("literal", "literal", "", "", r#""A\0雪""#),
+        (
+            "transparent alias",
+            "alias",
+            "type InnerText = string\ntype Text = InnerText",
+            r#"let aliased: Text = "A\0雪""#,
+            "aliased",
+        ),
+        (
+            "helper return",
+            "helper",
+            "type InnerText = string\ntype Text = InnerText\nfunc message() -> Text { \"A\\0雪\" }",
+            "",
+            "message()",
+        ),
+    ];
+
+    for (case_name, module_suffix, declarations, setup, value) in cases {
+        let source = format!(
+            r#"
+            {declarations}
+            func main() -> i32 {{
+                {setup}
+                let original = map_new()
+                let map = map_set(original, "k", {value})
+                println(to_json(map))
+                0
+            }}
+            "#
+        );
+        let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+        let context = Context::create();
+        let module_name = format!("map_string_owner_ingress_{module_suffix}");
+        let mut codegen = CodeGenerator::new(&context, &module_name);
+        codegen.compile_checked(&program).unwrap_or_else(|errors| {
+            panic!("compile typed String ingress ({case_name}): {errors:?}")
+        });
+        codegen
+            .module
+            .verify()
+            .unwrap_or_else(|error| panic!("verify typed String ingress ({case_name}): {error}"));
+        let ir = codegen.module.print_to_string().to_string();
+        assert!(
+            ir.contains("call i32 @mimi_map_set_string_copy("),
+            "{case_name}: {ir}"
+        );
+        assert!(
+            ir.contains("map_string_copy_succeeded"),
+            "{case_name}: {ir}"
+        );
+        assert!(
+            ir.contains("Map String insertion failed"),
+            "{case_name}: {ir}"
+        );
+        assert!(ir.contains("i64 5"), "preserve UTF-8/NUL byte length: {ir}");
+        assert!(
+            !ir.contains("call i64 @mimi_any_string_clone("),
+            "{case_name}: {ir}"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+            "{case_name} must not invoke the legacy body emitter"
+        );
+    }
+}
+
+#[test]
+fn compile_checked_rejects_actor_tuple_map_payload_without_legacy_access() {
     let source = r#"
+        actor StringShapeWorker { func ping() -> i32 { 1 } }
         func main() -> i32 {
-            let original = map_new()
-            let map = map_set(original, "k", "owned text")
-            println(to_json(map))
+            let worker = StringShapeWorker.spawn()
+            let root = map_new()
+            let saved = map_set(root, "payload", (worker, 16 as i64))
+            drop(saved)
             0
         }
     "#;
@@ -2024,82 +2738,24 @@ fn compile_checked_map_string_copy_keeps_typed_ingress_and_checks_failure() {
         .parse_file()
         .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "map_string_owner_ingress");
-    codegen
-        .compile_checked(&program)
-        .expect("compile typed String ingress");
-    codegen
-        .module
-        .verify()
-        .expect("verify typed String ingress IR");
-    let ir = codegen.module.print_to_string().to_string();
-    assert!(ir.contains("call i32 @mimi_map_set_string_copy("), "{ir}");
-    assert!(ir.contains("map_string_copy_succeeded"), "{ir}");
-    assert!(ir.contains("Map String insertion failed"), "{ir}");
-    assert!(!ir.contains("call i64 @mimi_any_string_clone("), "{ir}");
-}
 
-#[test]
-fn legacy_map_set_uses_source_string_type_instead_of_pointer_integer_shape() {
-    for (value, expects_string) in [
-        (r#""A\0雪""#, true),
-        ("aliased", true),
-        ("message()", true),
-        ("(worker, 16 as i64)", false),
-    ] {
-        // Export wrappers retain a real legacy body. The tuple has exactly
-        // the String LLVM layout, but its pointer is an opaque actor handle.
-        // Only inspect generated IR: do not execute a potential pointer read.
-        let source = format!(
-            r#"
-            type InnerText = string
-            type Text = InnerText
-            func message() -> Text {{ "A\0雪" }}
-            actor StringShapeWorker {{ func ping() -> i32 {{ 1 }} }}
-            extern "C" func exercise() -> i32 {{
-                let worker = StringShapeWorker.spawn()
-                let aliased: Text = message()
-                let root = map_new()
-                let saved = map_set(root, "payload", {value})
-                println(map_size(saved))
-                0
-            }}
-            func main() -> i32 {{ exercise() }}
-            "#
-        );
-        let tokens = crate::lexer::Lexer::new(&source).tokenize().expect("lex");
-        let file = crate::parser::Parser::new(tokens)
-            .parse_file()
-            .expect("parse");
-        let program = crate::core::check_program(&file).expect("check");
-        let context = Context::create();
-        let mut codegen = CodeGenerator::new(&context, "legacy_map_static_string");
-        codegen
-            .compile_file_with_resolved(&program, None)
-            .expect("compile legacy body through the test-only adapter");
-        codegen.module.verify().expect("verify legacy Map IR");
-        let ir = codegen.module.print_to_string().to_string();
-        assert_eq!(
-            ir.contains("call i32 @mimi_map_set_string_copy("),
-            expects_string,
-            "only a source-typed String can enter the owning ABI: {ir}"
-        );
-        assert!(!ir.contains("call i64 @mimi_any_string_clone("), "{ir}");
-        if expects_string {
-            assert!(ir.contains("map_string_copy_succeeded"), "{ir}");
-            assert!(
-                ir.contains("i64 5"),
-                "preserve the exact UTF-8/NUL byte length: {ir}"
-            );
-        } else {
-            assert!(
-                ir.contains("map_set_struct_h"),
-                "tuple must keep its product ABI: {ir}"
-            );
-            assert!(ir.contains("call void @mimi_map_set("), "{ir}");
-        }
-    }
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "actor_tuple_map_payload_rejected");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("the actor-handle/i64 tuple has no canonical Map payload receipt");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic.message.contains("record-valued map_set")
+        }),
+        "tuple Map payload must fail closed at the canonical route boundary: {errors:?}"
+    );
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "a rejected tuple payload must not invoke the legacy body emitter"
+    );
 }
 
 fn checked_with_std_maps(source: &str) -> (std::path::PathBuf, crate::core::CheckedProgram) {
@@ -2122,6 +2778,106 @@ fn checked_with_std_maps(source: &str) -> (std::path::PathBuf, crate::core::Chec
     (dir, program)
 }
 
+fn checked_with_aliased_map_owner_helper(
+    main_source: &str,
+) -> (std::path::PathBuf, crate::core::CheckedProgram) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-codegen-aliased-map-owner-{}-{}",
+        std::process::id(),
+        NEXT_TEMP_DIR.fetch_add(1, Ordering::Relaxed)
+    ));
+    let apps = dir.join("apps");
+    std::fs::create_dir_all(&apps).expect("create temporary module alias directory");
+    std::fs::write(
+        dir.join("mimi.toml"),
+        "[package]\nname = \"map_alias_fixture\"\nversion = \"0.1.0\"\nentry = \"main.mimi\"\n",
+    )
+    .expect("write temporary module alias manifest");
+    std::fs::write(
+        apps.join("left.mimi"),
+        r#"
+use std::maps
+
+pub func unsupported_map_read() -> i32 {
+    let root = map_new()
+    let pair = map_get_i32(root, "answer")
+    let unsupported = keys(root)
+    drop(pair)
+    drop(unsupported)
+    drop(root)
+    0
+}
+"#,
+    )
+    .expect("write aliased Map helper module");
+    let main_path = dir.join("main.mimi");
+    std::fs::write(&main_path, main_source).expect("write aliased Map entry");
+
+    let mut loader = crate::loader::ModuleLoader::new(dir.clone());
+    loader
+        .load_main(&main_path)
+        .expect("load aliased Map fixture");
+    let merged = loader.merge_all().expect("merge aliased Map fixture");
+    let program = crate::core::check_program(&merged).expect("check aliased Map fixture");
+    (dir, program)
+}
+
+#[test]
+fn compile_checked_rejects_incomplete_owned_get_reached_through_module_alias() {
+    let (dir, program) = checked_with_aliased_map_owner_helper(
+        r#"
+use apps::left as left
+
+func main() -> i32 { left.unsupported_map_read() }
+"#,
+    );
+    let helper = program
+        .functions()
+        .values()
+        .find(|function| function.qualified_name == "unsupported_map_read")
+        .expect("aliased imported Map helper")
+        .node_id
+        .clone();
+    let admission = crate::core::mir::classify_canonical_mir_route_admission(&program);
+    assert!(admission
+        .ordinary_map_owned_get_i32_string_v1
+        .has_profile_signal());
+    assert!(!admission.ordinary_map_owned_get_i32_string_v1_complete());
+    assert!(program.call_sites().values().any(|site| {
+        site.owner == "function:main" && site.target_function.as_ref() == Some(&helper)
+    }));
+    let reachable = super::resolved::reachable_callable_ids_from_roots(
+        &program,
+        &std::collections::BTreeSet::new(),
+    );
+    assert!(
+        reachable.contains(&helper),
+        "module-alias call must resolve to its exact Checker callable target"
+    );
+    assert!(
+        reachable.len() < program.callables().len(),
+        "a resolved direct-function alias must not degrade to the all-callable conservative fallback"
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "aliased_incomplete_map_owned_get");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("reachable incomplete owned-Get helper must fail closed");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && error.message.contains("ordinary Map owned-get attempt")
+        }),
+        "unexpected route error: {errors:?}"
+    );
+
+    std::fs::remove_dir_all(dir).expect("remove aliased Map fixture directory");
+}
+
 #[test]
 fn compile_checked_fails_closed_on_reachable_map_any_unpack() {
     let (dir, program) = checked_with_std_maps(
@@ -2138,7 +2894,6 @@ func main() -> i32 {
 "#,
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "reachable_dynamic_any_unpack");
     let errors = codegen
@@ -2152,10 +2907,6 @@ func main() -> i32 {
     assert!(errors[0]
         .message
         .contains("runtime Any value has no checked tag"));
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "the hard gate must run before touching legacy bodies"
-    );
 
     let context = Context::create();
     let mut strict = CodeGenerator::new(&context, "strict_dynamic_any_unpack");
@@ -2195,15 +2946,173 @@ func main() -> i32 { 42 }
 "#,
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let dormant_catalog_error =
+        crate::core::mir::types::MirTypeCatalog::from_checked_program(&program)
+            .expect_err("the dormant imported Map/Any catalog remains outside its closed profile");
+    assert!(
+        format!("{dormant_catalog_error:?}").contains("ordinary Map/Any"),
+        "this regression must exercise the dormant Map catalog boundary"
+    );
+
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "unreachable_dynamic_any_unpack");
     codegen
         .compile_checked(&program)
         .expect("unreachable std::maps accessors must not block an unrelated scalar entry");
     assert!(codegen.module.get_function("main").is_some());
+    for function in program.functions().values() {
+        if super::resolved::is_std_maps_callable(&program, &function.node_id) {
+            assert!(
+                codegen
+                    .module
+                    .get_function(&function.qualified_name)
+                    .is_none(),
+                "dormant maps callable '{}' must not even be declared",
+                function.qualified_name
+            );
+        }
+    }
+    codegen
+        .module
+        .verify()
+        .expect("verify scalar cohort module");
+
+    let context = Context::create();
+    let mut strict = CodeGenerator::new(&context, "strict_dormant_dynamic_any_unpack");
+    let errors = strict
+        .compile_resolved_native(&program)
+        .expect_err("the public all-callable API must retain its dormant-body boundary");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("DynamicAnyUnpack")));
+    assert!(strict.module.get_function("main").is_none());
 
     std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
+}
+
+#[test]
+fn reachable_map_import_cohort_keeps_generic_catalog_failure_closed() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func scalar_identity<T>(value: T) -> T { value }
+func main() -> i32 { scalar_identity(42) }
+"#,
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "reachable_generic_map_import_cohort");
+    let errors = codegen
+        .compile_resolved_native_reachable(&program, &std::collections::BTreeSet::new())
+        .expect_err("a reachable generic call must retain strict generic catalog validation");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("MIR-COVERAGE-001/NITS")
+                && error
+                    .message
+                    .contains("canonical generic TypeDesc catalog failed")
+                && error.message.contains("ordinary Map/Any")
+        }),
+        "unexpected reachable generic catalog error: {errors:?}"
+    );
+    assert!(codegen.module.get_function("main").is_none());
+
+    let context = Context::create();
+    let mut checked = CodeGenerator::new(&context, "checked_reachable_generic_map_import_cohort");
+    let errors = checked
+        .compile_checked(&program)
+        .expect_err("the default checked route must keep generic catalog validation strict");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && error
+                    .message
+                    .contains("reachable generic call has no complete canonical instance receipt")
+        }),
+        "default checked route did not preserve strict generic failure: {errors:?}"
+    );
+    assert!(checked.module.get_function("main").is_none());
+
+    std::fs::remove_dir_all(dir).expect("remove reachable generic Map import fixture directory");
+}
+
+#[test]
+fn compile_checked_dormant_map_exception_does_not_hide_user_map_helpers() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+func unsupported_user_map_helper() -> i32 {
+    let root = map_new()
+    let value = map_get_i32(root, "key")
+    let unsupported = keys(root)
+    drop(value)
+    drop(unsupported)
+    drop(root)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+    );
+    let helper = program
+        .functions()
+        .values()
+        .find(|function| {
+            function
+                .qualified_name
+                .ends_with("unsupported_user_map_helper")
+        })
+        .expect("dormant user Map helper")
+        .node_id
+        .clone();
+    let reachable = super::resolved::reachable_callable_ids_from_roots(
+        &program,
+        &std::collections::BTreeSet::new(),
+    );
+    assert!(!reachable.contains(&helper));
+    assert!(!super::resolved::is_std_maps_callable(&program, &helper));
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "dormant_user_map_helper");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("only exact dormant stdlib maps signals may bypass Map admission");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && error.message.contains("ordinary Map owned-get attempt")
+        }),
+        "unexpected dormant-user Map error: {errors:?}"
+    );
+    assert!(codegen.module.get_function("main").is_none());
+
+    std::fs::remove_dir_all(dir).expect("remove dormant user Map fixture directory");
+}
+
+#[test]
+fn compile_checked_dormant_map_exception_still_validates_other_user_helpers() {
+    let (dir, program) = checked_with_std_maps(
+        r#"
+use std::maps
+
+func unsupported_user_helper(xs: Set<f64>) -> i32 { 0 }
+func main() -> i32 { 42 }
+"#,
+    );
+
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "dormant_user_native_boundary");
+    let errors = codegen
+        .compile_checked(&program)
+        .expect_err("dormant unrelated user helpers must keep strict native validation");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("unsupported_user_helper") && error.message.contains("Set")
+        }),
+        "unexpected dormant-user boundary error: {errors:?}"
+    );
+    assert!(codegen.module.get_function("main").is_none());
+
+    std::fs::remove_dir_all(dir).expect("remove dormant user native fixture directory");
 }
 
 #[test]
@@ -2222,7 +3131,6 @@ func main() -> i32 { 0 }
 "#,
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "exported_dynamic_any_unpack");
     let errors = codegen
@@ -2233,10 +3141,6 @@ func main() -> i32 { 0 }
         Some(crate::diagnostic::codes::E0722)
     );
     assert!(errors[0].message.contains("reachable DynamicAnyUnpack"));
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "the exported-body gate must run before the legacy export wrapper is emitted"
-    );
 
     std::fs::remove_dir_all(dir).expect("remove temporary Map/Any fixture directory");
 }
@@ -2264,7 +3168,6 @@ func main() -> i32 { 0 }
         .node_id
         .clone();
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut shared = CodeGenerator::new(&context, "shared_dynamic_any_unpack");
     shared.shared = true;
@@ -2274,10 +3177,6 @@ func main() -> i32 { 0 }
     assert_eq!(
         errors[0].code.as_deref(),
         Some(crate::diagnostic::codes::E0722)
-    );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "shared-library host-entry rejection must precede any body emission"
     );
 
     let context = Context::create();
@@ -2362,7 +3261,6 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
         crate::core::mir::OptionStringVariantAdmission::CompleteCoverage
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "s30_option_string_default_route");
     codegen
@@ -2370,10 +3268,6 @@ fn compile_checked_routes_exact_option_string_switch_through_canonical_mir() {
         .expect("direct native entry must use the canonical Option<string> consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct Option<string> native route must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -2429,7 +3323,6 @@ fn compile_checked_routes_generic_option_result_and_managed_result_profiles_with
             profile.as_str()
         );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = Context::create();
         let mut codegen = CodeGenerator::new(&context, profile.as_str());
         codegen
@@ -2443,11 +3336,6 @@ fn compile_checked_routes_generic_option_result_and_managed_result_profiles_with
         assert!(
             codegen.resolved_failed_functions().is_empty(),
             "{} direct native API must not defer a resolved failure",
-            profile.as_str()
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{} direct native API must not access retained legacy bodies",
             profile.as_str()
         );
     }
@@ -2491,7 +3379,6 @@ fn compile_checked_rejects_unmaterialized_migrated_candidates_without_legacy_fal
         let program = crate::core::check_program(&file)
             .unwrap_or_else(|diags| panic!("check {name}: {diags:?}"));
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = Context::create();
         let mut codegen = CodeGenerator::new(&context, "mixed_generic_profile_rejected");
         let errors = match codegen.compile_checked(&program) {
@@ -2504,10 +3391,6 @@ fn compile_checked_rejects_unmaterialized_migrated_candidates_without_legacy_fal
                 Some("MIR-COVERAGE-001" | "MIR-LOWERING-001")
             )),
             "{name} must report a stable MIR boundary error: {errors:?}"
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{name} must not enter the legacy code generator"
         );
     }
 }
@@ -2559,7 +3442,6 @@ fn compile_checked_routes_copy_option_and_result_profiles_without_legacy_access(
             profile.as_str()
         );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = Context::create();
         let mut codegen = CodeGenerator::new(&context, profile.as_str());
         codegen
@@ -2573,11 +3455,6 @@ fn compile_checked_routes_copy_option_and_result_profiles_without_legacy_access(
         assert!(
             codegen.resolved_failed_functions().is_empty(),
             "{} direct native API must not defer a resolved failure",
-            profile.as_str()
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{} direct native API must not access retained legacy bodies",
             profile.as_str()
         );
     }
@@ -2598,16 +3475,11 @@ fn compile_checked_routes_exact_nested_option_tuple_through_canonical_mir() {
 
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "nested_option_tuple_default_route");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     codegen
         .compile_checked(&program)
         .expect("direct native entry must use the canonical nested Option tuple consumer");
     assert!(codegen.module.get_function("main").is_some());
     assert!(codegen.resolved_failed_functions().is_empty());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct nested Option tuple native route must not access retained legacy bodies"
-    );
 }
 
 #[test]
@@ -2813,7 +3685,6 @@ fn checked_declaration_name_installation_does_not_open_legacy_body_owner() {
             .parse_file()
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "checked_names");
     codegen
@@ -2835,66 +3706,10 @@ fn checked_declaration_name_installation_does_not_open_legacy_body_owner() {
         codegen.actor_defs.is_empty(),
         "installer never reconstructs ActorDef"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn checked_trait_slot_order_drives_legacy_vtable_without_trait_ast_cache() {
-    let source = r#"
-        trait Slots { func second() -> i32; func first() -> i32; }
-        type Item { value: i32 }
-        impl Slots for Item {
-            func first() -> i32 { self.value }
-            func second() -> i32 { self.value + 1 }
-        }
-        func main() -> i32 { let item = Item { value: 41 }; item.second() }
-    "#;
-    let file =
-        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
-            .parse_file()
-            .expect("parse");
-    let program = crate::core::check_program(&file).expect("check");
-    let implementation = program
-        .native_declarations()
-        .impls
-        .values()
-        .find(|implementation| implementation.trait_name == "Slots")
-        .expect("checked Slots impl");
-    let second_symbol = &implementation
-        .methods
-        .iter()
-        .find(|method| method.trait_slots == vec![0])
-        .expect("second method slot")
-        .symbol;
-    let first_symbol = &implementation
-        .methods
-        .iter()
-        .find(|method| method.trait_slots == vec![1])
-        .expect("first method slot")
-        .symbol;
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "checked_slots");
-    codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compatibility compilation");
-    codegen.module.verify().expect("valid IR");
-    let initializer = codegen
-        .module
-        .get_global(&implementation.vtable_symbol)
-        .expect("vtable")
-        .get_initializer()
-        .expect("initializer")
-        .to_string();
-    let second = initializer.find(second_symbol).expect("second slot");
-    let first = initializer.find(first_symbol).expect("first slot");
-    assert!(
-        second < first,
-        "trait declaration order controls the ABI, not impl order"
-    );
-}
-
-#[test]
-fn checked_generic_trait_specializations_keep_distinct_method_and_vtable_symbols() {
+fn checked_generic_trait_specializations_install_exact_vtables_from_checked_catalog() {
     let source = r#"
         trait Marker<T> { func read() -> i32; }
         impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
@@ -2937,10 +3752,27 @@ fn checked_generic_trait_specializations_keep_distinct_method_and_vtable_symbols
     );
 
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "checked_generic_marker");
+    let mut codegen = CodeGenerator::new(&context, "checked_generic_marker_vtables");
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile checked generic specializations");
+        .install_checked_declaration_names(&program)
+        .expect("install checked generic impl catalog");
+    let function_type = context.i32_type().fn_type(&[], false);
+    for symbol in &symbols {
+        codegen.module.add_function(symbol, function_type, None);
+    }
+    codegen.type_impls.clear();
+    let anchor = codegen.module.add_function(
+        "vtable_anchor",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(anchor, "entry");
+    codegen.builder.position_at_end(entry);
+    codegen
+        .compile_vtables()
+        .expect("emit vtables from checked impl identities");
+    codegen.builder.build_return(None).expect("anchor return");
     codegen.module.verify().expect("valid IR");
     assert!(
         !codegen.vtable_globals.contains_key("List__Marker"),
@@ -2962,6 +3794,7 @@ fn checked_generic_trait_specializations_keep_distinct_method_and_vtable_symbols
             "each vtable slot must reference its own checked method body",
         );
     }
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3058,7 +3891,6 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
         "each checked impl has a distinct canonical callable owner"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("concrete generic trait impls lower into canonical MIR");
@@ -3155,14 +3987,13 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
     )
     .parse_file()
     .expect("parse user Flow candidate");
-    let user_flow_program = crate::core::check_program(&user_flow_file)
-        .expect("check user Flow candidate");
+    let user_flow_program =
+        crate::core::check_program(&user_flow_file).expect("check user Flow candidate");
     assert!(
         !crate::codegen::has_static_generic_trait_specialization_candidate(&user_flow_program),
         "the generated Main call-site exemption must not admit a user Flow"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
     let mut checked_codegen = CodeGenerator::new(&context, "checked_mir_generic_trait_call_owners");
@@ -3182,14 +4013,12 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
             "public checked-program native output must retain exact impl method {symbol}"
         );
     }
-
     if crate::tests::can_link() {
         let native = crate::tests::link_and_observe_canonical_mir(&checked_codegen)
             .expect("execute checked-program canonical native output");
         assert_eq!(native.stdout, "22\n11\n");
         assert_eq!(native.stderr, "");
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 
     // Redirecting a call to the other specialization must fail its receiver
@@ -3240,7 +4069,47 @@ fn canonical_mir_dispatches_generic_trait_impls_by_exact_method_owner() {
             .message
             .contains("protocol method argument 0 TypeDesc disagrees")
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
+}
+
+#[test]
+fn static_generic_trait_route_uses_owned_string_list_glue_without_legacy_fallback() {
+    let source = r#"
+        trait Marker<T> { func read() -> i32; }
+        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
+        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
+        func main() -> i32 {
+            let numbers: List<i32> = [1]
+            let words: List<string> = ["x"]
+            let answer = words.read() + numbers.read()
+            drop(words)
+            answer
+        }
+    "#;
+    let file =
+        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
+            .parse_file()
+            .expect("parse");
+    let program = crate::core::check_program(&file).expect("check");
+    assert!(
+        crate::codegen::has_static_generic_trait_specialization_candidate(&program),
+        "the bounded route admits exact List<i32> and List<string> impl owners"
+    );
+
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let context = Context::create();
+    let mut codegen = CodeGenerator::new(&context, "generic_trait_list_string_owned_mir");
+    codegen
+        .compile_checked(&program)
+        .expect("owned String List glue permits the exact specialized native route");
+    codegen
+        .module
+        .verify()
+        .expect("valid generic String List native IR");
+    let ir = codegen.emit_ir();
+    assert!(ir.contains("mimi_mir_list_new_string"), "{ir}");
+    assert!(ir.contains("mimi_mir_list_drop_string"), "{ir}");
+    assert!(codegen.module.get_function("main").is_some());
     assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
@@ -3267,11 +4136,12 @@ fn checked_string_protocol_method_precedes_builtin_spelling_fallback() {
         panic!("TrimOverride must have exactly one checked method");
     };
     let expected_symbol = method.symbol.clone();
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "checked_string_trait_precedence");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile exact checked string method");
+        .compile_checked(&program)
+        .expect("compile checked String protocol override through the public route");
     codegen.module.verify().expect("valid IR");
     let body = codegen
         .module
@@ -3286,6 +4156,7 @@ fn checked_string_protocol_method_precedes_builtin_spelling_fallback() {
         !body.contains("str_trim"),
         "a ProtocolMethod call must not be desugared to the string builtin"
     );
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3299,11 +4170,12 @@ fn checked_string_builtin_call_keeps_the_builtin_adapter() {
             .parse_file()
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "checked_string_builtin_precedence");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile exact builtin string call");
+        .compile_checked(&program)
+        .expect("compile checked String builtin through the public route");
     codegen.module.verify().expect("valid IR");
     let body = codegen
         .module
@@ -3312,8 +4184,9 @@ fn checked_string_builtin_call_keeps_the_builtin_adapter() {
         .to_string();
     assert!(
         body.contains("str_trim"),
-        "an exact Builtin call must continue through the string builtin adapter"
+        "an exact Builtin call must continue through the resolved string builtin lowering"
     );
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3335,187 +4208,133 @@ fn checked_impl_bodies_compile_from_callable_owners_without_type_impls() {
             .parse_file()
             .expect("parse");
     let program = crate::core::check_program(&file).expect("check");
-    let mut body_file = (*program
-        .legacy_body_file(crate::core::LegacyBodyConsumer::CodegenLegacyRemainder))
-    .clone();
-    let mut reordered_impl_body = false;
-    for item in &mut body_file.items {
-        if let crate::ast::Item::Impl(implementation) = item {
-            implementation.methods.swap(0, 1);
-            reordered_impl_body = true;
-        }
-    }
-    assert!(
-        reordered_impl_body,
-        "test carries implementation body payloads"
-    );
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "checked_impl_owner_body");
-    codegen
-        .install_checked_declaration_names(&program)
-        .expect("install checked declarations");
-    let expected_targets = program
-        .call_sites()
-        .values()
-        .filter_map(|site| match site.resolved_callee.as_ref()? {
-            crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method } => Some((
-                protocol.clone(),
-                crate::core::NodeId(method.as_str().into()),
-            )),
-            _ => None,
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let installed_targets = codegen
-        .checked_trait_method_dispatch
-        .call_targets
-        .values()
-        .flatten()
-        .map(|target| (target.key.trait_owner.clone(), target.key.callable.clone()))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(expected_targets.len(), 2);
-    assert_eq!(installed_targets, expected_targets);
-    assert_eq!(codegen.checked_trait_method_dispatch.call_targets.len(), 2);
-    assert_eq!(
-        codegen
-            .checked_trait_method_dispatch
-            .call_targets
-            .values()
-            .map(Vec::len)
-            .sum::<usize>(),
-        2,
-        "each checker-selected static call retains one exact metadata receipt"
-    );
-    for (node, site) in program.call_sites() {
-        if matches!(
-            site.resolved_callee.as_ref(),
-            Some(crate::core::ir::ResolvedCallee::ProtocolMethod { .. })
-        ) {
-            let span = site.origin.user_span();
-            let key = (
-                span.source_id.raw(),
-                span.start_line,
-                span.start_col,
-                span.end_line,
-                span.end_col,
-            );
-            assert!(
-                codegen
-                    .checked_trait_method_dispatch
-                    .call_targets
-                    .contains_key(&key),
-                "checked call node '{}' is indexed at its source span",
-                node.0
-            );
-        }
-    }
-    for item in &body_file.items {
-        if let crate::ast::Item::Type(definition) = item {
-            codegen
-                .register_type_def(definition)
-                .expect("register type");
-        }
-    }
-    codegen
-        .install_checked_impl_method_bodies(&body_file, &program)
-        .expect("owner-indexed body payloads");
-    assert!(codegen.type_impls.is_empty());
-    codegen
-        .compile_checked_impl_methods(&program)
-        .expect("compile from native method bindings");
-    let checked_methods = program
+    let implementation = program
         .native_declarations()
         .impls
         .values()
-        .flat_map(|implementation| implementation.methods.iter())
-        .collect::<Vec<_>>();
-    let first_binding = checked_methods
+        .find(|implementation| {
+            implementation.trait_name == "Measure" && implementation.type_name == "Counter"
+        })
+        .expect("checked Measure for Counter impl");
+    let first_binding = implementation
+        .methods
         .iter()
         .find(|method| method.name == "first")
         .expect("checked first method binding");
-    let second_binding = checked_methods
+    let second_binding = implementation
+        .methods
         .iter()
         .find(|method| method.name == "second")
         .expect("checked second method binding");
-    let function = codegen
-        .module
-        .get_function(&first_binding.symbol)
-        .expect("canonical checked first method symbol");
-    assert!(function.count_basic_blocks() > 0);
-    assert!(
-        codegen
-            .module
-            .get_function(&second_binding.symbol)
-            .expect("canonical checked second method symbol")
-            .count_basic_blocks()
-            > 0
-    );
-    let first_owner = first_binding.callable.clone();
-    let first_call_site = program
-        .call_sites()
-        .values()
-        .find(|site| {
-            matches!(
-                site.resolved_callee.as_ref(),
-                Some(crate::core::ir::ResolvedCallee::ProtocolMethod { method, .. })
-                    if method.as_str() == first_owner.0.as_str()
-            )
-        })
-        .expect("resolved first method callsite");
-    let first_call_meta = crate::ast::AstNodeMeta::inherited(
-        first_call_site.origin.user_span(),
-        crate::ast::AstOrigin::User,
-    );
-    assert_eq!(
-        codegen.infer_impl_method_return_type("Counter", "first", Some(first_call_meta)),
-        "i32",
-        "call result typing reads the native signature, not the body AST"
-    );
-    codegen
-        .checked_impl_method_bodies
-        .get_mut(&first_owner)
-        .expect("cached first method body")
-        .0
-        .ret = Some(crate::ast::Type::Name("string".into(), Vec::new()));
-    assert_eq!(
-        codegen.infer_impl_method_return_type("Counter", "first", Some(first_call_meta)),
-        "i32",
-        "changing the executable AST payload cannot rewrite the checked ABI result"
-    );
-}
+    assert_eq!(second_binding.ordinal, 0);
+    assert_eq!(second_binding.trait_slots, vec![1]);
+    assert_eq!(first_binding.ordinal, 1);
+    assert_eq!(first_binding.trait_slots, vec![0]);
+    assert_ne!(first_binding.callable, second_binding.callable);
 
-#[test]
-fn checked_dyn_trait_dispatch_uses_the_canonical_trait_slot_signature() {
-    let source = r#"
-        trait Read { func read() -> i32; }
-        type Counter { value: i32 }
-        impl Read for Counter { func read() -> i32 { self.value } }
-        func read_dynamic(value: dyn Read) -> i32 { value.read() }
-        func main() -> i32 {
-            let counter = Counter { value: 41 };
-            let dynamic: dyn Read = counter;
-            read_dynamic(dynamic)
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("checked impl bodies lower into canonical MIR");
+    crate::verifier::validate_mir_capabilities(&mir)
+        .expect("static protocol-method verifier capability");
+    crate::codegen::mir::validate_mir_native(&mir)
+        .expect("static protocol-method native capability");
+
+    let first_owner = first_binding.callable.clone();
+    let second_owner = second_binding.callable.clone();
+    let protocol_owner = implementation.trait_owner.clone();
+    let mut expected_targets_by_call = std::collections::BTreeMap::new();
+    for (node, site) in program.call_sites() {
+        if let Some(crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method }) =
+            site.resolved_callee.as_ref()
+        {
+            assert_eq!(protocol, &protocol_owner);
+            let expected_owner = match site.callee.as_str() {
+                "counter.first" => &first_owner,
+                "counter.second" => &second_owner,
+                other => panic!("unexpected static protocol call spelling '{other}'"),
+            };
+            assert_eq!(
+                method.as_str(),
+                expected_owner.0.as_str(),
+                "checker must resolve '{}' to its exact impl callable owner",
+                site.callee
+            );
+            assert_eq!(site.node_id, *node);
+            expected_targets_by_call
+                .insert(node.clone(), (protocol.clone(), expected_owner.clone()));
         }
-    "#;
-    let file =
-        crate::parser::Parser::new(crate::lexer::Lexer::new(source).tokenize().expect("lex"))
-            .parse_file()
-            .expect("parse");
-    let program = crate::core::check_program(&file).expect("check");
+    }
+    assert_eq!(expected_targets_by_call.len(), 2);
+
+    let main_owner = crate::core::NodeId("function:main".into());
+    let main_mir = mir.functions().get(&main_owner).expect("main MIR");
+    let mir_targets_by_call = main_mir
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| {
+            let crate::core::mir::MirInstructionKind::Call {
+                callee: crate::core::ir::ResolvedCallee::ProtocolMethod { protocol, method },
+                ..
+            } = &instruction.kind
+            else {
+                return None;
+            };
+            let call_node = instruction.id.as_str().strip_prefix("inst:call:")?;
+            Some((
+                crate::core::NodeId(call_node.to_owned()),
+                (
+                    protocol.clone(),
+                    crate::core::NodeId(method.as_str().to_owned()),
+                ),
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(
+        mir_targets_by_call, expected_targets_by_call,
+        "canonical MIR must retain each source call's exact checker-selected method owner"
+    );
+
     let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "checked_dyn_trait_slot_abi");
+    let mut codegen = CodeGenerator::new(&context, "checked_impl_owner_body_mir");
     codegen
-        .compile_file_with_resolved(&program, None)
-        .expect("compile canonical dynamic trait ABI");
-    codegen
-        .module
-        .verify()
-        .expect("valid dynamic trait call IR");
-    let body = codegen
-        .module
-        .get_function("read_dynamic")
-        .expect("dynamic method caller")
-        .to_string();
-    assert!(body.contains("dyn_call"), "call uses the checked slot ABI");
+        .compile_mir_native(&mir)
+        .expect("compile both static methods through the canonical native consumer");
+    codegen.module.verify().expect("valid canonical native IR");
+    for binding in [first_binding, second_binding] {
+        let mir_function = mir
+            .functions()
+            .get(&binding.callable)
+            .expect("exact canonical method owner has a MIR body");
+        assert_eq!(
+            mir_function.result, binding.signature.result,
+            "MIR method result must preserve the checker-owned ABI result"
+        );
+        let result_desc = mir
+            .type_catalog()
+            .get(&mir_function.result)
+            .expect("canonical method result TypeDesc");
+        assert_eq!(
+            result_desc.kind,
+            crate::core::mir::types::MirTypeKind::Primitive(crate::core::PrimitiveType::I32),
+            "both checked method signatures retain the i32 ABI result"
+        );
+
+        let symbol = crate::codegen::mir::native_symbol_for_owner(&binding.callable)
+            .expect("canonical native method symbol");
+        let function = codegen
+            .module
+            .get_function(&symbol)
+            .expect("canonical native method body");
+        assert!(function.count_basic_blocks() > 0);
+        assert_eq!(
+            function.get_type().get_return_type(),
+            Some(context.i32_type().as_basic_type_enum()),
+            "native LLVM method ABI must not drift from its checked i32 result"
+        );
+    }
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3554,6 +4373,7 @@ fn checked_vtable_uses_native_impl_slot_receipt_without_ast_impl_map() {
         .symbol;
     let context = Context::create();
     let mut codegen = CodeGenerator::new(&context, "checked_native_vtable_receipt");
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
     codegen
         .install_checked_declaration_names(&program)
         .expect("install checked declarations");
@@ -3577,6 +4397,18 @@ fn checked_vtable_uses_native_impl_slot_receipt_without_ast_impl_map() {
         .expect("checked vtable installation");
     codegen.builder.build_return(None).expect("anchor return");
     codegen.module.verify().expect("valid vtable IR");
+    let vtable_type = codegen
+        .vtable_types
+        .get("Slots")
+        .copied()
+        .expect("Slots vtable layout");
+    let erased_slot_pointer =
+        BasicTypeEnum::PointerType(context.ptr_type(inkwell::AddressSpace::default()));
+    assert_eq!(
+        vtable_type.get_field_types(),
+        vec![erased_slot_pointer, erased_slot_pointer],
+        "the native vtable ABI has one erased function pointer per declared trait slot"
+    );
     let initializer = codegen
         .module
         .get_global(&implementation.vtable_symbol)
@@ -3591,6 +4423,7 @@ fn checked_vtable_uses_native_impl_slot_receipt_without_ast_impl_map() {
         .find(first_symbol)
         .expect("second declared slot points at first");
     assert!(second < first, "slot identity is checker-receipt driven");
+    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }
 
 #[test]
@@ -3621,7 +4454,6 @@ fn checked_actor_mailbox_headers_emit_real_resolved_calls_without_actor_ast_cach
             .node_id
             .clone();
         let selected = std::collections::BTreeSet::from([owner]);
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let (count, _) = codegen
             .compile_resolved_subset(&program, &selected)
             .expect("real canonical mailbox caller");
@@ -3636,7 +4468,6 @@ fn checked_actor_mailbox_headers_emit_real_resolved_calls_without_actor_ast_cach
             codegen.actor_defs.is_empty(),
             "emitter must not synthesize ActorDef"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -3770,61 +4601,4 @@ fn checked_actor_mailbox_header_preserves_order_and_explicit_abi_boundaries() {
             .is_err(),
         "an installed but incomplete native Actor schema must fail closed"
     );
-}
-
-#[test]
-fn static_generic_trait_route_keeps_list_string_outside_the_mir_glue_contract() {
-    let source = r#"
-        trait Marker<T> { func read() -> i32; }
-        impl Marker<i32> for List<i32> { func read() -> i32 { 11 } }
-        impl Marker<string> for List<string> { func read() -> i32 { 22 } }
-        func main() -> i32 {
-            let numbers: List<i32> = [1]
-            let words: List<string> = ["x"]
-            let answer = words.read() + numbers.read()
-            drop(words)
-            answer
-        }
-    "#;
-    let file = crate::parser::Parser::new(
-        crate::lexer::Lexer::new(source).tokenize().expect("lex"),
-    )
-    .parse_file()
-    .expect("parse");
-    let program = crate::core::check_program(&file).expect("check");
-    assert!(
-        !crate::codegen::has_static_generic_trait_specialization_candidate(&program),
-        "List<i32> + List<string> must stay outside the bounded MIR candidate"
-    );
-
-    let excluded_sources = program
-        .source_registry()
-        .records()
-        .iter()
-        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-        .map(|record| record.id)
-        .collect::<std::collections::HashSet<_>>();
-    let error = crate::core::mir::reference::MirProgram::from_checked_program_excluding_sources(
-        &program,
-        &excluded_sources,
-    )
-    .expect_err("List<string> must stay outside the canonical List glue contract");
-    let message = format!("{error:?}");
-    assert!(
-        message.contains("outside the canonical Copy scalar")
-            || message.contains("List<string>"),
-        "unexpected List<string> fail-closed diagnostic: {message}"
-    );
-
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
-    let context = Context::create();
-    let mut codegen = CodeGenerator::new(&context, "generic_trait_list_string_fail_closed");
-    let diagnostics = codegen
-        .compile_checked(&program)
-        .expect_err("unsupported List<string> generic-trait MIR must not fall back to legacy");
-    assert!(!diagnostics.is_empty(), "unsupported trait route fails closed");
-    assert!(codegen.module.get_function("main").is_none());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty());
 }

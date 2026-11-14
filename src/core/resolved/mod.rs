@@ -7,51 +7,12 @@ use crate::core::phase::{TypeScheme, ZonkedTy};
 use crate::diagnostic::Diagnostic;
 use crate::span::{SourceRegistry, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-#[cfg(test)]
-use std::sync::Arc;
-
-/// The only callers that may still access the retained surface body file.
-///
-/// This is deliberately a closed, typed boundary rather than a boolean
-/// "legacy fallback" flag.  Each variant names the compatibility consumer
-/// that still owns the access, so migration tests can prove that a closed MIR
-/// island did not accidentally reopen a different AST consumer.  Removing a
-/// variant is the deletion gate for that consumer; adding one requires a new
-/// architecture decision and receipt.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) enum LegacyBodyConsumer {
-    /// The legacy LLVM fifth pass for body classes not yet lowered to MIR.
-    CodegenLegacyRemainder,
-    /// The legacy Z3 Flow/body compatibility encoder.
-    FlowVerifierCompatibility,
-    /// The legacy Z3 extern-call-site/body compatibility encoder.
-    FfiVerifierCompatibility,
-    /// The secondary Flow/VIR engine used by dual verification compatibility.
-    DualVerifierCompatibility,
-}
-
-#[cfg(test)]
-impl LegacyBodyConsumer {
-    #[cfg(test)]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::CodegenLegacyRemainder => "codegen-legacy-remainder",
-            Self::FlowVerifierCompatibility => "flow-verifier-compatibility",
-            Self::FfiVerifierCompatibility => "ffi-verifier-compatibility",
-            Self::DualVerifierCompatibility => "dual-verifier-compatibility",
-        }
-    }
-}
 
 #[cfg(test)]
 thread_local! {
-    static TEST_LEGACY_BODY_ACCESS: std::cell::RefCell<Vec<LegacyBodyConsumer>> =
-        const { std::cell::RefCell::new(Vec::new()) };
     /// Test-only trace of legacy codegen body entry points.  This is kept
-    /// separate from the owner accessor trace: a compatibility snapshot may
-    /// still be retained for one body class while an already-emitted
-    /// canonical callable must never enter the legacy emitter.
+    /// separate from the checked-program boundary: already-emitted canonical
+    /// callables must never enter the legacy emitter.
     static TEST_LEGACY_CODEGEN_FUNCTION_CALLS: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -264,6 +225,11 @@ pub struct ResolvedCallSite {
     pub node_id: NodeId,
     pub owner: String,
     pub callee: String,
+    /// Stable Checker node identity of a syntactic method receiver, when the
+    /// call is written as `receiver.method(...)`. Consumers that enforce
+    /// receiver-type boundaries must use this identity instead of parsing
+    /// the lossy display spelling in `callee`.
+    pub method_receiver: Option<NodeId>,
     pub argc: usize,
     /// Expected arity from function/extern directories when known.
     pub expected_argc: Option<usize>,
@@ -272,12 +238,15 @@ pub struct ResolvedCallSite {
     /// Return type display from callee function directory when known.
     pub ret: Option<String>,
     pub kind: ResolvedCallKind,
-    /// Exact checker-selected function identity. Syntax-only collection cannot
-    /// always resolve nested declarations or distinguish same-named exports.
+    /// Qualified-import target selected from the loader identity graph.  The
+    /// surface collector keeps the historical `alias.field` spelling, while
+    /// this optional node identity lets body lowering dispatch duplicate
+    /// exports without guessing by bare name.
     pub target_function: Option<NodeId>,
-    /// Canonical callable identity recovered from the typed body call node.
-    /// Surface call-site collection intentionally records only syntax facts;
-    /// body lowering closes the method/trait target before backend use.
+    /// Canonical callable identity recovered from a typed callable body or a
+    /// Checker-issued declaration-root expression. Surface call-site
+    /// collection intentionally records only syntax facts; typed lowering
+    /// closes the target before backend use.
     pub resolved_callee: Option<crate::core::ir::ResolvedCallee>,
     pub origin: Origin,
 }
@@ -287,6 +256,29 @@ impl ResolvedCallSite {
         self.expected_argc
             .map(|expected| expected == self.argc)
             .unwrap_or(true)
+    }
+
+    /// Check a declaration-root FFI call against its exact Checker-owned
+    /// declaration. Variadic tails are accepted here only as source facts for
+    /// the non-executable root census; callable-body and executable consumers
+    /// continue to use `arity_matches` and the existing MIR admission gates.
+    pub(crate) fn checked_ffi_source_arity_matches(
+        &self,
+        typed_argument_count: usize,
+        declaration: &crate::core::ir::ResolvedFfiDeclarationContract,
+    ) -> bool {
+        let fixed_argument_count = declaration.fixed_parameter_ids.len();
+        if self.kind != ResolvedCallKind::Extern
+            || self.argc != typed_argument_count
+            || self.expected_argc != Some(fixed_argument_count)
+        {
+            return false;
+        }
+        if declaration.invocation.variadic {
+            self.argc >= fixed_argument_count
+        } else {
+            self.argc == fixed_argument_count && self.arity_matches()
+        }
     }
 }
 
@@ -591,6 +583,11 @@ pub struct ResolvedConstant {
     pub qualified_name: String,
     pub ty: Option<String>,
     pub value: ResolvedConstValue,
+    /// ABI tag retained for constants declared as native data exports.
+    pub extern_abi: Option<String>,
+    /// Validated scalar C data-symbol descriptor, populated during checked
+    /// program construction and consumed by native emitters.
+    pub native_data_export: Option<crate::core::native_data_export::CheckedNativeDataExport>,
     pub origin: Origin,
 }
 
@@ -751,22 +748,11 @@ pub struct TransitionTables {
 
 #[derive(Debug)]
 pub struct CheckedProgram {
-    /// Test-only compatibility snapshot used by the legacy body oracle and
-    /// codegen harnesses. Production CheckedProgram values retain no legacy
-    /// AST copy.
-    #[cfg(test)]
-    legacy_file: Arc<File>,
     /// Whether the checked source was assembled from one or more imports.
-    /// This is a typed route fact used by migration gates; consumers must not
-    /// inspect the test-only compatibility snapshot to rediscover module
-    /// composition.
+    /// This checker-owned route fact lets consumers distinguish imported
+    /// programs without retaining or reopening the surface AST.
     has_imports: bool,
     /// Checker-owned source provenance for route and diagnostic gates.
-    ///
-    /// This is metadata, not a second surface AST. Keeping the registry on
-    /// `CheckedProgram` lets consumers answer source-origin questions without
-    /// reopening the test-only compatibility snapshot; this registry remains
-    /// available in production CheckedProgram values.
     source_registry: SourceRegistry,
     items: HashMap<NodeId, ResolvedItem>,
     node_meta: HashMap<NodeId, NodeMeta>,
@@ -805,6 +791,10 @@ pub struct CheckedProgram {
     resolved_bodies: BTreeMap<NodeId, crate::core::ResolvedBody>,
     declaration_expression_bodies:
         BTreeMap<NodeId, crate::core::ir::lower::ResolvedDeclarationExpressionBody>,
+    /// Checker-issued authority records for declaration-owned FFI source
+    /// roots. This includes unused declaration defaults; default-use
+    /// occurrences are separate call-site facts.
+    ffi_source_roots: Vec<crate::core::ir::lower::CheckedFfiSourceRoot>,
     ffi_declarations: BTreeMap<NodeId, crate::core::ir::ResolvedFfiDeclarationContract>,
     callable_cfgs: BTreeMap<NodeId, crate::core::cfg::CallableCfg>,
     resource_analyses: BTreeMap<NodeId, crate::core::ResourceAnalysis>,
@@ -991,6 +981,10 @@ impl CheckedProgram {
             zonked_func_types,
             zonked_nested_func_types,
             zonked_expr_types,
+            ordinary_map_owned_any_v2_bool_cast_candidates,
+            ordinary_map_owned_any_v2_nonprimitive_cast_candidates,
+            ordinary_map_owned_any_v2_checked_unpack_candidates,
+            ordinary_map_owned_any_v2_values_crosscall_string_candidates,
             session_actions,
             trait_method_generics,
             effect_summaries,
@@ -1151,6 +1145,22 @@ impl CheckedProgram {
             return Err(errors);
         }
         let stable_expression_types = stabilize_expression_types(&program, &zonked_expr_types)?;
+        let stable_bool_cast_candidates = stabilize_candidate_expression_nodes(
+            &program,
+            &ordinary_map_owned_any_v2_bool_cast_candidates,
+        )?;
+        let stable_nonprimitive_cast_candidates = stabilize_candidate_expression_nodes(
+            &program,
+            &ordinary_map_owned_any_v2_nonprimitive_cast_candidates,
+        )?;
+        let stable_checked_unpack_candidates = stabilize_candidate_expression_nodes(
+            &program,
+            &ordinary_map_owned_any_v2_checked_unpack_candidates,
+        )?;
+        let stable_values_crosscall_string_candidates = stabilize_candidate_expression_nodes(
+            &program,
+            &ordinary_map_owned_any_v2_values_crosscall_string_candidates,
+        )?;
         program.resolved_session_actions = stabilize_session_actions(&program, &session_actions)?;
         program.type_schemes = schemes;
         program.zonked_function_types = zonked_by_node;
@@ -1185,7 +1195,11 @@ impl CheckedProgram {
         program.resolved_type_arguments = resolved_type_arguments;
         validate_resolved_variant_schemas(&program)?;
         program.resolved_bodies =
-            match crate::core::ir::lower::lower_checked_callable_bodies(file, &program) {
+            match crate::core::ir::lower::lower_checked_callable_bodies_with_checked_unpack_candidates(
+                file,
+                &program,
+                &stable_checked_unpack_candidates,
+            ) {
                 Ok(bodies) => bodies,
                 Err(body_errors) => {
                     return Err(body_errors
@@ -1370,24 +1384,136 @@ impl CheckedProgram {
                 }
             }
         }
+        // A checked-unpack source call is lowered to a typed Cast in the
+        // ResolvedBody, so it is intentionally absent from `resolved_calls`
+        // (that index is validated against actual Call nodes). Preserve its
+        // Checker-resolved builtin identity only in the source call-site
+        // catalog, keyed by the same stable Call NodeId candidate.
+        for (owner, calls) in &stable_checked_unpack_candidates {
+            for call_node in calls {
+                let Some(site) = program.call_sites.get_mut(call_node) else {
+                    errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0200,
+                        "checked Map/Any unpack has no exact source call-site identity",
+                        program
+                            .node_meta
+                            .get(call_node)
+                            .map(|meta| meta.origin.user_span())
+                            .unwrap_or(Span::UNKNOWN),
+                    ));
+                    continue;
+                };
+                if site.owner != owner.0
+                    || site.kind != ResolvedCallKind::Builtin
+                    || site.argc != 1
+                    || !site.arity_matches()
+                    || !matches!(site.callee.as_str(), "unpack_i32" | "unpack_string")
+                {
+                    errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0200,
+                        "checked Map/Any unpack source call differs from its Checker-owned builtin identity",
+                        site.origin.user_span(),
+                    ));
+                    continue;
+                }
+                let builtin = match crate::core::ir::BuiltinId::new(site.callee.clone()) {
+                    Ok(builtin) => builtin,
+                    Err(error) => {
+                        errors.push(Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {error}"),
+                            site.origin.user_span(),
+                        ));
+                        continue;
+                    }
+                };
+                if site.resolved_callee.as_ref().is_some_and(|existing| {
+                    existing != &crate::core::ir::ResolvedCallee::Builtin(builtin.clone())
+                }) {
+                    errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0200,
+                        "checked Map/Any unpack call identity conflicts with its typed source resolution",
+                        site.origin.user_span(),
+                    ));
+                    continue;
+                }
+                site.resolved_callee = Some(crate::core::ir::ResolvedCallee::Builtin(builtin));
+            }
+        }
         if !errors.is_empty() {
             return Err(errors);
         }
-        program.declaration_expression_bodies =
+        let (declaration_expression_bodies, ffi_source_root_seeds) =
             crate::core::ir::lower::lower_checked_declaration_expression_bodies(file, &program);
+        program.declaration_expression_bodies = declaration_expression_bodies;
         program.ffi_declarations = crate::core::ir::build_checked_ffi_declarations(&program)?;
+        program.ffi_source_roots =
+            crate::core::ir::lower::build_checked_ffi_source_roots(&program, ffi_source_root_seeds);
+        errors.extend(bind_checked_ffi_source_call_sites(&mut program));
         validate_resolved_callable_bodies(&program)?;
         program.callable_cfgs = crate::core::cfg::lower_resolved_bodies(&program.resolved_bodies)?;
         // RECORD-LIN-001 (0.1.9, Phase B): user records/unions with linear
         // fields must be tracked as linear. Compute the set of such qualified
         // names once and hand it to the CFG's is_linear.
         let linear_record_names = compute_linear_record_names(&program);
-        program.resource_analyses = crate::core::cfg::analyze_resolved_bodies(
-            &program.callable_cfgs,
-            &program.resolved_bodies,
-            &program.resolved_signatures,
-            &program.resolved_types,
-            &linear_record_names,
+        let checked_record_field_types = program
+            .type_defs
+            .values()
+            .filter(|definition| definition.kind == ResolvedTypeKind::Record)
+            .filter_map(|definition| {
+                let fields = definition
+                    .fields
+                    .iter()
+                    .map(|(name, _)| {
+                        let field = definition.field_ids.get(name)?;
+                        let ty = program.resolved_field_types.get(field)?;
+                        Some((name.clone(), ty.clone()))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some((definition.node_id.clone(), fields))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let checked_record_field_ids = program
+            .type_defs
+            .values()
+            .filter(|definition| definition.kind == ResolvedTypeKind::Record)
+            .map(|definition| (definition.node_id.clone(), definition.field_ids.clone()))
+            .collect::<BTreeMap<_, _>>();
+        program.resource_analyses =
+            crate::core::cfg::analyze_resolved_bodies_with_declaration_expressions(
+                &program.callable_cfgs,
+                &program.resolved_bodies,
+                &program.resolved_signatures,
+                &program.resolved_types,
+                &program.constants,
+                &checked_record_field_types,
+                &checked_record_field_ids,
+                &linear_record_names,
+                &program.declaration_expression_bodies,
+            )?;
+        attach_ordinary_map_owned_any_v2_get_or_default_i32_receipt(&mut program);
+        attach_ordinary_map_owned_any_v2_get_or_default_string_receipt(&mut program);
+        validate_ordinary_map_owned_any_v2_get_or_default_i32_receipt(&program)?;
+        validate_ordinary_map_owned_any_v2_get_or_default_string_receipt(&program)?;
+        validate_ordinary_map_owned_any_v2_values_local_cast_receipts(&program)?;
+        validate_ordinary_map_owned_any_v2_bool_cast_receipts(
+            &program,
+            &stable_bool_cast_candidates,
+        )?;
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &program,
+            &stable_nonprimitive_cast_candidates,
+        )?;
+        validate_ordinary_map_owned_any_v2_nonprimitive_unpack_boundary(
+            &program,
+            &stable_nonprimitive_cast_candidates,
+        )?;
+        validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
+            &program,
+            &stable_checked_unpack_candidates,
+        )?;
+        validate_ordinary_map_owned_any_v2_values_crosscall_string_receipts(
+            &program,
+            &stable_values_crosscall_string_candidates,
         )?;
         let mut callables = BTreeMap::new();
         for (owner, body) in &program.resolved_bodies {
@@ -1457,6 +1583,20 @@ impl CheckedProgram {
                 Ok(catalog) => catalog,
                 Err(declaration_errors) => return Err(declaration_errors),
             };
+
+        let data_exports =
+            crate::core::native_data_export::build_checked_native_data_exports(file, &program)?;
+        for export in data_exports {
+            let Some(constant) = program.constants.get_mut(&export.owner) else {
+                return Err(vec![Diagnostic::error_code(
+                    crate::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE,
+                    format!("checked constant descriptor for exported symbol '{}' disappeared during construction", export.symbol),
+                    export.span,
+                )]);
+            };
+            constant.native_data_export = Some(export);
+        }
+        crate::core::native_data_export::validate_checked_native_data_exports(&program)?;
 
         program.trait_method_generics = trait_method_generics;
 
@@ -1567,6 +1707,7 @@ impl CheckedProgram {
             &mut call_sites,
             &mut errors,
         );
+        install_qualified_import_targets(file, &functions, &mut call_sites, &mut errors);
         let mut origin_catalog = OriginCatalog::default();
         origin_catalog.register(
             &NodeId(COMPILATION_ROOT_NODE_ID.to_string()),
@@ -1627,23 +1768,10 @@ impl CheckedProgram {
             origin_catalog.register(&extern_block.node_id, &extern_block.origin, &mut errors);
         }
         origin_catalog.validate(&mut errors);
-        // Keep the compatibility snapshot available to test-only legacy body
-        // oracles without retaining it in production CheckedProgram values.
-        // Import directives are omitted; their presence stays in the
-        // checker-owned route fact below.
-        #[cfg(test)]
-        let legacy_file_clone = File {
-            sources: file.sources.clone(),
-            imports: Vec::new(),
-            items: file.items.clone(),
-            implicit_single: file.implicit_single,
-        };
         if !errors.is_empty() {
             return Err(errors);
         }
         Ok(Self {
-            #[cfg(test)]
-            legacy_file: Arc::new(legacy_file_clone),
             has_imports: !file.imports.is_empty(),
             source_registry: file.sources.clone(),
             items,
@@ -1678,6 +1806,7 @@ impl CheckedProgram {
             resolved_session_actions: BTreeMap::new(),
             resolved_bodies: BTreeMap::new(),
             declaration_expression_bodies: BTreeMap::new(),
+            ffi_source_roots: Vec::new(),
             ffi_declarations: BTreeMap::new(),
             callable_cfgs: BTreeMap::new(),
             resource_analyses: BTreeMap::new(),
@@ -1686,48 +1815,14 @@ impl CheckedProgram {
         })
     }
 
-    /// Test-only retained surface body file for an explicitly named
-    /// compatibility oracle. Production code consumes checker-owned
-    /// catalogs, Resolved bodies, or canonical MIR and cannot call this
-    /// accessor because it is compiled under `cfg(test)`.
-    ///
-    /// The four owner tags remain useful in unit-test traces while the old
-    /// AST consumers are compared against their canonical replacements. New
-    /// semantic consumers MUST use the typed directories or MIR; adding a
-    /// production caller here is a hard owner-audit failure.
-    #[cfg(test)]
-    pub(crate) fn reset_test_legacy_body_access() {
-        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().clear());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_legacy_body_access() -> Vec<LegacyBodyConsumer> {
-        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow().clone())
-    }
-
     #[cfg(test)]
     pub(crate) fn reset_test_legacy_codegen_function_calls() {
         TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow_mut().clear());
     }
 
     #[cfg(test)]
-    pub(crate) fn record_test_legacy_codegen_function_call(name: &str) {
-        TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow_mut().push(name.to_owned()));
-    }
-
-    #[cfg(test)]
     pub(crate) fn test_legacy_codegen_function_calls() -> Vec<String> {
         TEST_LEGACY_CODEGEN_FUNCTION_CALLS.with(|calls| calls.borrow().clone())
-    }
-
-    /// Test-only compatibility snapshot adapter. Production consumers must use
-    /// checker-owned typed directories and canonical MIR; keeping this method
-    /// behind `cfg(test)` makes that boundary compile-time enforced.
-    #[cfg(test)]
-    pub(crate) fn legacy_body_file(&self, _consumer: LegacyBodyConsumer) -> Arc<File> {
-        #[cfg(test)]
-        TEST_LEGACY_BODY_ACCESS.with(|access| access.borrow_mut().push(_consumer));
-        Arc::clone(&self.legacy_file)
     }
 
     /// Whether this checked program contains imported modules.  Migration
@@ -2122,6 +2217,34 @@ impl CheckedProgram {
         sites.into_iter().map(|(_, site)| site).collect()
     }
 
+    /// Return the stable boundary reason for any method call whose Checker
+    /// receiver type is a dynamic trait object.  This is shared by route
+    /// selection and direct consumers so a caller cannot reach Bytecode,
+    /// native codegen, or verifier compatibility by skipping the CLI router.
+    pub fn dynamic_protocol_method_boundary_reason(&self) -> Option<String> {
+        let has_dynamic_method = self.call_sites.values().any(|site| {
+            site.method_receiver
+                .as_ref()
+                .and_then(|receiver| self.resolved_node_type(receiver))
+                .and_then(|ty| self.resolved_types.get(ty))
+                .is_some_and(|ty| {
+                    matches!(
+                        ty,
+                        crate::core::ResolvedType::Trait {
+                            kind: crate::core::ir::TraitTypeKind::Dynamic,
+                            ..
+                        }
+                    )
+                })
+        });
+        has_dynamic_method.then(|| {
+            format!(
+                "{}: dynamic Protocol method dispatch through a `dyn Trait` receiver is removed by language-spec §3.9; default consumers cannot use Bytecode, LLVM, or verifier compatibility fallback",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })
+    }
+
     pub fn extern_func_signature(&self, name: &str) -> Option<&ResolvedExternFunc> {
         self.extern_blocks_sorted()
             .into_iter()
@@ -2341,6 +2464,269 @@ impl CheckedProgram {
         &self,
     ) -> &BTreeMap<NodeId, crate::core::ir::lower::ResolvedDeclarationExpressionBody> {
         &self.declaration_expression_bodies
+    }
+
+    /// Complete checker-owned census of constant, actor-field, trait, and
+    /// callable parameter-default roots that may contain direct extern calls.
+    /// Roots remain present when their declaration default has no call use.
+    pub fn checked_ffi_source_roots(&self) -> &[crate::core::ir::lower::CheckedFfiSourceRoot] {
+        &self.ffi_source_roots
+    }
+
+    /// Resolve a source-root handle to its canonical typed body. This API
+    /// takes no caller-supplied body and rejects missing, duplicated, moved,
+    /// or changed roots.
+    pub fn checked_ffi_source_root_body<'a>(
+        &'a self,
+        handle: &crate::core::ir::lower::CheckedFfiSourceRoot,
+    ) -> Result<&'a crate::core::ir::ResolvedBody, Vec<crate::core::ir::ResolvedBodyError>> {
+        use crate::core::ir::lower::{
+            checked_ffi_source_body_fingerprint, ResolvedDeclarationExpressionKind as Kind,
+            ResolvedDeclarationRootIdentity as Identity,
+        };
+        let fail = |node: &NodeId, reason: &str| {
+            vec![crate::core::ir::ResolvedBodyError::new(
+                node.clone(),
+                format!("TOOL-RESOLUTION-001: checked FFI source root {reason}"),
+            )]
+        };
+        let matching = self
+            .ffi_source_roots
+            .iter()
+            .filter(|root| root.root_node() == handle.root_node())
+            .collect::<Vec<_>>();
+        let [canonical] = matching.as_slice() else {
+            return Err(fail(
+                handle.root_node(),
+                if matching.is_empty() {
+                    "is absent from this CheckedProgram"
+                } else {
+                    "NodeId is ambiguous across declaration roots"
+                },
+            ));
+        };
+        if !handle.has_valid_witness()
+            || !canonical.same_handle(handle)
+            || !canonical.has_valid_call_census()
+            || !self.ffi_source_root_identity_is_canonical(canonical)
+        {
+            return Err(fail(
+                handle.root_node(),
+                "handle does not match its checker-issued owner/declaration/body witness",
+            ));
+        }
+        let (body, expression, fingerprint) = match (handle.kind(), handle.identity()) {
+            (
+                Kind::CallableParameterDefault,
+                Some(Identity::CallableParameterDefault {
+                    callable,
+                    parameter,
+                }),
+            ) => {
+                let body = self
+                    .resolved_bodies
+                    .get(callable)
+                    .ok_or_else(|| fail(handle.root_node(), "callable default body is missing"))?;
+                let expression = body.default_values.get(parameter).ok_or_else(|| {
+                    fail(handle.root_node(), "canonical parameter default is missing")
+                })?;
+                if body.owner != *callable
+                    || expression.node_id != *handle.root_node()
+                    || *callable != *handle.owner()
+                {
+                    return Err(fail(
+                        handle.root_node(),
+                        "callable/default parameter identity does not match the source root",
+                    ));
+                }
+                (
+                    body,
+                    expression,
+                    checked_ffi_source_body_fingerprint(body, expression, None),
+                )
+            }
+            (Kind::ConstantInitializer, Some(Identity::Constant { .. }))
+            | (Kind::ActorFieldInitializer, Some(Identity::ActorField { .. }))
+            | (Kind::TraitParameterDefault, Some(Identity::TraitParameterDefault { .. })) => {
+                let root = self
+                    .declaration_expression_bodies
+                    .get(handle.root_node())
+                    .ok_or_else(|| fail(handle.root_node(), "typed body is missing"))?;
+                if root.node_id != *handle.root_node()
+                    || root.owner != *handle.owner()
+                    || root.kind != handle.kind()
+                {
+                    return Err(fail(
+                        handle.root_node(),
+                        "typed declaration body does not match the source root",
+                    ));
+                }
+                let body = root.body.as_ref().map_err(Clone::clone)?;
+                let expression = body.root.result.as_deref().ok_or_else(|| {
+                    fail(
+                        handle.root_node(),
+                        "typed declaration root expression is missing",
+                    )
+                })?;
+                (
+                    body,
+                    expression,
+                    checked_ffi_source_body_fingerprint(body, expression, Some(root)),
+                )
+            }
+            _ => {
+                return Err(fail(
+                    handle.root_node(),
+                    "source root kind/identity is invalid",
+                ))
+            }
+        };
+        let root_origin = handle
+            .origin()
+            .ok_or_else(|| fail(handle.root_node(), "source root origin is missing"))?;
+        if fingerprint != handle.body_fingerprint() || &expression.origin != root_origin {
+            return Err(fail(
+                handle.root_node(),
+                "typed body origin disagrees with its source root handle",
+            ));
+        }
+        Ok(body)
+    }
+
+    /// Resolve an exact source call handle through its source root, canonical
+    /// typed body, and checked extern declaration. Callers cannot substitute
+    /// a body, call expression, or extern descriptor.
+    pub fn checked_ffi_source_call_context<'a>(
+        &'a self,
+        root_handle: &crate::core::ir::lower::CheckedFfiSourceRoot,
+        call_handle: &crate::core::ir::lower::CheckedFfiSourceCall,
+    ) -> Result<
+        crate::core::ir::lower::CheckedFfiSourceCallContext<'a>,
+        Vec<crate::core::ir::ResolvedBodyError>,
+    > {
+        use crate::core::ir::lower::CheckedFfiSourceCallContext;
+        let fail = |node: &NodeId, reason: &str| {
+            vec![crate::core::ir::ResolvedBodyError::new(
+                node.clone(),
+                format!("TOOL-RESOLUTION-001: checked FFI source call {reason}"),
+            )]
+        };
+        let body = self.checked_ffi_source_root_body(root_handle)?;
+        let canonical_root = self
+            .ffi_source_roots
+            .iter()
+            .find(|root| {
+                root.root_node() == root_handle.root_node() && root.same_handle(root_handle)
+            })
+            .ok_or_else(|| fail(call_handle.call_node(), "root handle is absent"))?;
+        let matching_calls = canonical_root
+            .calls()
+            .iter()
+            .filter(|call| call.call_node() == call_handle.call_node())
+            .collect::<Vec<_>>();
+        let [canonical_call] = matching_calls.as_slice() else {
+            return Err(fail(
+                call_handle.call_node(),
+                if matching_calls.is_empty() {
+                    "is absent from the selected source root"
+                } else {
+                    "NodeId is ambiguous inside the selected source root"
+                },
+            ));
+        };
+        if !canonical_call.same_handle(call_handle) || !canonical_call.belongs_to(canonical_root) {
+            return Err(fail(
+                call_handle.call_node(),
+                "handle does not match its checker-issued root/call witness",
+            ));
+        }
+        let expressions =
+            body.call_expressions(self.resolved_types(), self.resolved_type_targets())?;
+        let expression = expressions
+            .get(call_handle.call_node())
+            .ok_or_else(|| fail(call_handle.call_node(), "typed call node is missing"))?;
+        if !canonical_call.matches_typed_expression(expression) {
+            return Err(fail(
+                call_handle.call_node(),
+                "typed expression/origin/extern declaration changed after checker issuance",
+            ));
+        }
+        let declaration = self
+            .ffi_declarations
+            .get(call_handle.external_declaration())
+            .ok_or_else(|| {
+                fail(
+                    call_handle.external_declaration(),
+                    "extern declaration is missing",
+                )
+            })?;
+        if declaration.declaration != *call_handle.external_declaration() {
+            return Err(fail(
+                call_handle.external_declaration(),
+                "extern declaration identity changed",
+            ));
+        }
+        declaration.validate(self)?;
+        Ok(CheckedFfiSourceCallContext {
+            root: canonical_root,
+            body,
+            call: expression.clone(),
+            declaration,
+        })
+    }
+
+    fn ffi_source_root_identity_is_canonical(
+        &self,
+        root: &crate::core::ir::lower::CheckedFfiSourceRoot,
+    ) -> bool {
+        use crate::core::ir::lower::{
+            ResolvedDeclarationExpressionKind as Kind, ResolvedDeclarationRootIdentity as Identity,
+        };
+        match (root.kind(), root.identity()) {
+            (Kind::ConstantInitializer, Some(Identity::Constant { declaration })) => {
+                root.owner() == declaration && self.constants.contains_key(declaration)
+            }
+            (Kind::ActorFieldInitializer, Some(Identity::ActorField { actor, field })) => {
+                root.owner() == actor
+                    && self
+                        .actors
+                        .get(actor)
+                        .is_some_and(|resolved| resolved.field_ids.values().any(|id| id == field))
+            }
+            (
+                Kind::TraitParameterDefault,
+                Some(Identity::TraitParameterDefault { method, parameter }),
+            ) => {
+                root.owner() == method
+                    && self
+                        .resolved_trait_signature(method)
+                        .is_some_and(|signature| {
+                            signature.parameters.iter().any(|candidate| {
+                                &candidate.id == parameter && candidate.has_default
+                            })
+                        })
+            }
+            (
+                Kind::CallableParameterDefault,
+                Some(Identity::CallableParameterDefault {
+                    callable,
+                    parameter,
+                }),
+            ) => {
+                root.owner() == callable
+                    && self.resolved_signature(callable).is_some_and(|signature| {
+                        signature
+                            .parameters
+                            .iter()
+                            .any(|candidate| &candidate.id == parameter && candidate.has_default)
+                    })
+                    && self
+                        .resolved_body(callable)
+                        .and_then(|body| body.default_values.get(parameter))
+                        .is_some_and(|expression| expression.node_id == *root.root_node())
+            }
+            _ => false,
+        }
     }
 
     pub fn resolved_bodies(&self) -> &BTreeMap<NodeId, crate::core::ResolvedBody> {
@@ -2691,10 +3077,15 @@ pub(crate) fn top_level_function_qualified_names(
                 .get(&name)
                 .is_some_and(|identities| identities.len() > 1)
             {
-                // File-merge mode has no exported module alias yet. Use the
-                // stable source key as an internal disambiguator; ambiguous
-                // short names remain fail-closed at later call binding.
-                format!("{source_identity}::{name}")
+                let module = sources
+                    .records()
+                    .iter()
+                    .find(|record| record.key.as_str() == source_identity)
+                    .and_then(|record| {
+                        crate::module_system::module_path_from_source_key(&record.key)
+                    })
+                    .unwrap_or_else(|| source_identity.clone());
+                format!("{module}::{name}")
             } else {
                 name.clone()
             };
@@ -2738,8 +3129,14 @@ fn collect_items(
     errors: &mut Vec<Diagnostic>,
 ) {
     let ids = NodeIdBuilder::new(sources);
+    // File-merge compatibility keeps declarations with their surface names,
+    // but a qualified import needs both same-named exports to survive the
+    // canonical catalog. Pre-compute cross-source collisions and qualify only
+    // that narrow slice; same-file duplicate definitions retain the existing
+    // duplicate diagnostic.
+    let function_qualified_names = top_level_function_qualified_names(items, sources);
     for item in items {
-        collect_item_meta(item, &ids, node_meta, errors);
+        collect_item_meta(item, &ids, &function_qualified_names, node_meta, errors);
         match item {
             Item::Flow(flow) => {
                 let qualified = flow.name.clone();
@@ -2792,7 +3189,8 @@ fn collect_items(
                 }
             }
             Item::Func(function) => {
-                let qualified = function.name.clone();
+                let qualified =
+                    top_level_function_qualified_name(function, sources, &function_qualified_names);
                 let span = declaration_span(function.meta, function.meta.span);
                 insert_item(
                     resolved_items,
@@ -3034,6 +3432,7 @@ fn collect_items(
                 name,
                 ty,
                 value,
+                extern_abi,
                 ..
             } => {
                 let qualified = name.clone();
@@ -3064,6 +3463,8 @@ fn collect_items(
                         qualified_name: qualified.clone(),
                         ty: ty_str,
                         value: materialize_const_value(value),
+                        extern_abi: extern_abi.clone(),
+                        native_data_export: None,
                         origin: resolve_named_origin(
                             ResolvedItemKind::Constant,
                             &qualified,
@@ -3118,6 +3519,8 @@ fn collect_items(
                         qualified_name: qualified.clone(),
                         ty: Some(format!("cap:{}", qualified)),
                         value: ResolvedConstValue::Unit,
+                        extern_abi: None,
+                        native_data_export: None,
                         origin: resolve_named_origin(
                             ResolvedItemKind::Constant,
                             &qualified,
@@ -5528,12 +5931,14 @@ pub(crate) fn nested_function_owner(owner: &NodeId, function: &crate::ast::FuncD
 fn collect_item_meta(
     item: &Item,
     ids: &NodeIdBuilder<'_>,
+    function_qualified_names: &HashMap<(String, String), String>,
     out: &mut HashMap<NodeId, NodeMeta>,
     errors: &mut Vec<Diagnostic>,
 ) {
     match item {
         Item::Func(function) => {
-            let qualified = function.name.clone();
+            let qualified =
+                top_level_function_qualified_name(function, ids.sources, function_qualified_names);
             let node_id = NodeId(format!("function:{qualified}"));
             let fallback = function.meta.span;
             let parent = top_level_enclosing_parent(&qualified);
@@ -7598,10 +8003,13 @@ fn collect_program_call_sites(
         }
     }
     let ids = NodeIdBuilder::new(&file.sources);
+    let function_qualified_names = top_level_function_qualified_names(&file.items, &file.sources);
     for item in &file.items {
         collect_item_call_sites(
             item,
             &ids,
+            &file.sources,
+            &function_qualified_names,
             &function_info,
             &extern_info,
             &method_info,
@@ -7609,6 +8017,67 @@ fn collect_program_call_sites(
             errors,
         );
     }
+}
+
+/// Resolve the one conservative qualified-call spelling supported during the
+/// file-merge migration: `use path as alias; alias::name(...)`.  The parser
+/// represents `alias::name` as a field projection, so the surface collector
+/// initially records `alias.name`.  Rebind that call site to the canonical
+/// function node selected by source provenance; no bare-name or import-order
+/// guess is allowed when more than one source exports the same name.
+fn install_qualified_import_targets(
+    file: &File,
+    functions: &HashMap<NodeId, ResolvedFunction>,
+    call_sites: &mut HashMap<NodeId, ResolvedCallSite>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let mut imports = HashMap::new();
+    for import in &file.imports {
+        let alias = import
+            .alias
+            .clone()
+            .or_else(|| import.path.first().cloned());
+        let Some(alias) = alias else { continue };
+        imports.insert(alias, import.path.join("::"));
+    }
+    for site in call_sites.values_mut() {
+        let Some((alias, name)) = site.callee.split_once('.') else {
+            continue;
+        };
+        let Some(module_path) = imports.get(alias) else {
+            continue;
+        };
+        let mut candidates = functions
+            .values()
+            .filter(|function| {
+                function.qualified_name.rsplit("::").next() == Some(name)
+                    && file
+                        .sources
+                        .key(function.origin.user_span().source_id)
+                        .and_then(crate::module_system::module_path_from_source_key)
+                        .is_some_and(|source_path| {
+                            crate::module_system::module_path_matches_import_path(
+                                &source_path,
+                                module_path,
+                            )
+                        })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let [function] = candidates.as_slice() else {
+            // Missing and ambiguous exports have already been diagnosed by
+            // the checker or the legacy merge gate. Leave the call-site fact
+            // unresolved so lowerers fail closed instead of choosing a name.
+            continue;
+        };
+        site.callee = format!("{alias}::{name}");
+        site.kind = ResolvedCallKind::Function;
+        site.expected_argc = Some(function.params.len());
+        site.effects = function.effects.clone();
+        site.ret = Some(crate::core::fmt_type(&function.ret));
+        site.target_function = Some(function.node_id.clone());
+    }
+    let _ = errors;
 }
 
 fn collect_param_default_call_sites(
@@ -7684,6 +8153,8 @@ fn collect_func_call_sites(
 fn collect_item_call_sites(
     item: &Item,
     ids: &NodeIdBuilder<'_>,
+    sources: &SourceRegistry,
+    function_qualified_names: &HashMap<(String, String), String>,
     functions: &HashMap<String, (usize, Vec<String>, String)>,
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
@@ -7692,7 +8163,9 @@ fn collect_item_call_sites(
 ) {
     match item {
         Item::Func(function) => {
-            let owner = NodeId(format!("function:{}", function.name));
+            let qualified =
+                top_level_function_qualified_name(function, sources, function_qualified_names);
+            let owner = NodeId(format!("function:{qualified}"));
             collect_func_call_sites(
                 function,
                 &owner,
@@ -7908,6 +8381,7 @@ type ResolvedCalleeFacts = (
 
 fn record_expr_call_site(
     expr: &Expr,
+    method_receiver: Option<&Expr>,
     owner: &NodeId,
     role: &str,
     fallback: Span,
@@ -7944,6 +8418,21 @@ fn record_expr_call_site(
         node_id: node_id.clone(),
         owner: owner.0.clone(),
         callee: callee_name,
+        method_receiver: method_receiver.map(|receiver| {
+            let receiver_meta = receiver.meta();
+            ids.anonymous(
+                owner,
+                expr_kind(receiver),
+                &format!("{role}.callee.inner"),
+                receiver_meta
+                    .and_then(ast_meta_anchor)
+                    .map(|(span, _)| span),
+                receiver_meta
+                    .map(|meta| meta.origin)
+                    .unwrap_or(AstOrigin::User),
+                errors,
+            )
+        }),
         argc,
         expected_argc,
         effects,
@@ -7962,6 +8451,132 @@ fn record_expr_call_site(
             span,
         ));
     }
+}
+
+/// Close syntax-collected call-site records against Checker-issued FFI
+/// declaration-root calls. Those calls do not live in a callable body's
+/// `resolved_calls` map, so their exact Extern target must be installed from
+/// the validated source-root handle here rather than left as `None` for a
+/// later consumer to guess from the symbol spelling.
+fn bind_checked_ffi_source_call_sites(program: &mut CheckedProgram) -> Vec<Diagnostic> {
+    let roots = program.ffi_source_roots.clone();
+    let mut errors = Vec::new();
+    let mut bindings = Vec::new();
+
+    for root in &roots {
+        for call in root.calls() {
+            let context = match program.checked_ffi_source_call_context(root, call) {
+                Ok(context) => context,
+                Err(source_errors) => {
+                    errors.extend(source_errors.into_iter().map(|error| {
+                        Diagnostic::error(
+                            error.message,
+                            root.origin()
+                                .map_or(Span::UNKNOWN, |origin| origin.user_span()),
+                        )
+                    }));
+                    continue;
+                }
+            };
+            let crate::core::ir::ResolvedExprKind::Call(resolved_call) = &context.call.kind else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: Checker FFI root call '{}' is no longer a typed Call",
+                        call.call_node().0
+                    ),
+                    context.call.origin.user_span(),
+                ));
+                continue;
+            };
+            let expected_callee =
+                crate::core::ir::ResolvedCallee::Extern(call.external_declaration().clone());
+            if resolved_call.callee != expected_callee {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: Checker FFI root call '{}' resolved to a different extern declaration",
+                        call.call_node().0
+                    ),
+                    context.call.origin.user_span(),
+                ));
+                continue;
+            }
+
+            let sites = program
+                .call_sites
+                .values()
+                .filter(|site| site.node_id == *call.call_node())
+                .collect::<Vec<_>>();
+            let [site] = sites.as_slice() else {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: Checker FFI root call '{}' has {} call-site records for its exact NodeId",
+                        call.call_node().0,
+                        sites.len()
+                    ),
+                    context.call.origin.user_span(),
+                ));
+                continue;
+            };
+
+            let mut mismatches = Vec::new();
+            if site.owner != root.owner().0 {
+                mismatches.push("owner");
+            }
+            if site.node_id != *call.call_node()
+                || !program.call_sites.contains_key(call.call_node())
+            {
+                mismatches.push("NodeId/key");
+            }
+            if site.kind != ResolvedCallKind::Extern {
+                mismatches.push("call kind");
+            }
+            if site.callee != context.declaration.symbol {
+                mismatches.push("extern symbol");
+            }
+            if site.target_function.is_some() {
+                mismatches.push("function target");
+            }
+            if site.origin != context.call.origin {
+                mismatches.push("source origin/span");
+            }
+            if !site.checked_ffi_source_arity_matches(
+                resolved_call.arguments.len(),
+                context.declaration,
+            ) {
+                mismatches.push("argument count/arity");
+            }
+            if site
+                .resolved_callee
+                .as_ref()
+                .is_some_and(|existing| existing != &expected_callee)
+            {
+                mismatches.push("preexisting typed callee");
+            }
+            if !mismatches.is_empty() {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "TOOL-RESOLUTION-001: Checker FFI root call '{}' disagrees with its exact call-site identity in: {}",
+                        call.call_node().0,
+                        mismatches.join(", ")
+                    ),
+                    context.call.origin.user_span(),
+                ));
+                continue;
+            }
+
+            bindings.push((call.call_node().clone(), expected_callee));
+        }
+    }
+
+    if !errors.is_empty() {
+        return errors;
+    }
+    for (call_node, expected_callee) in bindings {
+        if let Some(site) = program.call_sites.get_mut(&call_node) {
+            site.resolved_callee = Some(expected_callee);
+        }
+    }
+    errors
 }
 
 fn collect_stmt_call_sites(
@@ -8290,8 +8905,13 @@ fn collect_expr_call_sites(
 ) {
     match expr.unlocated() {
         Expr::Call(callee, args) => {
+            let method_receiver = match callee.unlocated() {
+                Expr::Field(receiver, _) => Some(receiver.as_ref()),
+                _ => None,
+            };
             record_expr_call_site(
                 expr,
+                method_receiver,
                 owner,
                 role,
                 fallback,
@@ -8648,6 +9268,7 @@ fn collect_expr_call_sites(
         Expr::Turbofish(name, _, args) => {
             record_expr_call_site(
                 expr,
+                None,
                 owner,
                 role,
                 fallback,
@@ -8943,6 +9564,21 @@ fn resolve_named_call_callee(
     externs: &HashMap<String, (usize, String)>,
     methods: &HashMap<String, (usize, Vec<String>, String)>,
 ) -> ResolvedCalleeFacts {
+    // The checked-unpack source forms are builtin only when the Checker did
+    // not resolve a user function with the same name (check_call gives user
+    // globals precedence over builtins). Keep the syntax-only call-site
+    // catalog aligned for these newly registered names.
+    if matches!(name, "unpack_i32" | "unpack_string") {
+        if let Some((arity, effects, ret)) = functions.get(name) {
+            return (
+                name.to_string(),
+                ResolvedCallKind::Function,
+                Some(*arity),
+                effects.clone(),
+                Some(ret.clone()),
+            );
+        }
+    }
     // Keep the same precedence as Checker::check_call: language builtins are
     // resolved before flattened stdlib functions with the same surface name.
     if crate::core::builtins::is_builtin_callable(name)
@@ -9067,7 +9703,7 @@ fn canonical_shared_binding_type(
                 return Err(format!(
                     "weak binding initializer is not shared: {}",
                     crate::core::fmt_type(other)
-                ))
+                ));
             }
         },
     };
@@ -9216,6 +9852,6154 @@ impl<'a> ExpressionKeyIndex<'a> {
                 }
             }
         }
+    }
+}
+
+/// Resolve provisional direct `.1 as bool` casts to canonical source nodes.
+/// Inference records only the narrow syntax/type candidate; ownership does
+/// not authorize it until the exact node can be joined to a Checker receipt.
+fn stabilize_candidate_expression_nodes(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<ExpressionTypeKey>>,
+) -> Result<BTreeMap<NodeId, BTreeSet<NodeId>>, Vec<Diagnostic>> {
+    if candidates.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let index = ExpressionKeyIndex::build(program, candidates.keys());
+    let mut stable = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+    let mut errors = Vec::new();
+    for (owner, keys) in candidates {
+        for key in keys {
+            let matches = index.owned(&owner.0, key);
+            if matches.len() != 1 {
+                let span = program
+                    .node_meta
+                    .get(owner)
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or(Span::UNKNOWN);
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0200,
+                    "explicit Any-to-bool cast has no unique checked source identity",
+                    span,
+                ));
+                continue;
+            }
+            stable
+                .entry(owner.clone())
+                .or_default()
+                .insert((*matches[0]).clone());
+        }
+    }
+    if errors.is_empty() {
+        Ok(stable)
+    } else {
+        Err(errors)
+    }
+}
+
+/// The inference exception above is provisional. Every candidate must join a
+/// same-owner Checker V2 unpack receipt whose DynamicAny source and Bool
+/// target were collected only after the GetAny receiver's persistent Set
+/// lineage selected that exact payload type. In particular, `.1` syntax on an
+/// ordinary tuple does not authorize an Any downcast.
+fn validate_ordinary_map_owned_any_v2_bool_cast_receipts(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<(), Vec<Diagnostic>> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut errors = Vec::new();
+    for (owner, casts) in candidates {
+        let receipt = program
+            .resource_analyses
+            .get(owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .filter(|receipt| {
+                receipt.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && &receipt.owner == owner
+            });
+        for cast in casts {
+            let authorized = receipt.is_some_and(|receipt| {
+                receipt.unpack_receipts.iter().any(|unpack| {
+                    &unpack.cast == cast
+                        && unpack.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                        && unpack.conversion_kind
+                            == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                        && matches!(
+                            program.resolved_types.get(&unpack.conversion_from),
+                            Some(crate::core::ResolvedType::DynamicAny { .. })
+                        )
+                        && matches!(
+                            program.resolved_types.get(&unpack.conversion_to),
+                            Some(crate::core::ResolvedType::Primitive(
+                                crate::core::PrimitiveType::Bool
+                            ))
+                        )
+                })
+            });
+            if !authorized {
+                let span = program
+                    .node_meta
+                    .get(cast)
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or_else(|| {
+                        program
+                            .node_meta
+                            .get(owner)
+                            .map(|meta| meta.origin.user_span())
+                            .unwrap_or(Span::UNKNOWN)
+                    });
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0200,
+                    "explicit Any-to-bool cast requires an exact Checker receipt for a Map/Any GetAny whose persistent Set lineage selected bool",
+                    span,
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// The only non-primitive DynamicAny unpack target in the closed Map/Any
+/// profile is a concrete, non-generic record with one owned `text: string`
+/// field. MIR rechecks the ABI and glue details; the Checked boundary must
+/// already keep tuples, Option/Result, builtin Record, and arbitrary records
+/// out of the typed program.
+fn is_canonical_map_any_label_target(
+    program: &CheckedProgram,
+    target: &crate::core::ResolvedTypeId,
+) -> bool {
+    let Some(crate::core::ResolvedType::Nominal {
+        item, arguments, ..
+    }) = program.resolved_types.get(target)
+    else {
+        return false;
+    };
+    if !arguments.is_empty() {
+        return false;
+    }
+    let Some(definition) = program.type_defs.get(&NodeId(item.as_str().to_owned())) else {
+        return false;
+    };
+    if definition.kind != ResolvedTypeKind::Record
+        || !definition.generic_parameters.is_empty()
+        || definition.fields.len() != 1
+        || definition.fields[0].0 != "text"
+    {
+        return false;
+    }
+    let Some(field) = definition.field_ids.get("text") else {
+        return false;
+    };
+    program.resolved_field_types.get(field)
+        == Some(&crate::core::ir::primitive_type_id(
+            crate::core::PrimitiveType::String,
+        ))
+}
+
+/// DynamicAny-to-nonprimitive casts are not a general cast form. Inference
+/// records provisional candidates; this finalizer admits one only when it
+/// joins bijectively to the same callable's exact V2 GetAny unpack receipt,
+/// its typed Map call/result owner, and the pair's explicit whole-value Drop.
+/// The CFG collector independently requires the target payload to be selected
+/// on that GetAny root's persistent Set lineage.
+fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ir::{
+        CheckedConversionKind, ResolvedCallee, ResolvedExprKind, ResolvedPatternKind,
+        ResolvedProjection, ResolvedStmtKind,
+    };
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ActionKind, OrdinaryMapOwnedAnyV2ProfileVersion,
+        OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    };
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    fn e0200(program: &CheckedProgram, owner: &NodeId, cast: &NodeId, message: &str) -> Diagnostic {
+        Diagnostic::error_code(
+            crate::diagnostic::codes::E0200,
+            message,
+            program
+                .node_meta
+                .get(cast)
+                .map(|meta| meta.origin.user_span())
+                .or_else(|| {
+                    program
+                        .node_meta
+                        .get(owner)
+                        .map(|meta| meta.origin.user_span())
+                })
+                .unwrap_or(Span::UNKNOWN),
+        )
+    }
+
+    fn direct_binding<'a>(
+        body: &'a crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+    ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
+        body.root
+            .statements
+            .iter()
+            .filter_map(|statement| {
+                let ResolvedStmtKind::Bind {
+                    pattern:
+                        crate::core::ResolvedPattern {
+                            kind:
+                                ResolvedPatternKind::Binding {
+                                    local: bound,
+                                    by_reference: None,
+                                },
+                            ..
+                        },
+                    initializer: Some(initializer),
+                } = &statement.kind
+                else {
+                    return None;
+                };
+                (bound == local).then_some((statement, initializer))
+            })
+            .collect()
+    }
+
+    fn direct_binding_in_block<'a>(
+        block: &'a crate::core::ResolvedBlock,
+        local: &crate::core::ResolvedLocalId,
+    ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
+        block
+            .statements
+            .iter()
+            .filter_map(|statement| {
+                let ResolvedStmtKind::Bind {
+                    pattern:
+                        crate::core::ResolvedPattern {
+                            kind:
+                                ResolvedPatternKind::Binding {
+                                    local: bound,
+                                    by_reference: None,
+                                },
+                            ..
+                        },
+                    initializer: Some(initializer),
+                } = &statement.kind
+                else {
+                    return None;
+                };
+                (bound == local).then_some((statement, initializer))
+            })
+            .collect()
+    }
+
+    fn exact_result_arm<'a>(
+        arms: &'a [crate::core::ir::MatchArm],
+        expected_id: &crate::core::NodeId,
+        expected_variant: &str,
+    ) -> Option<&'a crate::core::ir::MatchArm> {
+        let [first, second] = arms else {
+            return None;
+        };
+        let matching = [first, second]
+            .into_iter()
+            .filter(|arm| arm.node_id == *expected_id)
+            .collect::<Vec<_>>();
+        let [arm] = matching.as_slice() else {
+            return None;
+        };
+        (arm.guard.is_none()
+            && matches!(&arm.pattern.kind, ResolvedPatternKind::Constructor { variant, .. }
+                if variant.0 == format!("builtin:variant:Result::{expected_variant}")))
+        .then_some(*arm)
+    }
+
+    fn computed_chain_result_paths<'a>(
+        body: &'a crate::core::ResolvedBody,
+        branch: &crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+    ) -> Option<(
+        &'a crate::core::ResolvedBlock,
+        crate::core::NodeId,
+        crate::core::NodeId,
+    )> {
+        let Some(root_result) = body.root.result.as_deref() else {
+            return None;
+        };
+        if root_result.node_id != branch.map_new_match {
+            return None;
+        }
+        let ResolvedExprKind::Match {
+            scrutinee: new_scrutinee,
+            arms: new_arms,
+        } = &root_result.kind
+        else {
+            return None;
+        };
+        if new_scrutinee.node_id != branch.map_new_operation
+            || new_arms
+                .iter()
+                .map(|arm| arm.node_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                != std::collections::BTreeSet::from([
+                    branch.map_new_ok_arm.clone(),
+                    branch.map_new_err_arm.clone(),
+                ])
+        {
+            return None;
+        }
+        let Some(new_ok) = exact_result_arm(new_arms, &branch.map_new_ok_arm, "Ok") else {
+            return None;
+        };
+        let Some(new_err) = exact_result_arm(new_arms, &branch.map_new_err_arm, "Err") else {
+            return None;
+        };
+        let ResolvedExprKind::Block(new_ok_block) = &new_ok.body.kind else {
+            return None;
+        };
+        let ResolvedExprKind::Block(new_err_block) = &new_err.body.kind else {
+            return None;
+        };
+        let Some(set_match) = new_ok_block.result.as_deref() else {
+            return None;
+        };
+        if set_match.node_id != branch.map_set_match {
+            return None;
+        }
+        let ResolvedExprKind::Match {
+            scrutinee: set_scrutinee,
+            arms: set_arms,
+        } = &set_match.kind
+        else {
+            return None;
+        };
+        if set_scrutinee.node_id != branch.map_set_operation
+            || set_arms
+                .iter()
+                .map(|arm| arm.node_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                != std::collections::BTreeSet::from([
+                    branch.map_set_ok_arm.clone(),
+                    branch.map_set_err_arm.clone(),
+                ])
+        {
+            return None;
+        }
+        let Some(set_ok) = exact_result_arm(set_arms, &branch.map_set_ok_arm, "Ok") else {
+            return None;
+        };
+        let Some(set_err) = exact_result_arm(set_arms, &branch.map_set_err_arm, "Err") else {
+            return None;
+        };
+        let ResolvedExprKind::Block(success_block) = &set_ok.body.kind else {
+            return None;
+        };
+        let ResolvedExprKind::Block(set_err_block) = &set_err.body.kind else {
+            return None;
+        };
+        let Some(new_err_result) = new_err_block.result.as_deref() else {
+            return None;
+        };
+        let Some(set_err_result) = set_err_block.result.as_deref() else {
+            return None;
+        };
+        Some((
+            success_block,
+            new_err_result.node_id.clone(),
+            set_err_result.node_id.clone(),
+        ))
+    }
+
+    let mut errors = Vec::new();
+    let route_admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    let computed_owner_chain_owner = NodeId("function:main".into());
+    let candidate_count = candidates.values().map(BTreeSet::len).sum::<usize>();
+    let exact_computed_owner_chain_candidate_set = route_admission
+        .ordinary_map_owned_any_v2
+        .is_computed_string_key_owner_chain()
+        && candidates.len() == 1
+        && candidates
+            .get(&computed_owner_chain_owner)
+            .is_some_and(|casts| casts.len() == 1 && candidate_count == 1);
+    for (owner, casts) in candidates {
+        let Some(body) = program.resolved_bodies.get(owner) else {
+            errors.extend(casts.iter().map(|cast| {
+                e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast has no exact same-owner GetAny receipt",
+                )
+            }));
+            continue;
+        };
+        let cast_expressions =
+            match body.cast_expressions(&program.resolved_types, &program.resolved_type_targets) {
+                Ok(expressions) => expressions,
+                Err(body_errors) => {
+                    errors.extend(body_errors.into_iter().map(|error| {
+                        Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {error}"),
+                            body.root.origin.user_span(),
+                        )
+                    }));
+                    continue;
+                }
+            };
+        let cfg = program
+            .resource_analyses
+            .get(owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .filter(|cfg| {
+                cfg.owner == *owner
+                    && cfg.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            });
+        let Some(cfg) = cfg else {
+            errors.extend(casts.iter().map(|cast| {
+                e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast requires an exact same-owner V2 GetAny receipt",
+                )
+            }));
+            continue;
+        };
+
+        let mut claimed_receipts = BTreeSet::new();
+        for cast in casts {
+            let Some(expression) = cast_expressions.get(cast) else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast has no unique resolved cast expression",
+                ));
+                continue;
+            };
+            let ResolvedExprKind::Cast { value, conversion } = &expression.kind else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive candidate is not a resolved cast",
+                ));
+                continue;
+            };
+            if !is_canonical_map_any_label_target(program, &expression.ty) {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast target is outside the canonical Label profile",
+                ));
+                continue;
+            }
+            let ResolvedExprKind::Load(source_place) = &value.kind else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast source must be direct tuple field 1",
+                ));
+                continue;
+            };
+            let [ResolvedProjection::Tuple {
+                index: 1,
+                ty: field_type,
+            }] = source_place.projections.as_slice()
+            else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast source must be direct tuple field 1",
+                ));
+                continue;
+            };
+            let pair = &source_place.base;
+            let pair_type = body.locals.get(pair).map(|local| &local.ty);
+            let exact_pair_type = pair_type.is_some_and(|pair_type| {
+                matches!(
+                    program.resolved_types.get(pair_type),
+                    Some(crate::core::ResolvedType::Tuple(fields))
+                        if fields.len() == 2
+                            && matches!(program.resolved_types.get(&fields[0]), Some(crate::core::ResolvedType::Primitive(crate::core::PrimitiveType::Bool)))
+                            && fields[1] == *field_type
+                            && matches!(program.resolved_types.get(&fields[1]), Some(crate::core::ResolvedType::DynamicAny { capability }) if capability == "type.dynamic_value")
+                )
+            });
+            if !exact_pair_type
+                || value.ty != *field_type
+                || conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+                || conversion.from != *field_type
+                || conversion.to != expression.ty
+            {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast does not match its direct GetAny field and target types",
+                ));
+                continue;
+            }
+
+            let matching = cfg
+                .unpack_receipts
+                .iter()
+                .filter(|receipt| receipt.cast == *cast)
+                .collect::<Vec<_>>();
+            let [receipt] = matching.as_slice() else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast requires exactly one matching GetAny unpack receipt",
+                ));
+                continue;
+            };
+            if !claimed_receipts.insert(receipt.cast.clone()) {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "GetAny unpack receipt is claimed by more than one nonprimitive cast candidate",
+                ));
+                continue;
+            }
+
+            let matching_actions = cfg
+                .actions
+                .iter()
+                .filter(|action| {
+                    action.kind == OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                        && action.point == receipt.operation
+                })
+                .collect::<Vec<_>>();
+            let matching_results = cfg
+                .result_receipts
+                .iter()
+                .filter(|result| result.operation == receipt.operation)
+                .collect::<Vec<_>>();
+            let (Some(action), Some(result)) = (matching_actions.first(), matching_results.first())
+            else {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "GetAny unpack receipt is missing its exact operation or result-owner receipt",
+                ));
+                continue;
+            };
+            let static_key_authorities = cfg
+                .static_key_get_receipts
+                .iter()
+                .filter(|authority| authority.unpack.cast == *cast)
+                .collect::<Vec<_>>();
+            let exact_static_selected_payload = matches!(
+                static_key_authorities.as_slice(),
+                [authority]
+                    if authority.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetProfileVersion::V1
+                        && authority.owner == *owner
+                        && authority.get_action == **action
+                        && authority.unpack == **receipt
+                        && authority.get_action.key_type.as_ref()
+                            == Some(&crate::core::ir::primitive_type_id(
+                                crate::core::PrimitiveType::String,
+                            ))
+                        && authority.get_action.key_static_digest.as_ref().is_some_and(|digest| {
+                            digest == &authority.query_digest
+                                && digest.len() == 64
+                                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        && matches!(
+                            &authority.payload_source,
+                            crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::SelectedSet {
+                                value_type,
+                            } if value_type == &expression.ty
+                        )
+                        && authority.selected_winning_set_action.as_ref().is_some_and(|set| {
+                            set.kind == OrdinaryMapOwnedAnyV2ActionKind::Set
+                                && set.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                                && set.key_type.as_ref()
+                                    == Some(&crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::String,
+                                    ))
+                                && set.key_static_digest.as_deref()
+                                    == Some(authority.query_digest.as_str())
+                                && set.payload_clone
+                                && set.value_type.as_ref() == Some(&expression.ty)
+                                && cfg.actions.iter().filter(|action| *action == set).count() == 1
+                        })
+            );
+            let computed_owner_chain_authorities = cfg
+                .result_receipts
+                .iter()
+                .filter_map(|result| {
+                    result
+                        .computed_string_key_owner_chain
+                        .as_deref()
+                        .map(|chain| (result, chain))
+                })
+                .collect::<Vec<_>>();
+            let exact_computed_owner_chain_selected_payload =
+                if exact_computed_owner_chain_candidate_set
+                    && owner == &computed_owner_chain_owner
+                    && casts.len() == 1
+                {
+                    match computed_owner_chain_authorities.as_slice() {
+                        [(chain_result, chain)] => {
+                            let mut pair_without_chain = (*chain_result).clone();
+                            pair_without_chain.computed_string_key_owner_chain = None;
+                            let set_action_is_unique = cfg
+                                .actions
+                                .iter()
+                                .filter(|candidate| *candidate == &chain.map_set)
+                                .count()
+                                == 1;
+                            let get_action_is_unique = cfg
+                                .actions
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.kind == OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                        && candidate.point == receipt.operation
+                                })
+                                .count()
+                                == 1;
+                            let string_type = crate::core::ir::primitive_type_id(
+                                crate::core::PrimitiveType::String,
+                            );
+                            let get_key_uses = chain
+                                .key_uses
+                                .iter()
+                                .filter(|usage| usage.action == chain.get_any)
+                                .collect::<Vec<_>>();
+                            let set_key_uses = chain
+                                .key_uses
+                                .iter()
+                                .filter(|usage| usage.action == chain.map_set)
+                                .collect::<Vec<_>>();
+                            let proof_matches_source = |usage: &crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyUseReceipt| {
+                                let proof = &usage.value_proof;
+                                let root_nodes = proof
+                                    .nodes
+                                    .iter()
+                                    .filter(|node| node.node == proof.expression)
+                                    .collect::<Vec<_>>();
+                                usage.action_kind == usage.action.kind
+                                    && usage.key_node == proof.expression
+                                    && usage.key_type == string_type
+                                    && proof.expression_type == string_type
+                                    && usage.action.key.as_ref() == Some(&usage.key_node)
+                                    && usage.action.key_type.as_ref() == Some(&string_type)
+                                    && proof.digest
+                                        == blake3::hash(&proof.bytes).to_hex().to_string()
+                                    && proof.nodes.iter().all(|node| {
+                                        node.ty == string_type
+                                            && node.digest
+                                                == blake3::hash(&node.bytes).to_hex().to_string()
+                                    })
+                                    && matches!(root_nodes.as_slice(), [root]
+                                        if root.ty == string_type
+                                            && root.bytes == proof.bytes
+                                            && root.digest == proof.digest)
+                            };
+                            let exact_key_byte_dag = matches!(get_key_uses.as_slice(), [usage]
+                                if proof_matches_source(usage)
+                                    && usage.action_kind
+                                        == OrdinaryMapOwnedAnyV2ActionKind::GetAny)
+                                && matches!(set_key_uses.as_slice(), [usage]
+                                    if proof_matches_source(usage)
+                                        && usage.action_kind
+                                            == OrdinaryMapOwnedAnyV2ActionKind::Set)
+                                && get_key_uses[0].value_proof.bytes
+                                    == set_key_uses[0].value_proof.bytes
+                                && get_key_uses[0].value_proof.digest
+                                    == set_key_uses[0].value_proof.digest;
+                            let (Some(set_value), Some(set_value_type)) =
+                                (&chain.map_set.value, &chain.map_set.value_type)
+                            else {
+                                errors.push(e0200(
+                                    program,
+                                    owner,
+                                    cast,
+                                    "computed String-key owner-chain receipt has no exact Set payload",
+                                ));
+                                continue;
+                            };
+                            chain.profile_version
+                                == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion::V1
+                                && chain.owner == *owner
+                                && chain.get_any == **action
+                                && chain.get_any.kind
+                                    == OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                && chain.get_any.point == receipt.operation
+                                && chain_result.operation == receipt.operation
+                                && chain_result.kind == OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                && pair_without_chain == chain.pair
+                                && chain.pair.operation == receipt.operation
+                                && chain.pair.result == result.result
+                                && chain.pair.result_type == result.result_type
+                                && chain.pair.binding == *pair
+                                && chain.pair.binding_point == receipt.pair_binding_point
+                                && chain.pair.source_local == action.local
+                                && chain.pair.source == action.root
+                                && action.source_node.as_ref() == Some(&chain.pair.source_node)
+                                && action.source_type.as_ref() == Some(&chain.pair.source_type)
+                                && chain.pair.key == action.key
+                                && chain.pair.key_type == action.key_type
+                                && chain.pair.key_local == action.key_local
+                                && chain.pair.settlement
+                                    == OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                                && chain.pair.settlement_point.as_ref()
+                                    == Some(&chain.pair_drop.settlement_point)
+                                && chain.pair_drop.local == chain.pair.binding
+                                && chain.pair_drop.binding_point == chain.pair.binding_point
+                                && chain.pair_drop.binding_type == chain.pair.result_type
+                                && chain.pair_snapshot_observation.snapshot_projection
+                                    == receipt.projection
+                                && chain.pair_snapshot_observation.snapshot_unpack == *cast
+                                && chain.pair_snapshot_observation.snapshot_binding_point
+                                    == receipt.unpack_binding_point
+                                && chain.pair_snapshot_observation.snapshot_local
+                                    == receipt.unpack_binding
+                                && chain.pair_snapshot_observation.snapshot_source_type
+                                    == receipt.conversion_from
+                                && chain.pair_snapshot_observation.snapshot_type
+                                    == expression.ty
+                                && chain.pair_snapshot_observation.snapshot_drop.local
+                                    == receipt.unpack_binding
+                                && chain.pair_snapshot_observation.snapshot_drop.binding_type
+                                    == expression.ty
+                                && chain.payload.set_action == chain.map_set
+                                && chain.payload.set_value == *set_value
+                                && chain.payload.set_value_type == *set_value_type
+                                && chain.payload.set_value_type == expression.ty
+                                && chain.payload.source.binding_type == expression.ty
+                                && exact_key_byte_dag
+                                && chain.map_set.kind == OrdinaryMapOwnedAnyV2ActionKind::Set
+                                && chain.map_set.value_type.as_ref() == Some(&expression.ty)
+                                && chain.map_set.value.as_ref() == Some(set_value)
+                                && chain.map_set.payload_clone
+                                && cfg.profile_version
+                                    == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                                && cfg.unpack_receipts.len() == 1
+                                && cfg.result_receipts.len() == 1
+                                && chain_result == result
+                                && set_action_is_unique
+                                && get_action_is_unique
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+            let computed_owner_chain = match computed_owner_chain_authorities.as_slice() {
+                [(_, chain)] => Some(*chain),
+                _ => None,
+            };
+            let computed_owner_chain_branch =
+                computed_owner_chain.and_then(|chain| chain.result_branch.as_deref());
+            let computed_owner_chain_source_paths = computed_owner_chain_branch
+                .and_then(|branch| computed_chain_result_paths(body, branch));
+            let exact_computed_owner_chain_result_branch =
+                exact_computed_owner_chain_selected_payload
+                    && computed_owner_chain.is_some_and(|chain| {
+                        let Some(branch) = chain.result_branch.as_deref() else {
+                            return false;
+                        };
+                        let Some(raw_cfg) = program.callable_cfgs.get(owner) else {
+                            return false;
+                        };
+                        let Some((success_block, new_err_result, set_err_result)) =
+                            computed_owner_chain_source_paths.as_ref()
+                        else {
+                            return false;
+                        };
+                        let new_error_paths = branch
+                            .paths
+                            .iter()
+                            .filter(|path| {
+                                path.kind
+                                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::MapNewErr
+                            })
+                            .collect::<Vec<_>>();
+                        let set_error_paths = branch
+                            .paths
+                            .iter()
+                            .filter(|path| {
+                                path.kind
+                                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::MapSetErr
+                            })
+                            .collect::<Vec<_>>();
+                        let success_paths = branch
+                            .paths
+                            .iter()
+                            .filter(|path| {
+                                path.kind
+                                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::Success
+                            })
+                            .collect::<Vec<_>>();
+                        let expected_success_drops = BTreeSet::from([
+                            branch.initial_root.clone(),
+                            branch.populated_root.clone(),
+                            chain.map_remove.local.clone(),
+                        ]);
+                        branch.profile_version
+                            == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion::V1
+                            && branch.owner == *owner
+                            && branch.cfg
+                                == crate::core::ownership::ManagedAnyCfgReceipt::from_cfg(
+                                    raw_cfg, body,
+                                )
+                            && branch.map_new_operation == chain.map_new.point
+                            && body
+                                .root
+                                .result
+                                .as_deref()
+                                .is_some_and(|result| result.node_id == branch.map_new_match)
+                            && branch.map_set_operation == chain.map_set.point
+                            && branch.initial_root == chain.map_new.local
+                            && branch.populated_root == chain.map_set.local
+                            && branch.paths.len() == 3
+                            && new_error_paths.len() == 1
+                            && set_error_paths.len() == 1
+                            && success_paths.len() == 1
+                            && new_error_paths[0].arm_path
+                                == [branch.map_new_err_arm.clone()]
+                            && new_error_paths[0].result == *new_err_result
+                            && new_error_paths[0].drops.is_empty()
+                            && set_error_paths[0].arm_path
+                                == [
+                                    branch.map_new_ok_arm.clone(),
+                                    branch.map_set_err_arm.clone(),
+                                ]
+                            && set_error_paths[0].result == *set_err_result
+                            && set_error_paths[0].drops.len() == 1
+                            && set_error_paths[0].drops[0].local == branch.initial_root
+                            && success_paths[0].arm_path
+                                == [
+                                    branch.map_new_ok_arm.clone(),
+                                    branch.map_set_ok_arm.clone(),
+                                ]
+                            && success_block
+                                .result
+                                .as_deref()
+                                .is_some_and(|result| success_paths[0].result == result.node_id)
+                            && success_paths[0].drops.len() == 3
+                            && success_paths[0]
+                                .drops
+                                .iter()
+                                .map(|drop| drop.local.clone())
+                                .collect::<BTreeSet<_>>()
+                                == expected_success_drops
+                            && success_paths[0]
+                                .drops
+                                .iter()
+                                .all(|drop| drop.settlement_place_index == 0)
+                    });
+            let computed_owner_chain_source_paths = exact_computed_owner_chain_result_branch
+                .then_some(computed_owner_chain_source_paths)
+                .flatten();
+            let exact_selected_payload_authority =
+                exact_static_selected_payload || exact_computed_owner_chain_result_branch;
+            let call_bindings = direct_binding(body, pair);
+            let exact_pair_binding_initializer = |binding: &(
+                &crate::core::ResolvedStmt,
+                &crate::core::ResolvedExpr,
+            )| {
+                let (statement, initializer) = binding;
+                statement.node_id == receipt.pair_binding_point
+                    && initializer.node_id == receipt.operation
+                    && initializer.ty == result.result_type
+                    && matches!(
+                        &initializer.kind,
+                        ResolvedExprKind::Call(call)
+                            if matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_get")
+                                && call.arguments.len() == 2
+                                && matches!(&call.arguments[0].value.kind, ResolvedExprKind::Load(place) if place.base == action.local && place.projections.is_empty())
+                                && action.key.as_ref().is_some_and(|key| call.arguments[1].value.node_id == *key)
+                    )
+            };
+            let nested_call_bindings = computed_owner_chain_source_paths
+                .as_ref()
+                .map(|(block, _, _)| direct_binding_in_block(block, pair))
+                .unwrap_or_default();
+            let exact_pair_binding = if exact_computed_owner_chain_result_branch {
+                call_bindings.is_empty()
+                    && nested_call_bindings.len() == 1
+                    && nested_call_bindings
+                        .iter()
+                        .any(exact_pair_binding_initializer)
+            } else {
+                call_bindings.len() == 1 && call_bindings.iter().any(exact_pair_binding_initializer)
+            };
+            let unpack_bindings = direct_binding(body, &receipt.unpack_binding);
+            let exact_unpack_binding_initializer =
+                |binding: &(&crate::core::ResolvedStmt, &crate::core::ResolvedExpr)| {
+                    let (statement, initializer) = binding;
+                    statement.node_id == receipt.unpack_binding_point
+                        && initializer.node_id == *cast
+                        && initializer.ty == expression.ty
+                        && body
+                            .locals
+                            .get(&receipt.unpack_binding)
+                            .is_some_and(|local| local.ty == expression.ty)
+                };
+            let nested_unpack_bindings = computed_owner_chain_source_paths
+                .as_ref()
+                .map(|(block, _, _)| direct_binding_in_block(block, &receipt.unpack_binding))
+                .unwrap_or_default();
+            let exact_unpack_binding = if exact_computed_owner_chain_result_branch {
+                unpack_bindings.is_empty()
+                    && nested_unpack_bindings.len() == 1
+                    && nested_unpack_bindings
+                        .iter()
+                        .any(exact_unpack_binding_initializer)
+            } else {
+                unpack_bindings.len() == 1
+                    && unpack_bindings.iter().any(exact_unpack_binding_initializer)
+            };
+            let pair_drops = body
+                .root
+                .statements
+                .iter()
+                .filter(|statement| {
+                    statement.node_id == receipt.settlement_point
+                        && matches!(
+                            &statement.kind,
+                            ResolvedStmtKind::Drop(places)
+                                if places.len() == 1
+                                    && places[0].base == *pair
+                                    && places[0].projections.is_empty()
+                        )
+                })
+                .collect::<Vec<_>>();
+            let pair_order = body
+                .root
+                .statements
+                .iter()
+                .position(|statement| statement.node_id == receipt.pair_binding_point);
+            let unpack_order = body
+                .root
+                .statements
+                .iter()
+                .position(|statement| statement.node_id == receipt.unpack_binding_point);
+            let drop_order = body
+                .root
+                .statements
+                .iter()
+                .position(|statement| statement.node_id == receipt.settlement_point);
+            let exact_root_pair_drop = pair_drops.len() == 1
+                && matches!(
+                    (pair_order, unpack_order, drop_order),
+                    (Some(pair), Some(unpack), Some(drop)) if pair < unpack && unpack < drop
+                );
+            let exact_nested_pair_drop = exact_computed_owner_chain_result_branch
+                && pair_drops.is_empty()
+                && computed_owner_chain
+                    .zip(computed_owner_chain_source_paths.as_ref())
+                    .is_some_and(|(chain, (success_block, _, _))| {
+                        let branch_pair_drops = success_block
+                            .statements
+                            .iter()
+                            .filter(|statement| {
+                                statement.node_id == receipt.settlement_point
+                                    && matches!(
+                                        &statement.kind,
+                                        ResolvedStmtKind::Drop(places)
+                                            if matches!(places.as_slice(), [place]
+                                                if place.base == *pair && place.projections.is_empty())
+                                    )
+                            })
+                            .collect::<Vec<_>>();
+                        let pair_order = success_block
+                            .statements
+                            .iter()
+                            .position(|statement| statement.node_id == receipt.pair_binding_point);
+                        let found_binding_order = success_block.statements.iter().position(
+                            |statement| {
+                                statement.node_id
+                                    == chain.pair_snapshot_observation.found_binding_point
+                            },
+                        );
+                        let unpack_order = success_block
+                            .statements
+                            .iter()
+                            .position(|statement| statement.node_id == receipt.unpack_binding_point);
+                        let drop_order = success_block
+                            .statements
+                            .iter()
+                            .position(|statement| statement.node_id == receipt.settlement_point);
+                        let expected_source_uses = BTreeSet::from([
+                            chain.pair_snapshot_observation.found_projection.clone(),
+                            chain.pair_snapshot_observation.found_base_load.clone(),
+                            receipt.projection.clone(),
+                            chain.pair_snapshot_observation.snapshot_base_load.clone(),
+                            receipt.settlement_point.clone(),
+                        ]);
+                        chain.pair_drop.local == *pair
+                            && chain.pair_drop.binding_point == receipt.pair_binding_point
+                            && chain.pair_drop.binding_type == result.result_type
+                            && chain.pair_drop.settlement_point == receipt.settlement_point
+                            && chain.pair_drop.settlement_place_index == 0
+                            && chain.pair_drop.source_uses == expected_source_uses
+                            && chain.pair_snapshot_observation.snapshot_projection
+                                == receipt.projection
+                            && chain.pair_snapshot_observation.snapshot_unpack == *cast
+                            && chain.pair_snapshot_observation.snapshot_binding_point
+                                == receipt.unpack_binding_point
+                            && branch_pair_drops.len() == 1
+                            && matches!(
+                                (
+                                    pair_order,
+                                    found_binding_order,
+                                    unpack_order,
+                                    drop_order,
+                                ),
+                                (Some(pair), Some(found), Some(unpack), Some(drop))
+                                    if pair < found && found < unpack && unpack < drop
+                            )
+                    },
+                );
+            let exact_pair_drop = exact_root_pair_drop || exact_nested_pair_drop;
+            let exact_result_owner = matching_actions.len() == 1
+                && matching_results.len() == 1
+                && action.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && action.point == receipt.operation
+                && action.result_local.as_ref() == Some(pair)
+                && action.result_type.as_ref() == pair_type
+                && result.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && result.kind == OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                && result.result == receipt.operation
+                && Some(&result.result_type) == pair_type
+                && result.binding == *pair
+                && result.binding_point == receipt.pair_binding_point
+                && result.source_local == action.local
+                && result.source == action.root
+                && action.source_node.as_ref() == Some(&result.source_node)
+                && action.source_type.as_ref() == Some(&result.source_type)
+                && action.key.as_ref() == result.key.as_ref()
+                && result.settlement == OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                && result.settlement_point.as_ref() == Some(&receipt.settlement_point)
+                && exact_selected_payload_authority
+                && receipt.profile_version == OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && receipt.cast == *cast
+                && receipt.projection == value.node_id
+                && receipt.pair_binding == *pair
+                && receipt.conversion_kind == conversion.kind
+                && receipt.conversion_from == conversion.from
+                && receipt.conversion_to == expression.ty
+                && exact_pair_binding
+                && exact_unpack_binding
+                && exact_pair_drop;
+            let cfg_point_count = |node: &NodeId| {
+                program
+                    .callable_cfgs
+                    .get(owner)
+                    .into_iter()
+                    .flat_map(|cfg| cfg.blocks.values())
+                    .flat_map(|block| &block.points)
+                    .filter(|point| point.source.node == *node)
+                    .count()
+            };
+            let exact_cfg_points = [
+                &receipt.operation,
+                &receipt.pair_binding_point,
+                &receipt.unpack_binding_point,
+                &receipt.projection,
+                &receipt.cast,
+                &receipt.settlement_point,
+            ]
+            .into_iter()
+            .all(|point| cfg_point_count(point) == 1);
+            if !exact_result_owner || !exact_cfg_points {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    cast,
+                    "DynamicAny-to-nonprimitive cast does not match the unique GetAny call, pair binding, cast binding, and explicit pair Drop receipt",
+                ));
+            }
+        }
+
+        for receipt in &cfg.unpack_receipts {
+            let nonprimitive_target = !matches!(
+                program.resolved_types.get(&receipt.conversion_to),
+                Some(crate::core::ResolvedType::Primitive(_))
+            );
+            if nonprimitive_target && !casts.contains(&receipt.cast) {
+                errors.push(e0200(
+                    program,
+                    owner,
+                    &receipt.cast,
+                    "nonprimitive GetAny unpack receipt has no unique provisional cast candidate",
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Join the sole direct Checker attempt to the canonical stdlib helper and
+/// replay both sides of the cross-call Map/Any ownership bridge.  The receipt
+/// is intentionally attached to the caller's ordinary-map-v2 CFG receipt;
+/// an attempt alone never authorizes a MIR route.
+fn attach_ordinary_map_owned_any_v2_get_or_default_string_receipt(program: &mut CheckedProgram) {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+
+    let candidates = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .into_iter()
+                .flat_map(move |cfg| {
+                    cfg.attempts
+                        .iter()
+                        .filter(|attempt| attempt.kind == AttemptKind::GetOrDefaultString)
+                        .map(move |attempt| (owner.clone(), attempt.clone()))
+                })
+        })
+        .collect::<Vec<_>>();
+    let [(caller_owner, attempt)] = candidates.as_slice() else {
+        return;
+    };
+    let Some(caller_body) = program.resolved_bodies.get(caller_owner) else {
+        return;
+    };
+    let Ok(caller_calls) =
+        caller_body.call_expressions(&program.resolved_types, &program.resolved_type_targets)
+    else {
+        return;
+    };
+    let Some(call_expression) = caller_calls.get(&attempt.point) else {
+        return;
+    };
+    let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+        return;
+    };
+    let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+        return;
+    };
+
+    let canonical_helpers = program
+        .functions
+        .values()
+        .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+        .map(|function| function.node_id.clone())
+        .collect::<Vec<_>>();
+    let [canonical_helper] = canonical_helpers.as_slice() else {
+        return;
+    };
+    if canonical_helper != helper_owner {
+        return;
+    }
+
+    let mut canonical_call_sites = program
+        .call_sites
+        .values()
+        .filter(|site| {
+            site.resolved_callee
+                == Some(crate::core::ResolvedCallee::Function(helper_owner.clone()))
+        })
+        .collect::<Vec<_>>();
+    canonical_call_sites.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    if canonical_call_sites.len() != 1
+        || canonical_call_sites[0].node_id != attempt.point
+        || canonical_call_sites[0].owner != caller_owner.0
+        || !ordinary_map_get_or_default_i32_caller_reachable_from_main(program, caller_owner)
+    {
+        return;
+    }
+
+    let Some(receipt) = collect_ordinary_map_owned_any_v2_get_or_default_string_receipt(
+        program,
+        caller_owner,
+        attempt,
+        call_expression,
+        helper_owner,
+    ) else {
+        return;
+    };
+    if let Some(cfg_receipt) = program
+        .resource_analyses
+        .get_mut(caller_owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+    {
+        cfg_receipt.get_or_default_string_receipt = Some(receipt);
+    }
+}
+
+fn attach_ordinary_map_owned_any_v2_get_or_default_i32_receipt(program: &mut CheckedProgram) {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+
+    let candidates = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .into_iter()
+                .flat_map(move |cfg| {
+                    cfg.attempts
+                        .iter()
+                        .filter(|attempt| attempt.kind == AttemptKind::GetOrDefaultI32)
+                        .map(move |attempt| (owner.clone(), attempt.clone()))
+                })
+        })
+        .collect::<Vec<_>>();
+    let [(caller_owner, attempt)] = candidates.as_slice() else {
+        return;
+    };
+    let Some(caller_body) = program.resolved_bodies.get(caller_owner) else {
+        return;
+    };
+    let Ok(caller_calls) =
+        caller_body.call_expressions(&program.resolved_types, &program.resolved_type_targets)
+    else {
+        return;
+    };
+    let Some(call_expression) = caller_calls.get(&attempt.point) else {
+        return;
+    };
+    let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+        return;
+    };
+    let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+        return;
+    };
+
+    let canonical_helpers = program
+        .functions
+        .values()
+        .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+        .map(|function| function.node_id.clone())
+        .collect::<Vec<_>>();
+    let [canonical_helper] = canonical_helpers.as_slice() else {
+        return;
+    };
+    if canonical_helper != helper_owner {
+        return;
+    }
+
+    let mut canonical_call_sites = program
+        .call_sites
+        .values()
+        .filter(|site| {
+            site.resolved_callee
+                == Some(crate::core::ResolvedCallee::Function(helper_owner.clone()))
+        })
+        .collect::<Vec<_>>();
+    canonical_call_sites.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    if canonical_call_sites.len() != 1
+        || canonical_call_sites[0].node_id != attempt.point
+        || canonical_call_sites[0].owner != caller_owner.0
+        || ordinary_map_get_or_default_i32_caller_is_actor_method(program, caller_owner)
+        || !ordinary_map_get_or_default_i32_caller_reachable_from_main(program, caller_owner)
+    {
+        return;
+    }
+
+    let Some(receipt) = collect_ordinary_map_owned_any_v2_get_or_default_i32_receipt(
+        program,
+        caller_owner,
+        attempt,
+        call_expression,
+        helper_owner,
+    ) else {
+        return;
+    };
+    if let Some(cfg_receipt) = program
+        .resource_analyses
+        .get_mut(caller_owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+    {
+        cfg_receipt.get_or_default_i32_receipt = Some(receipt);
+    }
+}
+
+fn canonical_std_maps_get_or_default(program: &CheckedProgram, owner: &NodeId) -> bool {
+    let Some(function) = program.functions.get(owner) else {
+        return false;
+    };
+    let span = program
+        .node_meta
+        .get(owner)
+        .map(|meta| meta.origin.user_span())
+        .unwrap_or_else(|| function.origin.user_span());
+    program
+        .source_registry
+        .key(span.source_id)
+        .is_some_and(|key| key.as_str() == "stdlib:maps.mimi")
+        && matches!(
+            function.qualified_name.as_str(),
+            "get_or_default" | "std::maps::get_or_default"
+        )
+}
+
+/// Prove that this call owner is in the Checker-resolved executable scope.
+/// The scope includes the unique entrypoint and exact Actor method roots;
+/// the latter are admitted here only so the route's separate Actor-owner gate
+/// can reject them without turning a valid program into an unrelated Checker
+/// error. Unreferenced helpers remain outside the scope.
+fn ordinary_map_get_or_default_i32_caller_is_actor_method(
+    program: &CheckedProgram,
+    target_owner: &NodeId,
+) -> bool {
+    // Receipt attachment runs before ResolvedActorDescriptor materialization.
+    // The Checker-owned ResolvedActor declaration already supplies the exact
+    // callable identities here, so use that directory rather than guessing
+    // from a name prefix or waiting for a later MIR actor plan.
+    program.actors.values().any(|actor| {
+        actor
+            .methods
+            .iter()
+            .any(|method| target_owner.0 == format!("function:{}::{method}", actor.qualified_name))
+    })
+}
+
+/// Prove a direct static call path from `main` to the candidate owner. Unknown
+/// calls do not create edges, but they also cannot invalidate a separately
+/// proven direct path to this owner.
+fn ordinary_map_get_or_default_i32_caller_reachable_from_main(
+    program: &CheckedProgram,
+    target_owner: &NodeId,
+) -> bool {
+    use crate::core::ir::{ResolvedCallee as C, ResolvedExprKind as E};
+
+    let main = NodeId("function:main".into());
+    if program
+        .functions
+        .values()
+        .filter(|function| function.qualified_name == "main")
+        .count()
+        != 1
+        || !program.resolved_bodies.contains_key(&main)
+    {
+        return false;
+    }
+    let mut pending = vec![main];
+    let mut visited = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !visited.insert(owner.clone()) {
+            continue;
+        }
+        if &owner == target_owner {
+            return true;
+        }
+        let Some(body) = program.resolved_bodies.get(&owner) else {
+            continue;
+        };
+        let Ok(calls) =
+            body.direct_call_expressions(&program.resolved_types, &program.resolved_type_targets)
+        else {
+            continue;
+        };
+        for (call_node, expression) in calls {
+            let E::Call(call) = &expression.kind else {
+                continue;
+            };
+            let Some(site) = program.call_sites().get(&call_node) else {
+                continue;
+            };
+            if site.owner != owner.0 || site.resolved_callee.as_ref() != Some(&call.callee) {
+                continue;
+            }
+            if let C::Function(target) = &call.callee {
+                if program.functions.contains_key(target)
+                    && program.resolved_bodies.contains_key(target)
+                {
+                    pending.push(target.clone());
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Return the complete callable scope that can participate in a checked
+/// GetOrDefault<i32> route. Imported-but-unreached stdlib functions are not
+/// executable owners for the route census; Actor method bodies are explicit
+/// roots because mailbox dispatch can reach them without an ordinary call
+/// edge from `main`. Any callable edge whose target is not statically known
+/// keeps this narrow scope unprovable.
+pub(crate) fn ordinary_map_get_or_default_i32_executable_scope(
+    program: &CheckedProgram,
+) -> Option<BTreeSet<NodeId>> {
+    use crate::core::ir::{ResolvedCallee as C, ResolvedExprKind as E};
+
+    fn contains_callable_type(
+        program: &CheckedProgram,
+        ty: &crate::core::ResolvedTypeId,
+        visiting: &mut BTreeSet<crate::core::ResolvedTypeId>,
+        substitutions: &BTreeMap<NodeId, crate::core::ResolvedTypeId>,
+    ) -> bool {
+        use crate::core::ResolvedType as T;
+
+        if !visiting.insert(ty.clone()) {
+            return false;
+        }
+        let contains = match program.resolved_types.get(ty) {
+            Some(T::Function { .. }) => true,
+            Some(T::GenericParameter(parameter)) => {
+                substitutions.get(parameter).is_none_or(|argument| {
+                    contains_callable_type(program, argument, visiting, substitutions)
+                })
+            }
+            Some(T::Nominal {
+                item, arguments, ..
+            }) => {
+                arguments.iter().any(|argument| {
+                    contains_callable_type(program, argument, visiting, substitutions)
+                }) || {
+                    let identity = NodeId(item.as_str().to_owned());
+                    let definition = program.type_defs.get(&identity);
+                    let actor = program.actor_descriptors.get(&identity);
+                    match (definition, actor) {
+                        (Some(definition), _) => {
+                            let mut field_substitutions = substitutions.clone();
+                            for ((_, parameter), argument) in
+                                definition.generic_parameters.iter().zip(arguments.iter())
+                            {
+                                field_substitutions.insert(parameter.clone(), argument.clone());
+                            }
+                            definition
+                                .field_ids
+                                .values()
+                                .filter_map(|field| program.resolved_field_types.get(field))
+                                .any(|field_type| {
+                                    contains_callable_type(
+                                        program,
+                                        field_type,
+                                        visiting,
+                                        &field_substitutions,
+                                    )
+                                })
+                                || (definition.kind == ResolvedTypeKind::Enum
+                                    && program
+                                        .resolved_variants()
+                                        .values()
+                                        .filter(|variant| variant.owner == identity)
+                                        .flat_map(|variant| &variant.members)
+                                        .any(|member| {
+                                            contains_callable_type(
+                                                program,
+                                                &member.ty,
+                                                visiting,
+                                                &field_substitutions,
+                                            )
+                                        }))
+                        }
+                        (None, Some(actor)) => actor.fields.iter().any(|field| {
+                            contains_callable_type(program, &field.ty, visiting, substitutions)
+                        }),
+                        (None, None) => {
+                            !item.as_str().starts_with("builtin:type:")
+                                && !item.as_str().starts_with("state:")
+                                && !item.as_str().starts_with("cap:")
+                        }
+                    }
+                }
+            }
+            Some(
+                T::Reference { target, .. }
+                | T::Option(target)
+                | T::CBuffer(target)
+                | T::Ownership { target, .. }
+                | T::Newtype { inner: target, .. }
+                | T::Array {
+                    element: target, ..
+                }
+                | T::Slice(target)
+                | T::RawPointer { target, .. },
+            ) => contains_callable_type(program, target, visiting, substitutions),
+            Some(T::Result { ok, error }) => {
+                contains_callable_type(program, ok, visiting, substitutions)
+                    || contains_callable_type(program, error, visiting, substitutions)
+            }
+            Some(T::Tuple(elements)) => elements
+                .iter()
+                .any(|element| contains_callable_type(program, element, visiting, substitutions)),
+            Some(
+                T::Primitive(_)
+                | T::FlowStateSet { .. }
+                | T::Capability(_)
+                | T::Trait { .. }
+                | T::DynamicAny { .. },
+            ) => false,
+            None => true,
+        };
+        visiting.remove(ty);
+        contains
+    }
+
+    let main = NodeId("function:main".into());
+    let main_functions = program
+        .functions
+        .values()
+        .filter(|function| function.qualified_name == "main")
+        .collect::<Vec<_>>();
+    if main_functions.len() != 1
+        || main_functions[0].node_id != main
+        || !program.resolved_bodies.contains_key(&main)
+    {
+        return None;
+    }
+
+    let mut pending = vec![main];
+    for descriptor in program.actor_descriptors.values() {
+        for method in &descriptor.methods {
+            if !program.functions.contains_key(&method.owner)
+                || !program.resolved_bodies.contains_key(&method.owner)
+            {
+                return None;
+            }
+            pending.push(method.owner.clone());
+        }
+    }
+
+    let mut reachable = BTreeSet::new();
+    while let Some(owner) = pending.pop() {
+        if !reachable.insert(owner.clone()) {
+            continue;
+        }
+        let body = program.resolved_bodies.get(&owner)?;
+        let calls = body
+            .direct_call_expressions(&program.resolved_types, &program.resolved_type_targets)
+            .ok()?;
+        for (call_node, expression) in &calls {
+            let E::Call(call) = &expression.kind else {
+                continue;
+            };
+            let site = program.call_sites().get(call_node)?;
+            if site.owner != owner.0 {
+                return None;
+            }
+            let site_callee = site.resolved_callee.as_ref()?;
+            if site_callee != &call.callee {
+                return None;
+            }
+            if matches!(site_callee, C::Extern(_) | C::Builtin(_))
+                && call.arguments.iter().any(|argument| {
+                    contains_callable_type(
+                        program,
+                        &argument.value.ty,
+                        &mut BTreeSet::new(),
+                        &BTreeMap::new(),
+                    )
+                })
+            {
+                // Builtins and foreign declarations can execute a callback
+                // without a canonical body edge. Keep the narrow census
+                // closed whenever a callable can cross that boundary.
+                return None;
+            }
+            match site_callee {
+                C::Function(target) => {
+                    if !program.functions.contains_key(target)
+                        || !program.resolved_bodies.contains_key(target)
+                    {
+                        return None;
+                    }
+                    pending.push(target.clone());
+                }
+                C::ActorMethod { actor, method } => {
+                    let owners = program
+                        .actor_descriptors
+                        .get(actor)?
+                        .methods
+                        .iter()
+                        .filter(|candidate| candidate.owner.0 == method.as_str())
+                        .map(|candidate| candidate.owner.clone())
+                        .collect::<Vec<_>>();
+                    let [method_owner] = owners.as_slice() else {
+                        return None;
+                    };
+                    if !program.functions.contains_key(method_owner)
+                        || !program.resolved_bodies.contains_key(method_owner)
+                    {
+                        return None;
+                    }
+                    pending.push(method_owner.clone());
+                }
+                C::LocalClosure(_) | C::ProtocolMethod { .. } | C::Transition(_) => return None,
+                C::Constructor(_) | C::Extern(_) | C::Builtin(_) => {}
+            }
+        }
+    }
+    Some(reachable)
+}
+
+/// Return the closed callable scope used by the narrow String specialization.
+/// Its call graph and Actor exclusion rules deliberately match the i32
+/// profile; the String route performs its own source, receipt, and type proof
+/// before it can use this generic static scope calculation.
+pub(crate) fn ordinary_map_get_or_default_string_executable_scope(
+    program: &CheckedProgram,
+) -> Option<BTreeSet<NodeId>> {
+    ordinary_map_get_or_default_i32_executable_scope(program)
+}
+
+fn validate_ordinary_map_owned_any_v2_get_or_default_i32_receipt(
+    program: &CheckedProgram,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+    let canonical_helpers = program
+        .functions
+        .values()
+        .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+        .map(|function| function.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    let provisional_candidates = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_operation_attempts
+                .iter()
+                .filter(|attempt| attempt.kind == AttemptKind::GetOrDefaultI32)
+                .map(move |attempt| (owner.clone(), attempt.clone()))
+        })
+        .collect::<Vec<_>>();
+    // Resource lowering records a provisional attempt from source shape
+    // alone. It is not yet route authority: a same-spelled local helper must
+    // remain an ordinary call unless its resolved target is the canonical
+    // stdlib function.
+    let candidates = provisional_candidates
+        .into_iter()
+        .filter(|(owner, attempt)| {
+            let Some(body) = program.resolved_bodies.get(owner) else {
+                return false;
+            };
+            let Ok(calls) =
+                body.call_expressions(&program.resolved_types, &program.resolved_type_targets)
+            else {
+                return false;
+            };
+            matches!(
+                calls.get(&attempt.point).map(|expression| &expression.kind),
+                Some(crate::core::ir::ResolvedExprKind::Call(call))
+                    if matches!(
+                        &call.callee,
+                        crate::core::ResolvedCallee::Function(target)
+                            if canonical_helpers.contains(target)
+                    )
+            )
+        })
+        .collect::<Vec<_>>();
+    let attached = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .and_then(|cfg| cfg.get_or_default_i32_receipt.as_ref())
+                .map(|receipt| (owner.clone(), receipt))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() && attached.is_empty() {
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    let error_span = |node: &NodeId| {
+        program
+            .node_meta
+            .get(node)
+            .map(|meta| meta.origin.user_span())
+            .unwrap_or(Span::UNKNOWN)
+    };
+    if attached.is_empty() {
+        // Unsupported reachable shapes (wrong payload/default, dynamic key,
+        // multiple callsites, and so on) stay outside this profile and are
+        // rejected by normal source/type checks or route coverage. The
+        // dedicated Checker error is reserved for an otherwise exact
+        // canonical call that is unreachable from `main`, because such a
+        // call must never mint a production route receipt.
+        if let [(caller_owner, attempt)] = candidates.as_slice() {
+            let expected = (|| {
+                let caller_body = program.resolved_bodies.get(caller_owner)?;
+                let calls = caller_body
+                    .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+                    .ok()?;
+                let call_expression = calls.get(&attempt.point)?;
+                let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+                    return None;
+                };
+                let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+                    return None;
+                };
+                let matching_helpers = canonical_helpers
+                    .iter()
+                    .filter(|helper| *helper == helper_owner)
+                    .collect::<Vec<_>>();
+                let [canonical_helper] = matching_helpers.as_slice() else {
+                    return None;
+                };
+                let source_calls = program
+                    .call_sites
+                    .values()
+                    .filter(|site| {
+                        site.resolved_callee
+                            == Some(crate::core::ResolvedCallee::Function(
+                                (*canonical_helper).clone(),
+                            ))
+                    })
+                    .collect::<Vec<_>>();
+                if source_calls.len() != 1
+                    || source_calls[0].node_id != attempt.point
+                    || source_calls[0].owner != caller_owner.0
+                {
+                    return None;
+                }
+                collect_ordinary_map_owned_any_v2_get_or_default_i32_receipt(
+                    program,
+                    caller_owner,
+                    attempt,
+                    call_expression,
+                    canonical_helper,
+                )
+                .map(|receipt| {
+                    (
+                        receipt,
+                        ordinary_map_get_or_default_i32_caller_reachable_from_main(
+                            program,
+                            caller_owner,
+                        ),
+                    )
+                })
+            })();
+            if let Some((_, false)) = expected {
+                if !ordinary_map_get_or_default_i32_caller_is_actor_method(program, caller_owner) {
+                    errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0218,
+                        "GetOrDefault<i32> caller is unreachable from main and cannot receive its Checker route receipt",
+                        error_span(&attempt.point),
+                    ));
+                }
+            }
+        }
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        };
+    }
+
+    if let ([(caller_owner, attempt)], [(receipt_owner, receipt)]) =
+        (candidates.as_slice(), attached.as_slice())
+    {
+        let expected = (|| {
+            let caller_body = program.resolved_bodies.get(caller_owner)?;
+            let calls = caller_body
+                .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+                .ok()?;
+            let call_expression = calls.get(&attempt.point)?;
+            let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+                return None;
+            };
+            let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+                return None;
+            };
+            let canonical_helpers = program
+                .functions
+                .values()
+                .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+                .map(|function| function.node_id.clone())
+                .collect::<Vec<_>>();
+            let [canonical_helper] = canonical_helpers.as_slice() else {
+                return None;
+            };
+            if helper_owner != canonical_helper {
+                return None;
+            }
+            let source_calls = program
+                .call_sites
+                .values()
+                .filter(|site| {
+                    site.resolved_callee
+                        == Some(crate::core::ResolvedCallee::Function(helper_owner.clone()))
+                })
+                .collect::<Vec<_>>();
+            if source_calls.len() != 1
+                || source_calls[0].node_id != attempt.point
+                || source_calls[0].owner != caller_owner.0
+                || !ordinary_map_get_or_default_i32_caller_reachable_from_main(
+                    program,
+                    caller_owner,
+                )
+            {
+                return None;
+            }
+            collect_ordinary_map_owned_any_v2_get_or_default_i32_receipt(
+                program,
+                caller_owner,
+                attempt,
+                call_expression,
+                helper_owner,
+            )
+        })();
+        if receipt_owner != caller_owner
+            || receipt.caller_owner != *caller_owner
+            || receipt.call_node != attempt.point
+            || expected.as_ref() != Some(*receipt)
+        {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                "get_or_default<i32> Checker receipt does not replay the exact caller, helper, and ownership bridge",
+                error_span(&attempt.point),
+            ));
+        }
+        if program
+            .resource_analyses
+            .get(caller_owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .is_none_or(|cfg| !cfg.attempts.contains(attempt))
+        {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                "get_or_default<i32> attempt is not present in its Checker CFG receipt",
+                error_span(&attempt.point),
+            ));
+        }
+    } else {
+        let node = candidates
+            .first()
+            .map(|(_, attempt)| &attempt.point)
+            .or_else(|| attached.first().map(|(_, receipt)| &receipt.call_node))
+            .cloned()
+            .unwrap_or_else(|| NodeId("ordinary-map-get-or-default-i32".into()));
+        errors.push(Diagnostic::error_code(
+            crate::diagnostic::codes::E0218,
+            format!(
+                "GetOrDefault<i32> requires exactly one canonical Checker attempt and one cross-call receipt; found {} attempts and {} receipts",
+                candidates.len(),
+                attached.len()
+            ),
+            error_span(&node),
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn validate_ordinary_map_owned_any_v2_get_or_default_string_receipt(
+    program: &CheckedProgram,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+    let canonical_helpers = program
+        .functions
+        .values()
+        .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+        .map(|function| function.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    let provisional_candidates = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_operation_attempts
+                .iter()
+                .filter(|attempt| attempt.kind == AttemptKind::GetOrDefaultString)
+                .map(move |attempt| (owner.clone(), attempt.clone()))
+        })
+        .collect::<Vec<_>>();
+    // Resource lowering records a provisional attempt from source shape
+    // alone. It is not yet route authority: a same-spelled local helper must
+    // remain an ordinary call unless its resolved target is the canonical
+    // stdlib function.
+    let candidates = provisional_candidates
+        .into_iter()
+        .filter(|(owner, attempt)| {
+            let Some(body) = program.resolved_bodies.get(owner) else {
+                return false;
+            };
+            let Ok(calls) =
+                body.call_expressions(&program.resolved_types, &program.resolved_type_targets)
+            else {
+                return false;
+            };
+            matches!(
+                calls.get(&attempt.point).map(|expression| &expression.kind),
+                Some(crate::core::ir::ResolvedExprKind::Call(call))
+                    if matches!(
+                        &call.callee,
+                        crate::core::ResolvedCallee::Function(target)
+                            if canonical_helpers.contains(target)
+                    )
+            )
+        })
+        .collect::<Vec<_>>();
+    let attached = program
+        .resource_analyses
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .and_then(|cfg| cfg.get_or_default_string_receipt.as_ref())
+                .map(|receipt| (owner.clone(), receipt))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() && attached.is_empty() {
+        return Ok(());
+    }
+
+    let mut errors = Vec::new();
+    let error_span = |node: &NodeId| {
+        program
+            .node_meta
+            .get(node)
+            .map(|meta| meta.origin.user_span())
+            .unwrap_or(Span::UNKNOWN)
+    };
+    if attached.is_empty() {
+        // Unsupported reachable shapes (wrong payload/default, dynamic key,
+        // multiple callsites, and so on) stay outside this profile and are
+        // rejected by normal source/type checks or route coverage. The
+        // dedicated Checker error is reserved for an otherwise exact
+        // canonical call that is unreachable from `main`, because such a
+        // call must never mint a production route receipt.
+        if let [(caller_owner, attempt)] = candidates.as_slice() {
+            let expected = (|| {
+                let caller_body = program.resolved_bodies.get(caller_owner)?;
+                let calls = caller_body
+                    .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+                    .ok()?;
+                let call_expression = calls.get(&attempt.point)?;
+                let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+                    return None;
+                };
+                let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+                    return None;
+                };
+                let matching_helpers = canonical_helpers
+                    .iter()
+                    .filter(|helper| *helper == helper_owner)
+                    .collect::<Vec<_>>();
+                let [canonical_helper] = matching_helpers.as_slice() else {
+                    return None;
+                };
+                let source_calls = program
+                    .call_sites
+                    .values()
+                    .filter(|site| {
+                        site.resolved_callee
+                            == Some(crate::core::ResolvedCallee::Function(
+                                (*canonical_helper).clone(),
+                            ))
+                    })
+                    .collect::<Vec<_>>();
+                if source_calls.len() != 1
+                    || source_calls[0].node_id != attempt.point
+                    || source_calls[0].owner != caller_owner.0
+                {
+                    return None;
+                }
+                collect_ordinary_map_owned_any_v2_get_or_default_string_receipt(
+                    program,
+                    caller_owner,
+                    attempt,
+                    call_expression,
+                    canonical_helper,
+                )
+                .map(|receipt| {
+                    (
+                        receipt,
+                        ordinary_map_get_or_default_i32_caller_reachable_from_main(
+                            program,
+                            caller_owner,
+                        ),
+                    )
+                })
+            })();
+            if let Some((_, false)) = expected {
+                if !ordinary_map_get_or_default_i32_caller_is_actor_method(program, caller_owner) {
+                    errors.push(Diagnostic::error_code(
+                        crate::diagnostic::codes::E0218,
+                        "get_or_default<string> caller is unreachable from main and cannot receive its Checker route receipt",
+                        error_span(&attempt.point),
+                    ));
+                }
+            }
+        }
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        };
+    }
+
+    if let ([(caller_owner, attempt)], [(receipt_owner, receipt)]) =
+        (candidates.as_slice(), attached.as_slice())
+    {
+        let expected = (|| {
+            let caller_body = program.resolved_bodies.get(caller_owner)?;
+            let calls = caller_body
+                .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+                .ok()?;
+            let call_expression = calls.get(&attempt.point)?;
+            let crate::core::ir::ResolvedExprKind::Call(call) = &call_expression.kind else {
+                return None;
+            };
+            let crate::core::ResolvedCallee::Function(helper_owner) = &call.callee else {
+                return None;
+            };
+            let canonical_helpers = program
+                .functions
+                .values()
+                .filter(|function| canonical_std_maps_get_or_default(program, &function.node_id))
+                .map(|function| function.node_id.clone())
+                .collect::<Vec<_>>();
+            let [canonical_helper] = canonical_helpers.as_slice() else {
+                return None;
+            };
+            if helper_owner != canonical_helper {
+                return None;
+            }
+            let source_calls = program
+                .call_sites
+                .values()
+                .filter(|site| {
+                    site.resolved_callee
+                        == Some(crate::core::ResolvedCallee::Function(helper_owner.clone()))
+                })
+                .collect::<Vec<_>>();
+            if source_calls.len() != 1
+                || source_calls[0].node_id != attempt.point
+                || source_calls[0].owner != caller_owner.0
+                || !ordinary_map_get_or_default_i32_caller_reachable_from_main(
+                    program,
+                    caller_owner,
+                )
+            {
+                return None;
+            }
+            collect_ordinary_map_owned_any_v2_get_or_default_string_receipt(
+                program,
+                caller_owner,
+                attempt,
+                call_expression,
+                helper_owner,
+            )
+        })();
+        if receipt_owner != caller_owner
+            || receipt.caller_owner != *caller_owner
+            || receipt.call_node != attempt.point
+            || expected.as_ref() != Some(*receipt)
+        {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                "get_or_default<String> Checker receipt does not replay the exact caller, helper, and ownership bridge",
+                error_span(&attempt.point),
+            ));
+        }
+        if program
+            .resource_analyses
+            .get(caller_owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .is_none_or(|cfg| !cfg.attempts.contains(attempt))
+        {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                "get_or_default<String> attempt is not present in its Checker CFG receipt",
+                error_span(&attempt.point),
+            ));
+        }
+    } else {
+        let node = candidates
+            .first()
+            .map(|(_, attempt)| &attempt.point)
+            .or_else(|| attached.first().map(|(_, receipt)| &receipt.call_node))
+            .cloned()
+            .unwrap_or_else(|| NodeId("ordinary-map-get-or-default-i32".into()));
+        errors.push(Diagnostic::error_code(
+            crate::diagnostic::codes::E0218,
+            format!(
+                "GetOrDefault<String> requires exactly one canonical Checker attempt and one cross-call receipt; found {} attempts and {} receipts",
+                candidates.len(),
+                attached.len()
+            ),
+            error_span(&node),
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn collect_ordinary_map_owned_any_v2_get_or_default_i32_receipt(
+    program: &CheckedProgram,
+    caller_owner: &NodeId,
+    get_attempt: &crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt,
+    call_expression: &crate::core::ResolvedExpr,
+    helper_owner: &NodeId,
+) -> Option<crate::core::ownership::OrdinaryMapOwnedAnyV2GetOrDefaultI32Receipt> {
+    use crate::core::ir::{
+        CheckedConversionKind as ConversionKind, ResolvedExprKind as E, ResolvedLiteral as L,
+        ResolvedPatternKind as P, ResolvedStmtKind as S, ResolvedType as T,
+    };
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+        OrdinaryMapOwnedAnyV2GetOrDefaultI32ProfileVersion as ProfileVersion,
+        OrdinaryMapOwnedAnyV2GetOrDefaultI32Receipt as Receipt,
+    };
+
+    fn direct_local(
+        expression: &crate::core::ResolvedExpr,
+    ) -> Option<&crate::core::ResolvedLocalId> {
+        match &expression.kind {
+            E::Load(place) if place.projections.is_empty() => Some(&place.base),
+            _ => None,
+        }
+    }
+
+    fn direct_tuple_projection(
+        expression: &crate::core::ResolvedExpr,
+        local: &crate::core::ResolvedLocalId,
+        index: usize,
+    ) -> bool {
+        match &expression.kind {
+            E::Load(place) => {
+                place.base == *local
+                    && matches!(
+                        place.projections.as_slice(),
+                        [crate::core::ir::ResolvedProjection::Tuple { index: found, .. }]
+                            if *found == index
+                    )
+            }
+            E::Project {
+                value,
+                projection: crate::core::ir::ResolvedValueProjection::Tuple(found),
+            } => *found == index && direct_local(value).is_some_and(|base| base == local),
+            _ => false,
+        }
+    }
+
+    fn binding(
+        statement: &crate::core::ResolvedStmt,
+    ) -> Option<(&crate::core::ResolvedLocalId, &crate::core::ResolvedExpr)> {
+        let S::Bind {
+            pattern:
+                crate::core::ir::ResolvedPattern {
+                    kind:
+                        P::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        Some((local, initializer))
+    }
+
+    fn binding_at(
+        body: &crate::core::ResolvedBody,
+        expression: &NodeId,
+    ) -> Option<(usize, crate::core::ResolvedLocalId)> {
+        let mut found = body
+            .root
+            .statements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let (local, initializer) = binding(statement)?;
+                (initializer.node_id == *expression).then_some((index, local.clone()))
+            });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    fn explicit_drop_at(
+        body: &crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+        point: &NodeId,
+    ) -> Option<(usize, usize)> {
+        let mut found = body
+            .root
+            .statements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                if statement.node_id != *point {
+                    return None;
+                }
+                let S::Drop(places) = &statement.kind else {
+                    return None;
+                };
+                let matching = places
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, place)| place.base == *local && place.projections.is_empty())
+                    .map(|(place_index, _)| place_index)
+                    .collect::<Vec<_>>();
+                (places.len() == 1 && matching.as_slice() == [0]).then_some((index, 0))
+            });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    fn builtin_call<'a>(
+        expression: &'a crate::core::ResolvedExpr,
+        name: &str,
+        arity: usize,
+    ) -> Option<&'a crate::core::ir::ResolvedCall> {
+        let E::Call(call) = &expression.kind else {
+            return None;
+        };
+        (call.arguments.len() == arity
+            && matches!(&call.callee, crate::core::ResolvedCallee::Builtin(builtin) if builtin.as_str() == name))
+        .then_some(call)
+    }
+
+    fn is_record(types: &crate::core::ResolvedTypeTable, ty: &crate::core::ResolvedTypeId) -> bool {
+        matches!(
+            types.get(ty),
+            Some(T::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+        )
+    }
+
+    fn is_dynamic_any(
+        types: &crate::core::ResolvedTypeTable,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            types.get(ty),
+            Some(T::DynamicAny { capability }) if capability == "type.dynamic_value"
+        )
+    }
+
+    let caller_body = program.resolved_bodies.get(caller_owner)?;
+    let caller_signature = program.resolved_signatures.get(caller_owner)?;
+    let caller_analysis = program.resource_analyses.get(caller_owner)?;
+    let caller_cfg_receipt = caller_analysis
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()?;
+    if caller_cfg_receipt.owner != *caller_owner
+        || caller_cfg_receipt.profile_version
+            != crate::core::ownership::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+    {
+        return None;
+    }
+    let E::Call(call) = &call_expression.kind else {
+        return None;
+    };
+    let helper_signature = program.resolved_signatures.get(helper_owner)?;
+    let helper_body = program.resolved_bodies.get(helper_owner)?;
+    let helper_function = program.functions.get(helper_owner)?;
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+
+    // Map Set is persistent, so both its source and result remain separate
+    // live roots across this call.
+    if caller_signature.owner != *caller_owner
+        || call.callee != crate::core::ResolvedCallee::Function(helper_owner.clone())
+        || call.type_arguments.as_slice() != [i32_type.clone()]
+        || call.result != i32_type
+        || call.arguments.len() != 3
+        || call.permission.is_some()
+        || !call.session.is_empty()
+        || get_attempt.point != call_expression.node_id
+        || get_attempt.arguments
+            != call
+                .arguments
+                .iter()
+                .map(|argument| argument.value.node_id.clone())
+                .collect::<Vec<_>>()
+    {
+        return None;
+    }
+
+    let [root_argument, key_argument, default_argument] = call.arguments.as_slice() else {
+        return None;
+    };
+    let root_local = direct_local(&root_argument.value)?.clone();
+    let root_type = root_argument.value.ty.clone();
+    let key_literal = match &key_argument.value.kind {
+        E::Literal(L::String(value)) if key_argument.value.ty == string_type => value.clone(),
+        _ => return None,
+    };
+    let default_i32 = match &default_argument.value.kind {
+        E::Literal(L::Int(value)) if default_argument.value.ty == i32_type => *value,
+        _ => return None,
+    };
+    if !is_record(&program.resolved_types, &root_type)
+        || root_argument.conversion.kind != ConversionKind::Identity
+        || root_argument.conversion.from != root_type
+        || root_argument.conversion.to != root_argument.value.ty
+        || key_argument.value.ty != string_type
+        || key_argument.conversion.kind != ConversionKind::Identity
+        || key_argument.conversion.from != string_type
+        || key_argument.conversion.to != string_type
+        || default_argument.conversion.kind != ConversionKind::Identity
+        || default_argument.conversion.from != i32_type
+        || default_argument.conversion.to != i32_type
+    {
+        return None;
+    }
+
+    let new_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::New)
+        .collect::<Vec<_>>();
+    let [new_action] = new_actions.as_slice() else {
+        return None;
+    };
+    let set_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::Set)
+        .collect::<Vec<_>>();
+    let [set_action] = set_actions.as_slice() else {
+        return None;
+    };
+    let drop_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::Drop)
+        .collect::<Vec<_>>();
+    if caller_cfg_receipt.actions.len() != 4
+        || caller_cfg_receipt.attempts.len() != 5
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::New
+            })
+            .count()
+            != 1
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Set
+            })
+            .count()
+            != 1
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Drop
+            })
+            .count()
+            != 2
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::GetOrDefaultI32
+            })
+            .count()
+            != 1
+        || get_attempt.receiver_local.as_ref() != Some(&root_local)
+        || get_attempt.result_local.is_none()
+        || new_action.local == root_local
+        || set_action.local != root_local
+        || set_action.source_local.as_ref() != Some(&new_action.local)
+        || set_action.value_type.as_ref() != Some(&i32_type)
+        || !set_action.payload_clone
+        || new_action.root
+            != crate::core::ResourceId(crate::core::NodeId(format!(
+                "ordinary-map-owned-any-v2:{}",
+                new_action.local.0 .0
+            )))
+        || set_action.root
+            != crate::core::ResourceId(crate::core::NodeId(format!(
+                "ordinary-map-owned-any-v2:{}",
+                root_local.0 .0
+            )))
+        || !drop_actions
+            .iter()
+            .any(|drop| drop.local == new_action.local)
+        || !drop_actions.iter().any(|drop| drop.local == root_local)
+    {
+        return None;
+    }
+
+    let set_expression = caller_body
+        .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+        .ok()?
+        .remove(&set_action.point)?;
+    let set_call = builtin_call(&set_expression, "map_set", 3)?;
+    let [set_root, set_key, set_value] = set_call.arguments.as_slice() else {
+        return None;
+    };
+    let set_initial_root = direct_local(&set_root.value)?.clone();
+    let set_key_value = match &set_key.value.kind {
+        E::Literal(L::String(value)) if set_key.value.ty == string_type => value.clone(),
+        _ => return None,
+    };
+    let set_value_i32 = match &set_value.value.kind {
+        E::Literal(L::Int(value)) if set_value.value.ty == i32_type => *value,
+        _ => return None,
+    };
+    // The built-in `map_set` call retains the concrete payload type in its
+    // resolved argument conversion; erasure happens at the Map ABI boundary.
+    // Bind the profile to an exact String identity conversion here rather than
+    // requiring a generic-call `DynamicAnyPack` that this builtin does not
+    // emit.
+    if set_initial_root != new_action.local
+        || set_action.key.as_ref() != Some(&set_key.value.node_id)
+        || set_expression.ty != root_type
+        || set_call.result != root_type
+        || set_root.conversion.kind != ConversionKind::Identity
+        || set_root.conversion.from != root_type
+        || set_root.conversion.to != root_type
+        || set_key.value.ty != string_type
+        || set_key.conversion.kind != ConversionKind::Identity
+        || set_key.conversion.from != string_type
+        || set_key.conversion.to != string_type
+        || set_value.value.ty != i32_type
+        || set_value.conversion.kind != ConversionKind::Identity
+        || set_value.conversion.from != i32_type
+        || set_value.conversion.to != i32_type
+        || set_action.value.as_ref() != Some(&set_value.value.node_id)
+        || set_action.key_type.as_ref() != Some(&string_type)
+        || set_action.value_type.as_ref() != Some(&i32_type)
+    {
+        return None;
+    }
+    let (set_binding_index, set_result_local) = binding_at(caller_body, &set_action.point)?;
+    if set_result_local != root_local {
+        return None;
+    }
+    let (call_binding_index, caller_result_local) =
+        binding_at(caller_body, &call_expression.node_id)?;
+    if get_attempt.result_local.as_ref() != Some(&caller_result_local)
+        || caller_body.locals.get(&caller_result_local)?.ty != i32_type
+    {
+        return None;
+    }
+    let new_expression = caller_body
+        .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+        .ok()?
+        .remove(&new_action.point)?;
+    let new_call = builtin_call(&new_expression, "map_new", 0)?;
+    let (new_binding_index, initial_root_local) = binding_at(caller_body, &new_action.point)?;
+    if initial_root_local != new_action.local
+        || new_expression.ty != root_type
+        || new_call.result != root_type
+        || caller_body.locals.get(&initial_root_local)?.ty != root_type
+        || caller_body.locals.get(&initial_root_local)?.mutable
+        || caller_body.locals.get(&root_local)?.mutable
+        || helper_signature.parameters.len() != 3
+        || call.arguments[0].parameter != helper_signature.parameters[0].id
+        || call.arguments[1].parameter != helper_signature.parameters[1].id
+        || call.arguments[2].parameter != helper_signature.parameters[2].id
+    {
+        return None;
+    }
+    let (root_drop_index, root_drop_place_index) = explicit_drop_at(
+        caller_body,
+        &root_local,
+        &drop_actions
+            .iter()
+            .find(|drop| drop.local == root_local)?
+            .point,
+    )?;
+    let (initial_drop_index, initial_drop_place_index) = explicit_drop_at(
+        caller_body,
+        &initial_root_local,
+        &drop_actions
+            .iter()
+            .find(|drop| drop.local == initial_root_local)?
+            .point,
+    )?;
+    if !(new_binding_index < set_binding_index
+        && set_binding_index < call_binding_index
+        && call_binding_index < initial_drop_index
+        && call_binding_index < root_drop_index)
+    {
+        return None;
+    }
+    let helper_source_key = program
+        .node_meta
+        .get(helper_owner)
+        .map(|meta| meta.origin.user_span())
+        .unwrap_or_else(|| helper_function.origin.user_span());
+    if !canonical_std_maps_get_or_default(program, helper_owner)
+        || helper_function.generics.len() != 1
+        || !helper_function.pub_
+        || helper_signature.owner != *helper_owner
+        || helper_signature.generic_parameters.len() != 1
+        || helper_signature.parameters.len() != 3
+        || helper_body.owner != *helper_owner
+        || helper_body.parameters.len() != 3
+        || program
+            .source_registry
+            .key(helper_source_key.source_id)
+            .is_none()
+    {
+        return None;
+    }
+    let generic = helper_signature.generic_parameters[0].clone();
+    let [map_parameter, key_parameter, default_parameter] = helper_signature.parameters.as_slice()
+    else {
+        return None;
+    };
+    let [map_local, key_local, default_local] = helper_body.parameters.as_slice() else {
+        return None;
+    };
+    let generic_type = &helper_signature.result;
+    if helper_signature.result != helper_signature.parameters[2].ty
+        || helper_signature.parameters[0].id != map_parameter.id
+        || helper_signature.parameters[1].id != key_parameter.id
+        || helper_signature.parameters[2].id != default_parameter.id
+        || helper_body.locals.get(map_local)?.ty != map_parameter.ty
+        || helper_body.locals.get(key_local)?.ty != key_parameter.ty
+        || helper_body.locals.get(default_local)?.ty != default_parameter.ty
+        || map_parameter.permission != Some(crate::core::Permission::View)
+        || !is_record(&program.resolved_types, &map_parameter.ty)
+        || key_parameter.ty != string_type
+        || !matches!(program.resolved_types.get(generic_type), Some(T::GenericParameter(id)) if id == &generic)
+        || !matches!(program.resolved_types.get(&default_parameter.ty), Some(T::GenericParameter(id)) if id == &generic)
+    {
+        return None;
+    }
+    let [pair_statement, selected_statement, pair_drop_statement] =
+        helper_body.root.statements.as_slice()
+    else {
+        return None;
+    };
+    let (pair_local, pair_initializer) = binding(pair_statement)?;
+    let (selected_local, selected_initializer) = binding(selected_statement)?;
+    let pair_call = builtin_call(pair_initializer, "map_get", 2)?;
+    let [map_argument, helper_key_argument] = pair_call.arguments.as_slice() else {
+        return None;
+    };
+    let T::Tuple(pair_fields) = program.resolved_types.get(&pair_initializer.ty)? else {
+        return None;
+    };
+    if pair_fields.len() != 2
+        || pair_fields[0] != bool_type
+        || !is_dynamic_any(&program.resolved_types, &pair_fields[1])
+        || pair_initializer.ty != pair_call.result
+        || helper_body.locals.get(pair_local)?.ty != pair_initializer.ty
+        || pair_call.type_arguments.len() != 0
+        || pair_call.permission.is_some()
+        || !pair_call.session.is_empty()
+        || direct_local(&map_argument.value) != Some(map_local)
+        || direct_local(&helper_key_argument.value) != Some(key_local)
+        || map_argument.conversion.kind != ConversionKind::Identity
+        || map_argument.value.ty != map_parameter.ty
+        || helper_key_argument.conversion.kind != ConversionKind::Identity
+        || helper_key_argument.value.ty != string_type
+        || !matches!(pair_statement.kind, S::Bind { .. })
+        || selected_initializer.ty != pair_fields[1]
+        || helper_body.locals.get(selected_local)?.ty != pair_fields[1]
+    {
+        return None;
+    }
+    let E::If {
+        condition,
+        then_block,
+        else_block,
+    } = &selected_initializer.kind
+    else {
+        return None;
+    };
+    if condition.ty != bool_type
+        || !direct_tuple_projection(condition, pair_local, 0)
+        || then_block.statements.len() != 0
+        || else_block.statements.len() != 0
+    {
+        return None;
+    }
+    let found_value = then_block.result.as_deref()?;
+    let default_branch_value = else_block.result.as_deref()?;
+    let E::Cast {
+        value: default_load,
+        conversion: default_pack,
+    } = &default_branch_value.kind
+    else {
+        return None;
+    };
+    let E::Load(default_place) = &default_load.kind else {
+        return None;
+    };
+    if default_place.base != *default_local
+        || !default_place.projections.is_empty()
+        || default_load.ty != *generic_type
+        || default_pack.kind != ConversionKind::DynamicAnyPack
+        || default_pack.from != *generic_type
+        || default_pack.to != pair_fields[1]
+        || default_branch_value.ty != pair_fields[1]
+        || !direct_tuple_projection(found_value, pair_local, 1)
+        || found_value.ty != pair_fields[1]
+    {
+        return None;
+    }
+    let helper_return = helper_body.root.result.as_deref()?;
+    let E::Cast {
+        value: selected_value,
+        conversion: unpack,
+    } = &helper_return.kind
+    else {
+        return None;
+    };
+    if direct_local(selected_value) != Some(selected_local)
+        || selected_value.ty != pair_fields[1]
+        || unpack.kind != ConversionKind::DynamicAnyUnpack
+        || unpack.from != pair_fields[1]
+        || unpack.to != *generic_type
+        || helper_return.ty != *generic_type
+    {
+        return None;
+    }
+    let S::Drop(pair_drops) = &pair_drop_statement.kind else {
+        return None;
+    };
+    if pair_drops.len() != 1
+        || pair_drops[0].base != *pair_local
+        || !pair_drops[0].projections.is_empty()
+    {
+        return None;
+    }
+    let pair_drop_point = pair_drop_statement.node_id.clone();
+
+    Some(Receipt {
+        profile_version: ProfileVersion::V1,
+        caller_owner: caller_owner.clone(),
+        call_node: call_expression.node_id.clone(),
+        call_target: helper_owner.clone(),
+        call_type_argument: i32_type.clone(),
+        call_arguments: call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.node_id.clone())
+            .collect(),
+        call_parameters: call
+            .arguments
+            .iter()
+            .map(|argument| argument.parameter.clone())
+            .collect(),
+        call_argument_types: call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.ty.clone())
+            .collect(),
+        call_conversions: call
+            .arguments
+            .iter()
+            .map(|argument| argument.conversion.clone())
+            .collect(),
+        call_result_type: call.result.clone(),
+        caller_result_local,
+        caller_call_binding_point: caller_body.root.statements[call_binding_index]
+            .node_id
+            .clone(),
+        caller_initial_root_local: initial_root_local.clone(),
+        caller_root_local: root_local.clone(),
+        caller_root: set_action.root.clone(),
+        caller_root_type: root_type,
+        caller_new_point: new_action.point.clone(),
+        caller_set_point: set_action.point.clone(),
+        caller_set_key: set_key.value.node_id.clone(),
+        caller_set_key_bytes: set_key_value,
+        caller_set_value: set_value.value.node_id.clone(),
+        caller_set_value_i32: set_value_i32,
+        caller_set_value_type: set_value.value.ty.clone(),
+        caller_query_key: key_argument.value.node_id.clone(),
+        caller_query_key_bytes: key_literal,
+        caller_default: default_argument.value.node_id.clone(),
+        caller_default_i32: default_i32,
+        caller_default_type: default_argument.value.ty.clone(),
+        caller_root_drop_point: drop_actions
+            .iter()
+            .find(|drop| drop.local == root_local)?
+            .point
+            .clone(),
+        caller_root_drop_place_index: root_drop_place_index,
+        caller_initial_root_drop_point: drop_actions
+            .iter()
+            .find(|drop| drop.local == initial_root_local)?
+            .point
+            .clone(),
+        caller_initial_root_drop_place_index: initial_drop_place_index,
+        helper_owner: helper_owner.clone(),
+        helper_map_parameter: map_parameter.id.clone(),
+        helper_map_permission: crate::core::Permission::View,
+        helper_key_parameter: key_parameter.id.clone(),
+        helper_default_parameter: default_parameter.id.clone(),
+        helper_map_local: map_local.clone(),
+        helper_key_local: key_local.clone(),
+        helper_default_local: default_local.clone(),
+        helper_get_any_call: pair_initializer.node_id.clone(),
+        helper_pair_local: pair_local.clone(),
+        helper_pair_binding_point: pair_statement.node_id.clone(),
+        helper_pair_type: pair_initializer.ty.clone(),
+        helper_found_condition: condition.node_id.clone(),
+        helper_found_projection: condition.node_id.clone(),
+        helper_payload_projection: found_value.node_id.clone(),
+        helper_unpack_cast: helper_return.node_id.clone(),
+        helper_unpack_target: unpack.to.clone(),
+        helper_if_node: selected_initializer.node_id.clone(),
+        helper_found_arm_block: then_block.node_id.clone(),
+        helper_default_arm_block: else_block.node_id.clone(),
+        helper_selected_local: selected_local.clone(),
+        helper_selected_binding_point: selected_statement.node_id.clone(),
+        helper_default_load: default_load.node_id.clone(),
+        helper_pair_drop_point: pair_drop_point,
+        helper_return_node: helper_return.node_id.clone(),
+        helper_result_type: helper_signature.result.clone(),
+    })
+}
+
+fn collect_ordinary_map_owned_any_v2_get_or_default_string_receipt(
+    program: &CheckedProgram,
+    caller_owner: &NodeId,
+    get_attempt: &crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt,
+    call_expression: &crate::core::ResolvedExpr,
+    helper_owner: &NodeId,
+) -> Option<crate::core::ownership::OrdinaryMapOwnedAnyV2GetOrDefaultStringReceipt> {
+    use crate::core::ir::{
+        CheckedConversionKind as ConversionKind, ResolvedExprKind as E, ResolvedLiteral as L,
+        ResolvedPatternKind as P, ResolvedStmtKind as S, ResolvedType as T,
+    };
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+        OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind,
+        OrdinaryMapOwnedAnyV2GetOrDefaultStringProfileVersion as ProfileVersion,
+        OrdinaryMapOwnedAnyV2GetOrDefaultStringReceipt as Receipt,
+    };
+
+    fn direct_local(
+        expression: &crate::core::ResolvedExpr,
+    ) -> Option<&crate::core::ResolvedLocalId> {
+        match &expression.kind {
+            E::Load(place) if place.projections.is_empty() => Some(&place.base),
+            _ => None,
+        }
+    }
+
+    fn direct_tuple_projection(
+        expression: &crate::core::ResolvedExpr,
+        local: &crate::core::ResolvedLocalId,
+        index: usize,
+    ) -> bool {
+        match &expression.kind {
+            E::Load(place) => {
+                place.base == *local
+                    && matches!(
+                        place.projections.as_slice(),
+                        [crate::core::ir::ResolvedProjection::Tuple { index: found, .. }]
+                            if *found == index
+                    )
+            }
+            E::Project {
+                value,
+                projection: crate::core::ir::ResolvedValueProjection::Tuple(found),
+            } => *found == index && direct_local(value).is_some_and(|base| base == local),
+            _ => false,
+        }
+    }
+
+    fn binding(
+        statement: &crate::core::ResolvedStmt,
+    ) -> Option<(&crate::core::ResolvedLocalId, &crate::core::ResolvedExpr)> {
+        let S::Bind {
+            pattern:
+                crate::core::ir::ResolvedPattern {
+                    kind:
+                        P::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        Some((local, initializer))
+    }
+
+    fn binding_at(
+        body: &crate::core::ResolvedBody,
+        expression: &NodeId,
+    ) -> Option<(usize, crate::core::ResolvedLocalId)> {
+        let mut found = body
+            .root
+            .statements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                let (local, initializer) = binding(statement)?;
+                (initializer.node_id == *expression).then_some((index, local.clone()))
+            });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    fn string_literal_source(
+        body: &crate::core::ResolvedBody,
+        expression: &crate::core::ResolvedExpr,
+        string_type: &crate::core::ResolvedTypeId,
+    ) -> Option<(
+        String,
+        Option<(crate::core::ResolvedLocalId, NodeId, usize)>,
+    )> {
+        match &expression.kind {
+            E::Literal(L::String(value)) if &expression.ty == string_type => {
+                Some((value.clone(), None))
+            }
+            E::Load(place) if place.projections.is_empty() && &expression.ty == string_type => {
+                let local = place.base.clone();
+                if body
+                    .locals
+                    .get(&local)
+                    .is_none_or(|definition| definition.mutable)
+                {
+                    return None;
+                }
+                let mut matches =
+                    body.root
+                        .statements
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, statement)| {
+                            let (bound_local, initializer) = binding(statement)?;
+                            if bound_local != &local || &initializer.ty != string_type {
+                                return None;
+                            }
+                            let E::Literal(L::String(value)) = &initializer.kind else {
+                                return None;
+                            };
+                            Some((value.clone(), statement.node_id.clone(), index))
+                        });
+                let (value, point, index) = matches.next()?;
+                matches
+                    .next()
+                    .is_none()
+                    .then_some((value, Some((local, point, index))))
+            }
+            _ => None,
+        }
+    }
+
+    fn unique_explicit_drop(
+        body: &crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+    ) -> Option<(NodeId, usize, usize)> {
+        let mut matches =
+            body.root
+                .statements
+                .iter()
+                .enumerate()
+                .filter_map(|(index, statement)| {
+                    let S::Drop(places) = &statement.kind else {
+                        return None;
+                    };
+                    let matching = places
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, place)| place.base == *local && place.projections.is_empty())
+                        .map(|(place_index, _)| place_index)
+                        .collect::<Vec<_>>();
+                    (places.len() == 1 && matching.as_slice() == [0]).then_some((
+                        statement.node_id.clone(),
+                        index,
+                        0,
+                    ))
+                });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    fn has_any_direct_drop(
+        body: &crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+    ) -> bool {
+        body.root.statements.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                S::Drop(places)
+                    if places.iter().any(|place| {
+                        place.base == *local && place.projections.is_empty()
+                    })
+            )
+        })
+    }
+
+    fn explicit_drop_at(
+        body: &crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+        point: &NodeId,
+    ) -> Option<(usize, usize)> {
+        let mut found = body
+            .root
+            .statements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, statement)| {
+                if statement.node_id != *point {
+                    return None;
+                }
+                let S::Drop(places) = &statement.kind else {
+                    return None;
+                };
+                let matching = places
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, place)| place.base == *local && place.projections.is_empty())
+                    .map(|(place_index, _)| place_index)
+                    .collect::<Vec<_>>();
+                (places.len() == 1 && matching.as_slice() == [0]).then_some((index, 0))
+            });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
+    }
+
+    fn builtin_call<'a>(
+        expression: &'a crate::core::ResolvedExpr,
+        name: &str,
+        arity: usize,
+    ) -> Option<&'a crate::core::ir::ResolvedCall> {
+        let E::Call(call) = &expression.kind else {
+            return None;
+        };
+        (call.arguments.len() == arity
+            && matches!(&call.callee, crate::core::ResolvedCallee::Builtin(builtin) if builtin.as_str() == name))
+        .then_some(call)
+    }
+
+    fn is_record(types: &crate::core::ResolvedTypeTable, ty: &crate::core::ResolvedTypeId) -> bool {
+        matches!(
+            types.get(ty),
+            Some(T::Nominal { item, .. }) if item.as_str() == "builtin:type:Record"
+        )
+    }
+
+    fn is_dynamic_any(
+        types: &crate::core::ResolvedTypeTable,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            types.get(ty),
+            Some(T::DynamicAny { capability }) if capability == "type.dynamic_value"
+        )
+    }
+
+    let caller_body = program.resolved_bodies.get(caller_owner)?;
+    let caller_signature = program.resolved_signatures.get(caller_owner)?;
+    let caller_analysis = program.resource_analyses.get(caller_owner)?;
+    let caller_cfg_receipt = caller_analysis
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()?;
+    if caller_cfg_receipt.owner != *caller_owner
+        || caller_cfg_receipt.profile_version
+            != crate::core::ownership::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+    {
+        return None;
+    }
+    let E::Call(call) = &call_expression.kind else {
+        return None;
+    };
+    let helper_signature = program.resolved_signatures.get(helper_owner)?;
+    let helper_body = program.resolved_bodies.get(helper_owner)?;
+    let helper_function = program.functions.get(helper_owner)?;
+    let payload_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let miss_payload_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+
+    // Map Set is persistent, so both its source and result remain separate
+    // live roots across this call.
+    if caller_signature.owner != *caller_owner
+        || call.callee != crate::core::ResolvedCallee::Function(helper_owner.clone())
+        || call.type_arguments.as_slice() != [payload_type.clone()]
+        || call.result != payload_type
+        || call.arguments.len() != 3
+        || call.permission.is_some()
+        || !call.session.is_empty()
+        || get_attempt.point != call_expression.node_id
+        || get_attempt.arguments
+            != call
+                .arguments
+                .iter()
+                .map(|argument| argument.value.node_id.clone())
+                .collect::<Vec<_>>()
+    {
+        return None;
+    }
+
+    let [root_argument, key_argument, default_argument] = call.arguments.as_slice() else {
+        return None;
+    };
+    let root_local = direct_local(&root_argument.value)?.clone();
+    let root_type = root_argument.value.ty.clone();
+    let key_literal = match &key_argument.value.kind {
+        E::Literal(L::String(value)) if key_argument.value.ty == string_type => value.clone(),
+        _ => return None,
+    };
+    let (default_string, default_source) =
+        string_literal_source(caller_body, &default_argument.value, &payload_type)?;
+    if !is_record(&program.resolved_types, &root_type)
+        || root_argument.conversion.kind != ConversionKind::Identity
+        || root_argument.conversion.from != root_type
+        || root_argument.conversion.to != root_argument.value.ty
+        || key_argument.value.ty != string_type
+        || key_argument.conversion.kind != ConversionKind::Identity
+        || key_argument.conversion.from != string_type
+        || key_argument.conversion.to != string_type
+        || default_argument.conversion.kind != ConversionKind::Identity
+        || default_argument.conversion.from != payload_type
+        || default_argument.conversion.to != payload_type
+    {
+        return None;
+    }
+
+    let new_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::New)
+        .collect::<Vec<_>>();
+    let [new_action] = new_actions.as_slice() else {
+        return None;
+    };
+    let set_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::Set)
+        .collect::<Vec<_>>();
+    let [set_action] = set_actions.as_slice() else {
+        return None;
+    };
+    let drop_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::Drop)
+        .collect::<Vec<_>>();
+    let clone_actions = caller_cfg_receipt
+        .actions
+        .iter()
+        .filter(|action| action.kind == ActionKind::Clone)
+        .collect::<Vec<_>>();
+    let root_clone = match clone_actions.as_slice() {
+        [] => None,
+        [clone] if clone.local == root_local => Some(*clone),
+        _ => return None,
+    };
+    let has_alias_clone = root_clone.is_some();
+    let expected_drop_count = if has_alias_clone { 3 } else { 2 };
+    let expected_action_count = if has_alias_clone { 6 } else { 4 };
+    let expected_attempt_count = if has_alias_clone { 7 } else { 5 };
+    let v2_resource = |local: &crate::core::ResolvedLocalId| {
+        crate::core::ResourceId(crate::core::NodeId(format!(
+            "ordinary-map-owned-any-v2:{}",
+            local.0 .0
+        )))
+    };
+    if caller_cfg_receipt.actions.len() != expected_action_count
+        || caller_cfg_receipt.attempts.len() != expected_attempt_count
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::New
+            })
+            .count()
+            != 1
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Set
+            })
+            .count()
+            != 1
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Drop
+            })
+            .count()
+            != expected_drop_count
+        || caller_cfg_receipt
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::GetOrDefaultString
+            })
+            .count()
+            != 1
+        || get_attempt.receiver_local.as_ref() != Some(&root_local)
+        || get_attempt.result_local.is_none()
+        || new_action.local == root_local
+        || new_action.local == set_action.local
+        || (root_clone.is_none() && set_action.local != root_local)
+        || (root_clone.is_some()
+            && root_clone.is_none_or(|clone| {
+                clone.local != root_local
+                    || clone.source_local.as_ref() != Some(&set_action.local)
+                    || set_action.local == new_action.local
+                    || set_action.local == root_local
+            }))
+        || set_action.source_local.as_ref() != Some(&new_action.local)
+        || set_action.value_type.as_ref() != Some(&payload_type)
+        || !set_action.payload_clone
+        || new_action.root != v2_resource(&new_action.local)
+        || set_action.root != v2_resource(&set_action.local)
+        || set_action.source.as_ref() != Some(&v2_resource(&new_action.local))
+        || clone_actions.len() != if has_alias_clone { 1 } else { 0 }
+        || !drop_actions
+            .iter()
+            .any(|drop| drop.local == new_action.local && drop.root == new_action.root)
+        || !drop_actions
+            .iter()
+            .any(|drop| drop.local == root_local && drop.root == v2_resource(&root_local))
+        || (has_alias_clone
+            && !drop_actions
+                .iter()
+                .any(|drop| drop.local == set_action.local && drop.root == set_action.root))
+        || {
+            let expected = if has_alias_clone {
+                [
+                    new_action.local.clone(),
+                    root_local.clone(),
+                    set_action.local.clone(),
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+            } else {
+                [new_action.local.clone(), root_local.clone()]
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            };
+            drop_actions
+                .iter()
+                .map(|drop| drop.local.clone())
+                .collect::<BTreeSet<_>>()
+                != expected
+        }
+        || drop_actions.iter().any(|drop| {
+            drop.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                || drop.root != v2_resource(&drop.local)
+                || drop.key.is_some()
+                || drop.key_type.is_some()
+                || drop.key_local.is_some()
+                || drop.key_local_mutable.is_some()
+                || drop.key_provenance.is_some()
+                || drop.key_static_digest.is_some()
+                || drop.value.is_some()
+                || drop.value_type.is_some()
+                || drop.payload_clone
+                || drop.source_local.is_some()
+                || drop.source.is_some()
+                || drop.source_node.is_some()
+                || drop.source_type.is_some()
+                || drop.result_type.is_some()
+                || drop.result_local.is_some()
+        })
+    {
+        return None;
+    }
+
+    let root_drop_actions = drop_actions
+        .iter()
+        .filter(|drop| drop.local == root_local)
+        .collect::<Vec<_>>();
+    let initial_drop_actions = drop_actions
+        .iter()
+        .filter(|drop| drop.local == new_action.local)
+        .collect::<Vec<_>>();
+    let [root_drop_action] = root_drop_actions.as_slice() else {
+        return None;
+    };
+    let [initial_drop_action] = initial_drop_actions.as_slice() else {
+        return None;
+    };
+    if explicit_drop_at(caller_body, &root_local, &root_drop_action.point).is_none()
+        || explicit_drop_at(caller_body, &new_action.local, &initial_drop_action.point).is_none()
+    {
+        return None;
+    }
+    let clone_binding_index = if let Some(clone) = root_clone {
+        let clone_bindings = caller_body
+            .root
+            .statements
+            .iter()
+            .filter_map(|statement| {
+                let (local, initializer) = binding(statement)?;
+                (initializer.node_id == clone.point).then_some((local, initializer))
+            })
+            .collect::<Vec<_>>();
+        let [(bound_local, initializer)] = clone_bindings.as_slice() else {
+            return None;
+        };
+        let (binding_index, bound_local_id) = binding_at(caller_body, &clone.point)?;
+        let source_local = set_action.local.clone();
+        if *bound_local != &root_local
+            || bound_local_id != root_local
+            || initializer.ty != root_type
+            || !matches!(
+                &initializer.kind,
+                E::Load(place)
+                    if place.base == source_local && place.projections.is_empty()
+            )
+            || clone.point != initializer.node_id
+            || clone.root != v2_resource(&root_local)
+            || clone.source_local.as_ref() != Some(&source_local)
+            || clone.source.as_ref() != Some(&set_action.root)
+            || clone.source_node.as_ref() != Some(&initializer.node_id)
+            || clone.source_type.as_ref() != Some(&root_type)
+            || clone.key.is_some()
+            || clone.key_type.is_some()
+            || clone.key_local.is_some()
+            || clone.key_local_mutable.is_some()
+            || clone.key_provenance.is_some()
+            || clone.key_static_digest.is_some()
+            || clone.value.is_some()
+            || clone.value_type.is_some()
+            || clone.payload_clone
+            || clone.result_type.is_some()
+            || clone.result_local.is_some()
+            || caller_body.locals.get(&root_local)?.mutable
+            || caller_body.locals.get(&source_local)?.ty != root_type
+        {
+            return None;
+        }
+        Some(binding_index)
+    } else {
+        None
+    };
+    let source_drop_action = if let Some(clone) = root_clone {
+        let source_drops = drop_actions
+            .iter()
+            .filter(|drop| drop.local == set_action.local && drop.root == set_action.root)
+            .collect::<Vec<_>>();
+        let [source_drop] = source_drops.as_slice() else {
+            return None;
+        };
+        if source_drop.point == root_drop_action.point
+            || source_drop.point == initial_drop_action.point
+            || source_drop.local == clone.local
+            || explicit_drop_at(caller_body, &set_action.local, &source_drop.point).is_none()
+        {
+            return None;
+        }
+        Some(*source_drop)
+    } else {
+        None
+    };
+
+    let new_attempts = caller_cfg_receipt
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::New)
+        .collect::<Vec<_>>();
+    let set_attempts = caller_cfg_receipt
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::Set)
+        .collect::<Vec<_>>();
+    let get_attempts = caller_cfg_receipt
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::GetOrDefaultString)
+        .collect::<Vec<_>>();
+    let drop_attempts = caller_cfg_receipt
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::Drop)
+        .collect::<Vec<_>>();
+    let clone_attempts = caller_cfg_receipt
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.kind == AttemptKind::Clone)
+        .collect::<Vec<_>>();
+    let [new_attempt] = new_attempts.as_slice() else {
+        return None;
+    };
+    let [set_attempt] = set_attempts.as_slice() else {
+        return None;
+    };
+    let [get_attempt_receipt] = get_attempts.as_slice() else {
+        return None;
+    };
+    if new_attempt.point != new_action.point
+        || new_attempt.receiver_local.is_some()
+        || new_attempt.result_local.as_ref() != Some(&new_action.local)
+        || !new_attempt.arguments.is_empty()
+        || set_attempt.point != set_action.point
+        || set_attempt.receiver_local.as_ref() != Some(&new_action.local)
+        || set_attempt.result_local.as_ref() != Some(&set_action.local)
+        || set_attempt.arguments.len() != 3
+        || set_attempt.arguments.first() != set_action.source_node.as_ref()
+        || set_attempt.arguments.get(1) != set_action.key.as_ref()
+        || set_attempt.arguments.get(2) != set_action.value.as_ref()
+        || *get_attempt_receipt != get_attempt
+        || get_attempt.point != call_expression.node_id
+        || get_attempt.receiver_local.as_ref() != Some(&root_local)
+        || get_attempt.result_local.is_none()
+        || get_attempt.arguments.len() != 3
+    {
+        return None;
+    }
+    match (root_clone, clone_attempts.as_slice()) {
+        (Some(clone), [attempt])
+            if attempt.point == clone.point
+                && attempt.arguments.as_slice() == [clone.point.clone()]
+                && attempt.receiver_local.as_ref() == Some(&set_action.local)
+                && attempt.result_local.as_ref() == Some(&root_local) => {}
+        (None, []) => {}
+        _ => return None,
+    }
+    if drop_attempts.len() != expected_drop_count
+        || drop_actions.iter().any(|drop| {
+            drop_attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.point == drop.point
+                        && attempt.receiver_local.as_ref() == Some(&drop.local)
+                        && attempt.result_local.is_none()
+                        && attempt.arguments.as_slice() == [drop.local.0.clone()]
+                })
+                .count()
+                != 1
+        })
+    {
+        return None;
+    }
+
+    let set_expression = caller_body
+        .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+        .ok()?
+        .remove(&set_action.point)?;
+    let set_call = builtin_call(&set_expression, "map_set", 3)?;
+    let [set_root, set_key, set_value] = set_call.arguments.as_slice() else {
+        return None;
+    };
+    let set_initial_root = direct_local(&set_root.value)?.clone();
+    let set_key_value = match &set_key.value.kind {
+        E::Literal(L::String(value)) if set_key.value.ty == string_type => value.clone(),
+        _ => return None,
+    };
+    let (set_value_string, set_value_source) =
+        string_literal_source(caller_body, &set_value.value, &payload_type)?;
+    // The built-in `map_set` call retains the concrete payload type in its
+    // resolved argument conversion; erasure happens at the Map ABI boundary.
+    // Bind the profile to an exact String identity conversion here rather than
+    // requiring a generic-call `DynamicAnyPack` that this builtin does not
+    // emit.
+    if set_initial_root != new_action.local
+        || set_action.key.as_ref() != Some(&set_key.value.node_id)
+        || set_expression.ty != root_type
+        || set_call.result != root_type
+        || set_root.conversion.kind != ConversionKind::Identity
+        || set_root.conversion.from != root_type
+        || set_root.conversion.to != root_type
+        || set_key.value.ty != string_type
+        || set_key.conversion.kind != ConversionKind::Identity
+        || set_key.conversion.from != string_type
+        || set_key.conversion.to != string_type
+        || set_value.value.ty != payload_type
+        || set_value.conversion.kind != ConversionKind::Identity
+        || set_value.conversion.from != payload_type
+        || set_value.conversion.to != payload_type
+        || set_action.value.as_ref() != Some(&set_value.value.node_id)
+        || set_action.key_type.as_ref() != Some(&string_type)
+        || set_action.value_type.as_ref() != Some(&payload_type)
+    {
+        return None;
+    }
+    let (set_binding_index, set_result_local) = binding_at(caller_body, &set_action.point)?;
+    if set_result_local != set_action.local
+        || (root_clone.is_none() && set_result_local != root_local)
+        || root_clone.is_some_and(|clone| {
+            clone.local != root_local || clone.source_local.as_ref() != Some(&set_result_local)
+        })
+    {
+        return None;
+    }
+    let (call_binding_index, caller_result_local) =
+        binding_at(caller_body, &call_expression.node_id)?;
+    if get_attempt.result_local.as_ref() != Some(&caller_result_local)
+        || caller_body.locals.get(&caller_result_local)?.ty != payload_type
+    {
+        return None;
+    }
+    let (set_value_local, set_value_binding_point, set_value_binding_index, set_value_drop) =
+        if let Some((local, binding_point, binding_index)) = set_value_source {
+            let (drop_point, drop_index, drop_place_index) =
+                unique_explicit_drop(caller_body, &local)?;
+            (
+                Some(local),
+                Some(binding_point),
+                Some(binding_index),
+                Some((drop_point, drop_index, drop_place_index)),
+            )
+        } else {
+            (None, None, None, None)
+        };
+    let (caller_default_local, caller_default_binding_point, default_binding_index): (
+        Option<crate::core::ir::ResolvedLocalId>,
+        Option<NodeId>,
+        Option<usize>,
+    ) = if let Some((local, binding_point, binding_index)) = default_source {
+        (Some(local), Some(binding_point), Some(binding_index))
+    } else {
+        (None, None, None)
+    };
+    let new_expression = caller_body
+        .call_expressions(&program.resolved_types, &program.resolved_type_targets)
+        .ok()?
+        .remove(&new_action.point)?;
+    let new_call = builtin_call(&new_expression, "map_new", 0)?;
+    let (new_binding_index, initial_root_local) = binding_at(caller_body, &new_action.point)?;
+    if initial_root_local != new_action.local
+        || new_expression.ty != root_type
+        || new_call.result != root_type
+        || caller_body.locals.get(&initial_root_local)?.ty != root_type
+        || caller_body.locals.get(&initial_root_local)?.mutable
+        || caller_body.locals.get(&root_local)?.mutable
+        || helper_signature.parameters.len() != 3
+        || call.arguments[0].parameter != helper_signature.parameters[0].id
+        || call.arguments[1].parameter != helper_signature.parameters[1].id
+        || call.arguments[2].parameter != helper_signature.parameters[2].id
+    {
+        return None;
+    }
+    let (root_drop_index, root_drop_place_index) = explicit_drop_at(
+        caller_body,
+        &root_local,
+        &drop_actions
+            .iter()
+            .find(|drop| drop.local == root_local)?
+            .point,
+    )?;
+    let (initial_drop_index, initial_drop_place_index) = explicit_drop_at(
+        caller_body,
+        &initial_root_local,
+        &drop_actions
+            .iter()
+            .find(|drop| drop.local == initial_root_local)?
+            .point,
+    )?;
+    let set_root_drop_action = source_drop_action.unwrap_or(*root_drop_action);
+    let (set_root_drop_index, set_root_drop_place_index) =
+        explicit_drop_at(caller_body, &set_action.local, &set_root_drop_action.point)?;
+    let (result_settlement, result_settlement_index) = if let Some((point, index, place_index)) =
+        unique_explicit_drop(caller_body, &caller_result_local)
+    {
+        (
+                crate::core::ownership::OrdinaryMapOwnedAnyV2GetOrDefaultStringResultSettlement::ExplicitDrop {
+                    point,
+                    place_index,
+                },
+                index,
+            )
+    } else {
+        if has_any_direct_drop(caller_body, &caller_result_local) {
+            return None;
+        }
+        let returned = caller_body.root.result.as_deref()?;
+        if direct_local(returned) != Some(&caller_result_local) || returned.ty != payload_type {
+            return None;
+        }
+        (
+                crate::core::ownership::OrdinaryMapOwnedAnyV2GetOrDefaultStringResultSettlement::TailReturn {
+                    point: returned.node_id.clone(),
+                },
+                caller_body.root.statements.len(),
+            )
+    };
+    if default_binding_index.is_some_and(|index| index >= call_binding_index)
+        || set_value_binding_index.is_some_and(|index| index >= set_binding_index)
+        || set_value_drop.as_ref().is_some_and(|(_, index, _)| {
+            *index <= call_binding_index
+                || *index <= initial_drop_index
+                || *index <= root_drop_index
+        })
+        || result_settlement_index <= call_binding_index
+        || set_root_drop_index <= call_binding_index
+        || source_drop_action.is_some_and(|drop| {
+            explicit_drop_at(caller_body, &drop.local, &drop.point)
+                .is_none_or(|(index, _)| index <= call_binding_index)
+        })
+        || (set_action.local == root_local) != (set_root_drop_index == root_drop_index)
+    {
+        return None;
+    }
+    if !(new_binding_index < set_binding_index
+        && set_binding_index < call_binding_index
+        && clone_binding_index
+            .is_none_or(|index| set_binding_index < index && index < call_binding_index)
+        && call_binding_index < initial_drop_index
+        && call_binding_index < root_drop_index)
+    {
+        return None;
+    }
+    let helper_source_key = program
+        .node_meta
+        .get(helper_owner)
+        .map(|meta| meta.origin.user_span())
+        .unwrap_or_else(|| helper_function.origin.user_span());
+    if !canonical_std_maps_get_or_default(program, helper_owner)
+        || helper_function.generics.len() != 1
+        || !helper_function.pub_
+        || helper_signature.owner != *helper_owner
+        || helper_signature.generic_parameters.len() != 1
+        || helper_signature.parameters.len() != 3
+        || helper_body.owner != *helper_owner
+        || helper_body.parameters.len() != 3
+        || program
+            .source_registry
+            .key(helper_source_key.source_id)
+            .is_none()
+    {
+        return None;
+    }
+    let generic = helper_signature.generic_parameters[0].clone();
+    let [map_parameter, key_parameter, default_parameter] = helper_signature.parameters.as_slice()
+    else {
+        return None;
+    };
+    let [map_local, key_local, default_local] = helper_body.parameters.as_slice() else {
+        return None;
+    };
+    let generic_type = &helper_signature.result;
+    if helper_signature.result != helper_signature.parameters[2].ty
+        || helper_signature.parameters[0].id != map_parameter.id
+        || helper_signature.parameters[1].id != key_parameter.id
+        || helper_signature.parameters[2].id != default_parameter.id
+        || helper_body.locals.get(map_local)?.ty != map_parameter.ty
+        || helper_body.locals.get(key_local)?.ty != key_parameter.ty
+        || helper_body.locals.get(default_local)?.ty != default_parameter.ty
+        || map_parameter.permission != Some(crate::core::Permission::View)
+        || !is_record(&program.resolved_types, &map_parameter.ty)
+        || key_parameter.ty != string_type
+        || !matches!(program.resolved_types.get(generic_type), Some(T::GenericParameter(id)) if id == &generic)
+        || !matches!(program.resolved_types.get(&default_parameter.ty), Some(T::GenericParameter(id)) if id == &generic)
+    {
+        return None;
+    }
+    let [pair_statement, selected_statement, pair_drop_statement] =
+        helper_body.root.statements.as_slice()
+    else {
+        return None;
+    };
+    let (pair_local, pair_initializer) = binding(pair_statement)?;
+    let (selected_local, selected_initializer) = binding(selected_statement)?;
+    let pair_call = builtin_call(pair_initializer, "map_get", 2)?;
+    let [map_argument, helper_key_argument] = pair_call.arguments.as_slice() else {
+        return None;
+    };
+    let T::Tuple(pair_fields) = program.resolved_types.get(&pair_initializer.ty)? else {
+        return None;
+    };
+    if pair_fields.len() != 2
+        || pair_fields[0] != bool_type
+        || !is_dynamic_any(&program.resolved_types, &pair_fields[1])
+        || pair_initializer.ty != pair_call.result
+        || helper_body.locals.get(pair_local)?.ty != pair_initializer.ty
+        || pair_call.type_arguments.len() != 0
+        || pair_call.permission.is_some()
+        || !pair_call.session.is_empty()
+        || direct_local(&map_argument.value) != Some(map_local)
+        || direct_local(&helper_key_argument.value) != Some(key_local)
+        || map_argument.conversion.kind != ConversionKind::Identity
+        || map_argument.value.ty != map_parameter.ty
+        || helper_key_argument.conversion.kind != ConversionKind::Identity
+        || helper_key_argument.value.ty != string_type
+        || !matches!(pair_statement.kind, S::Bind { .. })
+        || selected_initializer.ty != pair_fields[1]
+        || helper_body.locals.get(selected_local)?.ty != pair_fields[1]
+    {
+        return None;
+    }
+    let E::If {
+        condition,
+        then_block,
+        else_block,
+    } = &selected_initializer.kind
+    else {
+        return None;
+    };
+    if condition.ty != bool_type
+        || !direct_tuple_projection(condition, pair_local, 0)
+        || then_block.statements.len() != 0
+        || else_block.statements.len() != 0
+    {
+        return None;
+    }
+    let found_value = then_block.result.as_deref()?;
+    let default_branch_value = else_block.result.as_deref()?;
+    let E::Cast {
+        value: default_load,
+        conversion: default_pack,
+    } = &default_branch_value.kind
+    else {
+        return None;
+    };
+    let E::Load(default_place) = &default_load.kind else {
+        return None;
+    };
+    if default_place.base != *default_local
+        || !default_place.projections.is_empty()
+        || default_load.ty != *generic_type
+        || default_pack.kind != ConversionKind::DynamicAnyPack
+        || default_pack.from != *generic_type
+        || default_pack.to != pair_fields[1]
+        || default_branch_value.ty != pair_fields[1]
+        || !direct_tuple_projection(found_value, pair_local, 1)
+        || found_value.ty != pair_fields[1]
+    {
+        return None;
+    }
+    let helper_return = helper_body.root.result.as_deref()?;
+    let E::Cast {
+        value: selected_value,
+        conversion: unpack,
+    } = &helper_return.kind
+    else {
+        return None;
+    };
+    if direct_local(selected_value) != Some(selected_local)
+        || selected_value.ty != pair_fields[1]
+        || unpack.kind != ConversionKind::DynamicAnyUnpack
+        || unpack.from != pair_fields[1]
+        || unpack.to != *generic_type
+        || helper_return.ty != *generic_type
+    {
+        return None;
+    }
+    let S::Drop(pair_drops) = &pair_drop_statement.kind else {
+        return None;
+    };
+    if pair_drops.len() != 1
+        || pair_drops[0].base != *pair_local
+        || !pair_drops[0].projections.is_empty()
+    {
+        return None;
+    }
+    let pair_drop_point = pair_drop_statement.node_id.clone();
+
+    Some(Receipt {
+        profile_version: ProfileVersion::V1,
+        caller_owner: caller_owner.clone(),
+        call_node: call_expression.node_id.clone(),
+        call_target: helper_owner.clone(),
+        call_type_argument: payload_type.clone(),
+        miss_payload_type,
+        call_arguments: call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.node_id.clone())
+            .collect(),
+        call_parameters: call
+            .arguments
+            .iter()
+            .map(|argument| argument.parameter.clone())
+            .collect(),
+        call_argument_types: call
+            .arguments
+            .iter()
+            .map(|argument| argument.value.ty.clone())
+            .collect(),
+        call_conversions: call
+            .arguments
+            .iter()
+            .map(|argument| argument.conversion.clone())
+            .collect(),
+        call_result_type: call.result.clone(),
+        caller_result_local,
+        caller_call_binding_point: caller_body.root.statements[call_binding_index]
+            .node_id
+            .clone(),
+        caller_initial_root_local: initial_root_local.clone(),
+        caller_root_local: root_local.clone(),
+        caller_set_root_local: set_action.local.clone(),
+        caller_root: set_action.root.clone(),
+        caller_root_type: root_type,
+        caller_new_point: new_action.point.clone(),
+        caller_set_point: set_action.point.clone(),
+        caller_set_key: set_key.value.node_id.clone(),
+        caller_set_key_bytes: set_key_value,
+        caller_set_value: set_value.value.node_id.clone(),
+        caller_set_value_local: set_value_local,
+        caller_set_value_binding_point: set_value_binding_point,
+        caller_set_value_drop_point: set_value_drop.as_ref().map(|(point, _, _)| point.clone()),
+        caller_set_value_drop_place_index: set_value_drop
+            .as_ref()
+            .map(|(_, _, place_index)| *place_index),
+        caller_set_value_string: set_value_string,
+        caller_set_value_type: set_value.value.ty.clone(),
+        caller_query_key: key_argument.value.node_id.clone(),
+        caller_query_key_bytes: key_literal,
+        caller_default: default_argument.value.node_id.clone(),
+        caller_default_local,
+        caller_default_binding_point,
+        caller_default_string: default_string,
+        caller_default_type: default_argument.value.ty.clone(),
+        caller_result_settlement: result_settlement,
+        caller_root_drop_point: drop_actions
+            .iter()
+            .find(|drop| drop.local == root_local)?
+            .point
+            .clone(),
+        caller_root_drop_place_index: root_drop_place_index,
+        caller_set_root_drop_point: set_root_drop_action.point.clone(),
+        caller_set_root_drop_place_index: set_root_drop_place_index,
+        caller_initial_root_drop_point: drop_actions
+            .iter()
+            .find(|drop| drop.local == initial_root_local)?
+            .point
+            .clone(),
+        caller_initial_root_drop_place_index: initial_drop_place_index,
+        helper_owner: helper_owner.clone(),
+        helper_map_parameter: map_parameter.id.clone(),
+        helper_map_permission: crate::core::Permission::View,
+        helper_key_parameter: key_parameter.id.clone(),
+        helper_default_parameter: default_parameter.id.clone(),
+        helper_map_local: map_local.clone(),
+        helper_key_local: key_local.clone(),
+        helper_default_local: default_local.clone(),
+        helper_get_any_call: pair_initializer.node_id.clone(),
+        helper_pair_local: pair_local.clone(),
+        helper_pair_binding_point: pair_statement.node_id.clone(),
+        helper_pair_type: pair_initializer.ty.clone(),
+        helper_found_condition: condition.node_id.clone(),
+        helper_found_projection: condition.node_id.clone(),
+        helper_payload_projection: found_value.node_id.clone(),
+        helper_default_pack: default_branch_value.node_id.clone(),
+        // The resolved std::maps helper body is generic, so its raw pack
+        // conversion starts from T. The callsite receipt records the checked
+        // specialization of that source type (String) while preserving the
+        // helper's DynamicAny destination below.
+        helper_default_pack_from: payload_type.clone(),
+        helper_default_pack_to: default_pack.to.clone(),
+        helper_unpack_cast: helper_return.node_id.clone(),
+        helper_unpack_target: unpack.to.clone(),
+        helper_if_node: selected_initializer.node_id.clone(),
+        helper_found_arm_block: then_block.node_id.clone(),
+        helper_default_arm_block: else_block.node_id.clone(),
+        helper_selected_local: selected_local.clone(),
+        helper_selected_binding_point: selected_statement.node_id.clone(),
+        helper_default_load: default_load.node_id.clone(),
+        helper_pair_drop_point: pair_drop_point,
+        helper_return_node: helper_return.node_id.clone(),
+        helper_result_type: helper_signature.result.clone(),
+    })
+}
+
+/// Audit every non-primitive DynamicAnyUnpack belonging to an owner-v2
+/// GetAny/Values attempt, even when source inference could not produce a
+/// provisional cast candidate. Older owner profiles keep their own conversion
+/// contract; they do not inherit owner-v2's canonical-Label restriction.
+fn validate_ordinary_map_owned_any_v2_nonprimitive_unpack_boundary(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ir::{CheckedConversionKind, ResolvedExprKind};
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+
+    fn direct_map_get_payload(
+        body: &crate::core::ResolvedBody,
+        value: &crate::core::ResolvedExpr,
+    ) -> bool {
+        let payload_local = match &value.kind {
+            ResolvedExprKind::Load(place)
+                if matches!(
+                    place.projections.as_slice(),
+                    [crate::core::ir::ResolvedProjection::Tuple { index: 1, .. }]
+                ) =>
+            {
+                Some(place.base.clone())
+            }
+            ResolvedExprKind::Project {
+                value,
+                projection: crate::core::ir::ResolvedValueProjection::Tuple(1),
+            } => match &value.kind {
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(payload_local) = payload_local else {
+            return false;
+        };
+        let mut initializers = body.root.statements.iter().filter_map(|statement| {
+            let crate::core::ResolvedStmtKind::Bind {
+                pattern:
+                    crate::core::ResolvedPattern {
+                        kind:
+                            crate::core::ResolvedPatternKind::Binding {
+                                local,
+                                by_reference: None,
+                            },
+                        ..
+                    },
+                initializer: Some(initializer),
+            } = &statement.kind
+            else {
+                return None;
+            };
+            (local == &payload_local).then_some(initializer)
+        });
+        let Some(initializer) = initializers.next() else {
+            return false;
+        };
+        initializers.next().is_none()
+            && matches!(
+                &initializer.kind,
+                ResolvedExprKind::Call(call)
+                    if call.arguments.len() == 2
+                        && matches!(
+                            &call.callee,
+                            crate::core::ResolvedCallee::Builtin(name)
+                                if name.as_str() == "map_get"
+                        )
+            )
+    }
+
+    fn canonical_std_maps_get_or_default(program: &CheckedProgram, owner: &NodeId) -> bool {
+        let Some(function) = program.functions.get(owner) else {
+            return false;
+        };
+        let span = program
+            .node_meta
+            .get(owner)
+            .map(|meta| meta.origin.user_span())
+            .unwrap_or_else(|| function.origin.user_span());
+        program
+            .source_registry
+            .key(span.source_id)
+            .is_some_and(|key| key.as_str() == "stdlib:maps.mimi")
+            && matches!(
+                function.qualified_name.as_str(),
+                "get_or_default" | "std::maps::get_or_default"
+            )
+    }
+
+    let mut errors = Vec::new();
+    let route_admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+    let computed_owner_chain_owner = NodeId("function:main".into());
+    let computed_owner_chain_candidates = candidates.values().map(BTreeSet::len).sum::<usize>()
+        == 1
+        && candidates.len() == 1
+        && candidates
+            .get(&computed_owner_chain_owner)
+            .is_some_and(|casts| casts.len() == 1);
+    for (owner, body) in &program.resolved_bodies {
+        let casts =
+            match body.cast_expressions(&program.resolved_types, &program.resolved_type_targets) {
+                Ok(casts) => casts,
+                Err(body_errors) => {
+                    errors.extend(body_errors.into_iter().map(|error| {
+                        Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {error}"),
+                            body.root.origin.user_span(),
+                        )
+                    }));
+                    continue;
+                }
+            };
+        let cfg = program
+            .resource_analyses
+            .get(owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .filter(|cfg| cfg.owner == *owner && cfg.profile_version == ProfileVersion::V2);
+        for (cast, expression) in casts {
+            let ResolvedExprKind::Cast { value, conversion } = &expression.kind else {
+                continue;
+            };
+            if conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+                || !matches!(
+                    program.resolved_types.get(&conversion.from),
+                    Some(crate::core::ResolvedType::DynamicAny { capability })
+                        if capability == "type.dynamic_value"
+                )
+                || matches!(
+                    program.resolved_types.get(&conversion.to),
+                    Some(crate::core::ResolvedType::Primitive(_))
+                )
+            {
+                continue;
+            }
+
+            // Generic source bodies are checked before their type arguments
+            // are known. Preserve only the std::maps `get_or_default<T>`
+            // template conversion from the direct `.1` payload of a builtin
+            // Map.Get result to its declared T. Concrete executable routes
+            // still run the DynamicAny backend gate (E0722) until a call-site
+            // type receipt exists; arbitrary `Any as T` remains rejected.
+            let owner_generic_target = canonical_std_maps_get_or_default(program, owner)
+                && conversion.to == expression.ty
+                && direct_map_get_payload(body, value)
+                && program
+                    .resolved_signatures
+                    .get(owner)
+                    .is_some_and(|signature| {
+                        signature.owner == *owner
+                            && matches!(
+                                program.resolved_types.get(&conversion.to),
+                                Some(crate::core::ResolvedType::GenericParameter(binder))
+                                    if signature.generic_parameters.contains(binder)
+                            )
+                    });
+            if owner_generic_target {
+                continue;
+            }
+
+            let is_getany_candidate = cfg.is_some()
+                && candidates
+                    .get(owner)
+                    .is_some_and(|owner_candidates| owner_candidates.contains(&cast));
+            let is_cfg_unpack_attempt = cfg.is_some_and(|cfg| {
+                cfg.unpack_receipts
+                    .iter()
+                    .any(|receipt| receipt.cast == cast)
+            });
+            // The computed-string owner-chain cast is nominal (`as Label`),
+            // so it is intentionally absent from the builtin unpack call
+            // census. Admit it here only when the independently checked
+            // chain receipt names this exact cast, GetAny pair, selected Set
+            // payload, and one explicit pair Drop. The detailed source DAG
+            // and byte equality are replayed by the nonprimitive receipt
+            // validator earlier in CheckedProgram finalization.
+            let is_exact_computed_string_owner_chain =
+                route_admission.ordinary_map_owned_any_v2.is_computed_string_key_owner_chain()
+                    && computed_owner_chain_candidates
+                    && owner == &computed_owner_chain_owner
+                    && candidates
+                        .get(owner)
+                        .is_some_and(|casts| casts.contains(&cast))
+                    && cfg.is_some_and(|cfg| {
+                        let matching_unpacks = cfg
+                            .unpack_receipts
+                            .iter()
+                            .filter(|receipt| receipt.cast == cast)
+                            .collect::<Vec<_>>();
+                        let [unpack] = matching_unpacks.as_slice() else {
+                            return false;
+                        };
+                        let matching_chains = cfg
+                            .result_receipts
+                            .iter()
+                            .filter_map(|result| {
+                                result
+                                    .computed_string_key_owner_chain
+                                    .as_deref()
+                                    .map(|chain| (result, chain))
+                            })
+                            .collect::<Vec<_>>();
+                        let [(result, chain)] = matching_chains.as_slice() else {
+                            return false;
+                        };
+                        let mut pair_without_chain = (*result).clone();
+                        pair_without_chain.computed_string_key_owner_chain = None;
+                        let matching_gets = cfg
+                            .actions
+                            .iter()
+                            .filter(|action| {
+                                action.kind
+                                    == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                    && action.point == unpack.operation
+                            })
+                            .collect::<Vec<_>>();
+                        let [get] = matching_gets.as_slice() else {
+                            return false;
+                        };
+                        let exact_key_uses = {
+                            let get_uses = chain
+                                .key_uses
+                                .iter()
+                                .filter(|usage| usage.action == chain.get_any)
+                                .collect::<Vec<_>>();
+                            let set_uses = chain
+                                .key_uses
+                                .iter()
+                                .filter(|usage| usage.action == chain.map_set)
+                                .collect::<Vec<_>>();
+                            matches!((get_uses.as_slice(), set_uses.as_slice()), ([get_use], [set_use])
+                                if get_use.action_kind
+                                    == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                    && set_use.action_kind
+                                        == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                    && get_use.key_type == set_use.key_type
+                                    && get_use.value_proof.expression_type
+                                        == set_use.value_proof.expression_type
+                                    && get_use.value_proof.bytes == set_use.value_proof.bytes
+                                    && get_use.value_proof.digest == set_use.value_proof.digest)
+                        };
+                        cfg.owner == *owner
+                            && cfg.profile_version
+                                == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                            && chain.profile_version
+                                == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion::V1
+                            && chain.owner == *owner
+                            && chain.get_any == **get
+                            && chain.pair == pair_without_chain
+                            && result.operation == unpack.operation
+                            && result.kind
+                                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && result.binding == unpack.pair_binding
+                            && result.binding_point == unpack.pair_binding_point
+                            && result.settlement
+                                == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                            && result.settlement_point.as_ref()
+                                == Some(&unpack.settlement_point)
+                            && unpack.profile_version
+                                == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                            && unpack.conversion_kind == conversion.kind
+                            && unpack.conversion_from == conversion.from
+                            && unpack.conversion_to == conversion.to
+                            && unpack.settlement
+                                == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                            && chain.pair.binding == unpack.pair_binding
+                            && chain.pair_drop.local == unpack.pair_binding
+                            && chain.pair_drop.binding_point == unpack.pair_binding_point
+                            && chain.pair_drop.binding_type == result.result_type
+                            && chain.pair_drop.settlement_point == unpack.settlement_point
+                            && chain.pair.settlement_point.as_ref()
+                                == Some(&chain.pair_drop.settlement_point)
+                            && chain.payload.set_action == chain.map_set
+                            && chain.payload.set_value_type == expression.ty
+                            && chain.map_set.value_type.as_ref() == Some(&expression.ty)
+                            && chain.map_set.payload_clone
+                            && chain.pair_snapshot_observation.snapshot_unpack == cast
+                            && chain.pair_snapshot_observation.snapshot_projection
+                                == unpack.projection
+                            && chain.pair_snapshot_observation.snapshot_type == expression.ty
+                            && exact_key_uses
+                    });
+            let is_values_receipt = cfg.is_some_and(|cfg| {
+                cfg.values_unpack_receipts.iter().any(|receipt| {
+                    receipt.profile_version == ProfileVersion::V2
+                        && receipt.cast == cast
+                        && receipt.conversion_kind == conversion.kind
+                        && receipt.conversion_from == conversion.from
+                        && receipt.conversion_to == conversion.to
+                })
+            });
+            if !is_getany_candidate
+                && !is_cfg_unpack_attempt
+                && !is_values_receipt
+                && !is_exact_computed_string_owner_chain
+            {
+                continue;
+            }
+
+            let span = program
+                .node_meta
+                .get(&cast)
+                .map(|meta| meta.origin.user_span())
+                .unwrap_or_else(|| {
+                    program
+                        .node_meta
+                        .get(owner)
+                        .map(|meta| meta.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN)
+                });
+            if conversion.to != expression.ty
+                || !is_canonical_map_any_label_target(program, &conversion.to)
+            {
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0200,
+                    "DynamicAnyUnpack target must be an exact receipt-backed canonical Label",
+                    span,
+                ));
+                continue;
+            }
+
+            if !is_getany_candidate && !is_values_receipt && !is_exact_computed_string_owner_chain {
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0200,
+                    "DynamicAnyUnpack has no exact GetAny or Values source receipt",
+                    span,
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// The inference exception for local `List<Any>[index] as T` is provisional.
+/// Admit it across CheckedProgram finalization only when every direct local
+/// DynamicAny index cast joins exactly one same-owner Values unpack receipt,
+/// and every receipt points back to one such cast with the same target type.
+/// The receipt carries payload selection and the explicit snapshot Drop proof;
+/// unsupported roots, indexes, payloads, or settlement order therefore remain
+/// closed here even though the cast had to be typed to build the CFG.
+fn validate_ordinary_map_owned_any_v2_values_local_cast_receipts(
+    program: &CheckedProgram,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ir::{CheckedConversion, CheckedConversionKind};
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+
+    fn is_dynamic_any(
+        types: &crate::core::ResolvedTypeTable,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            types.get(ty),
+            Some(crate::core::ResolvedType::DynamicAny { capability })
+                if capability == "type.dynamic_value"
+        )
+    }
+
+    fn is_dynamic_any_list(
+        types: &crate::core::ResolvedTypeTable,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        matches!(
+            types.get(ty),
+            Some(crate::core::ResolvedType::Nominal { item, arguments, .. })
+                if item.as_str() == "builtin:type:List"
+                    && arguments.len() == 1
+                    && is_dynamic_any(types, &arguments[0])
+        )
+    }
+
+    fn direct_index_base(
+        source: &crate::core::ResolvedExpr,
+    ) -> Option<(
+        crate::core::ResolvedLocalId,
+        NodeId,
+        crate::core::ResolvedTypeId,
+        Option<crate::core::ResolvedLocalId>,
+    )> {
+        let crate::core::ResolvedExprKind::Project {
+            value,
+            projection: crate::core::ir::ResolvedValueProjection::Index(index),
+        } = &source.kind
+        else {
+            return None;
+        };
+        let crate::core::ResolvedExprKind::Load(place) = &value.kind else {
+            return None;
+        };
+        place.projections.is_empty().then(|| {
+            let index_local = match &index.kind {
+                crate::core::ResolvedExprKind::Load(index_place)
+                    if index_place.projections.is_empty() =>
+                {
+                    Some(index_place.base.clone())
+                }
+                _ => None,
+            };
+            (
+                place.base.clone(),
+                index.node_id.clone(),
+                index.ty.clone(),
+                index_local,
+            )
+        })
+    }
+
+    #[derive(Clone)]
+    struct Candidate {
+        snapshot: crate::core::ResolvedLocalId,
+        snapshot_type: crate::core::ResolvedTypeId,
+        index_projection: NodeId,
+        index_expression: NodeId,
+        index_type: crate::core::ResolvedTypeId,
+        index_local: Option<crate::core::ResolvedLocalId>,
+        conversion: CheckedConversion,
+        target: crate::core::ResolvedTypeId,
+    }
+
+    let mut candidates = BTreeMap::<(NodeId, NodeId), Candidate>::new();
+    let mut errors = Vec::new();
+    for (owner, body) in &program.resolved_bodies {
+        let casts = body
+            .cast_expressions(&program.resolved_types, &program.resolved_type_targets)
+            .map_err(|body_errors| {
+                body_errors
+                    .into_iter()
+                    .map(|error| {
+                        Diagnostic::error(
+                            format!("TOOL-RESOLUTION-001: {error}"),
+                            body.root.origin.user_span(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })?;
+        for (cast_id, expression) in casts {
+            let crate::core::ResolvedExprKind::Cast { value, conversion } = &expression.kind else {
+                continue;
+            };
+            if conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+                || !is_dynamic_any(&program.resolved_types, &conversion.from)
+            {
+                continue;
+            }
+            let Some((snapshot, index_expression, index_type, index_local)) =
+                direct_index_base(value)
+            else {
+                continue;
+            };
+            let Some(local) = body.locals.get(&snapshot) else {
+                continue;
+            };
+            if !is_dynamic_any_list(&program.resolved_types, &local.ty) {
+                continue;
+            }
+            let key = (owner.clone(), cast_id.clone());
+            let candidate = Candidate {
+                snapshot,
+                snapshot_type: local.ty.clone(),
+                index_projection: value.node_id.clone(),
+                index_expression,
+                index_type,
+                index_local,
+                conversion: conversion.clone(),
+                target: expression.ty.clone(),
+            };
+            if candidates.insert(key, candidate).is_some() {
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0218,
+                    "local Values unpack cast has a duplicated Checker source identity",
+                    expression.origin.user_span(),
+                ));
+            }
+        }
+    }
+
+    let mut receipts = BTreeMap::<
+        (NodeId, NodeId),
+        Vec<(
+            NodeId,
+            ProfileVersion,
+            crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt,
+        )>,
+    >::new();
+    for (owner, analysis) in &program.resource_analyses {
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            continue;
+        };
+        for receipt in &cfg.values_unpack_receipts {
+            receipts
+                .entry((owner.clone(), receipt.cast.clone()))
+                .or_default()
+                .push((cfg.owner.clone(), cfg.profile_version, receipt.clone()));
+        }
+    }
+
+    for (key @ (owner, cast), candidate) in &candidates {
+        let matches = receipts.get(key).map(Vec::as_slice).unwrap_or_default();
+        let [(receipt_owner, cfg_profile, receipt)] = matches else {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0200,
+                "direct List<Any> indexed cast requires one exact Values unpack receipt with payload disposition and explicit snapshot Drop",
+                program
+                    .node_meta
+                    .get(cast)
+                    .map(|meta| meta.origin.user_span())
+                    .or_else(|| program.node_meta.get(owner).map(|meta| meta.origin.user_span()))
+                    .unwrap_or(Span::UNKNOWN),
+            ));
+            continue;
+        };
+        let exact = receipt_owner == owner
+            && *cfg_profile == ProfileVersion::V2
+            && receipt.profile_version == ProfileVersion::V2
+            && receipt.cast == *cast
+            && receipt.snapshot_binding == candidate.snapshot
+            && receipt.snapshot_type == candidate.snapshot_type
+            && receipt.index_projection == candidate.index_projection
+            && receipt.index_expression == candidate.index_expression
+            && receipt.index_type == candidate.index_type
+            && receipt.index_local == candidate.index_local
+            && receipt.conversion_kind == candidate.conversion.kind
+            && receipt.conversion_from == candidate.conversion.from
+            && receipt.conversion_to == candidate.target
+            && candidate.target == candidate.conversion.to
+            && receipt.index_disposition.is_canonical()
+            && match receipt.index_disposition {
+                crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition::SelectedPayload => {
+                    !receipt.payload_selection.is_empty()
+                }
+                crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition::AlwaysOutOfBounds {
+                    ..
+                } => receipt.payload_selection.is_empty(),
+            }
+            && receipt.settlement
+                == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            && !receipt.settlement_point.0.trim().is_empty();
+        if !exact {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0200,
+                "direct List<Any> indexed cast disagrees with its exact Values unpack receipt",
+                program
+                    .node_meta
+                    .get(cast)
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or(Span::UNKNOWN),
+            ));
+        }
+    }
+
+    for (key @ (owner, cast), matching_receipts) in &receipts {
+        if matching_receipts.len() != 1 || !candidates.contains_key(key) {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                format!(
+                    "Checker Values unpack receipt for '{}' has no unique provisional local indexed cast",
+                    owner.0
+                ),
+                program
+                    .node_meta
+                    .get(cast)
+                    .map(|meta| meta.origin.user_span())
+                    .or_else(|| program.node_meta.get(owner).map(|meta| meta.origin.user_span()))
+                    .unwrap_or(Span::UNKNOWN),
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// A bare List has no source-visible element type. The one provisional
+/// `bare_list[index] as string` form is allowed to cross the CheckedProgram
+/// boundary only when the whole-program Checker pass attached its independent
+/// Values producer/caller receipt to the exact cast. This keeps unrelated
+/// bare List indexing fail-closed even though inference needed a temporary
+/// DynamicAny type to build the source-shaped resolved body.
+fn validate_ordinary_map_owned_any_v2_values_crosscall_string_receipts(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<(), Vec<Diagnostic>> {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as ProfileVersion;
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion as ProducerProfileVersion;
+
+    let mut expected = BTreeSet::new();
+    let mut errors = Vec::new();
+    for (caller_owner, casts) in candidates {
+        for cast in casts {
+            if !expected.insert((caller_owner.clone(), cast.clone())) {
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0218,
+                    "bare List String extraction has a duplicated Checker candidate identity",
+                    program
+                        .node_meta
+                        .get(cast)
+                        .map(|meta| meta.origin.user_span())
+                        .unwrap_or(Span::UNKNOWN),
+                ));
+            }
+        }
+    }
+
+    let mut attached = BTreeSet::new();
+    let mut duplicate_attached = BTreeSet::new();
+    for (producer_owner, analysis) in program.resource_analyses() {
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            continue;
+        };
+        let Some(receipt) = cfg.values_crosscall_string_caller_receipt.as_ref() else {
+            continue;
+        };
+        let identity = (receipt.caller_owner.clone(), receipt.unpack_cast.clone());
+        if !attached.insert(identity.clone()) {
+            duplicate_attached.insert(identity);
+            continue;
+        }
+        let (expected_element_count, expected_index) = match receipt.profile_version {
+            ProfileVersion::V1 | ProfileVersion::V3 => (1, 0),
+            ProfileVersion::V2 | ProfileVersion::V4 => (2, 1),
+        };
+        let result_branch_profile = matches!(
+            receipt.profile_version,
+            ProfileVersion::V3 | ProfileVersion::V4
+        );
+        let expected_result_producer_profile = match receipt.profile_version {
+            ProfileVersion::V3 => Some(ProducerProfileVersion::V1),
+            ProfileVersion::V4 => Some(ProducerProfileVersion::V2),
+            ProfileVersion::V1 | ProfileVersion::V2 => None,
+        };
+        let profile_fields_match = receipt.values_element_count == expected_element_count
+            && receipt.index_value == expected_index
+            && receipt.producer_sorted_keys.len() == expected_element_count
+            && receipt
+                .producer_sorted_keys
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && (!matches!(
+                receipt.profile_version,
+                ProfileVersion::V2 | ProfileVersion::V4
+            ) || receipt.producer_sorted_keys == ["a", "b"]);
+        let straightline_producer_matches = cfg
+            .values_producer_return_receipt
+            .as_ref()
+            .is_some_and(|producer| {
+                producer.owner == receipt.producer_owner
+                    && producer.values_operation == receipt.producer_values_operation
+                    && producer.return_value == receipt.producer_return
+                    && producer.root_settlements.len() == expected_element_count + 1
+                    && producer.payload_settlements.len() == expected_element_count
+            });
+        let result_producer_matches = cfg
+            .values_result_producer_receipt
+            .as_ref()
+            .is_some_and(|producer| {
+                let expected_sets = expected_element_count;
+                let expected_drops = (expected_sets + 1) * (expected_sets + 2) / 2;
+                let expected_actions = expected_sets * 4 + 2;
+                let non_drop_actions = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                    })
+                    .collect::<Vec<_>>();
+                Some(producer) == receipt.producer_result_receipt.as_ref()
+                    && Some(producer.profile_version) == expected_result_producer_profile
+                    && producer.owner == receipt.producer_owner
+                    && producer.values_operation == receipt.producer_values_operation
+                    && producer.success_result == receipt.producer_return
+                    && producer.set_branches.len() == expected_sets
+                    && producer.paths.len() == expected_sets + 2
+                    && producer
+                        .paths
+                        .iter()
+                        .filter(|path| {
+                            path.kind
+                                == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultPathKind::ValuesSnapshot
+                        })
+                        .count()
+                        == 1
+                    && producer
+                        .paths
+                        .iter()
+                        .filter(|path| {
+                            path.kind
+                                == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultPathKind::EmptyList
+                        })
+                        .count()
+                        == expected_sets + 1
+                    && producer.root_settlements.len() == expected_drops
+                    && producer.payload_settlements.len() == expected_sets * (expected_sets + 2)
+                    && cfg.actions.len() == expected_actions
+                    && cfg.attempts.len() == expected_actions
+                    && non_drop_actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                        })
+                        .count()
+                        == 1
+                    && non_drop_actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                        })
+                        .count()
+                        == expected_sets
+                    && non_drop_actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                        })
+                        .count()
+                        == 1
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                        })
+                        .count()
+                        == expected_drops
+            });
+        let producer_matches = cfg.owner == *producer_owner
+            && receipt.producer_owner == *producer_owner
+            && if result_branch_profile {
+                cfg.values_producer_return_receipt.is_none() && result_producer_matches
+            } else {
+                receipt.producer_result_receipt.is_none()
+                    && cfg.values_result_producer_receipt.is_none()
+                    && cfg.actions.len() == expected_element_count * 2 + 3
+                    && cfg.attempts.len() == expected_element_count * 2 + 3
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                        })
+                        .count()
+                        == 1
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                        })
+                        .count()
+                        == expected_element_count
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                        })
+                        .count()
+                        == 1
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                        })
+                        .count()
+                        == expected_element_count + 1
+                    && straightline_producer_matches
+            };
+        let caller_matches = receipt.caller_owner != receipt.producer_owner
+            && receipt.call_target == receipt.producer_owner
+            && profile_fields_match
+            && receipt.string_type
+                == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+            && if result_branch_profile {
+                cfg.values_result_producer_receipt
+                    .as_ref()
+                    .is_some_and(|producer| {
+                        receipt.producer_result_receipt.as_ref() == Some(producer)
+                            && receipt.call_result_type == producer.surface_return_type
+                            && receipt.snapshot_type == producer.snapshot_type
+                    })
+            } else {
+                cfg.values_producer_return_receipt
+                    .as_ref()
+                    .is_some_and(|producer| {
+                        receipt.call_result_type == producer.surface_return_type
+                            && receipt.snapshot_type == producer.snapshot_type
+                    })
+            }
+            && receipt.snapshot_source_uses
+                == BTreeSet::from([
+                    receipt.snapshot_load.clone(),
+                    receipt.snapshot_drop_point.clone(),
+                ])
+            && receipt.string_source_uses
+                == BTreeSet::from([
+                    receipt.comparison_load.clone(),
+                    receipt.string_drop_point.clone(),
+                ]);
+        if !profile_fields_match || !producer_matches || !caller_matches {
+            errors.push(Diagnostic::error_code(
+                crate::diagnostic::codes::E0218,
+                "bare List String extraction has an inconsistent cross-call Values receipt",
+                program
+                    .node_meta
+                    .get(&receipt.unpack_cast)
+                    .map(|meta| meta.origin.user_span())
+                    .unwrap_or(Span::UNKNOWN),
+            ));
+        }
+    }
+
+    for identity in duplicate_attached {
+        errors.push(Diagnostic::error_code(
+            crate::diagnostic::codes::E0218,
+            "bare List String extraction has multiple producer receipts for one cast",
+            program
+                .node_meta
+                .get(&identity.1)
+                .map(|meta| meta.origin.user_span())
+                .unwrap_or(Span::UNKNOWN),
+        ));
+    }
+    for (caller_owner, cast) in expected.difference(&attached) {
+        errors.push(Diagnostic::error_code(
+            crate::diagnostic::codes::E0218,
+            format!(
+                "bare List String extraction in '{}' requires the exact cross-call Values producer/caller receipt",
+                caller_owner.0
+            ),
+            program
+                .node_meta
+                .get(cast)
+                .map(|meta| meta.origin.user_span())
+                .unwrap_or(Span::UNKNOWN),
+        ));
+    }
+    for (caller_owner, cast) in attached.difference(&expected) {
+        errors.push(Diagnostic::error_code(
+            crate::diagnostic::codes::E0218,
+            format!(
+                "cross-call Values receipt in '{}' has no provisional bare List String cast candidate",
+                caller_owner.0
+            ),
+            program
+                .node_meta
+                .get(cast)
+                .map(|meta| meta.origin.user_span())
+                .unwrap_or(Span::UNKNOWN),
+        ));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// A dedicated checked-unpack builtin is only a source spelling for one
+/// existing `DynamicAnyUnpack` conversion. It is admitted after the exact
+/// call NodeId joins the same owner's GetAny CFG receipt, and only when the
+/// complete source classifier selects a narrow Map/Any profile. The
+/// MapRootGetAnyCaller profile is the explicit cross-call exception: it joins
+/// the caller's local GetAny/unpack CFG receipt to the producer's whole-program
+/// root-transfer receipt. CheckedGet admits a matching static key's selected
+/// Set type or the canonical i32 miss; ComputedKeyGet requires the same
+/// immutable dynamic key and selected Set type; RemovedKeyCheckedMiss requires
+/// its exact String-Set/Remove/GetAny receipt and canonical i32 miss.
+fn validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
+    program: &CheckedProgram,
+    candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<(), Vec<Diagnostic>> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    fn valid_static_digest(value: Option<&String>) -> bool {
+        value.is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    }
+
+    let candidate_count = candidates.values().map(BTreeSet::len).sum::<usize>();
+    let route_admission =
+        crate::core::mir::classify_canonical_mir_route_admission(program).ordinary_map_owned_any_v2;
+    let checked_get = route_admission.is_checked_get();
+    // Checked-unpack validation runs during CheckedProgram construction,
+    // before the final route admission has necessarily classified this
+    // source as CheckedGet. Use the route's complete source-only predicate
+    // here to break that classification/validation cycle; candidate count
+    // alone never activates the multi-query profile.
+    let checked_get_multi = candidate_count == 2
+        && candidates.len() == 1
+        && candidates
+            .get(&crate::core::NodeId("function:main".into()))
+            .is_some_and(|calls| calls.len() == 2)
+        && crate::core::mir::ordinary_map_owned_any_v2_checked_get_multi_lookup_source_candidate(
+            program,
+        );
+    let computed_key_get = route_admission.is_computed_key_get();
+    let dynamic_keys_get = route_admission.ordinary_map_owned_any_v2_dynamic_keys_get();
+    let removed_key_checked_miss = route_admission.is_removed_key_checked_miss();
+    let map_root_get_any_caller = route_admission.is_map_root_get_any_caller();
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let set_get_any_i32_owner = crate::core::NodeId("function:main".into());
+    let set_get_any_i32_source_receipt = program
+        .resource_analysis(&set_get_any_i32_owner)
+        .and_then(|analysis| {
+            analysis
+                .ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt
+                .as_ref()
+                .map(|receipt| (analysis, receipt))
+        });
+    let set_get_any_i32 = set_get_any_i32_source_receipt.is_some_and(|(analysis, receipt)| {
+        let Some(cfg) = program.callable_cfgs.get(&set_get_any_i32_owner) else {
+            return false;
+        };
+        let Some(body) = program.resolved_bodies.get(&set_get_any_i32_owner) else {
+            return false;
+        };
+        let Some(signature) = program.resolved_signatures.get(&set_get_any_i32_owner) else {
+            return false;
+        };
+        receipt.owner == set_get_any_i32_owner
+            && crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt(
+                receipt,
+                cfg,
+                body,
+                signature,
+                &program.resolved_types,
+                &analysis.ordinary_map_owned_any_v2_operation_attempts,
+            )
+            .is_ok()
+    });
+    let set_get_any_string_owner = crate::core::NodeId("function:main".into());
+    let set_get_any_string_source_receipt = program
+        .resource_analysis(&set_get_any_string_owner)
+        .and_then(|analysis| {
+            analysis
+                .ordinary_map_owned_any_v2_set_get_any_string_lineage_receipt
+                .as_ref()
+                .map(|receipt| (analysis, receipt))
+        });
+    let set_get_any_string = set_get_any_string_source_receipt
+        .is_some_and(|(analysis, receipt)| {
+            let Some(cfg) = program.callable_cfgs.get(&set_get_any_string_owner) else {
+                return false;
+            };
+            let Some(body) = program.resolved_bodies.get(&set_get_any_string_owner) else {
+                return false;
+            };
+            let Some(signature) = program.resolved_signatures.get(&set_get_any_string_owner) else {
+                return false;
+            };
+            receipt.owner == set_get_any_string_owner
+                && receipt.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyStringLineageProfileVersion::V1
+                && crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_any_string_lineage_receipt(
+                    receipt,
+                    cfg,
+                    body,
+                    signature,
+                    &program.resolved_types,
+                    &analysis.ordinary_map_owned_any_v2_operation_attempts,
+                )
+                .is_ok()
+        });
+    let direct_tuple_get_owner = crate::core::NodeId("function:main".into());
+    let direct_tuple_get_source_receipt = program
+        .resource_analysis(&direct_tuple_get_owner)
+        .and_then(|analysis| {
+            analysis
+                .ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt
+                .as_ref()
+                .map(|receipt| (analysis, receipt))
+        });
+    let direct_tuple_get_unpack = direct_tuple_get_source_receipt
+        .is_some_and(|(analysis, receipt)| {
+            let Some(cfg) = program.callable_cfgs.get(&direct_tuple_get_owner) else {
+                return false;
+            };
+            let Some(body) = program.resolved_bodies.get(&direct_tuple_get_owner) else {
+                return false;
+            };
+            let Some(signature) = program.resolved_signatures.get(&direct_tuple_get_owner) else {
+                return false;
+            };
+            receipt.owner == direct_tuple_get_owner
+                && receipt.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackProfileVersion::V1
+                && (receipt.unpack_target_type == i32_type
+                    || receipt.unpack_target_type == string_type)
+                && receipt.unpack_conversion_kind
+                    == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                && matches!(
+                    program.resolved_types.get(&receipt.unpack_source_type),
+                    Some(crate::core::ResolvedType::DynamicAny { .. })
+                )
+                && crate::core::cfg::validate_ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt(
+                    receipt,
+                    cfg,
+                    body,
+                    signature,
+                    &program.resolved_types,
+                    &analysis.ordinary_map_owned_any_v2_operation_attempts,
+                )
+                .is_ok()
+        });
+    let set_get_any_result_i32_owner = crate::core::NodeId("function:main".into());
+    let set_get_any_result_i32_source_receipt = program
+        .resource_analysis(&set_get_any_result_i32_owner)
+        .and_then(|analysis| {
+            analysis
+                .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt
+                .as_ref()
+                .map(|receipt| (analysis, receipt))
+        });
+    // Keep this receipt family separate from the tuple-valued `map_get`
+    // source receipt above. The public map_get_any route owns a Result
+    // envelope and independently proves the selected i32 payload, both
+    // projections, explicit pair/root cleanup, and the complete local CFG.
+    // The route candidate also replays the whole-program callable/callsite
+    // census, so another Map operation cannot borrow this credential.
+    let set_get_any_result_i32 = set_get_any_result_i32_source_receipt
+        .is_some_and(|(_, receipt)| {
+            receipt.owner == set_get_any_result_i32_owner
+                && receipt.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion::V1
+                && receipt.get_api
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+                && receipt.get_unpack_conversion_kind
+                    == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                && receipt.get_unpack_target_type == i32_type
+                && matches!(
+                    program.resolved_types.get(&receipt.get_unpack_source_type),
+                    Some(crate::core::ResolvedType::DynamicAny { .. })
+                )
+        });
+    let zero_miss_i32 = route_admission.is_zero_miss_i32();
+    let clone_isolation = route_admission.is_ordinary_map_owned_any_v2_clone_isolation();
+    let multi_unpack_count = if checked_get_multi {
+        Some(2)
+    } else if zero_miss_i32 {
+        Some(2)
+    } else if clone_isolation {
+        Some(3)
+    } else {
+        None
+    };
+    let mut errors = Vec::new();
+
+    // Multi-unpack profiles have their own whole-source classifiers. Keep
+    // their Checker candidate census closed to the exact main callable and
+    // require a one-to-one correspondence with every CFG unpack receipt.
+    // CheckedGet multi-lookup binds every candidate to its own static-key,
+    // result, found, unpack, and pair-settlement receipt; it admits exactly
+    // one selected String Set hit and one canonical i32 miss. Clone Isolation
+    // additionally binds each candidate to a selected static-key Set; its
+    // all-String source shape cannot use the canonical i32 miss.
+    let exact_multi_profile_candidate_set = multi_unpack_count.is_some_and(|expected| {
+        let main_owner = crate::core::NodeId("function:main".into());
+        let Some(calls) = candidates.get(&main_owner) else {
+            return false;
+        };
+        if candidates.len() != 1 || calls.len() != expected || candidate_count != expected {
+            return false;
+        }
+        let Some(cfg) = program
+            .resource_analysis(&main_owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        else {
+            return false;
+        };
+        let receipt_calls = cfg
+            .unpack_receipts
+            .iter()
+            .map(|receipt| receipt.cast.clone())
+            .collect::<BTreeSet<_>>();
+        let operations = cfg
+            .unpack_receipts
+            .iter()
+            .map(|receipt| receipt.operation.clone())
+            .collect::<BTreeSet<_>>();
+        let clone_static_key_casts = cfg
+            .static_key_get_receipts
+            .iter()
+            .map(|receipt| receipt.unpack.cast.clone())
+            .collect::<BTreeSet<_>>();
+        let clone_static_key_cover = !clone_isolation
+            || (cfg.static_key_get_receipts.len() == expected
+                && clone_static_key_casts.len() == expected
+                && &clone_static_key_casts == calls);
+        let checked_get_multi_static_key_cover = !checked_get_multi || {
+            let found_receipts = &cfg.found_observation_receipts;
+            let found_bindings = found_receipts
+                .iter()
+                .map(|receipt| receipt.found_binding.clone())
+                .collect::<BTreeSet<_>>();
+            let found_pairs = found_receipts
+                .iter()
+                .map(|receipt| receipt.pair_binding.clone())
+                .collect::<BTreeSet<_>>();
+            let found_operations = found_receipts
+                .iter()
+                .map(|receipt| receipt.operation.clone())
+                .collect::<BTreeSet<_>>();
+            let found_outcomes = found_receipts
+                .iter()
+                .map(|receipt| receipt.outcome_node.clone())
+                .collect::<BTreeSet<_>>();
+            let found_source_uses = found_receipts
+                .iter()
+                .flat_map(|receipt| receipt.found_source_uses.iter().cloned())
+                .collect::<BTreeSet<_>>();
+            let pair_settlements = cfg
+                .static_key_get_receipts
+                .iter()
+                .map(|receipt| receipt.unpack.settlement_point.clone())
+                .collect::<BTreeSet<_>>();
+            let query_digests = cfg
+                .static_key_get_receipts
+                .iter()
+                .map(|receipt| receipt.query_digest.clone())
+                .collect::<BTreeSet<_>>();
+            let selected_string_count = cfg
+                .static_key_get_receipts
+                .iter()
+                .filter(|receipt| {
+                    matches!(
+                        &receipt.payload_source,
+                        crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::SelectedSet { value_type }
+                            if value_type == &string_type
+                    )
+                })
+                .count();
+            let canonical_i32_miss_count = cfg
+                .static_key_get_receipts
+                .iter()
+                .filter(|receipt| {
+                    matches!(
+                        &receipt.payload_source,
+                        crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::I32MissAtNew
+                            | crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::I32MissAtRemove
+                    )
+                })
+                .count();
+            let pairings_are_exact = cfg.static_key_get_receipts.iter().all(|authority| {
+                let action = &authority.get_action;
+                let unpack = &authority.unpack;
+                let matching_actions = cfg
+                    .actions
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.point == action.point
+                            && candidate.kind
+                                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && **candidate == *action
+                    })
+                    .count();
+                let matching_unpacks = cfg
+                    .unpack_receipts
+                    .iter()
+                    .filter(|candidate| **candidate == *unpack)
+                    .count();
+                let matching_results = cfg
+                    .result_receipts
+                    .iter()
+                    .filter(|result| {
+                        result.operation == action.point
+                            && result.kind
+                                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && result.binding == unpack.pair_binding
+                            && result.binding_point == unpack.pair_binding_point
+                            && action.result_local.as_ref() == Some(&result.binding)
+                    })
+                    .collect::<Vec<_>>();
+                let [result] = matching_results.as_slice() else {
+                    return false;
+                };
+                let matching_found = found_receipts
+                    .iter()
+                    .filter(|found| {
+                        found.operation == action.point
+                            && found.pair_binding == result.binding
+                            && found.pair_binding_point == result.binding_point
+                    })
+                    .collect::<Vec<_>>();
+                let [found] = matching_found.as_slice() else {
+                    return false;
+                };
+                let target_type = program
+                    .call_sites
+                    .get(&unpack.cast)
+                    .and_then(|site| match site.callee.as_str() {
+                        "unpack_i32" => Some(&i32_type),
+                        "unpack_string" => Some(&string_type),
+                        _ => None,
+                    });
+                let payload_matches = match &authority.payload_source {
+                    crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::SelectedSet {
+                        value_type,
+                    } => {
+                        target_type == Some(value_type)
+                            && authority.selected_winning_set_action.as_ref().is_some_and(
+                                |set| {
+                                    set.kind
+                                        == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                        && set.key_static_digest.as_deref()
+                                            == Some(authority.query_digest.as_str())
+                                        && set.value_type.as_ref() == Some(value_type)
+                                        && set.payload_clone
+                                },
+                            )
+                    }
+                    crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::I32MissAtNew
+                    | crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource::I32MissAtRemove => {
+                        target_type == Some(&i32_type)
+                            && authority.selected_winning_set_action.is_none()
+                    }
+                };
+                authority.profile_version
+                    == crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetProfileVersion::V1
+                    && authority.owner == main_owner
+                    && authority.query_digest == action.key_static_digest.clone().unwrap_or_default()
+                    && valid_static_digest(Some(&authority.query_digest))
+                    && action.key_type.as_ref() == Some(&string_type)
+                    && unpack.operation == action.point
+                    && unpack.pair_binding == result.binding
+                    && unpack.pair_binding_point == result.binding_point
+                    && unpack.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.settlement == unpack.settlement
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+                    && matching_actions == 1
+                    && matching_unpacks == 1
+                    && matching_results.len() == 1
+                    && found.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && found.operation == action.point
+                    && found.pair_binding == result.binding
+                    && found.pair_binding_point == result.binding_point
+                    && !found.found_source_uses.is_empty()
+                    && payload_matches
+            });
+            cfg.static_key_get_receipts.len() == expected
+                && found_receipts.len() == expected
+                && clone_static_key_casts.len() == expected
+                && &clone_static_key_casts == calls
+                && found_bindings.len() == expected
+                && found_pairs.len() == expected
+                && found_operations.len() == expected
+                && found_outcomes.len() == 1
+                && found_source_uses.len()
+                    == found_receipts
+                        .iter()
+                        .map(|receipt| receipt.found_source_uses.len())
+                        .sum::<usize>()
+                && pair_settlements.len() == expected
+                && query_digests.len() == expected
+                && selected_string_count == 1
+                && canonical_i32_miss_count == 1
+                && pairings_are_exact
+        };
+        cfg.owner == main_owner
+            && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            && cfg.unpack_receipts.len() == expected
+            && cfg.result_receipts.len() == expected
+            && cfg
+                .result_receipts
+                .iter()
+                .all(|result| result.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny)
+            && receipt_calls.len() == expected
+            && operations.len() == expected
+            && &receipt_calls == calls
+            && clone_static_key_cover
+            && checked_get_multi_static_key_cover
+    });
+
+    // DynamicKeysGet is one closed two-GetAny profile. Its Checker receipt
+    // already pairs each miss/hit action, result, unpack, and payload local;
+    // admit only those two cast nodes as one candidate set.
+    let dynamic_keys_get_owner = crate::core::NodeId("function:main".into());
+    let exact_dynamic_keys_get_candidate_set = dynamic_keys_get
+        && candidate_count == 2
+        && candidates.len() == 1
+        && candidates
+            .get(&dynamic_keys_get_owner)
+            .is_some_and(|calls| {
+                if calls.len() != 2 {
+                    return false;
+                }
+                let Some(cfg) = program
+                    .resource_analysis(&dynamic_keys_get_owner)
+                    .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+                else {
+                    return false;
+                };
+                let [receipt] = cfg.dynamic_keys_get_receipts.as_slice() else {
+                    return false;
+                };
+                let receipt_calls = BTreeSet::from([
+                    receipt.miss_unpack.cast.clone(),
+                    receipt.hit_unpack.cast.clone(),
+                ]);
+                let cfg_unpack_calls = cfg
+                    .unpack_receipts
+                    .iter()
+                    .map(|unpack| unpack.cast.clone())
+                    .collect::<BTreeSet<_>>();
+                cfg.owner == dynamic_keys_get_owner
+                    && receipt.owner == dynamic_keys_get_owner
+                    && receipt_calls.len() == 2
+                    && calls == &receipt_calls
+                    && cfg.unpack_receipts.len() == 2
+                    && cfg_unpack_calls.len() == 2
+                    && cfg_unpack_calls == receipt_calls
+            });
+
+    // The Result-aware public GetAny route has a separate composite Checker
+    // receipt. It authorizes exactly its one `unpack_i32` callsite; a generic
+    // V2 GetAny receipt alone must not open this cast boundary.
+    let exact_set_get_any_i32_candidate_set = set_get_any_i32
+        && candidate_count == 1
+        && candidates.len() == 1
+        && candidates
+            .get(&set_get_any_i32_owner)
+            .is_some_and(|calls| {
+                let Some((_, receipt)) = set_get_any_i32_source_receipt else {
+                    return false;
+                };
+                receipt.owner == set_get_any_i32_owner
+                    && receipt.profile_version
+                        == crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyI32LineageProfileVersion::V1
+                    && calls == &BTreeSet::from([receipt.unpack_operation.clone()])
+            });
+    let exact_set_get_any_result_i32_candidate_set = set_get_any_result_i32
+        && candidate_count == 1
+        && candidates.len() == 1
+        && candidates
+            .get(&set_get_any_result_i32_owner)
+            .is_some_and(|calls| {
+                let Some((_, receipt)) = set_get_any_result_i32_source_receipt else {
+                    return false;
+                };
+                calls == &BTreeSet::from([receipt.get_unpack_operation.clone()])
+            });
+    let exact_set_get_any_string_candidate_set = set_get_any_string
+        && candidate_count == 1
+        && candidates.len() == 1
+        && candidates
+            .get(&set_get_any_string_owner)
+            .is_some_and(|calls| {
+                let Some((_, receipt)) = set_get_any_string_source_receipt else {
+                    return false;
+                };
+                receipt.owner == set_get_any_string_owner
+                    && receipt.profile_version
+                        == crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyStringLineageProfileVersion::V1
+                    && calls == &BTreeSet::from([receipt.unpack_operation.clone()])
+            });
+    let exact_direct_tuple_get_candidate_set = direct_tuple_get_unpack
+        && candidate_count == 1
+        && candidates.len() == 1
+        && candidates
+            .get(&direct_tuple_get_owner)
+            .is_some_and(|calls| {
+                let Some((_, receipt)) = direct_tuple_get_source_receipt else {
+                    return false;
+                };
+                receipt.owner == direct_tuple_get_owner
+                    && calls == &BTreeSet::from([receipt.unpack_operation.clone()])
+            });
+
+    // ZeroMissI32 is a two-lookup profile, but the lookup count alone must
+    // never make two unrelated GetAny casts interchangeable. Join both
+    // observed pair identities to their exact GetAny action, unpack, selected
+    // or canonical-miss payload lineage, and one explicit whole-pair Drop.
+    let exact_zero_miss_i32_candidate_set = zero_miss_i32
+        && candidate_count == 2
+        && candidates.len() == 1
+        && candidates
+            .get(&crate::core::NodeId("function:main".into()))
+            .is_some_and(|calls| {
+                let owner = crate::core::NodeId("function:main".into());
+                if calls.len() != 2 {
+                    return false;
+                }
+                let Some(cfg) = program
+                    .resource_analysis(&owner)
+                    .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+                else {
+                    return false;
+                };
+                let Some(source) = cfg.zero_miss_i32_observation_receipt.as_ref() else {
+                    return false;
+                };
+                let observations = [&source.hit_observation, &source.miss_observation];
+                let observation_calls = observations
+                    .iter()
+                    .map(|observation| {
+                        cfg.unpack_receipts
+                            .iter()
+                            .find(|unpack| {
+                                unpack.operation == observation.operation
+                                    && unpack.pair_binding == observation.pair_binding
+                            })
+                            .map(|unpack| unpack.cast.clone())
+                    })
+                    .collect::<Option<BTreeSet<_>>>();
+                let Some(observation_calls) = observation_calls else {
+                    return false;
+                };
+                if observation_calls.len() != 2 || &observation_calls != calls {
+                    return false;
+                }
+                let new_actions = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                    })
+                    .collect::<Vec<_>>();
+                let set_actions = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                    })
+                    .collect::<Vec<_>>();
+                let get_actions = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                    })
+                    .collect::<Vec<_>>();
+                let root_drops = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                    })
+                    .collect::<Vec<_>>();
+                let ([new], [set]) = (new_actions.as_slice(), set_actions.as_slice()) else {
+                    return false;
+                };
+                let hit_digest = blake3::hash(b"hit").to_hex().to_string();
+                let miss_digest = blake3::hash(b"absent").to_hex().to_string();
+                let exact_observation_pair = observations.iter().all(|observation| {
+                    let actions = cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                && action.point == observation.operation
+                        })
+                        .collect::<Vec<_>>();
+                    let [action] = actions.as_slice() else {
+                        return false;
+                    };
+                    let results = cfg
+                        .result_receipts
+                        .iter()
+                        .filter(|result| {
+                            result.operation == observation.operation
+                                && result.kind
+                                    == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                && result.binding == observation.pair_binding
+                                && result.binding_point == observation.pair_binding_point
+                        })
+                        .collect::<Vec<_>>();
+                    let [result] = results.as_slice() else {
+                        return false;
+                    };
+                    let unpacks = cfg
+                        .unpack_receipts
+                        .iter()
+                        .filter(|unpack| {
+                            unpack.operation == observation.operation
+                                && unpack.pair_binding == observation.pair_binding
+                                && unpack.pair_binding_point == observation.pair_binding_point
+                        })
+                        .collect::<Vec<_>>();
+                    let [unpack] = unpacks.as_slice() else {
+                        return false;
+                    };
+                    let found_receipts = cfg
+                        .found_observation_receipts
+                        .iter()
+                        .filter(|found| **found == **observation)
+                        .count();
+                    let is_hit = observation.operation == source.hit_observation.operation;
+                    let expected_digest = if is_hit { &hit_digest } else { &miss_digest };
+                    let exact_lookup_key = action.key_type.as_ref() == Some(&string_type)
+                        && action.key_static_digest.as_ref() == Some(expected_digest)
+                        && action.key_local.is_none()
+                        && action.key_provenance
+                            == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::StringLiteral)
+                        && action.local == set.local
+                        && action.root == set.root
+                        && action.source_local.as_ref() == Some(&set.local)
+                        && action.source.as_ref() == Some(&set.root);
+                    let exact_payload_lineage = if is_hit {
+                        set.key_type.as_ref() == Some(&string_type)
+                            && set.key_static_digest.as_deref() == Some(hit_digest.as_str())
+                            && set.value_type.as_ref() == Some(&i32_type)
+                            && set.payload_clone
+                    } else {
+                        set.key_type.as_ref() == Some(&string_type)
+                            && set.key_static_digest.as_deref() == Some(hit_digest.as_str())
+                            && set.value_type.as_ref() == Some(&i32_type)
+                            && set.payload_clone
+                            && action.key_static_digest.as_deref() == Some(miss_digest.as_str())
+                    };
+                    action.result_local.as_ref() == Some(&result.binding)
+                        && action.result_type.as_ref() == Some(&result.result_type)
+                        && action.source_local.as_ref() == Some(&result.source_local)
+                        && action.source.as_ref() == Some(&result.source)
+                        && exact_lookup_key
+                        && exact_payload_lineage
+                        && result.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                        && result.settlement
+                            == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+                        && unpack.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                        && calls.contains(&unpack.cast)
+                        && unpack.conversion_kind
+                            == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                        && unpack.conversion_to == i32_type
+                        && unpack.conversion_from
+                            == match program.resolved_types.get(&result.result_type) {
+                                Some(crate::core::ResolvedType::Tuple(fields))
+                                    if fields.len() == 2
+                                        && fields[0] == bool_type
+                                        && matches!(
+                                            program.resolved_types.get(&fields[1]),
+                                            Some(crate::core::ResolvedType::DynamicAny { .. })
+                                        ) =>
+                                {
+                                    fields[1].clone()
+                                }
+                                _ => return false,
+                            }
+                        && found_receipts == 1
+                        && observation.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                });
+                cfg.owner == owner
+                    && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && source.owner == owner
+                    && source.hit_observation.operation != source.miss_observation.operation
+                    && cfg.actions.len() == 6
+                    && cfg.actions.iter().all(|action| {
+                        matches!(
+                            action.kind,
+                            crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                                | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                | crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                        )
+                    })
+                    && set.source_local.as_ref() == Some(&new.local)
+                    && set.source.as_ref() == Some(&new.root)
+                    && get_actions.len() == 2
+                    && root_drops.len() == 2
+                    && root_drops
+                        .iter()
+                        .filter(|drop| drop.local == new.local && drop.root == new.root)
+                        .count()
+                        == 1
+                    && root_drops
+                        .iter()
+                        .filter(|drop| drop.local == set.local && drop.root == set.root)
+                        .count()
+                        == 1
+                    && cfg.result_receipts.len() == 2
+                    && cfg.unpack_receipts.len() == 2
+                    && cfg.found_observation_receipts.len() == 2
+                    && exact_observation_pair
+            });
+
+    // Complete-coverage diagnostic materialization may contain several
+    // independently checked GetAny unpacks (including more than one owner),
+    // but every builtin candidate must have exactly one distinct static-key
+    // Checker credential and no extra credential may be smuggled in. Nominal
+    // `pair.1 as Label` conversions are intentionally outside this builtin
+    // census and keep their separate conversion/TypeDesc validation.
+    let candidate_identities = candidates
+        .iter()
+        .flat_map(|(owner, calls)| calls.iter().map(|call| (owner.clone(), call.clone())))
+        .collect::<BTreeSet<_>>();
+    let static_key_get_receipts = program
+        .resource_analyses()
+        .iter()
+        .flat_map(|(owner, analysis)| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .iter()
+                .flat_map(move |cfg| {
+                    cfg.static_key_get_receipts
+                        .iter()
+                        .map(move |receipt| (owner.clone(), receipt))
+                })
+        })
+        .collect::<Vec<_>>();
+    let builtin_static_key_get_receipts = static_key_get_receipts
+        .iter()
+        .filter(|(owner, receipt)| {
+            program
+                .call_sites
+                .get(&receipt.unpack.cast)
+                .is_some_and(|site| {
+                    site.node_id == receipt.unpack.cast
+                        && site.owner == owner.0
+                        && site.kind == ResolvedCallKind::Builtin
+                        && site.argc == 1
+                        && site.arity_matches()
+                        && matches!(site.callee.as_str(), "unpack_i32" | "unpack_string")
+                })
+        })
+        .collect::<Vec<_>>();
+    let static_key_candidate_identities = builtin_static_key_get_receipts
+        .iter()
+        .map(|(owner, receipt)| (owner.clone(), receipt.unpack.cast.clone()))
+        .collect::<BTreeSet<_>>();
+    let exact_complete_coverage_candidate_set = route_admission.is_complete()
+        && multi_unpack_count.is_none()
+        && candidate_count > 0
+        && candidate_identities.len() == candidate_count
+        && builtin_static_key_get_receipts.len() == candidate_count
+        && static_key_candidate_identities.len() == candidate_count
+        && candidate_identities == static_key_candidate_identities;
+    let candidate_census_is_exact = if dynamic_keys_get {
+        exact_dynamic_keys_get_candidate_set
+    } else if direct_tuple_get_unpack {
+        exact_direct_tuple_get_candidate_set
+    } else if set_get_any_result_i32 {
+        exact_set_get_any_result_i32_candidate_set
+    } else if set_get_any_string {
+        exact_set_get_any_string_candidate_set
+    } else if set_get_any_i32 {
+        exact_set_get_any_i32_candidate_set
+    } else if zero_miss_i32 {
+        exact_zero_miss_i32_candidate_set
+    } else if let Some(expected) = multi_unpack_count {
+        candidate_count == expected && exact_multi_profile_candidate_set
+    } else if route_admission.is_complete() {
+        exact_complete_coverage_candidate_set
+    } else {
+        candidate_count == 1
+    };
+
+    for (owner, calls) in candidates {
+        for call in calls {
+            let site = program.call_sites.get(call);
+            let target_type = site.and_then(|site| match site.callee.as_str() {
+                "unpack_i32" => Some(&i32_type),
+                "unpack_string" => Some(&string_type),
+                _ => None,
+            });
+            let exact_builtin_call = site.is_some_and(|site| {
+                site.node_id == *call
+                    && site.owner == owner.0
+                    && site.kind == ResolvedCallKind::Builtin
+                    && site.argc == 1
+                    && site.arity_matches()
+                    && site.resolved_callee.as_ref().is_some_and(|callee| {
+                        matches!(callee, crate::core::ir::ResolvedCallee::Builtin(builtin)
+                            if builtin.as_str() == site.callee.as_str())
+                    })
+            });
+            let cfg = program
+                .resource_analysis(owner)
+                .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref());
+            let exact_cfg = cfg.is_some_and(|cfg| {
+                let matching_unpacks = cfg
+                    .unpack_receipts
+                    .iter()
+                    .filter(|receipt| receipt.cast == *call)
+                    .collect::<Vec<_>>();
+                let [unpack] = matching_unpacks.as_slice() else {
+                    return false;
+                };
+                let matching_results = cfg
+                    .result_receipts
+                    .iter()
+                    .filter(|result| {
+                        result.operation == unpack.operation
+                            && result.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && result.binding == unpack.pair_binding
+                            && result.binding_point == unpack.pair_binding_point
+                    })
+                    .collect::<Vec<_>>();
+                let [result] = matching_results.as_slice() else {
+                    return false;
+                };
+                let exact_tuple_getany_result = matches!(
+                    program.resolved_types.get(&result.result_type),
+                    Some(crate::core::ResolvedType::Tuple(fields))
+                        if fields.len() == 2
+                            && fields[0] == bool_type
+                            && matches!(
+                                program.resolved_types.get(&fields[1]),
+                                Some(crate::core::ResolvedType::DynamicAny { .. })
+                            )
+                            && fields[1] == unpack.conversion_from
+                );
+                cfg.owner == *owner
+                    && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && cfg.values_unpack_receipts.is_empty()
+                    && unpack.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && unpack.conversion_kind
+                        == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                    && Some(&unpack.conversion_to) == target_type
+                    && unpack.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && exact_tuple_getany_result
+                    && result.settlement == unpack.settlement
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+                    && matches!(
+                        program.resolved_types.get(&unpack.conversion_from),
+                        Some(crate::core::ResolvedType::DynamicAny { .. })
+                    )
+            });
+            let exact_map_root_get_any_caller = if map_root_get_any_caller
+                && target_type == Some(&string_type)
+            {
+                let matching_receipts = program
+                    .resource_analyses()
+                    .iter()
+                    .filter_map(|(holder, analysis)| {
+                        let cfg_receipt =
+                            analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref()?;
+                        let receipt = cfg_receipt.map_root_get_any_caller_receipt.as_ref()?;
+                        (receipt.caller_owner == *owner && receipt.unpack_cast == *call)
+                            .then_some((holder, cfg_receipt, receipt))
+                    })
+                    .collect::<Vec<_>>();
+                matches!(matching_receipts.as_slice(), [(holder, producer_cfg, receipt)]
+                    if receipt.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+                        && *holder == &receipt.producer_owner
+                        && producer_cfg.owner == receipt.producer_owner
+                        && producer_cfg.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                        && producer_cfg.map_root_producer_return_receipt.as_ref().is_some_and(
+                            |producer| {
+                                producer.owner == receipt.producer_owner
+                                    && producer.map_set_operation
+                                        == receipt.producer_map_set_operation
+                                    && producer.return_value == receipt.producer_return_value
+                                    && producer.final_root_local == receipt.producer_final_local
+                                    && producer.final_root_binding_point
+                                        == receipt.producer_final_binding_point
+                                    && producer.final_root == receipt.logical_root
+                                    && producer.final_root_type == receipt.caller_root_type
+                            }
+                        )
+                        && receipt.caller_owner == *owner
+                        && receipt.unpack_cast == *call
+                        && receipt.producer_owner != receipt.caller_owner
+                        && receipt.call_target == receipt.producer_owner
+                        && receipt.string_type == string_type
+                )
+            } else {
+                false
+            };
+            let exact_dynamic_keys_get_selected_payload_authority = cfg.is_some_and(|cfg| {
+                if !dynamic_keys_get
+                    || owner != &dynamic_keys_get_owner
+                    || target_type != Some(&i32_type)
+                {
+                    return false;
+                }
+                let [source] = cfg.dynamic_keys_get_receipts.as_slice() else {
+                    return false;
+                };
+                let (action, result, found, unpack, pair_drop, found_term, payload_term) =
+                    if source.miss_unpack.cast == *call {
+                        (
+                            &source.miss_get_action,
+                            &source.miss_result,
+                            &source.miss_found,
+                            &source.miss_unpack,
+                            &source.miss_pair_drop_point,
+                            &source.outcome_terms[2],
+                            &source.outcome_terms[3],
+                        )
+                    } else if source.hit_unpack.cast == *call {
+                        (
+                            &source.hit_get_action,
+                            &source.hit_result,
+                            &source.hit_found,
+                            &source.hit_unpack,
+                            &source.hit_pair_drop_point,
+                            &source.outcome_terms[0],
+                            &source.outcome_terms[1],
+                        )
+                    } else {
+                        return false;
+                    };
+                let pair_payload_type = match program.resolved_types.get(&result.result_type) {
+                    Some(crate::core::ResolvedType::Tuple(fields))
+                        if fields.len() == 2 && fields[0] == bool_type =>
+                    {
+                        fields.get(1)
+                    }
+                    _ => None,
+                };
+                let payload_is_dynamic_any = pair_payload_type.is_some_and(|payload| {
+                    matches!(
+                        program.resolved_types.get(payload),
+                        Some(crate::core::ResolvedType::DynamicAny { .. })
+                    )
+                });
+                let required_source_nodes = [
+                    &action.point,
+                    &result.result,
+                    &result.binding_point,
+                    &result.source_node,
+                    &found.projection,
+                    &unpack.unpack_binding_point,
+                    &unpack.projection,
+                    &unpack.cast,
+                    &unpack.settlement_point,
+                    &source.outcome_observation_call,
+                    &source.outcome_observation_load,
+                    &found_term.expression,
+                    &found_term.operand,
+                    &payload_term.expression,
+                    &payload_term.operand,
+                ];
+                let action_is_unique = cfg
+                    .actions
+                    .iter()
+                    .filter(|candidate| candidate.point == action.point)
+                    .count()
+                    == 1
+                    && cfg
+                        .actions
+                        .iter()
+                        .filter(|candidate| *candidate == action)
+                        .count()
+                        == 1;
+                let result_is_unique = cfg
+                    .result_receipts
+                    .iter()
+                    .filter(|candidate| *candidate == result)
+                    .count()
+                    == 1;
+                let unpack_is_unique = cfg
+                    .unpack_receipts
+                    .iter()
+                    .filter(|candidate| *candidate == unpack)
+                    .count()
+                    == 1;
+                let found_is_unique = cfg
+                    .found_observation_receipts
+                    .iter()
+                    .filter(|candidate| *candidate == found)
+                    .count()
+                    == 1;
+                cfg.owner == *owner
+                    && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && cfg.dynamic_keys_get_receipts.len() == 1
+                    && cfg.actions.len() == 7
+                    && cfg.result_receipts.len() == 2
+                    && cfg.unpack_receipts.len() == 2
+                    && cfg.found_observation_receipts.len() == 2
+                    && cfg.static_key_get_receipts.is_empty()
+                    && cfg.computed_key_string_get_receipts.is_empty()
+                    && source.owner == *owner
+                    && source.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetProfileVersion::V1
+                    && source.miss_unpack.cast != source.hit_unpack.cast
+                    && source.miss_result.binding != source.hit_result.binding
+                    && source.miss_unpack.pair_binding != source.hit_unpack.pair_binding
+                    && source.miss_unpack.unpack_binding != source.hit_unpack.unpack_binding
+                    && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                    && action.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && action.result_local.as_ref() == Some(&result.binding)
+                    && action.result_type.as_ref() == Some(&result.result_type)
+                    && action.source_local.as_ref() == Some(&result.source_local)
+                    && action.source.as_ref() == Some(&result.source)
+                    && action.source_node.as_ref() == Some(&result.source_node)
+                    && action.source_type.as_ref() == Some(&result.source_type)
+                    && action.key == result.key
+                    && action.key_type == result.key_type
+                    && action.key_local == result.key_local
+                    && action.key_type.as_ref() == Some(&string_type)
+                    && action.key_local.as_ref() == Some(&source.key_local)
+                    && action.key_local_mutable == Some(false)
+                    && action.key_provenance
+                        == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal)
+                    && action.key_static_digest.is_none()
+                    && result.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && result.operation == action.point
+                    && result.result == action.point
+                    && result.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                    && result.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.settlement_point.as_ref() == Some(pair_drop)
+                    && payload_is_dynamic_any
+                    && pair_payload_type == Some(&unpack.conversion_from)
+                    && found.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && found.operation == action.point
+                    && found.pair_binding == result.binding
+                    && found.pair_binding_point == result.binding_point
+                    && unpack.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && unpack.operation == action.point
+                    && unpack.pair_binding == result.binding
+                    && unpack.pair_binding_point == result.binding_point
+                    && unpack.cast == *call
+                    && unpack.conversion_kind
+                        == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                    && unpack.conversion_to == i32_type
+                    && target_type == Some(&unpack.conversion_to)
+                    && unpack.settlement == result.settlement
+                    && &unpack.settlement_point == pair_drop
+                    && unpack.unpack_binding_point != *pair_drop
+                    && found_term.local == found.found_binding
+                    && payload_term.local == unpack.unpack_binding
+                    && required_source_nodes
+                        .iter()
+                        .all(|node| source.source_identity_nodes.contains(*node))
+                    && [
+                        &result.binding_point,
+                        &unpack.unpack_binding_point,
+                        pair_drop,
+                    ]
+                    .iter()
+                    .all(|node| source.source_statement_nodes.contains(*node))
+                    && action_is_unique
+                    && result_is_unique
+                    && unpack_is_unique
+                    && found_is_unique
+            });
+            let exact_static_key_selected_payload_authority = cfg.is_some_and(|cfg| {
+                use crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetPayloadSource as PayloadSource;
+                use crate::core::OrdinaryMapOwnedAnyV2StaticKeyGetProfileVersion as ProfileVersion;
+
+                if !route_admission.is_complete() && !clone_isolation && !checked_get_multi {
+                    return false;
+                }
+                let matching_authorities = cfg
+                    .static_key_get_receipts
+                    .iter()
+                    .filter(|receipt| receipt.unpack.cast == *call)
+                    .collect::<Vec<_>>();
+                let [authority] = matching_authorities.as_slice() else {
+                    return false;
+                };
+                let matching_unpacks = cfg
+                    .unpack_receipts
+                    .iter()
+                    .filter(|unpack| unpack.cast == *call)
+                    .collect::<Vec<_>>();
+                let [unpack] = matching_unpacks.as_slice() else {
+                    return false;
+                };
+                let matching_gets = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && action.point == unpack.operation
+                    })
+                    .collect::<Vec<_>>();
+                let [get] = matching_gets.as_slice() else {
+                    return false;
+                };
+                let matching_results = cfg
+                    .result_receipts
+                    .iter()
+                    .filter(|result| {
+                        result.operation == get.point
+                            && result.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            && result.binding == unpack.pair_binding
+                            && result.binding_point == unpack.pair_binding_point
+                    })
+                    .collect::<Vec<_>>();
+                let [result] = matching_results.as_slice() else {
+                    return false;
+                };
+                let exact_join = cfg.owner == *owner
+                    && authority.profile_version == ProfileVersion::V1
+                    && authority.owner == *owner
+                    && authority.get_action == **get
+                    && authority.unpack == **unpack
+                    && get.key_static_digest.as_ref().is_some_and(|digest| {
+                        digest == &authority.query_digest && valid_static_digest(Some(digest))
+                    })
+                    && get.key_type.as_ref() == Some(&string_type)
+                    && get.result_local.as_ref() == Some(&result.binding)
+                    && result.source_local == get.local
+                    && result.source == get.root
+                    && result.key == get.key
+                    && result.key_type == get.key_type
+                    && result.key_local == get.key_local
+                    && result.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && unpack.settlement == result.settlement
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point);
+                let exact_payload_source = match &authority.payload_source {
+                    PayloadSource::SelectedSet { value_type } => authority
+                        .selected_winning_set_action
+                        .as_ref()
+                        .is_some_and(|set| {
+                            set.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                && set.profile_version
+                                    == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                                && set.key_type.as_ref() == Some(&string_type)
+                                && set.key_static_digest.as_deref()
+                                    == Some(authority.query_digest.as_str())
+                                && set.payload_clone
+                                && set.value_type.as_ref() == Some(value_type)
+                                && Some(value_type) == target_type
+                                && cfg.actions.iter().filter(|action| *action == set).count() == 1
+                        }),
+                    PayloadSource::I32MissAtNew | PayloadSource::I32MissAtRemove
+                        if !clone_isolation =>
+                    {
+                        target_type == Some(&i32_type)
+                            && authority.selected_winning_set_action.is_none()
+                    }
+                    PayloadSource::I32MissAtNew | PayloadSource::I32MissAtRemove => false,
+                };
+                exact_join && exact_payload_source
+            });
+            let exact_source_lineage = cfg.is_some_and(|cfg| {
+                let sets = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                    })
+                    .collect::<Vec<_>>();
+                let gets = cfg
+                    .actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                    })
+                    .collect::<Vec<_>>();
+                let [set] = sets.as_slice() else {
+                    return false;
+                };
+                let [get] = gets.as_slice() else {
+                    return false;
+                };
+                let [unpack] = cfg.unpack_receipts.as_slice() else {
+                    return false;
+                };
+                let Some(set_type) = set.value_type.as_ref() else {
+                    return false;
+                };
+                let Some(result) = cfg.result_receipts.iter().find(|result| {
+                    result.operation == get.point
+                        && result.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                }) else {
+                    return false;
+                };
+                let key_matches = set.key_static_digest == get.key_static_digest;
+                let exact_computed_key_string_credential =
+                    if computed_key_get && target_type == Some(&string_type) {
+                        let [credential] = cfg.computed_key_string_get_receipts.as_slice() else {
+                            return false;
+                        };
+                        credential.owner == *owner
+                            && credential.map_set == **set
+                            && credential.get_any == **get
+                            && credential.result == *result
+                            && credential.unpack == *unpack
+                            && credential.unpack.cast == *call
+                    } else {
+                        !computed_key_get || cfg.computed_key_string_get_receipts.is_empty()
+                    };
+                let exact_unpack_result_join = unpack.operation == get.point
+                    && unpack.pair_binding == result.binding
+                    && unpack.pair_binding_point == result.binding_point
+                    && unpack.settlement == result.settlement
+                    && result.settlement
+                        == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                    && result.settlement_point.as_ref() == Some(&unpack.settlement_point)
+                    && result.key == get.key
+                    && result.key_type == get.key_type
+                    && result.key_local == get.key_local;
+                let exact_direct_get_set_lineage =
+                    get.source_local.as_ref() == Some(&set.local)
+                        && get.source.as_ref() == Some(&set.root);
+                let exact_checked_get_key_payload = checked_get
+                    && valid_static_digest(set.key_static_digest.as_ref())
+                    && valid_static_digest(get.key_static_digest.as_ref())
+                    && if key_matches {
+                        target_type == Some(set_type)
+                    } else {
+                        target_type == Some(&i32_type)
+                    };
+                let exact_computed_key_payload = computed_key_get
+                    && set.key_static_digest.is_none()
+                    && get.key_static_digest.is_none()
+                    && set.key_local.is_some()
+                    && set.key_local == get.key_local
+                    && set.key_local_mutable == Some(false)
+                    && get.key_local_mutable == Some(false)
+                    && set.key_type == Some(string_type.clone())
+                    && get.key_type == Some(string_type.clone())
+                    && set.key_provenance
+                        == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal)
+                    && get.key_provenance
+                        == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal)
+                    && target_type == Some(set_type)
+                    && exact_computed_key_string_credential;
+                let exact_removed_key_checked_miss = if !removed_key_checked_miss
+                    || target_type != Some(&i32_type)
+                {
+                    false
+                } else {
+                    let Some(removed_key) = cfg.removed_key_checked_miss_receipt.as_ref() else {
+                        return false;
+                    };
+                    let [found_observation] = cfg.found_observation_receipts.as_slice() else {
+                        return false;
+                    };
+                    let new_actions = cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind
+                                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                        })
+                        .collect::<Vec<_>>();
+                    let remove_actions = cfg
+                        .actions
+                        .iter()
+                        .filter(|action| {
+                            action.kind
+                                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Remove
+                        })
+                        .collect::<Vec<_>>();
+                    let [new] = new_actions.as_slice() else {
+                        return false;
+                    };
+                    let [remove] = remove_actions.as_slice() else {
+                        return false;
+                    };
+                    let map_type = get.source_type.as_ref();
+                    let root_actions = [
+                        &removed_key.new_action,
+                        &removed_key.set_action,
+                        &removed_key.remove_action,
+                    ];
+                    let root_settlements_match = removed_key.root_settlements.len() == 3
+                        && root_actions.iter().all(|root| {
+                            removed_key
+                                .root_settlements
+                                .iter()
+                                .filter(|drop| {
+                                    drop.kind
+                                        == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                                        && drop.local == root.local
+                                        && drop.root == root.root
+                                })
+                                .count()
+                                == 1
+                        })
+                        && removed_key.root_settlements.iter().all(|drop| {
+                            cfg.actions.iter().any(|action| action == drop)
+                        });
+                    let expected_key_digest =
+                        blake3::hash(&removed_key.key_bytes).to_hex().to_string();
+                    let same_literal_key = !removed_key.key_bytes.is_empty()
+                        && [*set, *remove, *get].iter().all(|action| {
+                            action.key_type == Some(string_type.clone())
+                                && action.key_local.is_none()
+                                && action.key_provenance
+                                    == Some(
+                                        crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::StringLiteral,
+                                    )
+                                && action.key_static_digest.as_deref()
+                                    == Some(expected_key_digest.as_str())
+                        });
+                    removed_key.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                        && removed_key.new_action == **new
+                        && removed_key.set_action == **set
+                        && removed_key.remove_action == **remove
+                        && removed_key.get_action == **get
+                        && removed_key.get_result == *result
+                        && removed_key.found_observation == *found_observation
+                        && removed_key.unpack == *unpack
+                        && removed_key.new_action.kind
+                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                        && removed_key.set_action.kind
+                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                        && removed_key.remove_action.kind
+                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Remove
+                        && removed_key.get_action.kind
+                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                        && removed_key.set_action.source_local
+                            == Some(removed_key.new_action.local.clone())
+                        && removed_key.set_action.source.as_ref()
+                            == Some(&removed_key.new_action.root)
+                        && removed_key.remove_action.source_local
+                            == Some(removed_key.set_action.local.clone())
+                        && removed_key.remove_action.source.as_ref()
+                            == Some(&removed_key.set_action.root)
+                        && removed_key.get_action.source_local
+                            == Some(removed_key.remove_action.local.clone())
+                        && removed_key.get_action.source.as_ref()
+                            == Some(&removed_key.remove_action.root)
+                        && removed_key.set_action.value_type == Some(string_type.clone())
+                        && removed_key.get_result.kind
+                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                        && removed_key.get_result.operation == removed_key.get_action.point
+                        && removed_key.get_result.source_local == removed_key.remove_action.local
+                        && removed_key.get_result.source == removed_key.remove_action.root
+                        && map_type.is_some_and(|map_type| {
+                            removed_key.get_action.source_type.as_ref() == Some(map_type)
+                                && removed_key.remove_action.source_type.as_ref()
+                                    == Some(map_type)
+                                && removed_key.set_action.source_type.as_ref() == Some(map_type)
+                                && removed_key.get_result.source_type == *map_type
+                        })
+                        && removed_key.unpack.operation == removed_key.get_action.point
+                        && removed_key.unpack.pair_binding == removed_key.get_result.binding
+                        && removed_key.unpack.pair_binding_point
+                            == removed_key.get_result.binding_point
+                        && removed_key.unpack.cast == *call
+                        && removed_key.unpack.conversion_to == i32_type
+                        && removed_key.unpack.settlement
+                            == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        && removed_key.get_result.settlement
+                            == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                        && removed_key.get_result.settlement_point.as_ref()
+                            == Some(&removed_key.unpack.settlement_point)
+                        && removed_key.found_observation.operation
+                            == removed_key.get_action.point
+                        && removed_key.found_observation.pair_binding
+                            == removed_key.get_result.binding
+                        && same_literal_key
+                        && root_settlements_match
+                };
+                let removed_key_receipt_profile_consistent = removed_key_checked_miss
+                    || cfg.removed_key_checked_miss_receipt.is_none();
+                exact_unpack_result_join
+                    && removed_key_receipt_profile_consistent
+                    && ((exact_direct_get_set_lineage
+                        && (exact_checked_get_key_payload || exact_computed_key_payload))
+                        || exact_static_key_selected_payload_authority
+                        || exact_removed_key_checked_miss)
+            });
+
+            let exact_profile_source_lineage = if direct_tuple_get_unpack {
+                owner == &direct_tuple_get_owner
+                    && direct_tuple_get_source_receipt.is_some_and(|(_, source)| {
+                        source.unpack_operation == *call
+                            && source.unpack_conversion_kind
+                                == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                            && Some(&source.unpack_target_type) == target_type
+                            && matches!(
+                                program.resolved_types.get(&source.unpack_source_type),
+                                Some(crate::core::ResolvedType::DynamicAny { .. })
+                            )
+                    })
+            } else if set_get_any_result_i32 {
+                owner == &set_get_any_result_i32_owner
+                    && target_type == Some(&i32_type)
+                    && set_get_any_result_i32_source_receipt.is_some_and(|(_, source)| {
+                        source.get_unpack_operation == *call
+                            && source.get_unpack_conversion_kind
+                                == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                            && source.get_unpack_target_type == i32_type
+                            && matches!(
+                                program.resolved_types.get(&source.get_unpack_source_type),
+                                Some(crate::core::ResolvedType::DynamicAny { .. })
+                            )
+                    })
+            } else if set_get_any_i32 {
+                owner == &set_get_any_i32_owner
+                    && target_type == Some(&i32_type)
+                    && set_get_any_i32_source_receipt.is_some_and(|(_, source)| {
+                        source.unpack_operation == *call
+                            && source.unpack_conversion_kind
+                                == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                            && source.unpack_target_type == i32_type
+                    })
+            } else if set_get_any_string {
+                owner == &set_get_any_string_owner
+                    && target_type == Some(&string_type)
+                    && set_get_any_string_source_receipt.is_some_and(|(_, source)| {
+                        source.unpack_operation == *call
+                            && source.unpack_conversion_kind
+                                == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+                            && source.unpack_target_type == string_type
+                            && matches!(
+                                program.resolved_types.get(&source.unpack_source_type),
+                                Some(crate::core::ResolvedType::DynamicAny { .. })
+                            )
+                    })
+            } else if dynamic_keys_get {
+                exact_dynamic_keys_get_candidate_set
+                    && exact_cfg
+                    && exact_dynamic_keys_get_selected_payload_authority
+            } else if zero_miss_i32 {
+                exact_zero_miss_i32_candidate_set && exact_cfg
+            } else if multi_unpack_count.is_some() {
+                exact_multi_profile_candidate_set
+                    && exact_cfg
+                    && (!(clone_isolation || checked_get_multi)
+                        || exact_static_key_selected_payload_authority)
+            } else if map_root_get_any_caller {
+                exact_map_root_get_any_caller
+            } else {
+                ((checked_get || computed_key_get || removed_key_checked_miss)
+                    && exact_source_lineage)
+                    || exact_static_key_selected_payload_authority
+            };
+            if !candidate_census_is_exact
+                || !(checked_get
+                    || computed_key_get
+                    || dynamic_keys_get
+                    || removed_key_checked_miss
+                    || map_root_get_any_caller
+                    || direct_tuple_get_unpack
+                    || zero_miss_i32
+                    || clone_isolation
+                    || set_get_any_string
+                    || set_get_any_result_i32
+                    || set_get_any_i32
+                    || exact_static_key_selected_payload_authority)
+                || !exact_builtin_call
+                || (!exact_cfg
+                    && !direct_tuple_get_unpack
+                    && !set_get_any_i32
+                    && !set_get_any_string
+                    && !set_get_any_result_i32)
+                || !exact_profile_source_lineage
+            {
+                let span = site
+                    .map(|site| site.origin.user_span())
+                    .or_else(|| {
+                        program
+                            .node_meta
+                            .get(call)
+                            .map(|meta| meta.origin.user_span())
+                    })
+                    .unwrap_or(Span::UNKNOWN);
+                errors.push(Diagnostic::error_code(
+                    crate::diagnostic::codes::E0200,
+                    "Map/Any unpack requires an exact profile-matched GetAny receipt with a selected payload",
+                    span,
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 
@@ -11287,14 +18071,12 @@ fn build_canonical_function_signatures(
         }
     }
 
-    // Multi-target union receipt payload types: intern the payload fields of
-    // states targeted by multi-target transitions so the MIR catalog can
-    // materialize the FlowStateSet variant layout without reopening the
-    // checker. Only multi-target target states are interned, keeping the map
-    // empty for every program without a union-return transition; an interning
-    // failure surfaces as a fail-closed diagnostic here rather than a silent
-    // layout gap in a consumer.
-    let multi_target_states: BTreeMap<String, BTreeSet<String>> = {
+    // Canonical payload types are required for two consumers: multi-target
+    // transition receipts need every target state's layout, and a `runs Flow`
+    // Actor needs its root state's payload when opening the actor domain.
+    // Without the latter, an otherwise valid one-target Flow loses the root
+    // field type before the checker-owned Actor descriptor is built.
+    let mut states_requiring_payload_types: BTreeMap<String, BTreeSet<String>> = {
         let mut map = BTreeMap::new();
         for transition in program.transitions.values() {
             if transition.targets.len() > 1 {
@@ -11305,8 +18087,29 @@ fn build_canonical_function_signatures(
         }
         map
     };
+    for item in &file.items {
+        let crate::ast::Item::Actor(actor) = item else {
+            continue;
+        };
+        let Some(flow_name) = actor.runs_flow.as_deref() else {
+            continue;
+        };
+        let Some(flow) = file.items.iter().find_map(|candidate| match candidate {
+            crate::ast::Item::Flow(flow) if flow.name == flow_name => Some(flow),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(root) = flow.states.iter().find(|state| state.name != "Fault") else {
+            continue;
+        };
+        states_requiring_payload_types
+            .entry(flow_name.to_owned())
+            .or_default()
+            .insert(root.name.clone());
+    }
     for flow in program.flows.values() {
-        let Some(target_states) = multi_target_states.get(&flow.id.0) else {
+        let Some(target_states) = states_requiring_payload_types.get(&flow.id.0) else {
             continue;
         };
         let flow_generic_names = flow

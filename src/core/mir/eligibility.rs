@@ -12,6 +12,7 @@ use crate::core::ir::{
     ResolvedPatternKind, ResolvedProjection, ResolvedStmtKind, ResolvedType,
     ResolvedValueProjection,
 };
+use crate::core::resolved::ResolvedTransition;
 use crate::core::{
     CheckedProgram, NodeId, ResolvedBody, ResolvedLocalId, ResolvedPattern, ResolvedStmt,
     TransitionId,
@@ -1738,10 +1739,12 @@ pub fn is_s8_flow_transition_candidate(program: &CheckedProgram) -> bool {
 /// adapter can consume as one graph.
 ///
 /// The original S8 profile intentionally covered one self-loop only. This
-/// adjacent profile admits a scalar multi-transition graph while keeping
-/// parameters, failure effects, persistent fields, imports, helpers, fallback
-/// edges, and non-scalar payloads outside the receipt. Unsupported Flow syntax
-/// therefore fails at the shared MIR gates instead of reaching the AST emitter.
+/// adjacent profile admits a scalar multi-transition graph with at most one
+/// `i32` event parameter per transition, while keeping failure effects,
+/// persistent fields, imports, helpers, fallback edges, and non-scalar
+/// payloads outside the receipt. The canonical MIR transition contract already
+/// binds event arguments to the checked parameter list, and all four consumers
+/// validate that contract before execution.
 pub fn is_closed_silent_local_flow_candidate(program: &CheckedProgram) -> bool {
     if program.has_imports() || program.flows().len() != 1 || !program.actors().is_empty() {
         return false;
@@ -1789,10 +1792,17 @@ pub fn is_closed_silent_local_flow_candidate(program: &CheckedProgram) -> bool {
     }
     if transitions.iter().any(|transition| {
         transition.targets.len() != 1
-            || !transition.params.is_empty()
+            || transition.params.len() > 1
+            || transition
+                .params
+                .iter()
+                .any(|(_, ty)| !is_concrete_i32_type(ty))
             || transition.fails.is_some()
             || program.resolved_body(&transition.node_id).is_none()
     }) {
+        return false;
+    }
+    if !has_only_exact_transition_unknown_effects(program, &transitions) {
         return false;
     }
     for (name, state) in &flow.states {
@@ -1814,6 +1824,281 @@ pub fn is_closed_silent_local_flow_candidate(program: &CheckedProgram) -> bool {
         };
         flow.states.contains_key(&target.name)
     })
+}
+
+/// The Flow call-site scanner records a direct transition as `unknown` because
+/// transition signatures do not yet carry a body effect summary. The bounded
+/// silent-local receipt may account for exactly that edge, but must not absorb
+/// stdout, shared mutation, or another effect merely because the same caller
+/// also invokes a transition.
+fn has_only_exact_transition_unknown_effects(
+    program: &CheckedProgram,
+    transitions: &[&ResolvedTransition],
+) -> bool {
+    let transition_ids = transitions
+        .iter()
+        .map(|transition| transition.id.clone())
+        .collect::<HashSet<_>>();
+    let mut executable_owners = transitions
+        .iter()
+        .map(|transition| transition.node_id.0.clone())
+        .collect::<HashSet<_>>();
+    let main_owner = NodeId("function:main".into());
+    executable_owners.insert(main_owner.0.clone());
+
+    let Some(main) = program.callable(&main_owner) else {
+        return false;
+    };
+    let Some(main_body) = program.resolved_body(&main_owner) else {
+        return false;
+    };
+    if main
+        .signature
+        .effects
+        .iter()
+        .any(|effect| effect.as_str() != "unknown")
+        || body_contains_unaccounted_flow_effect_metadata(main_body)
+        || transitions.iter().any(|transition| {
+            program
+                .callable(&transition.node_id)
+                .is_none_or(|callable| !callable.signature.effects.is_empty())
+                || program
+                    .resolved_body(&transition.node_id)
+                    .is_none_or(body_contains_unaccounted_flow_effect_metadata)
+        })
+    {
+        return false;
+    }
+
+    program
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| executable_owners.contains(&site.owner))
+        .all(|site| {
+            site.effects.is_empty()
+                || (site.kind == crate::core::ResolvedCallKind::Unknown
+                    && site.effects.as_slice() == ["unknown"]
+                    && matches!(
+                        &site.resolved_callee,
+                        Some(ResolvedCallee::Transition(id)) if transition_ids.contains(id)
+                    ))
+        })
+}
+
+/// Transition signatures do not yet summarize statement-level backend
+/// requirements or the SharedLet origin marker. A silent-local Flow receipt
+/// may account for the exact `unknown` transition call edge, but it must not
+/// treat those checker-owned body effects as part of that transition. This
+/// scanner keeps the candidate closed over every executable body root,
+/// including nested typed blocks and checker-owned place/default expressions.
+fn body_contains_unaccounted_flow_effect_metadata(body: &ResolvedBody) -> bool {
+    body.root
+        .statements
+        .iter()
+        .any(statement_contains_unaccounted_flow_effect_metadata)
+        || body
+            .root
+            .result
+            .as_deref()
+            .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+        || body
+            .place_inputs
+            .values()
+            .chain(body.default_values.values())
+            .any(expression_contains_unaccounted_flow_effect_metadata)
+}
+
+fn block_contains_unaccounted_flow_effect_metadata(block: &crate::core::ir::ResolvedBlock) -> bool {
+    block
+        .statements
+        .iter()
+        .any(statement_contains_unaccounted_flow_effect_metadata)
+        || block
+            .result
+            .as_deref()
+            .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+}
+
+fn statement_contains_unaccounted_flow_effect_metadata(statement: &ResolvedStmt) -> bool {
+    if !statement.backend_requirements.is_empty() {
+        return true;
+    }
+    match &statement.kind {
+        ResolvedStmtKind::Bind {
+            pattern,
+            initializer,
+        } => {
+            pattern.node_id == NodeId(format!("{}/shared-pattern", statement.node_id.0))
+                || matches!(
+                    &pattern.origin,
+                    crate::core::Origin::Desugared { parent, rule, .. }
+                        if parent == &statement.node_id && rule == "resolved_body.shared_binding"
+                )
+                || initializer
+                    .as_ref()
+                    .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+        }
+        ResolvedStmtKind::Assign { value, .. }
+        | ResolvedStmtKind::Expr(value)
+        | ResolvedStmtKind::Contract {
+            condition: value, ..
+        } => expression_contains_unaccounted_flow_effect_metadata(value),
+        ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => value
+            .as_ref()
+            .is_some_and(expression_contains_unaccounted_flow_effect_metadata),
+        ResolvedStmtKind::While { condition, body } => {
+            expression_contains_unaccounted_flow_effect_metadata(condition)
+                || block_contains_unaccounted_flow_effect_metadata(body)
+        }
+        ResolvedStmtKind::WhileLet {
+            initializer, body, ..
+        } => {
+            expression_contains_unaccounted_flow_effect_metadata(initializer)
+                || block_contains_unaccounted_flow_effect_metadata(body)
+        }
+        ResolvedStmtKind::IfLet {
+            initializer,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expression_contains_unaccounted_flow_effect_metadata(initializer)
+                || block_contains_unaccounted_flow_effect_metadata(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_contains_unaccounted_flow_effect_metadata)
+        }
+        ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+            block_contains_unaccounted_flow_effect_metadata(body)
+        }
+        ResolvedStmtKind::For { iterable, body, .. } => {
+            expression_contains_unaccounted_flow_effect_metadata(iterable)
+                || block_contains_unaccounted_flow_effect_metadata(body)
+        }
+        ResolvedStmtKind::Pinned { .. } | ResolvedStmtKind::NestedCallable(_) => true,
+        ResolvedStmtKind::Math(expressions) => expressions
+            .iter()
+            .any(expression_contains_unaccounted_flow_effect_metadata),
+        ResolvedStmtKind::Drop(_) | ResolvedStmtKind::Continue => false,
+    }
+}
+
+fn expression_contains_unaccounted_flow_effect_metadata(expression: &ResolvedExpr) -> bool {
+    if !expression.backend_requirements.is_empty() {
+        return true;
+    }
+    match &expression.kind {
+        ResolvedExprKind::FString(parts) => parts.iter().any(|part| match part {
+            crate::core::ir::ResolvedFStringPart::Text(_) => false,
+            crate::core::ir::ResolvedFStringPart::Interpolation(value) => {
+                expression_contains_unaccounted_flow_effect_metadata(value)
+            }
+        }),
+        ResolvedExprKind::Project { value, projection } => {
+            expression_contains_unaccounted_flow_effect_metadata(value)
+                || matches!(
+                    projection,
+                    ResolvedValueProjection::Index(index)
+                        if expression_contains_unaccounted_flow_effect_metadata(index)
+                )
+        }
+        ResolvedExprKind::Binary { left, right, .. }
+        | ResolvedExprKind::Range {
+            start: left,
+            end: right,
+        } => {
+            expression_contains_unaccounted_flow_effect_metadata(left)
+                || expression_contains_unaccounted_flow_effect_metadata(right)
+        }
+        ResolvedExprKind::Unary { operand, .. }
+        | ResolvedExprKind::OptionalChain {
+            receiver: operand, ..
+        }
+        | ResolvedExprKind::TypeOf(operand)
+        | ResolvedExprKind::Old(operand)
+        | ResolvedExprKind::Try { value: operand, .. }
+        | ResolvedExprKind::Cast { value: operand, .. }
+        | ResolvedExprKind::Spawn(operand)
+        | ResolvedExprKind::Await(operand) => {
+            expression_contains_unaccounted_flow_effect_metadata(operand)
+        }
+        ResolvedExprKind::Call(call) => call
+            .arguments
+            .iter()
+            .any(|argument| expression_contains_unaccounted_flow_effect_metadata(&argument.value)),
+        ResolvedExprKind::Tuple(values)
+        | ResolvedExprKind::List(values)
+        | ResolvedExprKind::Set(values) => values
+            .iter()
+            .any(expression_contains_unaccounted_flow_effect_metadata),
+        ResolvedExprKind::Map(entries) => entries.iter().any(|(key, value)| {
+            expression_contains_unaccounted_flow_effect_metadata(key)
+                || expression_contains_unaccounted_flow_effect_metadata(value)
+        }),
+        ResolvedExprKind::Comprehension {
+            value,
+            iterable,
+            guard,
+            ..
+        } => {
+            expression_contains_unaccounted_flow_effect_metadata(value)
+                || expression_contains_unaccounted_flow_effect_metadata(iterable)
+                || guard
+                    .as_deref()
+                    .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+        }
+        ResolvedExprKind::Record { fields, rest, .. } => {
+            fields
+                .iter()
+                .any(|field| expression_contains_unaccounted_flow_effect_metadata(&field.value))
+                || rest
+                    .as_deref()
+                    .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+        }
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Quote(block) => block_contains_unaccounted_flow_effect_metadata(block),
+        ResolvedExprKind::Scope { body, .. } => {
+            block_contains_unaccounted_flow_effect_metadata(body)
+        }
+        ResolvedExprKind::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expression_contains_unaccounted_flow_effect_metadata(condition)
+                || block_contains_unaccounted_flow_effect_metadata(then_block)
+                || block_contains_unaccounted_flow_effect_metadata(else_block)
+        }
+        ResolvedExprKind::Match { scrutinee, arms } => {
+            expression_contains_unaccounted_flow_effect_metadata(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+                        || expression_contains_unaccounted_flow_effect_metadata(&arm.body)
+                })
+        }
+        ResolvedExprKind::Slice { target, start, end } => {
+            expression_contains_unaccounted_flow_effect_metadata(target)
+                || start
+                    .as_deref()
+                    .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+                || end
+                    .as_deref()
+                    .is_some_and(expression_contains_unaccounted_flow_effect_metadata)
+        }
+        // A closure's body is a distinct callable owner and is not covered by
+        // the exact main/transition call-site set used for this receipt.
+        ResolvedExprKind::Lambda(_) => true,
+        ResolvedExprKind::Literal(_)
+        | ResolvedExprKind::Load(_)
+        | ResolvedExprKind::Constant(_)
+        | ResolvedExprKind::Callable(_)
+        | ResolvedExprKind::DefaultArgument { .. }
+        | ResolvedExprKind::ComptimeValue(_)
+        | ResolvedExprKind::TypeValue(_) => false,
+    }
 }
 
 /// Whether `program` is the exact S8 production island already closed by all

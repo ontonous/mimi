@@ -18,7 +18,7 @@ impl<'a> Checker<'a> {
                 // inference. `-2147483648` parses as Neg(2147483648); the
                 // positive literal alone exceeds i32::MAX and value-aware
                 // widening (literal.rs) promotes it to i64, breaking i32 call
-                // sites (dual_actor_negative_int_field regressed with E0211).
+                // sites (dual_actor_negative_int_flow_payload regressed with E0211).
                 // The *folded* value is exactly i32::MIN, so keep it i32 —
                 // matches pre-C2 typing and both backends' wrapped value.
                 if let Expr::Literal(Lit::Int(v)) = e.unlocated() {
@@ -306,19 +306,30 @@ mod managed_any_string_equality_tests {
         let legal = crate::tests::parse(
             r#"
             func main() -> i32 {
-                let empty = map_new()
-                let root = map_set(empty, "key", "value\0🧪")
-                let pair = map_get(root, "key")
-                let payload = pair.1
-                let eq_forward = payload == "value\0🧪"
-                let eq_reverse = "value\0🧪" == payload
-                let ne_forward = payload != "other"
-                let ne_reverse = "other" != payload
-                drop(pair)
-                drop(payload)
-                drop(empty)
-                drop(root)
-                if eq_forward && eq_reverse && ne_forward && ne_reverse { 0 } else { 1 }
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "key", "value\0🧪") {
+                            Ok(root) => {
+                                let pair = map_get(root, "key")
+                                let payload = pair.1
+                                let eq_forward = payload == "value\0🧪"
+                                let eq_reverse = "value\0🧪" == payload
+                                let ne_forward = payload != "other"
+                                let ne_reverse = "other" != payload
+                                drop(pair)
+                                drop(payload)
+                                drop(empty)
+                                drop(root)
+                                if eq_forward && eq_reverse && ne_forward && ne_reverse { 0 } else { 1 }
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
             "#,
         );
@@ -327,17 +338,28 @@ mod managed_any_string_equality_tests {
         let illegal = crate::tests::parse(
             r#"
             func main() -> i32 {
-                let empty = map_new()
-                let root = map_set(empty, "key", "value")
-                let pair = map_get(root, "key")
-                let payload = pair.1
-                let bad_forward = payload == 1
-                let bad_reverse = 1 == payload
-                drop(pair)
-                drop(payload)
-                drop(empty)
-                drop(root)
-                if bad_forward || bad_reverse { 1 } else { 0 }
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "key", "value") {
+                            Ok(root) => {
+                                let pair = map_get(root, "key")
+                                let payload = pair.1
+                                let bad_forward = payload == 1
+                                let bad_reverse = 1 == payload
+                                drop(pair)
+                                drop(payload)
+                                drop(empty)
+                                drop(root)
+                                if bad_forward || bad_reverse { 1 } else { 0 }
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
             "#,
         );

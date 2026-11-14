@@ -15,7 +15,6 @@ pub mod gep;
 #[cfg(feature = "llvm18-host-dynamic")]
 mod llvm_host;
 pub mod mir;
-mod mono_recover;
 mod registry;
 mod resolved;
 mod scope;
@@ -36,6 +35,56 @@ use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, Val
 use inkwell::OptimizationLevel;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// MCJIT can return a non-null function address even when RuntimeDyld failed
+/// to resolve one of the module's external relocations. Inkwell's
+/// `get_function` only checks that address, so JIT tests must inspect the
+/// engine error before calling generated code.
+#[cfg(test)]
+pub(crate) fn check_execution_engine_linked(
+    engine: &inkwell::execution_engine::ExecutionEngine<'_>,
+) -> Result<(), String> {
+    let mut error = std::ptr::null_mut();
+    // SAFETY: `engine` is live and `error` is a valid output slot. LLVM owns
+    // any returned message and it is released below after copying its text.
+    let failed = unsafe {
+        llvm_sys::execution_engine::LLVMExecutionEngineGetErrMsg(engine.as_mut_ptr(), &mut error)
+    };
+    if failed == 0 {
+        if !error.is_null() {
+            // SAFETY: LLVM allocated this message for the current engine API
+            // call, and it is no longer needed because no link error occurred.
+            unsafe { llvm_sys::core::LLVMDisposeMessage(error) };
+        }
+        return Ok(());
+    }
+
+    let message = if error.is_null() {
+        "LLVM reported an execution-engine link error without a message".to_owned()
+    } else {
+        // SAFETY: LLVM returned a NUL-terminated error message for this live
+        // engine. Copy it before disposing LLVM's allocation.
+        let message = unsafe { std::ffi::CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned();
+        // SAFETY: this is the message allocated by LLVMExecutionEngineGetErrMsg.
+        unsafe { llvm_sys::core::LLVMDisposeMessage(error) };
+        message
+    };
+    Err(format!(
+        "MCJIT failed to resolve external symbols: {message}"
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn assert_execution_engine_linked(
+    engine: &inkwell::execution_engine::ExecutionEngine<'_>,
+    operation: &str,
+) {
+    if let Err(message) = check_execution_engine_linked(engine) {
+        panic!("{message} before {operation}");
+    }
+}
 
 /// Initialize the LLVM target set used by native code generation.
 ///
@@ -243,11 +292,6 @@ pub struct CodeGenerator<'ctx> {
     /// checked-program boundary for native type consumers.
     checked_native_declarations: Option<crate::core::ir::ResolvedNativeDeclarations>,
     checked_native_types: Option<crate::core::ResolvedTypeTable>,
-    /// AST function bodies indexed by checked callable identity. This keeps
-    /// compatibility code generation's body payload while moving production
-    /// impl selection and dispatch off `type_impls` name scans.
-    checked_impl_method_bodies:
-        HashMap<crate::core::NodeId, (crate::ast::FuncDef, crate::ast::Type)>,
     /// Checker-issued LLVM symbol for each impl method callable.  The
     /// resolved emitter lowers an admitted impl body directly from Typed IR,
     /// while the native declaration catalog/vtable uses this stable symbol.
@@ -278,12 +322,6 @@ pub struct CodeGenerator<'ctx> {
     /// Maps bare name -> (mangled LLVM symbol, func_defs entry displaced by
     /// the shadow, restored when the enclosing frame exits).
     nested_shadow_symbols: HashMap<String, (String, Option<FuncDef>)>,
-    /// Name of the function currently compiled by compile_func_legacy (used
-    /// to mangle shadowing nested symbols deterministically).
-    current_legacy_fn: String,
-    /// Monotonic counter disambiguating same-named shadows within one
-    /// enclosing function (e.g. two `func h` declarations in sequence).
-    nested_shadow_counter: usize,
     var_type_names: HashMap<String, String>,
     /// Type objects for variables (avoids string re-parsing for Arch-2).
     var_types: HashMap<String, Type>,
@@ -424,10 +462,6 @@ pub struct CodeGenerator<'ctx> {
     callback_thunk_counter: u64,
     /// G1b: Cache of generated callback thunks, keyed by signature fingerprint.
     callback_thunks: HashMap<String, CallbackThunkEntry<'ctx>>,
-    /// Counter for naming unique export callback trampolines.
-    export_callback_thunk_counter: u64,
-    /// Cache of export callback trampolines, keyed by signature fingerprint.
-    export_callback_trampolines: HashMap<String, inkwell::values::PointerValue<'ctx>>,
     pending_spawn_type: Option<BasicTypeEnum<'ctx>>,
     /// Set of type names that are record types (for JSON FFI serialization).
     record_type_names: std::collections::HashSet<String>,
@@ -599,7 +633,6 @@ pub struct CodeGenerator<'ctx> {
     resolved_method_params: Option<HashMap<String, Vec<(String, String)>>>,
     /// Capability names from CheckedProgram.
     resolved_capabilities: Option<std::collections::HashSet<String>>,
-    resolved_capability_combined: Option<HashMap<String, String>>,
     /// Constant names from CheckedProgram.
     resolved_constants: Option<std::collections::HashSet<String>>,
     resolved_constant_values: Option<HashMap<String, (Option<String>, String)>>,
@@ -703,18 +736,15 @@ pub struct CodeGenerator<'ctx> {
     /// fallible transition body.
     fault_self_entry: Option<(inkwell::values::PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     /// H4 (audit-codegen): persistent field names of the flow currently being
-    /// compiled (from FlowDef, available on both compile_checked and legacy
-    /// compile_file paths — resolved_persistent_fields is CheckedProgram-only).
+    /// compiled. Checked native flow lowering reads the checker-owned
+    /// persistent-field catalog.
     current_persistent_fields: Vec<String>,
-    /// Set of function qualified_names that the resolved emitter attempted to
-    /// compile but failed (e.g., due to a coercion error in the body emission).
-    /// These functions may have partial basic blocks (entry block without
-    /// terminator) that would cause the legacy emitter's `compile_func_legacy` to
-    /// incorrectly skip them. Track them here so the legacy emitter knows to
-    /// recompile even when `count_basic_blocks() != 0`.
+    /// Function names whose resolved subset-test emission failed. Partial
+    /// bodies are cleared before recording; this is direct test evidence and
+    /// never triggers a surface-AST retry.
     resolved_failed_functions: std::collections::HashSet<String>,
     /// Test-only fault injection for proving that a partially emitted body is
-    /// cleared before legacy retry. This never exists in production builds.
+    /// cleared before the checked native route returns its failure.
     #[cfg(test)]
     resolved_emission_failure_for_test:
         Option<(crate::core::NodeId, ResolvedEmissionFailureForTest)>,
@@ -729,6 +759,10 @@ pub struct CodeGenerator<'ctx> {
     /// is consumer provenance and may change on an idempotent replay, while
     /// every canonical MIR/ABI/FFI/ownership field must remain identical.
     mir_native_route_receipt: Option<crate::core::mir::CanonicalMirRouteReceipt>,
+    /// Verifier-side native capability preflights emit LLVM for validation,
+    /// but do not represent the CLI's final native build and must not publish
+    /// its route-census events.
+    suppress_canonical_mir_native_census: bool,
 }
 
 #[cfg(test)]
@@ -826,7 +860,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             checked_alias_primitives: HashMap::new(),
             checked_native_declarations: None,
             checked_native_types: None,
-            checked_impl_method_bodies: HashMap::new(),
             checked_impl_method_symbols: HashMap::new(),
             checked_trait_method_dispatch: CheckedTraitMethodDispatchIndex::default(),
             checked_generic_binder_names: HashMap::new(),
@@ -836,8 +869,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             type_map: HashMap::new(),
             func_defs: HashMap::new(),
             nested_shadow_symbols: HashMap::new(),
-            current_legacy_fn: String::new(),
-            nested_shadow_counter: 0,
             var_type_names: HashMap::new(),
             var_types: HashMap::new(),
             ref_bound_vars: std::collections::HashSet::new(),
@@ -884,8 +915,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             extern_param_types: HashMap::new(),
             callback_thunk_counter: 0,
             callback_thunks: HashMap::new(),
-            export_callback_thunk_counter: 0,
-            export_callback_trampolines: HashMap::new(),
             pending_spawn_type: None,
             record_type_names: std::collections::HashSet::new(),
             repr_c_record_names: std::collections::HashSet::new(),
@@ -955,7 +984,6 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_method_signatures: None,
             resolved_method_params: None,
             resolved_capabilities: None,
-            resolved_capability_combined: None,
             resolved_constants: None,
             resolved_constant_values: None,
             resolved_traits: None,
@@ -1004,7 +1032,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             resolved_emission_failure_observed_partial_for_test: false,
             mir_native_compiled_digest: None,
             mir_native_route_receipt: None,
+            suppress_canonical_mir_native_census: false,
         }
+    }
+
+    /// Silence build-census events for a native module compiled only as a
+    /// verifier capability preflight. Validation and LLVM emission still run;
+    /// the final CLI build owns the production census.
+    pub(crate) fn suppress_canonical_mir_native_census(&mut self) {
+        self.suppress_canonical_mir_native_census = true;
     }
 
     /// Test-only snapshot of the native module's route admission anchor.
@@ -1024,10 +1060,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.mir_native_route_receipt = receipt;
     }
 
-    /// Function names the resolved emitter attempted and then handed to
-    /// legacy. Phase 0 core-callee policy treats a non-empty set on
-    /// Flow/Session/spawn/linear functions as a hard compile error; tests
-    /// still inspect this to prove a core Flow program stayed resolved.
+    /// Function names whose resolved subset-test emission failed. Tests use
+    /// this to distinguish cleared failures from compatibility retries.
     pub fn resolved_failed_functions(&self) -> &std::collections::HashSet<String> {
         &self.resolved_failed_functions
     }
@@ -1270,12 +1304,6 @@ impl<'ctx> CodeGenerator<'ctx> {
 
     pub(crate) fn resolved_session_display(&self, name: &str) -> Option<&str> {
         self.resolved_session_displays
-            .as_ref()
-            .and_then(|map| map.get(name).map(String::as_str))
-    }
-
-    pub(crate) fn resolved_capability_combined_with(&self, name: &str) -> Option<&str> {
-        self.resolved_capability_combined
             .as_ref()
             .and_then(|map| map.get(name).map(String::as_str))
     }
@@ -6564,14 +6592,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "shared-object emission requires a successful checked native compilation in shared mode so every host-callable body is checked for DynamicAnyUnpack".into(),
             ))
         }
-    }
-
-    /// The test-only legacy harness still exercises C data-symbol emission
-    /// through `compile_file`, which is itself unavailable outside tests.
-    /// Keep that fixture path separate from the production serializer gate.
-    #[cfg(test)]
-    pub(crate) fn allow_legacy_test_shared_object_emission(&mut self) {
-        self.shared_dynamic_any_preflight_passed = true;
     }
 
     /// Emit an object file using a pre-created TargetMachine.

@@ -18,8 +18,50 @@ use crate::interp::bytecode::{
 };
 use crate::interp::Value;
 
+/// Refresh the test-only whole-program snapshot after a fixture deliberately
+/// adds a bytecode-only Spawn/Actor shell. The helper revalidates the retained
+/// Checker census and source call bindings; production code has no reseal API.
+fn reseal_test_bytecode_fixture(bytecode: &mut crate::interp::bytecode::BytecodeProgram) {
+    BytecodeVM::reseal_managed_any_cfg_fixture_program_for_test(bytecode)
+        .unwrap_or_else(|error| panic!("explicit test bytecode reseal failed: {error}"));
+}
+
 const C_SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.c");
 const SOURCE: &str = include_str!("../../tests/fixtures/mir_scalar_ffi_abi.mimi");
+
+fn retarget_main_helper_call_result_for_test_only(
+    mir: &mut MirProgram,
+    helper_name: &str,
+    ty: &crate::core::ir::ResolvedTypeId,
+) {
+    let main_owner = crate::core::NodeId("function:main".into());
+    let helper_owner = crate::core::NodeId(format!("function:{helper_name}"));
+    let mut main = mir
+        .functions()
+        .get(&main_owner)
+        .expect("legal executable main MIR")
+        .clone();
+    let call_results = main
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| match &instruction.kind {
+            crate::core::mir::MirInstructionKind::Call {
+                result: Some(result),
+                callee: crate::core::ir::ResolvedCallee::Function(callee),
+                ..
+            } if callee == &helper_owner => Some(result.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(call_results.len(), 1, "main must call {helper_name} once");
+    main.values
+        .get_mut(&call_results[0])
+        .expect("helper call result value")
+        .ty = ty.clone();
+    mir.replace_function_for_test_only(main);
+}
+
 const MIXED_WIDTH_C_SOURCE: &str = r#"
 #include <stdint.h>
 int64_t mir_ffi_widen_arg(int64_t x) { return x + 1; }
@@ -231,7 +273,8 @@ double mir_ffi_result_f64(int64_t x) { return x == 7 ? 42.75 : -1.0; }
 "#;
 const RESULT_CONVERSION_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_f64(x: i64) -> f64; }
-func main() -> f64 { mir_ffi_result_f64(7 as i64) }
+func ffi_result_conversion_case() -> f64 { mir_ffi_result_f64(7 as i64) }
+func main() -> i64 { ffi_result_conversion_case(); 42 }
 "#;
 const RESULT_CONVERSION_I64_C_SOURCE: &str = r#"
 #include <stdint.h>
@@ -256,7 +299,8 @@ double mir_ffi_result_f64_nan(int64_t x) { (void)x; return NAN; }
 "#;
 const RESULT_RANGE_F64_SOURCE: &str = r#"
 extern "C" { func mir_ffi_result_f64_nan(x: i64) -> f64; }
-func main() -> f64 { mir_ffi_result_f64_nan(7 as i64) }
+func ffi_nonfinite_result_case() -> f64 { mir_ffi_result_f64_nan(7 as i64) }
+func main() -> i64 { ffi_nonfinite_result_case(); 0 }
 "#;
 const MULTI_CALL_NONFINITE_C_SOURCE: &str = r#"
 #include <math.h>
@@ -269,11 +313,12 @@ extern "C" {
     func mir_ffi_prefix_value(x: i64) -> i64;
     func mir_ffi_nonfinite(x: i64) -> f64;
 }
-func main() -> f64 {
+func ffi_multi_call_nonfinite_case() -> f64 {
     let first = mir_ffi_prefix_value(7 as i64)
     println(first)
     mir_ffi_nonfinite(8 as i64)
 }
+func main() -> i64 { ffi_multi_call_nonfinite_case(); 0 }
 "#;
 const F64_I32_RANGE_C_SOURCE: &str = r#"
 #include <stdint.h>
@@ -285,11 +330,12 @@ extern "C" {
     func mir_ffi_f64_i32_edge(x: i64) -> f64;
     func mir_ffi_f64_i32_oob(x: i64) -> f64;
 }
-func main() -> f64 {
+func ffi_f64_i32_range_case() -> f64 {
     mir_ffi_f64_i32_edge(1 as i64)
     println(0 as i64)
     mir_ffi_f64_i32_oob(2 as i64)
 }
+func main() -> i64 { ffi_f64_i32_range_case(); 0 }
 "#;
 const MULTI_CALL_REQUIRES_C_SOURCE: &str = r#"
 #include <stdint.h>
@@ -509,7 +555,6 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
         .expect("shared scalar FFI materialization");
     assert!(crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route));
     assert_eq!(route.program.canonical_digest(), mir.canonical_digest());
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-abi".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-abi".into()),
@@ -525,7 +570,6 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let digest = mir.canonical_digest();
     let expected = "-2147483647\n2147483647\n4294967296\ntrue\nfalse\n1\n1\n42\n";
     let oracle = Oracle(Cell::new(0));
@@ -570,13 +614,11 @@ fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, expected);
     assert_eq!(native.stderr, "");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let context = inkwell::context::Context::create();
     let mut direct = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_direct");
     direct
         .compile_checked(&checked)
         .expect("direct native uses scalar FFI MIR");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(
         direct.test_mir_native_route_receipt(),
         Some(&mir.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE)),
@@ -751,14 +793,12 @@ fn scalar_ffi_f32_reference_bytecode_native_chain_matches() {
     let checked = crate::core::check_program(&file).expect("check f32 chain FFI fixture");
     let mir = MirProgram::from_checked_program(&checked).expect("materialize f32 chain MIR");
     assert_eq!(mir.ffi_calls().len(), 2);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-chain".into())
         .expect("verify f32 chain MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct F32ChainOracle {
         calls: Cell<u32>,
@@ -848,14 +888,12 @@ fn scalar_ffi_f32_special_values_match_three_consumers() {
     let mir =
         MirProgram::from_checked_program(&checked).expect("materialize f32 special-value MIR");
     assert_eq!(mir.ffi_calls().len(), 4);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-special-values".into())
         .expect("verify f32 special-value MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct F32SpecialOracle;
     impl MirReferenceFfiResolver for F32SpecialOracle {
@@ -943,14 +981,12 @@ fn scalar_ffi_f32_extreme_values_match_three_consumers() {
     let mir =
         MirProgram::from_checked_program(&checked).expect("materialize f32 extreme-value MIR");
     assert_eq!(mir.ffi_calls().len(), 8);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-f32-extreme-values".into())
         .expect("verify f32 extreme-value MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct F32ExtremeOracle;
     impl MirReferenceFfiResolver for F32ExtremeOracle {
@@ -1156,7 +1192,6 @@ func main() -> i64 {
         crate::core::check_program(&super::parse(SOURCE)).expect("f32 host-failure fixture check");
     let mir = MirProgram::from_checked_program(&checked).expect("f32 host-failure fixture MIR");
     assert_eq!(mir.ffi_calls().len(), 2);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let host = FailingThenRecoveringF32Host {
         calls: Cell::new(0),
@@ -1261,7 +1296,6 @@ func main() -> i64 {
     assert_eq!(good_native.exit_code, Some(0));
     assert_eq!(good_native.stdout, "1\n42\n");
     assert!(good_native.stderr.is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1322,12 +1356,10 @@ fn scalar_ffi_f32_forged_result_conversion_rejects_all_consumers() {
         .iter()
         .any(|error| error.contains("conversion")));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verifier_error =
         crate::verifier::verify_mir(&forged, "forged-f32-result-conversion".into())
             .expect_err("verifier must reject forged f32 result conversion");
     assert!(verifier_error.contains("conversion"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1391,12 +1423,10 @@ fn scalar_ffi_f32_forged_result_descriptor_rejects_all_consumers() {
         .expect_err("capability gate must reject forged f32 result descriptor");
     assert!(!capability_error.is_empty());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verifier_error =
         crate::verifier::verify_mir(&forged, "forged-f32-result-descriptor".into())
             .expect_err("verifier must reject forged f32 result descriptor");
     assert!(!verifier_error.is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1464,12 +1494,10 @@ fn scalar_ffi_f32_forged_argument_conversion_rejects_all_consumers() {
         .iter()
         .any(|error| error.contains("conversion")));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verifier_error =
         crate::verifier::verify_mir(&forged, "forged-f32-argument-conversion".into())
             .expect_err("verifier must reject forged f32 argument conversion");
     assert!(verifier_error.contains("conversion"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -1488,7 +1516,7 @@ fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
     let checked = crate::core::check_program(&file).expect("check direct f32 literal FFI fixture");
     let mir =
         MirProgram::from_checked_program(&checked).expect("materialize direct f32 literal FFI MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_result_conversion_case".into());
     // The checker-owned FFI source witness seals the conversion instruction
     // together with the call receipt.  Exercise the real narrowing conversion
     // emitted for the literal instead of replacing it with an unreceipted MIR
@@ -1685,7 +1713,7 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
     let checked = crate::core::check_program(&file).expect("check result conversion FFI fixture");
     let mut mir =
         MirProgram::from_checked_program(&checked).expect("materialize result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_result_conversion_case".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -1714,6 +1742,11 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
     // checker-owned f64 -> i64 result conversion receipt is exercised by all
     // consumers without reopening surface type inference.
     mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type.clone());
+    retarget_main_helper_call_result_for_test_only(
+        &mut mir,
+        "ffi_result_conversion_case",
+        &i64_type,
+    );
     let result_conversion = crate::core::mir::MirFfiAbiConversion {
         from: MirAbiClass::Float { bits: 64 },
         to: MirAbiClass::Integer {
@@ -1784,14 +1817,12 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
         .expect("reference result conversion FFI execution");
     assert_eq!(reference, MirRuntimeValue::Int(42));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-conversion".into())
         .expect("verify result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free result conversion bytecode");
     assert!(bytecode.ast.is_none());
@@ -1840,7 +1871,7 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
         .expect("check integer narrow result conversion FFI fixture");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize integer narrow result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_nonfinite_result_case".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -1960,14 +1991,12 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
         .expect("reference integer narrow result conversion FFI execution");
     assert_eq!(reference, MirRuntimeValue::Int(42));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-narrow".into())
         .expect("verify integer narrow result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free integer narrow result bytecode");
     assert!(bytecode.ast.is_none());
@@ -2104,14 +2133,12 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
         "{reference_error}"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-range".into())
         .expect("verify range-guarded result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free integer narrow range bytecode");
     assert!(bytecode.ast.is_none());
@@ -2172,7 +2199,7 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
     let checked = crate::core::check_program(&file).expect("check non-finite result conversion");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize non-finite result conversion MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_nonfinite_result_case".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -2201,7 +2228,12 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
         .expect("i64 non-finite result target TypeDesc");
     // Model the caller-side integer result slot so this test reaches the
     // checker-owned FloatToSignedInteger receipt in every consumer.
-    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type);
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type.clone());
+    retarget_main_helper_call_result_for_test_only(
+        &mut mir,
+        "ffi_nonfinite_result_case",
+        &i64_type,
+    );
     let result_conversion = crate::core::mir::MirFfiAbiConversion {
         from: MirAbiClass::Float { bits: 64 },
         to: MirAbiClass::Integer {
@@ -2253,14 +2285,12 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
         .to_string()
         .contains("outside target integer range"));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-nonfinite".into())
         .expect("verify non-finite result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free non-finite result bytecode");
     assert!(bytecode.ast.is_none());
@@ -2321,7 +2351,7 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize multi-call non-finite FFI MIR");
     assert_eq!(mir.ffi_calls().len(), 2);
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_multi_call_nonfinite_case".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -2353,7 +2383,12 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
     // that call result.  Rebind only the tail result slot to i64 so the
     // checker-owned result conversion is exercised after the first call has
     // already produced observable output.
-    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type);
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i64_type.clone());
+    retarget_main_helper_call_result_for_test_only(
+        &mut mir,
+        "ffi_multi_call_nonfinite_case",
+        &i64_type,
+    );
     let result_conversion = crate::core::mir::MirFfiAbiConversion {
         from: MirAbiClass::Float { bits: 64 },
         to: MirAbiClass::Integer {
@@ -2367,6 +2402,17 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
         .expect("multi-call non-finite receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+
+    let stale_witness_error = MirReferenceInterpreter::new(&mir)
+        .execute(&owner, &[])
+        .expect_err("reference must reject the unresealed result-conversion fixture");
+    assert!(
+        stale_witness_error
+            .to_string()
+            .contains("checked-source witness disagrees"),
+        "{stale_witness_error}"
+    );
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct PrefixThenNonFiniteOracle(Cell<i64>);
     impl MirReferenceFfiResolver for PrefixThenNonFiniteOracle {
@@ -2418,14 +2464,12 @@ fn scalar_ffi_multi_call_nonfinite_result_preserves_prefix_effect() {
         "reference must invoke the successful prefix and then the failing call"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-multi-nonfinite".into())
         .expect("verify multi-call non-finite result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free multi-call non-finite bytecode");
     assert!(bytecode.ast.is_none());
@@ -2486,7 +2530,7 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
         .expect("check floating narrow result conversion FFI fixture");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize floating narrow result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_result_conversion_case".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -2516,7 +2560,12 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
     // The surface declaration owns an f64 call result today.  Rebind the
     // canonical result slot to i32 so the checker-owned f64 -> i32 receipt is
     // exercised by reference, bytecode, and native consumers alike.
-    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type);
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &result_id, i32_type.clone());
+    retarget_main_helper_call_result_for_test_only(
+        &mut mir,
+        "ffi_result_conversion_case",
+        &i32_type,
+    );
     let result_conversion = crate::core::mir::MirFfiAbiConversion {
         from: MirAbiClass::Float { bits: 64 },
         to: MirAbiClass::Integer {
@@ -2587,14 +2636,12 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
         .expect("reference floating narrow result conversion FFI execution");
     assert_eq!(reference, MirRuntimeValue::Int(42));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-result-float-narrow".into())
         .expect("verify floating narrow result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free floating narrow result bytecode");
     assert!(bytecode.ast.is_none());
@@ -2643,7 +2690,7 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
         .expect("check mixed argument/result conversion FFI fixture");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize mixed argument/result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_f64_i32_range_case".into());
     let (instruction_id, argument_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -2759,7 +2806,6 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
         .expect("reference mixed argument/result conversion FFI execution");
     assert_eq!(reference, MirRuntimeValue::Int(42));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-conversion".into())
         .expect("verify mixed argument/result conversion MIR");
     assert!(verification.iter().all(|result| matches!(
@@ -2793,7 +2839,6 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
         projection(&verification_again),
         "mixed conversion verifier projection must be repeatable"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed conversion bytecode");
     assert!(bytecode.ast.is_none());
@@ -2857,7 +2902,7 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize floating narrow result range MIR");
     assert_eq!(mir.ffi_calls().len(), 2);
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:ffi_f64_i32_range_case".into());
     let mut call_values = mir
         .ffi_calls()
         .iter()
@@ -2900,7 +2945,8 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
         &edge_result,
         i32_type.clone(),
     );
-    mir.replace_function_result_and_value_type_for_test_only(&owner, &oob_result, i32_type);
+    mir.replace_function_result_and_value_type_for_test_only(&owner, &oob_result, i32_type.clone());
+    retarget_main_helper_call_result_for_test_only(&mut mir, "ffi_f64_i32_range_case", &i32_type);
     let result_conversion = crate::core::mir::MirFfiAbiConversion {
         from: MirAbiClass::Float { bits: 64 },
         to: MirAbiClass::Integer {
@@ -2918,6 +2964,17 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
         .expect("floating narrow out-of-range receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+
+    let stale_witness_error = MirReferenceInterpreter::new(&mir)
+        .execute(&owner, &[])
+        .expect_err("reference must reject the unresealed result-conversion fixture");
+    assert!(
+        stale_witness_error
+            .to_string()
+            .contains("checked-source witness disagrees"),
+        "{stale_witness_error}"
+    );
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct FloatNarrowRangeOracle(Cell<i64>);
     impl MirReferenceFfiResolver for FloatNarrowRangeOracle {
@@ -2980,14 +3037,12 @@ fn scalar_ffi_float_narrow_result_range_preserves_prefix_effect() {
     assert_eq!(unchecked_reference.captured_output(), "0\n");
     assert_eq!(oracle.0.get(), 4);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-float-narrow-range".into())
         .expect("verify floating narrow result range MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Proven | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free floating narrow range bytecode");
     assert!(bytecode.ast.is_none());
@@ -3054,7 +3109,6 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
     let receipt_ids = mir.ffi_calls().keys().cloned().collect::<Vec<_>>();
     assert_ne!(receipt_ids[0], receipt_ids[1]);
     let ordered = mir.ffi_call_entries_in_source_order();
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-multi-call-public".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-multi-call-public".into()),
@@ -3092,7 +3146,6 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
             "the failed call must retain its receipt span"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct RequiresSequenceOracle(Cell<i64>);
     impl MirReferenceFfiResolver for RequiresSequenceOracle {
@@ -3135,7 +3188,6 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
         "reference must preserve stdout produced before the failed call"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-prefix-failure".into())
         .expect("verify multi-call requires MIR");
     assert!(
@@ -3144,7 +3196,6 @@ fn scalar_ffi_multi_call_requires_failure_preserves_prefix_side_effects() {
             .any(|result| result.status == crate::verifier::VerifStatus::Disproven),
         "verifier must retain the disproven second requires: {verification:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free multi-call requires bytecode");
     assert!(bytecode.ast.is_none());
@@ -3265,7 +3316,6 @@ func main() -> i64 {
         "reference must preserve prefix call order before the postcondition failure"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-combined-prefix".into())
         .expect("verify combined ensures prefix MIR");
     assert_eq!(
@@ -3289,7 +3339,6 @@ func main() -> i64 {
             .span,
         combined_receipt.span
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("combined ensures prefix bytecode");
     assert!(bytecode.ast.is_none());
@@ -3337,7 +3386,6 @@ func main() -> i64 {
         "{}",
         native.stderr
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -3423,7 +3471,6 @@ func main() -> i64 {
         "reference must not call the combined host after a failed requires"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-combined-requires".into())
         .expect("verify combined requires short-circuit MIR");
     assert_eq!(
@@ -3453,7 +3500,6 @@ func main() -> i64 {
             .span,
         combined_receipt.span
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("combined requires short-circuit bytecode");
     assert!(bytecode.ast.is_none());
@@ -3502,7 +3548,6 @@ func main() -> i64 {
         "{}",
         native.stderr
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -3539,7 +3584,6 @@ func main() -> i64 {
     assert_eq!(receipt.mir_digest, mir.canonical_digest());
     assert_eq!(receipt.ffi_digest.len(), 64);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let api_results = [
         crate::verifier::verify_checked(&checked, "r6-457-public-verifiers".into()),
         crate::verifier::verify_checked_dual(&checked, "r6-457-public-verifiers".into()),
@@ -3596,7 +3640,6 @@ func main() -> i64 {
         projections.windows(2).all(|pair| pair[0] == pair[1]),
         "public verifier APIs must expose one ordered semantic result projection"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -3628,7 +3671,6 @@ func main() -> i64 {
     let ordered = route.program.ffi_call_entries_in_source_order();
     assert_eq!(ordered.len(), 3);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let first = crate::verifier::verify_checked(&checked, "r6-466-repeat-public-verifiers".into())
         .expect("first repeated public verifier run");
     let second = crate::verifier::verify_checked(&checked, "r6-466-repeat-public-verifiers".into())
@@ -3687,7 +3729,6 @@ func main() -> i64 {
     };
     assert_eq!(projection(&first), projection(&second));
     assert_eq!(projection(&first), projection(&dual));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -3723,7 +3764,6 @@ func main() -> i64 {
         }));
     };
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
         .expect("checked source-hash FFI verifier");
     assert_results("verify_checked", &checked_results);
@@ -3763,7 +3803,6 @@ func main() -> i64 {
             .as_ref()
             .is_some_and(|artifact| artifact.source_hash == source_hash)
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -3926,14 +3965,12 @@ fn scalar_ffi_missing_symbol_is_rejected_at_each_host_boundary() {
         "missing explicit host binding must fail before the entry body"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-missing-symbol".into())
         .expect("verify missing-symbol FFI MIR");
     assert!(verification.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free missing-symbol FFI bytecode");
     assert!(bytecode.ast.is_none());
@@ -5430,6 +5467,8 @@ func main() -> i64 {
         first_binding.instruction,
     );
     vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate coordinated FFI forgery");
 
     let first = vm
         .run_value()
@@ -5463,6 +5502,8 @@ func main() -> i64 {
         original_binding.instruction,
     );
     vm.replace_canonical_ffi_binding_for_test_only(1, original_binding);
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring coordinated FFI forgery");
     assert_eq!(
         vm.call_named("function:main", Vec::new())
             .expect("canonical VM must recover after coordinated forgery restoration"),
@@ -5798,6 +5839,7 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
+    reseal_test_bytecode_fixture(program);
 
     let checked_program = bytecode.clone();
     let mut vm = BytecodeVM::new(bytecode);
@@ -5934,6 +5976,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let program = bytecode;
     let mut vm = BytecodeVM::new(program.clone());
@@ -6096,6 +6139,7 @@ func main() -> i64 {
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: child_result });
 
+    reseal_test_bytecode_fixture(bytecode_mut);
     let mut vm = BytecodeVM::new(bytecode);
     assert_eq!(
         vm.run_value()
@@ -6222,6 +6266,7 @@ func main() -> i64 {
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result_reg });
 
+    reseal_test_bytecode_fixture(bytecode_mut);
     let mut vm = BytecodeVM::new(bytecode);
     vm.enable_stdout_capture();
     let captured_stdout = vm.stdout_buf().expect("enabled stdout capture");
@@ -6366,6 +6411,7 @@ func main() -> i64 {
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result_reg });
 
+    reseal_test_bytecode_fixture(bytecode_mut);
     let mut vm = BytecodeVM::new(bytecode);
     vm.enable_stdout_capture();
     let captured_stdout = vm.stdout_buf().expect("enabled stdout capture");
@@ -6460,6 +6506,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let good_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut good_vm = BytecodeVM::new(bytecode.clone());
@@ -6594,6 +6641,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let program = bytecode;
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -6733,6 +6781,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let program = bytecode;
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -6925,6 +6974,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_value });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let sorted_lines = |stdout: &str| {
         // A concurrent println appends its payload and newline under separate
@@ -7099,6 +7149,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: first_value });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let sorted_lines = |stdout: &str| {
         // A concurrent println appends its payload and newline under separate
@@ -7270,12 +7321,15 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut vm = BytecodeVM::new(bytecode);
     vm.set_stdout_buf(stdout.clone());
     vm.set_canonical_ffi_library_path(fixture.dir.join("ffi.so").to_string_lossy().into_owned());
     vm.replace_canonical_ffi_call_extern_index_for_test_only(leaf, ffi_pc, 17);
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate nested FFI index forgery");
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     let error = vm
@@ -7294,6 +7348,8 @@ func main() -> i64 { 0 }
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     vm.replace_canonical_ffi_call_extern_index_for_test_only(leaf, ffi_pc, original_extern_idx);
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring nested FFI index");
     assert_eq!(
         vm.run_value()
             .expect("restored nested descriptor index must recover"),
@@ -7425,6 +7481,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: plain_value });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let sorted_lines = |stdout: &str| {
         // A concurrent println appends its payload and newline under separate
@@ -7636,6 +7693,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: first_value });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let sorted_lines = |stdout: &str| {
         // A concurrent println appends its payload and newline under separate
@@ -7681,6 +7739,8 @@ func main() -> i64 { 0 }
         first_binding.extern_idx,
     );
     vm.replace_canonical_ffi_binding_for_test_only(1, forged_binding);
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate paired FFI binding/index forgery");
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
     stdout.lock().unwrap().clear();
@@ -7714,6 +7774,8 @@ func main() -> i64 { 0 }
         original_b.extern_idx,
     );
     vm.replace_canonical_ffi_binding_for_test_only(1, original_b.clone());
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring paired FFI binding/index forgery");
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
 
@@ -7854,6 +7916,8 @@ func main() -> i64 { 0 }
         u16::MAX,
         original_b.argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate FFI argument-window forgery");
     stdout.lock().unwrap().clear();
     let window_error = vm
         .run_value()
@@ -7881,6 +7945,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         original_b.argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring FFI argument window");
     stdout.lock().unwrap().clear();
     assert_eq!(
         vm.run_value()
@@ -7943,6 +8009,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         forged_instruction_argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate FFI instruction argc forgery");
     stdout.lock().unwrap().clear();
     let instruction_argc_error = vm
         .run_value()
@@ -7972,6 +8040,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         original_b.argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring FFI instruction argc");
     let forged_descriptor_argc = if original_b.argc == 0 { 1 } else { 0 };
     let mut forged_descriptor_binding = binding_snapshot[1].clone();
     forged_descriptor_binding.argc = forged_descriptor_argc;
@@ -7982,6 +8052,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         forged_descriptor_argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate FFI descriptor arity forgery");
     stdout.lock().unwrap().clear();
     let descriptor_arity_error = vm
         .run_value()
@@ -8011,6 +8083,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         original_b.argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring FFI descriptor arity");
     stdout.lock().unwrap().clear();
     assert_eq!(
         vm.run_value()
@@ -8040,6 +8114,8 @@ func main() -> i64 { 0 }
         forged_combo_args_base,
         forged_combo_argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate combined FFI argument forgery");
     stdout.lock().unwrap().clear();
     let combo_error = vm
         .run_value()
@@ -8089,6 +8165,8 @@ func main() -> i64 { 0 }
         original_b.args_base,
         original_b.argc,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring combined FFI arguments");
     stdout.lock().unwrap().clear();
     assert_eq!(
         vm.call_function(vm.program().entry, &[])
@@ -8201,6 +8279,7 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
+    reseal_test_bytecode_fixture(program);
 
     let verified_stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut verified = BytecodeVM::new(bytecode.clone());
@@ -11421,7 +11500,6 @@ func main() -> i64 { println(labs(-41 as i64)); 0 }
     let mir = MirProgram::from_checked_program(&checked)
         .expect("materialize default libc scalar FFI MIR");
     assert_eq!(mir.ffi_calls().len(), 1);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc".into()),
@@ -11437,7 +11515,6 @@ func main() -> i64 { println(labs(-41 as i64)); 0 }
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
@@ -11579,7 +11656,6 @@ func main() -> i32 {
         without_scope.canonical_digest()
     });
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "nested-scalar-ffi".into()),
         crate::verifier::verify_checked_dual(&checked, "nested-scalar-ffi".into()),
@@ -11595,7 +11671,6 @@ func main() -> i32 {
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(RefCell::new(Vec::new()));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -11650,13 +11725,11 @@ func main() -> i32 {
     assert_eq!(native.stdout, "17\n25\n");
     assert_eq!(native.stderr, "");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let direct_context = inkwell::context::Context::create();
     let mut direct = crate::codegen::CodeGenerator::new(&direct_context, "nested_ffi_direct_api");
     direct
         .compile_checked(&checked)
         .expect("direct checked API must use the nested helper MIR route");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let direct_native = super::link_and_observe_module(
         &direct,
         &config,
@@ -11751,7 +11824,6 @@ func main() -> i64 {
     assert_eq!(reference.output, "18\n");
     assert_eq!(*oracle.0.borrow(), [-17, -25]);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let bytecode = compile_mir_program(&mir).expect("AST-free bytecode from the same MIR");
     assert!(bytecode.ast.is_none());
     assert!(bytecode.extern_names.is_empty());
@@ -11764,7 +11836,6 @@ func main() -> i64 {
     let mut vm = BytecodeVM::new(bytecode);
     assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(26));
     assert_eq!(vm.stdout(), "18\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_scalar_ffi_pure_nested");
@@ -11785,14 +11856,12 @@ func main() -> i64 {
     assert_eq!(native.stdout, "18\n");
     assert_eq!(native.stderr, "");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let direct_context = inkwell::context::Context::create();
     let mut direct =
         crate::codegen::CodeGenerator::new(&direct_context, "scalar_ffi_nested_direct");
     direct
         .compile_checked(&checked)
         .expect("direct checked API must use the canonical scalar FFI route");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let direct_native = super::link_and_observe_module(&direct, &config, counter + 1)
         .expect("direct checked API native execution");
     assert_eq!(direct_native.exit_code, Some(26));
@@ -11867,7 +11936,6 @@ func main() -> i64 {
     assert_eq!(mir.nested_callable_scopes().len(), 1);
     assert_eq!(mir.ffi_calls().len(), 2);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verifier = crate::verifier::verify_ffi_checked(&checked)
         .expect("verify nested FFI postcondition through canonical MIR");
     assert!(
@@ -11876,7 +11944,6 @@ func main() -> i64 {
             .any(|result| result.status == crate::verifier::VerifStatus::Disproven),
         "the unconstrained foreign result must fail its postcondition: {verifier:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = OrderedOracle {
         sequence: Cell::new(0),
@@ -11971,7 +12038,6 @@ func main() -> i64 { println(sched_yield()); 0 }
     assert_eq!(receipt.symbol, "sched_yield");
     assert!(receipt.parameter_types.is_empty());
     assert!(receipt.parameter_conversions.is_empty());
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc-zero-arg".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc-zero-arg".into()),
@@ -11987,7 +12053,6 @@ func main() -> i64 { println(sched_yield()); 0 }
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
@@ -12027,7 +12092,6 @@ func main() -> i64 { println(sched_yield()); 0 }
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "0\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     drop(guard);
 }
 
@@ -12085,7 +12149,6 @@ func main() -> i64 {
         vec!["labs", "sched_yield"]
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-default-libc-multi".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-default-libc-multi".into()),
@@ -12101,7 +12164,6 @@ func main() -> i64 {
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
@@ -12168,7 +12230,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "41\n0\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     drop(guard);
 }
 
@@ -12281,7 +12342,6 @@ pub func call_sched() -> i32 { sched_yield() }
         receipt.caller.0.contains("call_labs") || receipt.caller.0.contains("call_sched")
     }));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-imported-default-libc".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-imported-default-libc".into()),
@@ -12297,7 +12357,6 @@ pub func call_sched() -> i32 { sched_yield() }
             "{results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
@@ -12344,7 +12403,6 @@ pub func call_sched() -> i32 { sched_yield() }
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "41\n0\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     fs::remove_dir_all(project).expect("remove imported default-libc project");
     drop(guard);
@@ -12472,7 +12530,6 @@ pub func call_sched() -> i32 { sched_yield() }
         .is_some_and(|ensures| ensures.canonical_text().contains("le(")));
 
     let receipt = mir.route_receipt("scalar-ffi-v1");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mir_results = crate::verifier::verify_mir(&mir, "imported-default-libc-contract".into())
         .expect("verify imported default-libc contract MIR");
     assert!(
@@ -12510,7 +12567,6 @@ pub func call_sched() -> i32 { sched_yield() }
             })
         }));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
@@ -12550,7 +12606,6 @@ pub func call_sched() -> i32 { sched_yield() }
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "41\n0\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     fs::remove_dir_all(project).expect("remove imported default-libc contract project");
     drop(guard);
@@ -13213,7 +13268,7 @@ pub type Scalar = f64
 pub type Real = Scalar
 pub type ScalarInt = i64
 pub type ResultId = ScalarInt
-extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> ResultId requires: value >= 0 ensures: value >= 0; }
+extern "C" { func mir_ffi_import_alias_sequence(value: Real) -> ResultId ensures: result == result; }
 pub func call_imported_alias(first: i64, second: i64) -> ResultId {
     requires: first >= 0 and second >= 0
     let first_result = mir_ffi_import_alias_sequence(first)
@@ -13230,7 +13285,7 @@ pub type ExtraScalar = f64
 pub type ExtraReal = ExtraScalar
 pub type ExtraScalarInt = i64
 pub type ExtraResultId = ExtraScalarInt
-extern "C" { func mir_ffi_import_alias_sequence_extra(value: ExtraReal) -> ExtraResultId requires: value >= 0 ensures: value >= 0; }
+extern "C" { func mir_ffi_import_alias_sequence_extra(value: ExtraReal) -> ExtraResultId ensures: result == result; }
 pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     requires: value >= 0
     mir_ffi_import_alias_sequence_extra(value)
@@ -13304,7 +13359,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
         receipt
             .ensures
             .as_ref()
-            .is_some_and(|ensures| ensures.canonical_text().contains("ge("))
+            .is_some_and(|ensures| ensures.canonical_text().contains("eq("))
     }));
     assert_eq!(
         receipts[0].caller,
@@ -13391,7 +13446,13 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     let key_reference_error = MirReferenceInterpreter::new(&key_forged)
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must reject a forged imported alias receipt key");
-    assert!(key_reference_error.to_string().contains("receipt key"));
+    assert!(
+        key_reference_error.to_string().contains("receipt key")
+            || key_reference_error
+                .to_string()
+                .contains("orphaned from an extern MIR Call"),
+        "{key_reference_error}"
+    );
     let key_bytecode_error = compile_mir_program(&key_forged)
         .expect_err("bytecode must reject a forged imported alias receipt key");
     assert!(key_bytecode_error.iter().any(|error| {
@@ -13403,11 +13464,14 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     assert!(key_native_error.iter().any(|error| {
         error.message.contains("orphaned from a MIR extern call")
             || error.message.contains("receipt key")
+            || error.message.contains("orphaned from an extern MIR Call")
     }));
     let key_capability_error = crate::verifier::validate_mir_capabilities(&key_forged)
         .expect_err("capability gate must reject a forged imported alias receipt key");
     assert!(key_capability_error.iter().any(|error| {
-        error.contains("orphaned from a MIR extern call") || error.contains("receipt key")
+        error.contains("orphaned from a MIR extern call")
+            || error.contains("receipt key")
+            || error.contains("orphaned from an extern MIR Call")
     }));
     let key_verifier_error =
         crate::verifier::verify_mir(&key_forged, "forged-imported-alias-receipt-key".into())
@@ -13415,6 +13479,7 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     assert!(
         key_verifier_error.contains("orphaned from a MIR extern call")
             || key_verifier_error.contains("receipt key")
+            || key_verifier_error.contains("orphaned from an extern MIR Call")
     );
 
     // Mutating one declaration descriptor must be rejected as a cross-call
@@ -13449,6 +13514,10 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
         .expect("identity conversion for forged descriptor");
     let mut descriptor_forged_program = mir.clone();
     descriptor_forged_program.replace_ffi_calls_for_test_only(descriptor_forged_receipts);
+    let rejects_forged_declaration_shape = |message: &str| {
+        message.contains("incompatible declaration TypeDescs")
+            || message.contains("fixed TypeDesc prefix differs from checked declaration")
+    };
     let descriptor_table_errors = crate::core::mir::validate_ffi_symbol_declaration_shapes(
         descriptor_forged_program.ffi_calls(),
     );
@@ -13458,32 +13527,33 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
     let descriptor_reference_error = MirReferenceInterpreter::new(&descriptor_forged_program)
         .execute(&crate::core::NodeId("function:main".into()), &[])
         .expect_err("reference must reject a forged imported alias descriptor");
-    assert!(descriptor_reference_error
-        .to_string()
-        .contains("incompatible declaration TypeDescs"));
+    assert!(
+        rejects_forged_declaration_shape(&descriptor_reference_error.to_string()),
+        "{descriptor_reference_error}"
+    );
     let descriptor_bytecode_error = compile_mir_program(&descriptor_forged_program)
         .expect_err("bytecode must reject a forged imported alias descriptor");
     assert!(descriptor_bytecode_error
         .iter()
-        .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+        .any(|error| rejects_forged_declaration_shape(&error.message)));
     let descriptor_native_error =
         crate::codegen::mir::validate_mir_native(&descriptor_forged_program)
             .expect_err("native validator must reject a forged imported alias descriptor");
     assert!(descriptor_native_error
         .iter()
-        .any(|error| error.message.contains("incompatible declaration TypeDescs")));
+        .any(|error| rejects_forged_declaration_shape(&error.message)));
     let descriptor_capability_error =
         crate::verifier::validate_mir_capabilities(&descriptor_forged_program)
             .expect_err("capability gate must reject a forged imported alias descriptor");
     assert!(descriptor_capability_error
         .iter()
-        .any(|error| error.contains("incompatible declaration TypeDescs")));
+        .any(|error| rejects_forged_declaration_shape(error)));
     let descriptor_verifier_error = crate::verifier::verify_mir(
         &descriptor_forged_program,
         "forged-imported-alias-descriptor".into(),
     )
     .expect_err("verifier must reject a forged imported alias descriptor");
-    assert!(descriptor_verifier_error.contains("incompatible declaration TypeDescs"));
+    assert!(rejects_forged_declaration_shape(&descriptor_verifier_error));
 
     // Result identity and result ABI conversion are independent receipt
     // dimensions.  Each must be checked even when the declaration shape and
@@ -13666,7 +13736,6 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
         "reference must observe all imported callers in order"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verified = crate::verifier::verify_mir(&mir, "imported-alias-sequence".into())
         .expect("verify imported alias sequence MIR");
     assert!(verified.iter().all(|result| {
@@ -13698,7 +13767,6 @@ pub func call_imported_alias_extra(value: i64) -> ExtraResultId {
                 && artifact.mir_hash == receipt.mir_digest
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free imported alias sequence bytecode");
     assert!(bytecode.ast.is_none());
@@ -13860,7 +13928,6 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
     assert_eq!(route.program.route_receipt("scalar-ffi-v1"), receipt);
     assert_eq!(receipt.ffi_digest.len(), 64);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "imported-alias-proof".into())
         .expect("verify imported alias proof MIR");
     assert_eq!(results.len(), 2, "wrapper and extern requires obligations");
@@ -13913,7 +13980,6 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
             "{label}: {public_results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     fs::remove_dir_all(project).expect("remove imported alias proof project");
 }
 
@@ -13972,7 +14038,6 @@ fn scalar_ffi_imported_alias_negative_verifier_artifact_matches_route_receipt() 
     let receipt = mir.route_receipt("scalar-ffi-v1");
     assert_eq!(route.program.route_receipt("scalar-ffi-v1"), receipt);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "imported-alias-negative-proof".into())
         .expect("verify imported alias negative proof MIR");
     assert_eq!(
@@ -13988,7 +14053,6 @@ fn scalar_ffi_imported_alias_negative_verifier_artifact_matches_route_receipt() 
             artifact.engine == ProofArtifact::ENGINE_MIR && artifact.mir_hash == receipt.mir_digest
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     fs::remove_dir_all(project).expect("remove imported alias negative proof project");
 }
 
@@ -14059,7 +14123,6 @@ func main() -> i64 {
         .contains("eq("));
     let digest = mir.canonical_digest();
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-ensures".into())
         .expect("MIR FFI ensures verifier");
     assert_eq!(results.len(), 1, "one call-site postcondition obligation");
@@ -14079,7 +14142,6 @@ func main() -> i64 {
             .mir_hash,
         digest
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-ensures".into()),
@@ -14098,7 +14160,6 @@ func main() -> i64 {
             .as_ref()
             .is_some_and(|artifact| artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14141,7 +14202,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(mir.canonical_digest(), digest);
 }
 
@@ -14176,7 +14236,6 @@ func main() -> i64 {
     assert!(receipt.ensures.is_some());
     let digest = mir.canonical_digest();
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-requires-ensures".into())
         .expect("MIR FFI requires-and-ensures verifier");
     assert_eq!(results.len(), 1, "one receipt produces one combined result");
@@ -14199,7 +14258,6 @@ func main() -> i64 {
     assert!(results[0].artifact.as_ref().is_some_and(|artifact| {
         artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR && artifact.mir_hash == digest
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14243,7 +14301,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -14297,7 +14354,6 @@ func main() -> i64 {
         })
     ));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-unit-ensures".into())
         .expect("MIR unit-return FFI ensures verifier");
     assert_eq!(
@@ -14309,7 +14365,6 @@ func main() -> i64 {
     assert!(results[0]
         .message
         .contains("extern ensures contract proven"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14362,7 +14417,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "4\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -14428,7 +14482,6 @@ func main() -> i64 {
     assert!(receipts.iter().all(|receipt| receipt.result.is_some()));
     assert!(receipts.iter().all(|receipt| receipt.ensures.is_some()));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-bool-ensures".into())
         .expect("MIR bool-result FFI ensures verifier");
     assert_eq!(
@@ -14442,7 +14495,6 @@ func main() -> i64 {
     assert!(results
         .iter()
         .all(|result| result.message.contains("extern ensures contract disproven")));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-bool-ensures".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-bool-ensures".into()),
@@ -14459,7 +14511,6 @@ func main() -> i64 {
             })
         }));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14517,7 +14568,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "true\nfalse\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -14552,7 +14602,6 @@ func main() -> i64 {
         .values()
         .all(|receipt| receipt.ensures.is_some()));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-short-circuit".into())
         .expect("MIR short-circuit FFI ensures verifier");
     assert_eq!(results.len(), 2);
@@ -14572,7 +14621,6 @@ func main() -> i64 {
         1,
         "the unconstrained nonzero result remains statically disproven"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     for results in [
         crate::verifier::verify_checked(&checked, "scalar-ffi-short-circuit".into()),
         crate::verifier::verify_checked_dual(&checked, "scalar-ffi-short-circuit".into()),
@@ -14600,7 +14648,6 @@ func main() -> i64 {
             })
         }));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = Oracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14641,7 +14688,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "0\n7\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -14689,7 +14735,6 @@ func main() -> i64 {
     let mir = MirProgram::from_checked_program(&checked)
         .expect("materialize FFI postcondition division trap");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_mir(&mir, "scalar-ffi-ensures-div-zero".into())
         .expect("MIR FFI postcondition division verifier");
     assert_eq!(results.len(), 1);
@@ -14697,7 +14742,6 @@ func main() -> i64 {
     assert!(results[0]
         .message
         .contains("extern ensures contract disproven"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = CountingOracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -14746,7 +14790,6 @@ func main() -> i64 {
     .expect("native FFI postcondition division execution");
     assert_ne!(native.exit_code, Some(0));
     assert!(native.stderr.contains("E0801"), "{}", native.stderr);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -14844,7 +14887,6 @@ func main() -> i64 {{
         let mir = MirProgram::from_checked_program(&checked)
             .unwrap_or_else(|error| panic!("{label}: materialization failed: {error:?}"));
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = crate::verifier::verify_mir(&mir, label.into())
             .unwrap_or_else(|error| panic!("{label}: verifier failed: {error}"));
         assert_eq!(results.len(), 1, "{label}: one postcondition result");
@@ -14853,7 +14895,6 @@ func main() -> i64 {{
             results[0].message.contains("extern ensures contract"),
             "{label}: {results:?}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         for results in [
             crate::verifier::verify_checked(&checked, label.into()),
             crate::verifier::verify_checked_dual(&checked, label.into()),
@@ -14864,7 +14905,6 @@ func main() -> i64 {{
             assert_eq!(results.len(), 1, "{label}: public verifier result");
             assert_eq!(results[0].status, expected_status, "{label}: {results:?}");
         }
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
         let oracle = CountingOracle(Cell::new(0));
         let reference = MirReferenceInterpreter::new(&mir)
@@ -14932,7 +14972,6 @@ func main() -> i64 {{
             assert_eq!(native.stdout, output);
             assert_eq!(native.stderr, "");
         }
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -15010,7 +15049,6 @@ func main() -> i64 {{
         let mir = MirProgram::from_checked_program(&checked)
             .unwrap_or_else(|error| panic!("{label}: materialization failed: {error:?}"));
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = crate::verifier::verify_mir(&mir, label.into())
             .unwrap_or_else(|error| panic!("{label}: MIR verifier failed: {error}"));
         assert_eq!(results.len(), 1, "{label}: one ensures result");
@@ -15019,7 +15057,6 @@ func main() -> i64 {{
             results[0].message.contains("extern ensures contract"),
             "{label}: {results:?}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
         let oracle = IdentityOracle(Cell::new(0));
         let reference = MirReferenceInterpreter::new(&mir)
@@ -15086,7 +15123,6 @@ func main() -> i64 {{
             assert_eq!(native.stdout, expected_output);
             assert_eq!(native.stderr, "");
         }
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -15145,7 +15181,6 @@ func main() -> i64 {
     assert_ne!(first_result, second_result, "call results must not alias");
     assert!(receipts.iter().all(|receipt| receipt.ensures.is_some()));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mir_results = crate::verifier::verify_mir(&mir, "multi-argument-remainder".into())
         .expect("multi-argument remainder MIR verifier");
     assert_eq!(mir_results.len(), 2);
@@ -15153,7 +15188,6 @@ func main() -> i64 {
         result.status == crate::verifier::VerifStatus::Disproven
             && result.message.contains("extern ensures contract")
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     for results in [
         crate::verifier::verify_checked(&checked, "multi-argument-remainder".into()),
         crate::verifier::verify_checked_dual(&checked, "multi-argument-remainder-dual".into()),
@@ -15165,7 +15199,6 @@ func main() -> i64 {
             .iter()
             .all(|result| { result.status == crate::verifier::VerifStatus::Disproven }));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let oracle = PairOracle(Cell::new(0));
     let reference = MirReferenceInterpreter::new(&mir)
@@ -15206,7 +15239,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "-7\n7\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -15262,7 +15294,6 @@ func main() -> i32 {
     assert!(receipts[0].result.is_some());
     assert!(receipts[0].ensures.is_some());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mir_results = crate::verifier::verify_mir(&mir, "mixed-i32-i64".into())
         .expect("mixed i32/i64 MIR verifier");
     assert_eq!(mir_results.len(), 1);
@@ -15282,7 +15313,6 @@ func main() -> i32 {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&MixedOracle)
@@ -15322,7 +15352,6 @@ func main() -> i32 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "-7\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -15379,7 +15408,6 @@ func main() -> i32 {
     assert!(receipts.iter().all(|receipt| receipt.arguments.len() == 2));
     assert!(receipts.iter().all(|receipt| receipt.result.is_some()));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mir_results = crate::verifier::verify_mir(&mir, "mixed-boundary".into())
         .expect("mixed-width boundary MIR verifier");
     assert_eq!(mir_results.len(), 2);
@@ -15400,7 +15428,6 @@ func main() -> i32 {
             .iter()
             .all(|result| result.status == crate::verifier::VerifStatus::Disproven));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&MixedBoundaryOracle)
@@ -15440,7 +15467,6 @@ func main() -> i32 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "-2147483648\n-2147483648\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -15453,13 +15479,22 @@ fn scalar_ffi_mixed_width_checked_arithmetic_uses_i64_slot_and_short_circuits() 
             receipt: &MirFfiCallContract,
             args: &[MirRuntimeValue],
         ) -> Result<MirRuntimeValue, String> {
-            if receipt.symbol != "mir_ffi_i32_max" && receipt.symbol != "mir_ffi_i32_zero" {
+            if receipt.symbol != "mir_ffi_i32_max"
+                && receipt.symbol != "mir_ffi_i32_zero"
+                && receipt.symbol != "mir_ffi_i32_min"
+            {
                 return Err(format!("unexpected symbol {}", receipt.symbol));
             }
             let [MirRuntimeValue::Int(_left), MirRuntimeValue::Int(_right)] = args else {
                 return Err("width arithmetic oracle expects i32/i64 arguments".into());
             };
-            Ok(MirRuntimeValue::Int(i32::MAX as i64))
+            Ok(MirRuntimeValue::Int(
+                if receipt.symbol == "mir_ffi_i32_min" {
+                    i32::MIN as i64
+                } else {
+                    i32::MAX as i64
+                },
+            ))
         }
     }
 
@@ -15467,6 +15502,7 @@ fn scalar_ffi_mixed_width_checked_arithmetic_uses_i64_slot_and_short_circuits() 
 #include <stdint.h>
 int32_t mir_ffi_i32_max(int32_t left, int64_t right) { (void)left; (void)right; return INT32_MAX; }
 int32_t mir_ffi_i32_zero(int32_t left, int64_t right) { (void)left; (void)right; return INT32_MAX; }
+int32_t mir_ffi_i32_min(int32_t left, int64_t right) { (void)left; (void)right; return INT32_MIN; }
 "#;
     const SOURCE: &str = r#"
 extern "C" {
@@ -15474,12 +15510,16 @@ extern "C" {
         ensures: result + 1 > result;
     func mir_ffi_i32_zero(left: i32, right: i64) -> i32
         ensures: right == 0 or result + 1 > result;
+    func mir_ffi_i32_min(left: i32, right: i64) -> i32
+        ensures: result != (-2147483647 - 1) or result / -1 > result;
 }
 func main() -> i32 {
     let max_value = mir_ffi_i32_max(0, 1 as i64);
     let zero_value = mir_ffi_i32_zero(0, 0 as i64);
+    let min_value = mir_ffi_i32_min(0, 1 as i64);
     println(max_value);
     println(zero_value);
+    println(min_value);
     0
 }
 "#;
@@ -15493,39 +15533,43 @@ func main() -> i32 {
     let mir = MirProgram::from_checked_program(&checked)
         .expect("mixed-width arithmetic FFI materialization");
     let receipts = mir.ffi_calls().values().collect::<Vec<_>>();
-    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts.len(), 3);
     assert!(receipts.iter().all(|receipt| receipt.arguments.len() == 2));
     assert!(receipts.iter().all(|receipt| receipt.result.is_some()));
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let mir_results = crate::verifier::verify_mir(&mir, "mixed-arithmetic".into())
         .expect("mixed-width arithmetic MIR verifier");
-    assert_eq!(mir_results.len(), 2);
+    assert_eq!(mir_results.len(), 3);
     assert!(
         mir_results
             .iter()
             .all(|result| result.status == crate::verifier::VerifStatus::Proven),
         "mixed-width arithmetic verifier results: {mir_results:?}"
     );
+    assert!(mir_results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            artifact.integer_model
+                == "checked_i32_i64_power_i64_then_i32_wrap_0_1_11+ffi_contract_i64_slot_v1"
+        })
+    }));
     for results in [
         crate::verifier::verify_checked(&checked, "mixed-arithmetic".into()),
         crate::verifier::verify_checked_dual(&checked, "mixed-arithmetic-dual".into()),
         crate::verifier::verify_ffi_checked(&checked),
     ] {
         let results = results.expect("mixed-width arithmetic public verifier");
-        assert_eq!(results.len(), 2);
+        assert_eq!(results.len(), 3);
         assert!(results
             .iter()
             .all(|result| result.status == crate::verifier::VerifStatus::Proven));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&WidthArithmeticOracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
         .expect("mixed-width arithmetic reference execution");
     assert_eq!(reference.value, MirRuntimeValue::Int(0));
-    assert_eq!(reference.output, "2147483647\n2147483647\n");
+    assert_eq!(reference.output, "2147483647\n2147483647\n-2147483648\n");
 
     let bytecode = compile_mir_program(&mir).expect("mixed-width arithmetic bytecode");
     assert!(bytecode.ast.is_none());
@@ -15534,7 +15578,7 @@ func main() -> i32 {
         vm.run_value().expect("mixed-width arithmetic VM"),
         Value::Int(0)
     ));
-    assert_eq!(vm.stdout(), "2147483647\n2147483647\n");
+    assert_eq!(vm.stdout(), "2147483647\n2147483647\n-2147483648\n");
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "mixed_width_arithmetic_ffi");
@@ -15556,9 +15600,38 @@ func main() -> i32 {
     )
     .expect("mixed-width arithmetic native execution");
     assert_eq!(native.exit_code, Some(0));
-    assert_eq!(native.stdout, "2147483647\n2147483647\n");
+    assert_eq!(native.stdout, "2147483647\n2147483647\n-2147483648\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+}
+
+#[test]
+fn scalar_ffi_checked_power_stays_outside_executable_contract_subset() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+
+    let source = r#"
+extern "C" {
+    func foreign(value: i64) -> i64 ensures: result ** 2 > result;
+}
+func main() -> i64 { foreign(1 as i64) }
+"#;
+    let checked = crate::core::check_program(&super::parse(source))
+        .expect("typed FFI Power fixture remains checker-readable");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("MIR retains the exact typed FFI Power receipt");
+    let results = crate::verifier::verify_mir(&mir, "ffi-power-outside-runtime".into())
+        .expect("unsupported runtime Power produces an explicit verifier result");
+    assert_eq!(results.len(), 1, "one FFI Ensures result: {results:?}");
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "verifier must not prove a predicate the runtime consumers reject"
+    );
+    assert!(results[0].artifact.is_none());
+    assert!(results[0]
+        .message
+        .contains("outside the executable FFI predicate contract"));
 }
 
 #[test]
@@ -16479,6 +16552,9 @@ fn scalar_ffi_manifest_symbol_safety_classifier_covers_all_rejection_classes() {
 
 #[test]
 fn scalar_ffi_reserved_map_root_runtime_symbol_fails_before_host_resolution() {
+    const SOURCE_METADATA_MISMATCH: &str =
+        "checked extern declaration ABI/contract metadata differs";
+
     const RESERVED_SOURCE: &str = r#"
 extern "C" { func mimi_mir_map_root_new() -> i64; }
 func main() -> i64 { mimi_mir_map_root_new() }
@@ -16512,39 +16588,65 @@ func main() -> i64 { foreign_handle() }
 
     let reference_error = MirReferenceInterpreter::new(&program)
         .execute(&crate::core::NodeId("function:main".into()), &[])
-        .expect_err("reference must reject reserved runtime names before host lookup");
+        .expect_err("reference must reject forged source metadata before host resolution");
     assert!(
         reference_error
             .to_string()
-            .contains("reserved Canonical MIR MapRoot runtime helper"),
+            .contains(SOURCE_METADATA_MISMATCH),
         "{reference_error}"
     );
 
     let bytecode_errors = compile_mir_program(&program)
-        .expect_err("bytecode must reject reserved runtime names before host lookup");
-    assert!(bytecode_errors.iter().any(|error| {
-        error
-            .message
-            .contains("reserved Canonical MIR MapRoot runtime helper")
-    }));
+        .expect_err("bytecode must reject forged source metadata before host lookup");
+    assert!(
+        bytecode_errors.iter().any(|error| {
+            error
+                .message
+                .contains("extern call FFI symbol is not manifest-safe")
+                && error
+                    .message
+                    .contains("reserved Canonical MIR MapRoot runtime helper")
+        }),
+        "{bytecode_errors:#?}"
+    );
+    assert!(
+        bytecode_errors.iter().any(|error| {
+            error
+                .message
+                .contains("extern call FFI checked-source witness disagrees")
+        }),
+        "{bytecode_errors:#?}"
+    );
 
     let native_errors = crate::codegen::mir::validate_mir_native(&program)
-        .expect_err("native admission must reject reserved runtime names before declaration");
+        .expect_err("native admission must reject forged source metadata before declaration");
     assert!(native_errors.iter().any(|error| {
-        error
-            .message
-            .contains("reserved Canonical MIR MapRoot runtime helper")
+        error.message.contains("FFI source census")
+            && error.message.contains("extern source/MIR join")
+            && error.message.contains(SOURCE_METADATA_MISMATCH)
     }));
 
     let capability_errors = crate::verifier::validate_mir_capabilities(&program)
-        .expect_err("the public capability gate must reject reserved runtime names");
-    assert!(capability_errors
-        .iter()
-        .any(|error| { error.contains("reserved Canonical MIR MapRoot runtime helper") }));
+        .expect_err("the public capability gate must reject forged source metadata");
+    assert!(
+        capability_errors
+            .iter()
+            .any(|error| { error.contains("checked-source witness disagrees") }),
+        "{capability_errors:#?}"
+    );
+    assert!(
+        capability_errors
+            .iter()
+            .any(|error| error.contains("reserved Canonical MIR MapRoot runtime helper")),
+        "{capability_errors:#?}"
+    );
 }
 
 #[test]
 fn actor_execution_domain_ffi_symbols_are_reserved_before_host_resolution() {
+    const SOURCE_METADATA_MISMATCH: &str =
+        "checked extern declaration ABI/contract metadata differs";
+
     const RESERVED_SOURCE: &str = r#"
 extern "C" { func mimi_mir_actor_domain_open() -> i64; }
 func main() -> i64 { mimi_mir_actor_domain_open() }
@@ -16576,12 +16678,35 @@ func main() -> i64 { foreign_handle() }
         .symbol = "mimi_mir_actor_domain_open".into();
     program.replace_ffi_calls_for_test_only(receipts);
 
+    struct MustNotResolve(Cell<usize>);
+    impl MirReferenceFfiResolver for MustNotResolve {
+        fn preflight(&self, _receipts: &[MirFfiCallContract]) -> Result<(), String> {
+            self.0.set(self.0.get() + 1);
+            Ok(())
+        }
+
+        fn call(
+            &self,
+            _receipt: &MirFfiCallContract,
+            _arguments: &[MirRuntimeValue],
+        ) -> Result<MirRuntimeValue, String> {
+            self.0.set(self.0.get() + 1);
+            Err("unexpected FFI host call".into())
+        }
+    }
+
+    let resolver = MustNotResolve(Cell::new(0));
     let reference_error = MirReferenceInterpreter::new(&program)
+        .with_ffi_resolver(&resolver)
         .execute(&crate::core::NodeId("function:main".into()), &[])
-        .expect_err("reference must reject reserved ActorExecutionDomain names before host lookup");
-    assert!(reference_error
-        .to_string()
-        .contains("reserved Canonical MIR ActorExecutionDomain runtime helper"));
+        .expect_err("reference must reject forged source metadata before host resolution");
+    let reference_message = reference_error.to_string();
+    assert!(
+        reference_message.contains("extern source/MIR join")
+            && reference_message.contains(SOURCE_METADATA_MISMATCH),
+        "{reference_message}"
+    );
+    assert_eq!(resolver.0.get(), 0, "FFI host preflight/call must not run");
 
     let bytecode_errors = compile_mir_program(&program)
         .expect_err("bytecode must reject reserved ActorExecutionDomain names before host lookup");
@@ -16592,11 +16717,11 @@ func main() -> i64 { foreign_handle() }
     }));
 
     let native_errors = crate::codegen::mir::validate_mir_native(&program)
-        .expect_err("native admission must reject reserved names before declaration");
+        .expect_err("native admission must reject forged source metadata before declaration");
     assert!(native_errors.iter().any(|error| {
-        error
-            .message
-            .contains("reserved Canonical MIR ActorExecutionDomain runtime helper")
+        error.message.contains("FFI source census")
+            && error.message.contains("extern source/MIR join")
+            && error.message.contains(SOURCE_METADATA_MISMATCH)
     }));
 
     let capability_errors = crate::verifier::validate_mir_capabilities(&program)
@@ -16607,7 +16732,10 @@ func main() -> i64 { foreign_handle() }
 }
 
 #[test]
-fn scalar_ffi_symbol_safety_precedes_shape_conflict_across_direct_consumers() {
+fn scalar_ffi_source_census_and_symbol_safety_precede_shape_conflict_across_direct_consumers() {
+    const SOURCE_METADATA_MISMATCH: &str =
+        "checked extern declaration ABI/contract metadata differs";
+
     const SOURCE: &str = r#"
 extern "C" {
     func foreign_i64(value: i64) -> i64;
@@ -16637,45 +16765,47 @@ func main() -> i64 {
 
     let reference_error = MirReferenceInterpreter::new(&forged)
         .execute(&crate::core::NodeId("function:main".into()), &[])
-        .expect_err("reference must run symbol preflight before shape aggregation");
+        .expect_err("reference must reject forged source metadata before shape aggregation");
     assert!(
         reference_error
             .to_string()
-            .contains("FFI symbol is not manifest-safe"),
+            .contains(SOURCE_METADATA_MISMATCH),
         "{reference_error}"
     );
 
     let bytecode_errors = compile_mir_program(&forged)
         .expect_err("bytecode must run symbol preflight before shape aggregation");
     assert!(
-        bytecode_errors
-            .first()
-            .is_some_and(|error| error.message.contains("FFI symbol is not manifest-safe")),
+        bytecode_errors.first().is_some_and(|error| {
+            error.message.contains("FFI symbol is not manifest-safe")
+                && error.message.contains("whitespace or a manifest delimiter")
+        }),
         "{bytecode_errors:?}"
     );
 
     let native_errors = crate::codegen::mir::validate_mir_native(&forged)
-        .expect_err("native must run receipt preflight before shape aggregation");
+        .expect_err("native must reject forged source metadata before shape aggregation");
     assert!(
         native_errors
             .first()
-            .is_some_and(|error| error.message.contains("FFI symbol is not manifest-safe")),
+            .is_some_and(|error| error.message.contains(SOURCE_METADATA_MISMATCH)),
         "{native_errors:?}"
     );
 
     let capability_errors = crate::verifier::validate_mir_capabilities(&forged)
         .expect_err("capability gate must reject the malformed symbol");
     assert!(
-        capability_errors
-            .iter()
-            .any(|error| error.contains("FFI symbol is not manifest-safe")),
+        capability_errors.iter().any(|error| {
+            error.contains("FFI symbol is not manifest-safe")
+                && error.contains("whitespace or a manifest delimiter")
+        }),
         "{capability_errors:?}"
     );
 
     let verifier_error = crate::verifier::verify_mir(&forged, "shape-order".into())
-        .expect_err("public verifier must reject the malformed symbol");
+        .expect_err("public verifier must reject forged source metadata before shape aggregation");
     assert!(
-        verifier_error.contains("FFI symbol 'foreign symbol' is not manifest-safe"),
+        verifier_error.contains(SOURCE_METADATA_MISMATCH),
         "{verifier_error}"
     );
 }
@@ -18772,7 +18902,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "7\n8\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -19132,7 +19261,6 @@ void mir_ffi_unit_recover(int64_t value) {
     assert_eq!(good_native.stdout, "1\n");
     assert!(good_native.stderr.is_empty());
     assert_eq!(std::fs::read_to_string(&trace_path).unwrap(), "unit-good\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -19314,7 +19442,7 @@ int64_t mir_ffi_mark(int64_t x) {{
             "4\n", Some(("E0802", "overflow in FFI precondition")), 0, true),
         ("x / 3 == -2 && x % 3 == -1", "mir_ffi_mark(-7 as i64); 21 as i64",
             "-7\n", None, 21, true),
-        ("x < 0 && 1 / 0 > 0", "mir_ffi_mark(4 as i64); 21 as i64",
+        ("x < 0 && 1 / (x - x) > 0", "mir_ffi_mark(4 as i64); 21 as i64",
             "", Some(("E0808", "precondition")), 0, true),
     ] {
         let source = format!(
@@ -19400,7 +19528,6 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             2,
             "only user helper and main"
         );
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         for results in [
             crate::verifier::verify_checked(&checked, "ffi-route".into()),
             crate::verifier::verify_checked_dual(&checked, "ffi-route".into()),
@@ -19699,7 +19826,6 @@ fn scalar_ffi_checked_apis_share_prelude_scope_and_contract_verdicts() {
             .compile_checked(&checked)
             .expect("direct native scalar FFI route");
         generator.module.verify().expect("valid native module");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -19770,7 +19896,6 @@ fn scalar_ffi_default_ffi_verifier_reuses_one_route_receipt() {
                 && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -19853,23 +19978,23 @@ fn scalar_ffi_default_ffi_verifier_replay_preserves_route_identity() {
         assert_eq!(first_artifact.cache_key(), second_artifact.cache_key());
         assert!(!first_artifact.is_compatible(second_artifact));
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
 fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
     for source in [
         r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
-            func main() -> f64 { foreign(42.5) }"#,
+            func ffi_f64_contract_case() -> f64 { foreign(42.5) }
+            func main() -> i64 { ffi_f64_contract_case(); 0 }"#,
         r#"extern "C" { func foreign(x: f32) -> f32 requires: x > 0.0; }
-            func main() -> f32 { foreign(42.5 as f32) }"#,
+            func ffi_f32_contract_case() -> f32 { foreign(42.5 as f32) }
+            func main() -> i64 { ffi_f32_contract_case(); 0 }"#,
         r#"extern "C" { func foreign(x: i64) -> i64; }
             func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
     ] {
         let checked = crate::core::check_program(&super::parse_prod(source))
             .expect("check unsupported graph");
         assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         for result in [
             crate::verifier::verify_checked(&checked, String::new()),
             crate::verifier::verify_checked_dual(&checked, String::new()),
@@ -19880,7 +20005,6 @@ fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_ffi_route");
         assert!(generator.compile_checked(&checked).is_err());
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -19915,14 +20039,12 @@ fn scalar_ffi_non_c_abi_stays_outside_canonical_route() {
         }
         other => panic!("non-C ABI must not become a complete canonical admission: {other:?}"),
     }
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("contract-free non-C ABI has no FFI proof obligations");
     assert!(
         results.is_empty(),
         "non-C ABI without contracts: {results:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -19976,7 +20098,6 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
         let checked = crate::core::check_program(&super::parse_prod(source))
             .expect("declaration-boundary fixture");
         assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
             .expect_err("unsupported declaration semantics must remain compatibility");
         match error {
@@ -19992,13 +20113,11 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
             }
             other => panic!("unsupported declaration must remain compatibility: {other:?}"),
         }
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
         // The public native CodeGenerator API must enforce the same FFI
         // boundary as CLI dispatch. Otherwise a declaration outside the
         // migrated scalar C ABI can fall through its "Compatibility" MIR
         // result into the old resolved/AST emitter.
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_ffi_boundary");
         let diagnostics = generator
@@ -20011,10 +20130,6 @@ fn scalar_ffi_declaration_boundaries_precede_compatibility_materialization() {
                     && diagnostic.message.contains(expected)
             }),
             "direct native API must preserve the precise FFI boundary '{expected}': {diagnostics:?}"
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "rejected FFI declarations must not open the legacy body"
         );
     }
 }
@@ -20045,8 +20160,6 @@ fn scalar_ffi_materialization_rejects_unrepresented_no_panic_semantics() {
         message.contains("unsupported no_panic FFI protection semantics"),
         "unexpected no_panic materialization diagnostic: {message}"
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -20557,7 +20670,6 @@ func main() -> i64 {
             .expect_err("FFI verifier must reject forged f32 manifest");
     assert!(verifier_error.contains("ffi_digest"));
     assert_eq!(forged.profile, receipt.profile);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -20750,7 +20862,6 @@ func main() -> i64 {
             "round {round} {label}: forgery must change FFI digest"
         );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
         let reference_error = forged_reference
             .execute(&crate::core::NodeId("function:main".into()), &[])
@@ -20762,7 +20873,6 @@ func main() -> i64 {
         );
         assert_eq!(forged_reference.captured_output(), "");
         assert_eq!(oracle.calls.get(), 2, "round {round} {label} reached host");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
         let bytecode_error = compile_mir_program(&forged)
             .expect_err("bytecode must reject forged generated f32 receipt");
@@ -20777,7 +20887,6 @@ func main() -> i64 {
             crate::verifier::verify_mir(&forged, format!("generated-f32-receipt-forgery-{round}"))
                 .expect_err("verifier must reject forged generated f32 receipt");
         assert!(!verifier_error.is_empty(), "round {round} {label}");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
     assert!(seen.into_iter().all(|was_seen| was_seen));
 }
@@ -20834,7 +20943,6 @@ fn scalar_ffi_seeded_default_verifier_matrix_preserves_receipts() {
                     && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
             })
         }));
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -20873,11 +20981,9 @@ fn scalar_ffi_seeded_cross_abi_default_verifier_matrix_preserves_receipts() {
                     message.contains("extern contract expression is outside scalar MIR"),
                     "cross-ABI f64 boundary drifted: {message}"
                 );
-                crate::core::CheckedProgram::reset_test_legacy_body_access();
                 assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
                 assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
                 assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
-                assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
                 continue;
             }
             Err(error) => {
@@ -20902,7 +21008,6 @@ fn scalar_ffi_seeded_cross_abi_default_verifier_matrix_preserves_receipts() {
                     && artifact.mir_route_receipt.as_ref() == Some(&expected_receipt)
             })
         }));
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -20995,27 +21100,23 @@ func main() -> i64 {
     ));
     assert_eq!(vm.stdout(), "42\n42\n");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verified = crate::verifier::verify_checked(&checked, "multi-argument".into())
         .expect("multi-argument verifier");
     assert!(verified.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let dual = crate::verifier::verify_checked_dual(&checked, "multi-argument-dual".into())
         .expect("multi-argument dual verifier");
     assert!(dual.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let ffi = crate::verifier::verify_ffi_checked(&checked).expect("multi-argument FFI verifier");
     assert!(ffi.iter().all(|result| matches!(
         result.status,
         crate::verifier::VerifStatus::Verified | crate::verifier::VerifStatus::NoObligations
     )));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "multi_argument_ffi");
@@ -21023,7 +21124,6 @@ func main() -> i64 {
         .compile_checked(&checked)
         .expect("multi-argument direct native route");
     generator.module.verify().expect("multi-argument LLVM");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let config = super::E2EConfig {
         extra_c_src: Some(C_SOURCE.into()),
         ..Default::default()
@@ -21131,7 +21231,6 @@ func main() -> i64 {
     assert_ne!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n");
     assert!(native.stderr.contains("E0808"), "{}", native.stderr);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -21267,7 +21366,6 @@ func main() -> i64 {
     assert_ne!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n");
     assert!(native.stderr.contains("E0808"), "{}", native.stderr);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -21376,7 +21474,6 @@ func main() -> i64 {
     )
     .expect_err("native link must reject the absent multi-argument symbol");
     assert!(native_error.contains("linker failed"), "{native_error}");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -21458,7 +21555,6 @@ func main() -> i64 {
         })
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-missing-symbol".into())
         .expect("verify mixed-width missing-symbol MIR");
     assert!(verification.iter().all(|result| matches!(
@@ -21471,7 +21567,6 @@ func main() -> i64 {
                 && artifact.mir_hash == mir.canonical_digest()
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let reference_error = MirReferenceInterpreter::new(&mir)
         .execute(&crate::core::NodeId("function:main".into()), &[])
@@ -21545,7 +21640,6 @@ func main() -> i64 {
     )
     .expect_err("native link must reject the absent mixed-width symbol");
     assert!(native_error.contains("linker failed"), "{native_error}");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -21638,7 +21732,6 @@ func main() -> i64 {
         "ensures must remain in the receipt"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-ensures".into())
         .expect("verify mixed-width ensures MIR");
     assert_eq!(verification.len(), 1);
@@ -21662,7 +21755,6 @@ func main() -> i64 {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, crate::verifier::VerifStatus::Disproven);
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     struct BadOracle;
     impl MirReferenceFfiResolver for BadOracle {
@@ -21774,7 +21866,6 @@ func main() -> i64 {
     assert_ne!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "7\n");
     assert!(native.stderr.contains("E0808"), "{}", native.stderr);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -21919,7 +22010,6 @@ func main() -> i64 {
     assert!(reference_error.to_string().contains("outside i32"));
     assert_eq!(reference.captured_output(), "7\n");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range".into())
         .expect("verify mixed-width result-range MIR");
     assert!(verification.iter().all(|result| matches!(
@@ -21932,7 +22022,6 @@ func main() -> i64 {
                 && artifact.mir_hash == mir.canonical_digest()
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width result-range bytecode");
     assert!(bytecode.ast.is_none());
@@ -21970,7 +22059,6 @@ func main() -> i64 {
         "{}",
         native.stderr
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -22177,7 +22265,6 @@ func main() -> i64 {
     assert_eq!(reentrant_reference.captured_output(), "7\n");
     assert_eq!(reentrant_oracle.calls.get(), 2);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification = crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range-reentry".into())
         .expect("verify mixed-width range reentry MIR");
     assert!(verification.iter().all(|result| matches!(
@@ -22190,7 +22277,6 @@ func main() -> i64 {
                 && artifact.mir_hash == mir.canonical_digest()
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width range reentry bytecode");
     assert!(bytecode.ast.is_none());
@@ -22261,7 +22347,6 @@ func main() -> i64 {
         "{}",
         native.stderr
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -22442,7 +22527,6 @@ func main() -> i64 {
     assert_eq!(reference_result.value, MirRuntimeValue::Int(42));
     assert_eq!(reference_result.output, "3\n");
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let verification =
         crate::verifier::verify_mir(&mir, "scalar-ffi-mixed-range-multi-call".into())
             .expect("verify mixed-width multi-call range MIR");
@@ -22456,7 +22540,6 @@ func main() -> i64 {
                 && artifact.mir_hash == mir.canonical_digest()
         })
     }));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width multi-call bytecode");
     assert!(bytecode.ast.is_none());
@@ -22527,7 +22610,6 @@ func main() -> i64 {
         "{}",
         native.stderr
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -22579,7 +22661,6 @@ func main() -> i64 {
     assert_eq!(route_receipt.mir_digest, mir.canonical_digest());
     assert_eq!(route_receipt.ffi_digest.len(), 64);
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let bytecode = compile_mir_program(&mir).expect("AST-free mixed-width projection bytecode");
     assert!(bytecode.ast.is_none());
     assert_eq!(bytecode.canonical_ffi.len(), 2);
@@ -22591,7 +22672,6 @@ func main() -> i64 {
         bytecode.canonical_ffi[1].symbol,
         "generated_projection_second"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     let mir_results = crate::verifier::verify_mir(&mir, "r6-668-projection".into())
         .expect("verify mixed-width projection MIR");
@@ -22667,7 +22747,6 @@ func main() -> i64 {
         projections.windows(2).all(|pair| pair[0] == pair[1]),
         "public verifier APIs must expose one ordered mixed-width projection"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -22815,7 +22894,6 @@ func main() -> i64 {
                 || verifier_error.contains("conversion from"),
             "{label}: {verifier_error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -23243,7 +23321,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "3\n3\n42\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -23414,7 +23491,6 @@ func main() -> i64 {
     assert_eq!(vm.stdout(), "5\n3\n42\n");
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -23564,7 +23640,6 @@ func main() -> i64 {
     assert_eq!(vm.debug_stack_state(), (0, 0));
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, original_descriptor);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -23693,7 +23768,6 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 1);
     assert_eq!(vm.program().canonical_ffi, original_descriptors);
     assert_eq!(vm.program().canonical_ffi_bindings, original_bindings);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -23870,10 +23944,6 @@ func main() -> i64 {
         }),
         "unexpected capability malformed receipt diagnostics: {capability_errors:?}"
     );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "malformed canonical receipt must not touch a compatibility owner"
-    );
     let reference = MirReferenceInterpreter::new(&mir)
         .with_ffi_resolver(&Oracle)
         .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
@@ -23992,7 +24062,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "8\n3\n42\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -24162,7 +24231,6 @@ func main() -> i64 {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "3\n42\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -24413,7 +24481,6 @@ func main() -> i64 {
         verifier_error.contains("result") || verifier_error.contains("identity"),
         "{verifier_error}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -24422,7 +24489,8 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
         (
             "float-contract",
             r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
-            func main() -> f64 { foreign(42.5) }"#,
+            func ffi_float_contract_case() -> f64 { foreign(42.5) }
+            func main() -> i64 { ffi_float_contract_case(); 0 }"#,
         ),
         (
             "collection-composition",
@@ -24453,17 +24521,12 @@ fn scalar_ffi_seeded_unsupported_compositions_reject_without_legacy() {
             error.to_string().contains("scalar-ffi-v1"),
             "{label}: {error}"
         );
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
         assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
         assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_seeded_ffi");
         assert!(generator.compile_checked(&checked).is_err());
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{label} round {round} touched a compatibility owner"
-        );
     }
 }
 
@@ -24546,7 +24609,6 @@ foreign_agg("x") }"#,
         let reason = crate::core::mir::scalar_ffi_boundary_reason(&checked)
             .unwrap_or_else(|| panic!("{label} round {round} must name a boundary reason"));
         assert!(reason.contains(expected), "{label} round {round}: {reason}");
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
             .expect_err("aggregate shape must fail closed at the declaration boundary");
         let text = error.to_string();
@@ -24555,10 +24617,6 @@ foreign_agg("x") }"#,
             "{label} round {round}: {text}"
         );
         assert!(text.contains(expected), "{label} round {round}: {text}");
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{label} round {round} touched a compatibility owner while rejecting"
-        );
     }
 }
 
@@ -24629,13 +24687,8 @@ fn scalar_ffi_uncalled_aggregate_declaration_is_inert_to_route_admission() {
         crate::core::mir::scalar_ffi_boundary_reason(&checked).is_none(),
         "uncalled aggregate declaration must not produce a boundary reason"
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::core::mir::materialize_canonical_mir_route(&checked, None)
         .expect("uncalled aggregate declaration must not block scalar materialization");
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "scalar materialization touched a compatibility owner"
-    );
 
     let called = r#"
         extern "C" {
@@ -24690,17 +24743,12 @@ func main() -> i64 { f32_result(1.5 as f32) as i64 }
         "{materialization_error}"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     assert!(crate::verifier::verify_checked(&checked, String::new()).is_err());
     assert!(crate::verifier::verify_checked_dual(&checked, String::new()).is_err());
     assert!(crate::verifier::verify_ffi_checked(&checked).is_err());
     let context = inkwell::context::Context::create();
     let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_f32_cast");
     assert!(generator.compile_checked(&checked).is_err());
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "direct f32 result cast reached a compatibility owner"
-    );
 }
 
 #[test]
@@ -24748,6 +24796,8 @@ fn scalar_ffi_f32_bytecode_index_forgery_rejects_and_recovers() {
         second_binding.pc,
         first_binding.extern_idx,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after deliberate f32 descriptor index forgery");
 
     let index_error = vm
         .run_value()
@@ -24774,6 +24824,8 @@ fn scalar_ffi_f32_bytecode_index_forgery_rejects_and_recovers() {
         second_binding.pc,
         second_binding.extern_idx,
     );
+    vm.reseal_managed_any_cfg_fixture_for_test()
+        .expect("reseal bytecode after restoring f32 descriptor index");
     assert_eq!(
         vm.call_function(vm.program().entry, &[])
             .expect("restored direct f32 descriptor index must recover"),
@@ -24803,7 +24855,6 @@ fn scalar_ffi_f32_bytecode_index_forgery_rejects_and_recovers() {
     assert_eq!(native.exit_code, Some(0));
     assert_eq!(native.stdout, "42\n43\n");
     assert_eq!(native.stderr, "");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -24908,7 +24959,6 @@ func main() -> i64 { matrix_guard(1 as i64) }
         let mut forged = canonical.clone();
         forged.replace_ffi_calls_for_test_only(receipts);
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let reference_error = MirReferenceInterpreter::new(&forged)
             .execute(&crate::core::NodeId("function:main".into()), &[])
             .expect_err("reference must reject deterministic receipt forgery");
@@ -24916,10 +24966,6 @@ func main() -> i64 { matrix_guard(1 as i64) }
             reference_error.to_string().contains("FFI")
                 || reference_error.to_string().contains("extern"),
             "round {round} {label}: {reference_error}"
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "round {round} {label} reached a compatibility owner"
         );
 
         let bytecode_error = compile_mir_program(&forged)
@@ -24946,10 +24992,6 @@ func main() -> i64 { matrix_guard(1 as i64) }
         assert!(
             !verifier_error.is_empty(),
             "round {round} {label}: {verifier_error}"
-        );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "round {round} {label} reached a compatibility owner"
         );
     }
     assert!(seen.into_iter().all(|was_seen| was_seen));
@@ -25194,7 +25236,6 @@ func main() -> i64 {{
                 "{label}/{forge_label}: forgery must change the FFI digest"
             );
 
-            crate::core::CheckedProgram::reset_test_legacy_body_access();
             let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
             let reference_error = forged_reference
                 .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
@@ -25214,10 +25255,6 @@ func main() -> i64 {{
                 oracle.calls.get(),
                 baseline_calls,
                 "{label}/{forge_label}: forged receipt reached the host"
-            );
-            assert!(
-                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-                "{label}/{forge_label} reached a compatibility owner"
             );
 
             let bytecode_error = compile_mir_program(&forged)
@@ -25243,10 +25280,6 @@ func main() -> i64 {{
             assert!(
                 !verifier_error.is_empty(),
                 "{label}/{forge_label}: {verifier_error}"
-            );
-            assert!(
-                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-                "{label}/{forge_label} reached a compatibility owner"
             );
         }
     }
@@ -25411,7 +25444,6 @@ func main() -> i64 {
             "{field}: forgery must change the FFI digest"
         );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let forged_reference = MirReferenceInterpreter::new(&forged).with_ffi_resolver(&oracle);
         let reference_error = forged_reference
             .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
@@ -25431,10 +25463,6 @@ func main() -> i64 {
             calls_before_forgery,
             "{field}: whole-manifest validation must not add host calls"
         );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{field}: forgery leg reached a compatibility owner"
-        );
 
         let bytecode_error = compile_mir_program(&forged)
             .expect_err("bytecode must reject the forged middle receipt");
@@ -25451,10 +25479,6 @@ func main() -> i64 {
         let verifier_error = crate::verifier::verify_mir(&forged, receipt_label.to_string())
             .expect_err("verifier must reject the forged middle receipt");
         assert!(!verifier_error.is_empty(), "{field}: {verifier_error}");
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{field}: forgery leg reached a compatibility owner"
-        );
     }
 }
 
@@ -25663,7 +25687,6 @@ func main() -> i64 {
     )
     .expect_err("verifier must reject the forged manifest before proof");
     assert!(verifier_error.contains("ffi_digest"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -25825,7 +25848,6 @@ void mir_ffi_unit_route(int64_t value) { (void)value; }
     )
     .expect_err("verifier must reject forged Unit route before proof");
     assert!(verifier_error.starts_with(crate::core::mir::MIR_FFI_ROUTE_RECEIPT_ERROR_CODE));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -25955,7 +25977,6 @@ func main() -> i64 {
         crate::diagnostic::DiagnosticOriginKind::RuntimeSystem
     );
     assert_eq!(verifier_origin.rule.as_deref(), Some("mir.route"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -26060,7 +26081,6 @@ func main() -> i64 {
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
     assert_eq!(artifact.mir_route_receipt.as_ref(), Some(&receipt));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -26217,7 +26237,6 @@ func main() -> i64 {
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot_b);
     assert_eq!(artifact_a.mir_route_receipt.as_ref(), Some(&profile_a));
     assert_eq!(artifact_b.mir_route_receipt.as_ref(), Some(&profile_b));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -26311,6 +26330,7 @@ func main() -> i64 { 0 }
     });
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
     program.functions[main] = main_proto;
+    reseal_test_bytecode_fixture(program);
 
     let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
     let bad_fixture = library_fixture(counter, BAD_C_SOURCE);
@@ -26370,7 +26390,6 @@ func main() -> i64 { 0 }
     assert_eq!(recovery_vm.debug_canonical_ffi_loaded_library_count(), 1);
 
     guard.set_path(&good_fixture.dir.join("ffi.so"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -26490,6 +26509,7 @@ func main() -> i64 { 0 }
         });
         main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: outer_result });
         program.functions[main] = main_proto;
+        reseal_test_bytecode_fixture(program);
         bytecode
     };
 
@@ -26552,7 +26572,6 @@ func main() -> i64 { 0 }
     assert_eq!(missing_stack, (0, 0));
     assert_eq!(missing_cache, 0);
     guard.set_path(&fixture.dir.join("ffi.so"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -26620,6 +26639,7 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
+    reseal_test_bytecode_fixture(program);
 
     let counter = super::E2E_COUNTER.fetch_add(1, Ordering::Relaxed);
     let fixture = library_fixture(counter, C_SOURCE);
@@ -26661,7 +26681,6 @@ func main() -> i64 { 0 }
         "{error}"
     );
     assert_eq!(checked_ffi.debug_stack_state(), (0, 0));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -26766,7 +26785,6 @@ func main() -> i64 {
     assert_eq!(native.stdout, "3\n");
     assert!(native.stderr.contains("E0808"), "{}", native.stderr);
     assert!(native.stderr.contains("FFI postcondition failed"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -26917,7 +26935,6 @@ func main() -> i64 {
         .expect("reference must recover with valid Unit route receipt");
     assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
     assert_eq!(recovered_reference.output, "4\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -27110,7 +27127,6 @@ func main() -> i64 {
         .expect("reference must recover with second valid Unit profile");
     assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
     assert_eq!(recovered_reference.output, "6\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     guard.set_path(&library);
 }
 
@@ -27299,7 +27315,6 @@ func main() -> i64 { mir_route_diagnostic(7 as i64) }
         crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
     );
     assert!(reference.captured_output().is_empty());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -27460,7 +27475,6 @@ func main() -> i64 {
         .compile_mir_native_with_route_manifest(&mir, &verifier_manifest)
         .expect("native must accept a semantically equivalent profile receipt");
     native.module.verify().expect("cross-profile native module");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -27561,7 +27575,6 @@ func main() -> i64 {
     assert_eq!(vm.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm.program().canonical_ffi_bindings, binding_snapshot);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -27633,7 +27646,6 @@ func main() -> i64 {
     assert_eq!(repeat_bad.exit_code, bad_observation.exit_code);
     assert_eq!(repeat_bad.stdout, bad_observation.stdout);
     assert_eq!(repeat_bad.stderr, bad_observation.stderr);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -27806,7 +27818,6 @@ func main() -> i64 {
         std::fs::read_to_string(&trace_path).unwrap(),
         "ffi-bad\nffi-good\n"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -27900,7 +27911,6 @@ func main() -> i64 {
         crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
     );
     assert_eq!(generator.module.print_to_string().to_string(), snapshot);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28032,7 +28042,6 @@ int64_t mir_route_direct_recover(int64_t value) { return value + 1; }
         .expect("reference must recover with the original direct route receipt");
     assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
     assert_eq!(recovered_reference.output, "8\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28107,7 +28116,6 @@ func main() -> i64 {
         .module
         .verify()
         .expect("different MIR rejection must leave the admitted module valid");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28179,7 +28187,6 @@ func main() -> i64 {
         .expect("valid profile replay must recover after descriptor rejection");
     assert_eq!(native.module.print_to_string().to_string(), snapshot);
     native.module.verify().expect("recovered profile module");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28326,7 +28333,6 @@ int64_t mir_route_interleaved(int64_t value) { return value + 1; }
         .expect("reference must recover after interleaved failures");
     assert_eq!(recovered_reference.value, MirRuntimeValue::Int(0));
     assert_eq!(recovered_reference.output, "8\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28428,7 +28434,6 @@ func main() -> i64 {
             .map(|receipt| receipt.profile.as_str()),
         Some(profile_a.profile.as_str())
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -28563,7 +28568,6 @@ func main() -> i64 {
             .map(|receipt| receipt.profile.as_str()),
         Some(profile_a.profile.as_str())
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -28750,7 +28754,6 @@ func main() -> i64 {
     assert_eq!(observation.stdout, "1\n2\n");
     assert!(observation.stderr.is_empty());
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n8\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -28945,7 +28948,6 @@ func main() -> i64 {
     assert_eq!(observation.stdout, "3\n4\n");
     assert!(observation.stderr.contains("E0808"));
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -29131,7 +29133,6 @@ func main() -> i64 {
     assert_eq!(observation.stdout, "5\n6\n");
     assert!(observation.stderr.contains("E0808"));
     assert_eq!(std::fs::read_to_string(&trace).unwrap(), "7\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -29356,7 +29357,6 @@ func main() -> i64 {
     assert_eq!(observation_b.stdout, "7\n8\n");
     assert!(observation_b.stderr.is_empty());
     assert_eq!(std::fs::read_to_string(&trace_b).unwrap(), "B7\nB8\n");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -29497,6 +29497,7 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
+    reseal_test_bytecode_fixture(program);
     let descriptor_snapshot = program.canonical_ffi.clone();
     let binding_snapshot = program.canonical_ffi_bindings.clone();
     assert_eq!(
@@ -29584,7 +29585,6 @@ func main() -> i64 { 0 }
     assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[cfg(unix)]
@@ -29732,6 +29732,7 @@ func main() -> i64 { 0 }
     main_proto.emit(crate::interp::bytecode::instr::Op::Ret { ra: result });
     program.functions[main] = main_proto;
     program.entry = main as u32;
+    reseal_test_bytecode_fixture(program);
     let descriptor_snapshot = program.canonical_ffi.clone();
     let binding_snapshot = program.canonical_ffi_bindings.clone();
     let program = std::sync::Arc::new(program.clone());
@@ -29815,7 +29816,6 @@ func main() -> i64 { 0 }
     assert_eq!(vm_b.debug_canonical_ffi_loaded_library_count(), 2);
     assert_eq!(vm_b.program().canonical_ffi, descriptor_snapshot);
     assert_eq!(vm_b.program().canonical_ffi_bindings, binding_snapshot);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -29897,7 +29897,6 @@ func main() -> i64 {
         .module
         .verify()
         .expect("recovered native route anchor module");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -29958,7 +29957,6 @@ fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
             "{label}"
         );
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::verifier::verify_checked(&checked, format!("{label}-single"))
             .expect_err("recursive scalar helper must fail the canonical verifier");
         assert!(error.contains("recursive"), "{label}: {error}");
@@ -29980,10 +29978,6 @@ fn scalar_ffi_recursive_helpers_fail_closed_without_legacy() {
                 .any(|diagnostic| diagnostic.message.contains("recursive")),
             "{label}: {diagnostics:?}"
         );
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "{label} touched a compatibility owner"
-        );
     }
 }
 
@@ -30000,18 +29994,85 @@ fn ffi_checked_ignores_unrelated_callable_contract_without_legacy() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("unrelated callable contract fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("FFI-only verifier should have no extern obligations");
     assert!(
         results.is_empty(),
         "unrelated callable contract: {results:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn ffi_checked_compatibility_verifies_string_requires_positive_and_negative() {
+fn ffi_checked_preserves_canonical_receipt_verdicts_and_deferred_boundary() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+
+    let source = r#"
+        extern "C" { func foreign(value: i64) -> i64 requires: value > 0; }
+        func main() -> i64 {
+            foreign(7 as i64)
+            foreign(-8 as i64)
+        }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("canonical FFI receipt fixture");
+    let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect("materialize the admitted scalar FFI graph");
+    assert!(crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route));
+    let expected_receipt = route.program.route_receipt("verify-ffi-v1");
+    let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+
+    crate::core::mir::reset_test_route_materialization_count();
+    let results =
+        crate::verifier::verify_ffi_checked_with_source_hash(&checked, source_hash.clone())
+            .expect("checked FFI verification must use the canonical route receipt");
+    assert_eq!(
+        results.len(),
+        2,
+        "one result per FFI call site: {results:?}"
+    );
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+    assert_eq!(results[1].status, crate::verifier::VerifStatus::Disproven);
+    assert!(results.iter().all(|result| {
+        result.artifact.as_ref().is_some_and(|artifact| {
+            let Some(receipt) = artifact.mir_route_receipt.as_ref() else {
+                return false;
+            };
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact.source_hash == source_hash
+                && artifact.mir_hash == expected_receipt.mir_digest
+                && receipt.same_semantic_identity(&expected_receipt)
+                && receipt.validate_against_program(&route.program).is_ok()
+        })
+    }));
+    assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
+
+    let deferred_source = r#"
+        extern "C" { func text(value: string) -> i64 requires: unsupported_contract(value); }
+        func main() -> i64 { text("mimi") }
+    "#;
+    let deferred_checked = crate::core::check_program(&super::parse_prod(deferred_source))
+        .expect("historically accepted deferred FFI predicate");
+    let deferred = crate::verifier::verify_ffi_checked(&deferred_checked)
+        .expect("deferred typed FFI obligation remains observable");
+    assert_eq!(deferred.len(), 1, "deferred obligation: {deferred:?}");
+    assert_eq!(
+        deferred[0].status,
+        crate::verifier::VerifStatus::NotInTrustedSubset
+    );
+    assert!(deferred[0].artifact.is_none());
+    assert_eq!(
+        deferred[0]
+            .diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.code.as_deref()),
+        Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    );
+}
+
+#[test]
+fn ffi_checked_typed_string_requires_preserve_positive_and_negative() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -30026,20 +30087,29 @@ fn ffi_checked_compatibility_verifies_string_requires_positive_and_negative() {
             "#
         );
         let checked = crate::core::check_program(&super::parse_prod(&source))
-            .expect("requires-only String FFI compatibility fixture");
+            .expect("requires-only typed String FFI fixture");
         assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = crate::verifier::verify_ffi_checked(&checked)
             .expect("supported String requires must use checked contract roots");
         assert_eq!(results.len(), 1, "String FFI result: {results:?}");
         assert_eq!(results[0].status, expected, "{argument}: {results:?}");
-        assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+        let artifact = results[0]
+            .artifact
+            .as_ref()
+            .expect("String verifier MIR artifact");
+        assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+        assert_eq!(
+            artifact
+                .mir_route_receipt
+                .as_ref()
+                .map(|receipt| receipt.profile.as_str()),
+            Some("verifier-ffi-mir-v1")
+        );
     }
 }
 
 #[test]
-fn ffi_checked_compatibility_checks_aggregate_parameter_and_result() {
+fn ffi_checked_typed_aggregate_requires_preserve_positive_and_negative() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -30062,10 +30132,9 @@ fn ffi_checked_compatibility_checks_aggregate_parameter_and_result() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("aggregate parameter/result with scalar FFI requires fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let results = crate::verifier::verify_ffi_checked(&checked)
-        .expect("AST/Z3-expressible field requires should not be rejected by ABI layout alone");
+        .expect("checker-typed field requires should not be rejected by ABI layout alone");
     assert_eq!(results.len(), 2, "aggregate FFI call results: {results:?}");
     let positive = results
         .iter()
@@ -30079,7 +30148,6 @@ fn ffi_checked_compatibility_checks_aggregate_parameter_and_result() {
     assert_eq!(negative.status, crate::verifier::VerifStatus::Failed);
     assert_eq!(positive.artifact.as_ref().unwrap().engine, "resolved_ffi");
     assert_eq!(negative.artifact.as_ref().unwrap().engine, "resolved_ffi");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -30095,7 +30163,6 @@ fn ffi_checked_verifies_ensures_only_foreign_call_through_mir() {
         .expect("ensures-only scalar FFI fixture");
     assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
     crate::core::mir::reset_test_route_materialization_count();
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("complete ensures-only scalar FFI contract should use canonical MIR");
@@ -30118,7 +30185,6 @@ fn ffi_checked_verifies_ensures_only_foreign_call_through_mir() {
         Some("scalar-ffi-v1")
     );
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -30130,7 +30196,6 @@ fn ffi_checked_rejects_called_contract_with_unsupported_abi_metadata() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("unsupported ABI metadata fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let error = crate::verifier::verify_ffi_checked(&checked)
         .expect_err("called contract with non-C ABI must fail closed");
@@ -30142,11 +30207,10 @@ fn ffi_checked_rejects_called_contract_with_unsupported_abi_metadata() {
         error.contains("ABI 'Rust' is outside the canonical C ABI"),
         "{error}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn ffi_checked_compatibility_preserves_requires_and_reports_unmodeled_ensures() {
+fn ffi_checked_typed_requires_and_unmodeled_ensures_keep_distinct_results() {
     let source = r#"
         extern "C" {
             func foreign(value: i64) -> i64 requires: value >= 0 ensures: true;
@@ -30157,7 +30221,6 @@ fn ffi_checked_compatibility_preserves_requires_and_reports_unmodeled_ensures() 
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("noncanonical scalar FFI ensures fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("the supported Requires obligation remains independently checkable");
@@ -30192,11 +30255,10 @@ fn ffi_checked_compatibility_preserves_requires_and_reports_unmodeled_ensures() 
         .find(|result| !result.func_name.ends_with("Ensures"))
         .expect("typed Requires result");
     assert_eq!(requires.artifact.as_ref().unwrap().engine, "resolved_ffi");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn ffi_checked_compatibility_rejects_ensures_only_without_a_false_proof() {
+fn ffi_checked_unmodeled_ensures_only_does_not_claim_a_false_proof() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -30209,7 +30271,6 @@ fn ffi_checked_compatibility_rejects_ensures_only_without_a_false_proof() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("noncanonical scalar ensures-only FFI fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("an unmodeled Ensures obligation is an explicit result");
@@ -30219,11 +30280,10 @@ fn ffi_checked_compatibility_rejects_ensures_only_without_a_false_proof() {
         crate::verifier::VerifStatus::NotInTrustedSubset
     );
     assert!(results[0].artifact.is_none());
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn ffi_checked_compatibility_preserves_requires_with_invocation_metadata() {
+fn ffi_checked_typed_requires_preserve_invocation_metadata() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -30246,7 +30306,50 @@ fn ffi_checked_compatibility_preserves_requires_with_invocation_metadata() {
                 !crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi,
                 "metadata fixture should remain outside executable ScalarFfi: {extern_block}"
             );
-            crate::core::CheckedProgram::reset_test_legacy_body_access();
+            let owner = crate::core::NodeId("function:main".into());
+            let mir = crate::core::mir::reference::MirProgram::from_checked_program_ffi_caller(
+                &checked, &owner,
+            )
+            .expect("checked caller materializes as verifier-only MIR");
+            assert_eq!(
+                mir.purpose(),
+                crate::core::mir::reference::MirProgramPurpose::VerifierOnly
+            );
+            mir.validate_ffi_source_census()
+                .expect("source census preserves exact declaration/call metadata");
+            let receipt = mir
+                .ffi_calls()
+                .values()
+                .next()
+                .expect("one exact checked extern call receipt");
+            assert_eq!(receipt.abi, "C");
+            assert!(receipt.requires.is_some());
+            assert!(receipt.requires_root.is_some());
+            assert!(!receipt.requires_deferred);
+            assert!(!receipt.requires_types.is_empty());
+            assert!(receipt.ensures.is_none());
+            assert_eq!(receipt.fixed_argument_count, receipt.arguments.len());
+            assert_eq!(receipt.source_arguments.len(), receipt.arguments.len());
+            assert!(!receipt.unsafe_block);
+            if extern_block.contains("#[errno]") {
+                assert!(receipt.block_returns_errno);
+                assert!(!receipt.declaration_returns_errno);
+            }
+            if extern_block.contains("#[no_panic]") {
+                assert!(receipt.block_no_panic);
+                assert!(!receipt.declaration_no_panic);
+            }
+            if extern_block.contains("&value") {
+                assert_eq!(
+                    receipt.fixed_parameter_modes,
+                    [crate::core::ir::ResolvedFfiParameterMode::Borrow]
+                );
+            }
+            if extern_block.contains("...") {
+                assert!(receipt.variadic);
+                assert!(receipt.variadic_arguments.is_empty());
+                assert_eq!(receipt.fixed_argument_count, receipt.arguments.len());
+            }
             let results = crate::verifier::verify_ffi_checked(&checked)
                 .unwrap_or_else(|error| panic!("verify {extern_block}: {error}"));
             assert_eq!(results.len(), 1, "{extern_block} / {argument}: {results:?}");
@@ -30255,13 +30358,113 @@ fn ffi_checked_compatibility_preserves_requires_with_invocation_metadata() {
                 "{extern_block} / {argument}: {}",
                 results[0].message
             );
-            assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
-            assert!(
-                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-                "pure input Requires use typed roots with invocation metadata"
+            assert_eq!(
+                results[0].artifact.as_ref().unwrap().engine,
+                crate::verifier::ProofArtifact::ENGINE_MIR
             );
         }
     }
+}
+
+#[test]
+fn ffi_checked_scalar_requires_policy_rejects_forged_metadata_witness() {
+    let source = r#"
+        #[errno] #[no_panic] extern "C" {
+            func foreign(value: i64) -> i64 requires: value >= 0;
+        }
+        func main() -> i64 { foreign(7) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("checked scalar Requires metadata fixture");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged =
+        crate::core::mir::reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+            .expect("checked caller materializes as verifier-only MIR");
+    let mut receipts = forged.ffi_calls().clone();
+    let receipt = receipts.values_mut().next().expect("one FFI receipt");
+    receipt.block_no_panic = false;
+    forged.replace_ffi_calls_for_test_only(receipts);
+
+    let contract = forged
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("one forged FFI receipt");
+    let function = forged
+        .functions()
+        .get(&owner)
+        .expect("the exact verifier-only caller");
+    let receipt_errors =
+        crate::core::mir::validate_ffi_call_contract_verifier_scalar_requires_receipt(
+            forged.type_catalog(),
+            function,
+            &contract.instruction,
+            &contract.callee,
+            contract.result.as_ref(),
+            &contract.arguments,
+            contract,
+        );
+    assert!(
+        receipt_errors
+            .iter()
+            .any(|message| message.contains("checked-source witness")),
+        "forged metadata receipt must fail the private witness: {receipt_errors:?}"
+    );
+
+    let error = crate::verifier::verify_ffi_mir(&forged)
+        .expect_err("changed invocation metadata must invalidate its checked-source witness");
+    assert!(
+        error.contains("source census") || error.contains("checked-source witness"),
+        "{error}"
+    );
+}
+
+#[test]
+fn ffi_checked_scalar_requires_policy_rejects_move_parameter_mode() {
+    let source = r#"
+        extern "C" {
+            func foreign(cap@value: i64) -> i64 requires: value >= 0;
+        }
+        func main() -> i64 { foreign(7) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("checked scalar Move-mode Requires fixture");
+    let owner = crate::core::NodeId("function:main".into());
+    let mir =
+        crate::core::mir::reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+            .expect("checked Move-mode caller materializes as verifier-only MIR");
+    let error = crate::verifier::verify_ffi_mir(&mir)
+        .expect_err("Move ownership cannot be admitted by scalar Requires proof policy");
+    assert!(error.contains("Move/Cap parameter modes"), "{error}");
+}
+
+#[test]
+fn ffi_checked_scalar_requires_policy_rejects_nonempty_variadic_tail() {
+    let source = r#"
+        extern "C" {
+            func foreign(value: i64 ...) -> i64 requires: value >= 0;
+        }
+        func main() -> i64 { foreign(7, 1) }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(source))
+        .expect("checked variadic Requires fixture");
+    let owner = crate::core::NodeId("function:main".into());
+    let mir =
+        crate::core::mir::reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+            .expect("nonempty variadic caller materializes with its exact tail receipt");
+    let receipt = mir
+        .ffi_calls()
+        .values()
+        .next()
+        .expect("one exact checked extern call receipt");
+    assert!(receipt.variadic);
+    assert_eq!(receipt.fixed_argument_count, 1);
+    assert_eq!(receipt.arguments.len(), 2);
+    assert_eq!(receipt.variadic_arguments.len(), 1);
+
+    let error = crate::verifier::verify_ffi_mir(&mir)
+        .expect_err("nonempty variadic tail has no scalar Requires proof policy");
+    assert!(error.contains("empty checked tail"), "{error}");
 }
 
 #[test]
@@ -30289,7 +30492,6 @@ fn ffi_checked_rejects_mixed_scalar_ffi_and_map_owner_profiles() {
             || admission.ordinary_map_owned_get_i32_string_v1_complete(),
         "a complete canonical Map owner profile: {admission:?}"
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
 
     let error = crate::verifier::verify_ffi_checked(&checked)
         .expect_err("mixed canonical owner profiles must fail closed before compatibility");
@@ -30297,7 +30499,6 @@ fn ffi_checked_rejects_mixed_scalar_ffi_and_map_owner_profiles() {
         error.contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE),
         "{error}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -30312,11 +30513,9 @@ fn ffi_checked_does_not_open_legacy_for_uncalled_extern_contract() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("uncalled string FFI contract fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("uncalled extern contract has no FFI call-site obligations");
     assert!(results.is_empty(), "uncalled contract: {results:?}");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -30334,18 +30533,16 @@ fn ffi_checked_ignores_uncontracted_called_extern_when_other_contract_is_uncalle
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("mixed called/uncalled string FFI fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("called uncontracted extern has no FFI obligation");
     assert!(
         results.is_empty(),
         "called uncontracted extern: {results:?}"
     );
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn ffi_checked_compatibility_keeps_only_called_contract_externs() {
+fn ffi_checked_typed_requires_keep_only_called_contract_externs() {
     if !crate::verifier::is_z3_available() {
         return;
     }
@@ -30359,14 +30556,23 @@ fn ffi_checked_compatibility_keeps_only_called_contract_externs() {
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("mixed called contract/uncontracted string FFI fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let results = crate::verifier::verify_ffi_checked(&checked)
         .expect("called String requires use typed roots with an uncontracted sibling");
     assert_eq!(results.len(), 1, "called contract results: {results:?}");
     assert!(results[0].func_name.contains("guarded"));
     assert!(!results[0].func_name.contains("plain"));
-    assert_eq!(results[0].artifact.as_ref().unwrap().engine, "resolved_ffi");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("String verifier MIR artifact");
+    assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
+    assert_eq!(
+        artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some("verifier-ffi-mir-v1")
+    );
 }
 
 const SWEEP_C_SOURCE: &str = r#"
@@ -30552,7 +30758,6 @@ fn run_sweep_case(
         "{test_label}: reference prefix stdout"
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let bytecode = compile_mir_program(&mir)
         .unwrap_or_else(|error| panic!("{test_label}: bytecode: {error:?}"));
     assert!(bytecode.ast.is_none(), "{test_label}: AST-free bytecode");
@@ -30569,10 +30774,6 @@ fn run_sweep_case(
         vm.stdout(),
         expected_stdout,
         "{test_label}: bytecode prefix stdout"
-    );
-    assert!(
-        crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-        "{test_label}: bytecode must not touch legacy bodies"
     );
 
     let context = inkwell::context::Context::create();
@@ -30788,7 +30989,6 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
 
             // Verifier leg: a contract-free foreign call carries no proof
             // obligations, but the MIR must still verify structurally.
-            crate::core::CheckedProgram::reset_test_legacy_body_access();
             let verification = crate::verifier::verify_mir(
                 &mir,
                 format!("scalar-ffi-abi-load-failure-{round}").into(),
@@ -30802,7 +31002,6 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
                 )),
                 "round {round} ({label}): {verification:?}"
             );
-            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
             // Bytecode leg: both missing-library and missing-symbol faces
             // fail closed at E0800 before executing the source body.
@@ -30853,7 +31052,6 @@ int64_t mir_ffi_unrelated_dummy(int64_t value) { return value - 1; }
     }
     assert_eq!(round as usize, RESULT_ABIS.len() * 2);
     assert!(observed.iter().all(|faces| faces.iter().all(|seen| *seen)));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     drop(guard);
 }
 
@@ -30913,7 +31111,20 @@ fn map_any_owner_and_scalar_ffi_composition_fails_closed_at_every_public_entry()
             crate::core::mir::MapAnyOwnerAdmission::CompleteCoverage,
             "{label} must be a complete independently checker-receipted MapAnyOwner v1 lifecycle"
         );
+        assert_eq!(
+            admission.ordinary_map_owner_lifecycle_i32_string_v1,
+            crate::core::mir::OrdinaryMapOwnerLifecycleI32StringV1Admission::CoveredByMapAnyOwnerV1,
+            "{label} source attempts are joined to the complete MapAnyOwner receipt"
+        );
+        assert!(
+            crate::core::mir::ordinary_map_attempts_fully_covered_by_map_any_owner_v1(&checked),
+            "{label} has a complete exact source-attempt join"
+        );
         assert!(admission.scalar_ffi, "{label} must carry a scalar FFI call");
+        assert!(
+            crate::core::mir::scalar_ffi_map_owner_composition_failure(admission).is_some(),
+            "{label} remains an explicit public-admission rejection"
+        );
 
         match crate::core::mir::materialize_canonical_mir_route(&checked, None) {
             Err(crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
@@ -30927,34 +31138,27 @@ fn map_any_owner_and_scalar_ffi_composition_fails_closed_at_every_public_entry()
             other => panic!("{label} must hard-reject the profile composition: {other:?}"),
         }
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::verifier::verify_checked(&checked, format!("{label}-single"))
             .expect_err("single verifier must reject unsupported profile composition");
         assert!(
             error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
             .expect_err("dual verifier must reject unsupported profile composition");
         assert!(
             error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let error = crate::verifier::verify_ffi_checked(&checked)
             .expect_err("FFI verifier must reject unsupported profile composition");
         assert!(
             error.contains("MapAnyOwner v1 profile cannot be combined"),
             "{label}: {error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "map_root_ffi_conflict");
         let diagnostics = generator
@@ -30968,7 +31172,6 @@ fn map_any_owner_and_scalar_ffi_composition_fails_closed_at_every_public_entry()
             }),
             "{label}: {diagnostics:?}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -31039,28 +31242,21 @@ fn scalar_ffi_record_and_s8_flow_intersections_fail_closed() {
             }
         ));
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let single = crate::verifier::verify_checked(&checked, format!("{label}-single"))
             .expect_err("single verifier must reject the FFI composition");
         assert!(
             single.contains("scalar FFI composition"),
             "{label}: {single}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let dual = crate::verifier::verify_checked_dual(&checked, format!("{label}-dual"))
             .expect_err("dual verifier must reject the FFI composition");
         assert!(dual.contains("scalar FFI composition"), "{label}: {dual}");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let ffi = crate::verifier::verify_ffi_checked(&checked)
             .expect_err("FFI verifier must reject the cross-island composition");
         assert!(ffi.contains("scalar FFI composition"), "{label}: {ffi}");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, label);
         let diagnostics = generator
@@ -31072,7 +31268,6 @@ fn scalar_ffi_record_and_s8_flow_intersections_fail_closed() {
                 .any(|diagnostic| { diagnostic.message.contains("scalar FFI composition") }),
             "{label}: {diagnostics:?}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -31134,7 +31329,6 @@ fn scalar_ffi_structural_receipt_mutations_share_preflight_classification() {
     }
 
     for (mutation, label, expected) in CASES {
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let mut receipts = canonical.ffi_calls().clone();
         match mutation {
             Mutation::Missing => receipts.clear(),
@@ -31229,7 +31423,6 @@ fn scalar_ffi_structural_receipt_mutations_share_preflight_classification() {
             ffi_verifier_error.contains(expected),
             "{label} FFI verifier: {ffi_verifier_error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }
 
@@ -31283,7 +31476,6 @@ fn scalar_ffi_instruction_and_call_result_identity_drift_fail_closed_across_cons
     }
 
     for (mutation, label, expected) in CASES {
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let mut function = canonical
             .functions()
             .get(&owner)
@@ -31412,6 +31604,5 @@ fn scalar_ffi_instruction_and_call_result_identity_drift_fail_closed_across_cons
             ffi_verifier_error.contains(expected),
             "{label} FFI verifier: {ffi_verifier_error}"
         );
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     }
 }

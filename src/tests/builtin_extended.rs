@@ -70,31 +70,40 @@ func main() -> i32 {
 #[test]
 fn builtin_floor() {
     let src = r#"
-func main() -> f64 {
+func observed_floor() -> f64 {
     floor(3.7)
 }
+func main() -> i32 {
+    if observed_floor() == 3.0 { 0 } else { 1 }
+}
 "#;
-    assert_eq!(run_source(src), interp::Value::Float(3.0));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_ceil() {
     let src = r#"
-func main() -> f64 {
+func observed_ceil() -> f64 {
     ceil(3.2)
 }
+func main() -> i32 {
+    if observed_ceil() == 4.0 { 0 } else { 1 }
+}
 "#;
-    assert_eq!(run_source(src), interp::Value::Float(4.0));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_round() {
     let src = r#"
-func main() -> f64 {
+func observed_round() -> f64 {
     round(3.5)
 }
+func main() -> i32 {
+    if observed_round() == 4.0 { 0 } else { 1 }
+}
 "#;
-    assert_eq!(run_source(src), interp::Value::Float(4.0));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -127,16 +136,15 @@ func main() -> bool {
 #[test]
 fn builtin_pi() {
     let src = r#"
-func main() -> f64 {
+func observed_pi() -> f64 {
     pi()
 }
+func main() -> i32 {
+    let difference = observed_pi() - 3.141592653589793
+    if difference > -0.0000000001 && difference < 0.0000000001 { 0 } else { 1 }
+}
 "#;
-    let result = run_source(src);
-    if let interp::Value::Float(f) = result {
-        assert!((f - std::f64::consts::PI).abs() < 1e-10);
-    } else {
-        panic!("expected float, got {:?}", result);
-    }
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -162,39 +170,41 @@ func main() -> i32 {
 #[test]
 fn builtin_to_float_from_string() {
     let src = r#"
-func main() -> f64 {
+func observed_to_float_from_string() -> f64 {
     to_float("2.5")
 }
+func main() -> i32 {
+    let difference = observed_to_float_from_string() - 2.5
+    if difference > -0.0000000001 && difference < 0.0000000001 { 0 } else { 1 }
+}
 "#;
-    let result = run_source(src);
-    if let interp::Value::Float(f) = result {
-        assert!((f - 2.5).abs() < 1e-10);
-    } else {
-        panic!("expected float, got {:?}", result);
-    }
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_char_at() {
     let src = r#"
-func main() -> string {
+func observed_str_char_at() -> string {
     str_char_at("hello", 1)
 }
+func main() -> i32 {
+    if observed_str_char_at() == "e" { 0 } else { 1 }
+}
 "#;
-    assert_eq!(run_source(src), interp::Value::String(crate::interp::SharedString::new("e".into())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_substring() {
     let src = r#"
-func main() -> string {
+func observed_str_substring() -> string {
     str_substring("hello world", 0, 5)
 }
+func main() -> i32 {
+    if observed_str_substring() == "hello" { 0 } else { 1 }
+}
 "#;
-    assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello".into()))
-    );
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]

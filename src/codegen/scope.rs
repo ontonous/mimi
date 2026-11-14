@@ -434,46 +434,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.weak_release_vars.pop();
     }
 
-    /// Release all remaining shared and weak variables at function exit
-    pub(super) fn release_all_shared(&mut self) -> MimiResult<()> {
-        // Entries are ownership counts, so preserve duplicates across scopes.
-        let all_release: Vec<inkwell::values::PointerValue<'ctx>> = self
-            .shared_release_vars
-            .iter()
-            .flat_map(|scope| scope.iter())
-            .copied()
-            .collect();
-        if let Some(release_fn) = self.module.get_function("mimi_rc_release") {
-            for heap_ptr in all_release {
-                self.build_call(
-                    release_fn,
-                    &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
-                    "shared_release",
-                )?;
-            }
-        }
-        let all_weak: Vec<inkwell::values::PointerValue<'ctx>> = self
-            .weak_release_vars
-            .iter()
-            .flat_map(|scope| scope.iter())
-            .copied()
-            .collect();
-        if let Some(release_fn) = self.module.get_function("mimi_rc_weak_release") {
-            for heap_ptr in all_weak {
-                self.build_call(
-                    release_fn,
-                    &[BasicMetadataValueEnum::PointerValue(heap_ptr)],
-                    "weak_release",
-                )?;
-            }
-        }
-        self.shared_release_vars.clear();
-        self.shared_release_vars.push(Vec::new());
-        self.weak_release_vars.clear();
-        self.weak_release_vars.push(Vec::new());
-        Ok(())
-    }
-
     /// Register a shared variable's heap pointer for release on scope exit
     pub(super) fn register_shared_var(&mut self, heap_ptr: inkwell::values::PointerValue<'ctx>) {
         if let Some(scope) = self.shared_release_vars.last_mut() {
@@ -486,17 +446,5 @@ impl<'ctx> CodeGenerator<'ctx> {
         if let Some(scope) = self.weak_release_vars.last_mut() {
             scope.push(heap_ptr);
         }
-    }
-
-    /// Check for unconsumed capabilities at scope exit
-    pub(super) fn check_unconsumed_caps(&self) -> MimiResult<()> {
-        if let Some(scope) = self.cap_vars.last() {
-            for (name, (_, consumed)) in scope {
-                if !consumed {
-                    return Err(CompileError::CapNotConsumed(name.to_string()));
-                }
-            }
-        }
-        Ok(())
     }
 }

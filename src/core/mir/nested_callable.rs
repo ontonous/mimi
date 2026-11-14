@@ -5,22 +5,23 @@
 //! environment/default/generic ABI, and every materialized use is a direct
 //! call from that declaring function.  The original scalar-FFI slice remains
 //! available for the wider C scalar ABI; the direct-root profile below adds
-//! only the copy scalar Mimi shapes whose ABI is closed without an external
-//! receipt (i32/i64/bool).
+//! only the Copy i32 lexical snapshot shape whose ABI is closed without an
+//! external receipt.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::core::ir::{ResolvedStmtKind, ResolvedType};
+use crate::core::ir::{ResolvedLocalId, ResolvedPatternKind, ResolvedStmtKind, ResolvedType};
 use crate::core::{
     CheckedProgram, NodeId, Origin, PrimitiveType, ResolvedCallKind, ResolvedTypeId,
 };
 use crate::span::SourceId;
 
+use super::lower::is_comptime_callable;
 use super::reference::MirProgram;
 use super::types::{MirAbiClass, MirLayout, MirOwnership, MirTypeCatalog};
 use super::{MirFunction, MirInstructionId, MirInstructionKind};
 
-pub const MIR_NESTED_CALLABLE_SCOPE_SCHEMA: &str = "mimi-mir-nested-callable-scope-v1";
+pub const MIR_NESTED_CALLABLE_SCOPE_SCHEMA: &str = "mimi-mir-nested-callable-scope-v2";
 
 /// Immutable lexical declaration witness carried with the canonical MIR
 /// program. The call-site vector is materialized from the same MIR graph and
@@ -32,8 +33,41 @@ pub struct MirNestedCallableScopeReceipt {
     pub declaration: NodeId,
     pub callee: NodeId,
     pub call_instructions: Vec<MirInstructionId>,
+    /// Number of source-declared parameters before the hidden lexical capture
+    /// suffix in the canonical direct-call ABI.
+    pub source_parameter_count: usize,
     pub parameter_types: Vec<ResolvedTypeId>,
     pub result_type: ResolvedTypeId,
+    /// Checker-derived, declaration-time capture snapshots appended to every
+    /// direct call from `parent`.
+    pub(crate) capture_slots: Vec<MirNestedCallableCaptureSlot>,
+    checker_snapshot: CheckedNestedCallableScopeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckedNestedCallableScopeSnapshot {
+    parent: NodeId,
+    declaration: NodeId,
+    callee: NodeId,
+    source_parameter_count: usize,
+    parameter_types: Vec<ResolvedTypeId>,
+    result_type: ResolvedTypeId,
+    capture_slots: Vec<MirNestedCallableCaptureSlot>,
+}
+
+/// One immutable Copy value captured at the nested declaration point and
+/// supplied as a hidden direct-call parameter. The slot retains both local
+/// identities and the exact MIR instruction/value identities so the
+/// whole-program validator can reject coordinated same-type substitutions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MirNestedCallableCaptureSlot {
+    pub(crate) capture: ResolvedLocalId,
+    pub(crate) ty: ResolvedTypeId,
+    pub(crate) declaration_copy: MirInstructionId,
+    pub(crate) source: super::MirValueId,
+    pub(crate) snapshot: super::MirValueId,
+    pub(crate) callee_parameter: super::MirValueId,
+    pub(crate) callee_parameter_index: usize,
 }
 
 impl MirNestedCallableScopeReceipt {
@@ -44,11 +78,27 @@ impl MirNestedCallableScopeReceipt {
         push_frame(&mut text, &self.declaration.0);
         push_frame(&mut text, &self.callee.0);
         push_frame(&mut text, self.result_type.as_str());
+        text.push_str("source_params=");
+        text.push_str(&self.source_parameter_count.to_string());
+        text.push('\n');
         text.push_str("params=");
         text.push_str(&self.parameter_types.len().to_string());
         text.push('\n');
         for parameter in &self.parameter_types {
             push_frame(&mut text, parameter.as_str());
+        }
+        text.push_str("captures=");
+        text.push_str(&self.capture_slots.len().to_string());
+        text.push('\n');
+        for slot in &self.capture_slots {
+            push_frame(&mut text, &slot.capture.0 .0);
+            push_frame(&mut text, slot.ty.as_str());
+            push_frame(&mut text, slot.declaration_copy.as_str());
+            push_frame(&mut text, slot.source.as_str());
+            push_frame(&mut text, slot.snapshot.as_str());
+            push_frame(&mut text, slot.callee_parameter.as_str());
+            text.push_str(&slot.callee_parameter_index.to_string());
+            text.push('\n');
         }
         text.push_str("calls=");
         text.push_str(&self.call_instructions.len().to_string());
@@ -65,6 +115,8 @@ pub(crate) struct CheckedNestedCallableScopePlan {
     /// Parent owner → nested target owner → declaration statement identity.
     pub by_parent: BTreeMap<NodeId, BTreeMap<NodeId, NodeId>>,
     pub declarations: BTreeMap<NodeId, (NodeId, NodeId)>,
+    pub source_parameter_counts: BTreeMap<NodeId, usize>,
+    pub captures: BTreeMap<NodeId, Vec<MirNestedCallableCaptureSlot>>,
 }
 
 /// Derive only the receipt candidates whose complete lexical and signature
@@ -74,16 +126,27 @@ pub(crate) fn checked_nested_callable_scope_plan(
     program: &CheckedProgram,
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> CheckedNestedCallableScopePlan {
+    checked_nested_callable_scope_plan_with_owner_scope(program, excluded_sources, None)
+}
+
+pub(crate) fn checked_nested_callable_scope_plan_with_owner_scope(
+    program: &CheckedProgram,
+    excluded_sources: Option<&HashSet<SourceId>>,
+    owner_scope: Option<&BTreeSet<NodeId>>,
+) -> CheckedNestedCallableScopePlan {
     let mut plan = CheckedNestedCallableScopePlan::default();
     // Nested declarations are admitted when either the legacy scalar FFI
     // profile authorizes their wider C scalar ABI, or they are a direct-root
-    // copy-scalar helper (i32/i64/bool) whose ABI is closed by Mimi itself.
-    // Captures, branch-local declarations, defaults, generics, contracts,
-    // nested declarations and recursive call graphs remain fail-closed below.
+    // copy-scalar helper whose ABI is closed by Mimi itself. Copy i32 lexical
+    // captures are admitted as declaration-time snapshots;
+    // branch-local declarations, defaults, generics, contracts, nested
+    // declarations and recursive call graphs remain fail-closed below.
     let scalar_ffi_profile =
         super::eligibility::is_scalar_ffi_candidate_excluding_sources(program, excluded_sources);
     for (parent_owner, parent) in program.callables() {
-        if !is_top_level_function_owner(parent_owner)
+        if is_comptime_callable(program, parent_owner)
+            || owner_scope.is_some_and(|scope| !scope.contains(parent_owner))
+            || !is_top_level_function_owner(parent_owner)
             || source_is_excluded(parent, excluded_sources)
         {
             continue;
@@ -99,6 +162,7 @@ pub(crate) fn checked_nested_callable_scope_plan(
                 program,
                 parent_owner,
                 target,
+                &statement.node_id,
                 scalar_ffi_profile,
                 excluded_sources,
             ) {
@@ -112,6 +176,19 @@ pub(crate) fn checked_nested_callable_scope_plan(
                 plan.declarations.insert(
                     callee.clone(),
                     (parent_owner.clone(), statement.node_id.clone()),
+                );
+                plan.source_parameter_counts
+                    .insert(callee.clone(), target.body.parameters.len());
+                plan.captures.insert(
+                    callee.clone(),
+                    checked_nested_callable_capture_slots(
+                        program,
+                        parent_owner,
+                        parent,
+                        target,
+                        &statement.node_id,
+                    )
+                    .expect("admissible nested target has a checked capture layout"),
                 );
             }
         }
@@ -153,7 +230,8 @@ pub fn unsupported_nested_callable_boundary_reason(
 ) -> Option<String> {
     let plan = checked_nested_callable_scope_plan(program, excluded_sources);
     for (owner, callable) in program.callables() {
-        if !owner.0.contains("/function:")
+        if is_comptime_callable(program, owner)
+            || !owner.0.contains("/function:")
             || owner.0.starts_with("actor:")
             || owner
                 .0
@@ -197,6 +275,7 @@ fn is_admissible_nested_target(
     program: &CheckedProgram,
     parent: &NodeId,
     target: &crate::core::ResolvedCallable,
+    declaration: &NodeId,
     scalar_ffi_profile: bool,
     excluded_sources: Option<&HashSet<SourceId>>,
 ) -> bool {
@@ -225,7 +304,16 @@ fn is_admissible_nested_target(
         || owner_tail.contains('/')
         || target.owner != target.signature.owner
         || target.owner != target.body.owner
-        || !target.body.captures.is_empty()
+        || checked_nested_callable_capture_slots(
+            program,
+            parent,
+            program
+                .callable(parent)
+                .expect("nested parent checked before admission"),
+            target,
+            declaration,
+        )
+        .is_none()
         || !target.body.default_values.is_empty()
         || !target.contracts.is_empty()
         || !target.signature.generic_parameters.is_empty()
@@ -258,7 +346,7 @@ fn is_admissible_nested_target(
     };
     matches!(&function.origin, Origin::User(_))
         && !function.is_async
-        && !function.is_comptime
+        && !is_comptime_callable(program, &target.owner)
         && function.extern_abi.is_none()
         && function.generics.is_empty()
         && function.generic_binders.is_empty()
@@ -284,7 +372,6 @@ fn is_direct_root_copy_scalar_target(
         || !is_top_level_function_owner(parent)
         || target.owner != target.body.owner
         || target.owner != target.signature.owner
-        || !target.body.captures.is_empty()
         || !target.body.default_values.is_empty()
         || !target.contracts.is_empty()
         || !target.signature.generic_parameters.is_empty()
@@ -321,13 +408,97 @@ fn is_direct_root_copy_scalar_target(
     {
         return false;
     }
-    // The declaration must be an immediate root statement in source order.
-    // `checked_nested_callable_scope_plan` only visits those statements, but
-    // keeping this fact in the predicate makes the receipt validator's
-    // direct-root contract explicit and testable.
-    parent_callable.body.root.statements.iter().any(|statement| {
+    let Some(declaration) = parent_callable.body.root.statements.iter().find_map(|statement| {
         matches!(&statement.kind, ResolvedStmtKind::NestedCallable(owner) if owner == &target.owner)
-    })
+            .then_some(&statement.node_id)
+    }) else {
+        return false;
+    };
+    // The declaration must be an immediate root statement and every captured
+    // local must already exist at that point in the lexical source order.
+    checked_nested_callable_capture_slots(program, parent, parent_callable, target, declaration)
+        .is_some()
+}
+
+fn checked_nested_callable_capture_slots(
+    program: &CheckedProgram,
+    parent_owner: &NodeId,
+    parent: &crate::core::ResolvedCallable,
+    target: &crate::core::ResolvedCallable,
+    declaration: &NodeId,
+) -> Option<Vec<MirNestedCallableCaptureSlot>> {
+    if target
+        .owner
+        .0
+        .strip_prefix(&format!("{}/function:", parent_owner.0))
+        .is_none()
+    {
+        return None;
+    }
+    let mut visible = parent
+        .body
+        .parameters
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut found = false;
+    for statement in &parent.body.root.statements {
+        if statement.node_id == *declaration
+            && matches!(&statement.kind, ResolvedStmtKind::NestedCallable(owner) if owner == &target.owner)
+        {
+            found = true;
+            break;
+        }
+        if let ResolvedStmtKind::Bind {
+            pattern,
+            initializer: Some(_),
+        } = &statement.kind
+        {
+            if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
+                visible.insert(local.clone());
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+
+    let mut captures = target.body.captures.clone();
+    captures.sort();
+    if captures.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+    let mut slots = Vec::with_capacity(captures.len());
+    for (index, capture) in captures.iter().enumerate() {
+        let source = parent.body.locals.get(capture)?;
+        let imported = target.body.locals.get(capture)?;
+        // This direct-call ABI snapshots Copy scalar values at declaration.
+        // Mutable Copy locals retain value semantics: later writes in the
+        // parent do not alter an already-declared helper's environment.
+        if !visible.contains(capture)
+            || source.id != *capture
+            || imported.id != *capture
+            || source.ty != imported.ty
+            || !is_nested_capture_i32(program, &source.ty)
+        {
+            return None;
+        }
+        let identity = format!("{}/capture:{}", declaration.0, capture.0 .0);
+        slots.push(MirNestedCallableCaptureSlot {
+            capture: capture.clone(),
+            ty: source.ty.clone(),
+            declaration_copy: MirInstructionId::new(format!(
+                "inst:nested_capture.{index}:{}",
+                declaration.0
+            ))
+            .ok()?,
+            source: super::MirValueId::new(format!("local:{}", capture.0 .0)).ok()?,
+            snapshot: super::MirValueId::new(format!("environment:{identity}")).ok()?,
+            callee_parameter: super::MirValueId::new(format!("local:{}", capture.0 .0)).ok()?,
+            callee_parameter_index: target.body.parameters.len().checked_add(index)?,
+        });
+    }
+    Some(slots)
 }
 
 fn is_direct_copy_scalar(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
@@ -336,6 +507,13 @@ fn is_direct_copy_scalar(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool 
         Some(ResolvedType::Primitive(
             PrimitiveType::I32 | PrimitiveType::I64 | PrimitiveType::Bool
         ))
+    )
+}
+
+fn is_nested_capture_i32(program: &CheckedProgram, ty: &ResolvedTypeId) -> bool {
+    matches!(
+        program.resolved_types().get(ty),
+        Some(ResolvedType::Primitive(PrimitiveType::I32))
     )
 }
 
@@ -370,6 +548,54 @@ pub(crate) fn materialize_nested_callable_scope_receipts(
             ));
             continue;
         };
+        let Some(source_parameter_count) = plan.source_parameter_counts.get(callee).copied() else {
+            errors.push(format!(
+                "nested callable '{}' has no checker source-parameter count",
+                callee.0
+            ));
+            continue;
+        };
+        let mut capture_slots = plan.captures.get(callee).cloned().unwrap_or_default();
+        let Some(parent_function) = functions.get(parent) else {
+            errors.push(format!(
+                "nested callable '{}' declaring owner '{}' has no concrete MIR body",
+                callee.0, parent.0
+            ));
+            continue;
+        };
+        let mut captures_materialized = true;
+        for slot in &mut capture_slots {
+            let copies = parent_function
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .filter(|instruction| instruction.id == slot.declaration_copy)
+                .collect::<Vec<_>>();
+            match copies.as_slice() {
+                [instruction] => match &instruction.kind {
+                    MirInstructionKind::Copy { result, source } if result == &slot.snapshot => {
+                        slot.source = source.clone();
+                    }
+                    _ => {
+                        captures_materialized = false;
+                        errors.push(format!(
+                            "nested callable '{}' declaration snapshot '{}' is not its exact MIR Copy",
+                            callee.0, slot.declaration_copy
+                        ));
+                    }
+                },
+                _ => {
+                    captures_materialized = false;
+                    errors.push(format!(
+                        "nested callable '{}' declaration snapshot '{}' is absent or duplicated",
+                        callee.0, slot.declaration_copy
+                    ));
+                }
+            }
+        }
+        if !captures_materialized {
+            continue;
+        }
         let mut call_instructions = Vec::new();
         for (caller_owner, caller) in functions {
             for block in caller.blocks.values() {
@@ -377,6 +603,7 @@ pub(crate) fn materialize_nested_callable_scope_receipts(
                     let MirInstructionKind::Call {
                         callee: call_target,
                         type_arguments,
+                        arguments,
                         ..
                     } = &instruction.kind
                     else {
@@ -391,6 +618,23 @@ pub(crate) fn materialize_nested_callable_scope_receipts(
                         } else if !type_arguments.is_empty() {
                             errors.push(format!(
                                 "nested callable '{}' direct call carries generic type arguments",
+                                callee.0
+                            ));
+                        } else if source_parameter_count.checked_add(capture_slots.len())
+                            != Some(arguments.len())
+                            || arguments
+                                .get(source_parameter_count..)
+                                .is_none_or(|suffix| {
+                                    suffix
+                                        != capture_slots
+                                            .iter()
+                                            .map(|slot| slot.snapshot.clone())
+                                            .collect::<Vec<_>>()
+                                            .as_slice()
+                                })
+                        {
+                            errors.push(format!(
+                                "nested callable '{}' direct call does not pass its exact lexical snapshot suffix",
                                 callee.0
                             ));
                         } else {
@@ -422,6 +666,15 @@ pub(crate) fn materialize_nested_callable_scope_receipts(
         if parameter_types.len() != target.parameters.len() {
             continue;
         }
+        let checker_snapshot = CheckedNestedCallableScopeSnapshot {
+            parent: parent.clone(),
+            declaration: declaration.clone(),
+            callee: callee.clone(),
+            source_parameter_count,
+            parameter_types: parameter_types.clone(),
+            result_type: target.result.clone(),
+            capture_slots: capture_slots.clone(),
+        };
         receipts.insert(
             callee.clone(),
             MirNestedCallableScopeReceipt {
@@ -430,8 +683,11 @@ pub(crate) fn materialize_nested_callable_scope_receipts(
                 declaration: declaration.clone(),
                 callee: callee.clone(),
                 call_instructions,
+                source_parameter_count,
                 parameter_types,
                 result_type: target.result.clone(),
+                capture_slots,
+                checker_snapshot,
             },
         );
     }
@@ -452,7 +708,15 @@ pub(crate) fn validate_nested_callable_scope_receipts(
     let mut errors = Vec::new();
     let nested_owners = functions
         .keys()
-        .filter(|owner| owner.0.contains("/function:"))
+        // Only direct children of top-level Mimi functions use this receipt.
+        // Actor and impl methods have qualified `function:Type::method`
+        // parents and carry their own semantic receipts; counting their
+        // helpers here would require one owner to carry competing contracts.
+        .filter(|owner| {
+            owner.0.split_once("/function:").is_some_and(|(parent, _)| {
+                parent.starts_with("function:") && !parent.contains("::")
+            })
+        })
         .cloned()
         .collect::<BTreeSet<_>>();
     if nested_owners != receipts.keys().cloned().collect() {
@@ -471,6 +735,20 @@ pub(crate) fn validate_nested_callable_scope_receipts(
         if receipt.schema != MIR_NESTED_CALLABLE_SCOPE_SCHEMA {
             errors.push(format!(
                 "nested callable '{}' has unexpected scope receipt schema",
+                receipt.callee.0
+            ));
+        }
+        let checker_snapshot = &receipt.checker_snapshot;
+        if receipt.parent != checker_snapshot.parent
+            || receipt.declaration != checker_snapshot.declaration
+            || receipt.callee != checker_snapshot.callee
+            || receipt.source_parameter_count != checker_snapshot.source_parameter_count
+            || receipt.parameter_types != checker_snapshot.parameter_types
+            || receipt.result_type != checker_snapshot.result_type
+            || receipt.capture_slots != checker_snapshot.capture_slots
+        {
+            errors.push(format!(
+                "nested callable '{}' environment differs from the checker lexical snapshot",
                 receipt.callee.0
             ));
         }
@@ -497,6 +775,20 @@ pub(crate) fn validate_nested_callable_scope_receipts(
             ));
             continue;
         };
+        if receipt
+            .source_parameter_count
+            .checked_add(receipt.capture_slots.len())
+            != Some(target.parameters.len())
+            || receipt
+                .capture_slots
+                .windows(2)
+                .any(|pair| pair[0].capture >= pair[1].capture)
+        {
+            errors.push(format!(
+                "nested callable '{}' hidden capture parameter partition is invalid",
+                receipt.callee.0
+            ));
+        }
         let target_has_ffi_receipt = ffi_calls
             .values()
             .any(|ffi_call| ffi_call.caller == receipt.callee);
@@ -528,6 +820,51 @@ pub(crate) fn validate_nested_callable_scope_receipts(
                 receipt.callee.0
             ));
         }
+        let Some(parent) = functions.get(&receipt.parent) else {
+            // The missing parent diagnostic above remains the stable boundary;
+            // skip slot checks that need its value catalog.
+            continue;
+        };
+        for (index, slot) in receipt.capture_slots.iter().enumerate() {
+            let expected_index = receipt.source_parameter_count.checked_add(index);
+            if expected_index != Some(slot.callee_parameter_index)
+                || target.parameters.get(slot.callee_parameter_index)
+                    != Some(&slot.callee_parameter)
+                || receipt.parameter_types.get(slot.callee_parameter_index) != Some(&slot.ty)
+                || !is_nested_capture_i32_desc(type_catalog, &slot.ty)
+                || parent
+                    .values
+                    .get(&slot.source)
+                    .is_none_or(|value| value.ty != slot.ty)
+                || parent
+                    .values
+                    .get(&slot.snapshot)
+                    .is_none_or(|value| value.ty != slot.ty)
+                || target
+                    .values
+                    .get(&slot.callee_parameter)
+                    .is_none_or(|value| value.ty != slot.ty)
+            {
+                errors.push(format!(
+                    "nested callable '{}' capture slot has a forged identity, index, or TypeDesc",
+                    receipt.callee.0
+                ));
+            }
+            let copies = parent
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .filter(|instruction| instruction.id == slot.declaration_copy)
+                .collect::<Vec<_>>();
+            if copies.len() != 1
+                || !matches!(&copies[0].kind, MirInstructionKind::Copy { result, source } if result == &slot.snapshot && source == &slot.source)
+            {
+                errors.push(format!(
+                    "nested callable '{}' lacks its exact declaration-time capture snapshot",
+                    receipt.callee.0
+                ));
+            }
+        }
         for parameter in &receipt.parameter_types {
             if !is_canonical_scalar(type_catalog, parameter, false) {
                 errors.push(format!(
@@ -555,6 +892,7 @@ pub(crate) fn validate_nested_callable_scope_receipts(
                     let MirInstructionKind::Call {
                         callee,
                         type_arguments,
+                        arguments,
                         ..
                     } = &instruction.kind
                     else {
@@ -562,7 +900,20 @@ pub(crate) fn validate_nested_callable_scope_receipts(
                     };
                     if callee == &crate::core::ir::ResolvedCallee::Function(receipt.callee.clone())
                     {
-                        if caller_owner != &receipt.parent || !type_arguments.is_empty() {
+                        let expected_suffix = receipt
+                            .capture_slots
+                            .iter()
+                            .map(|slot| slot.snapshot.clone())
+                            .collect::<Vec<_>>();
+                        if caller_owner != &receipt.parent
+                            || !type_arguments.is_empty()
+                            || receipt
+                                .source_parameter_count
+                                .checked_add(expected_suffix.len())
+                                != Some(arguments.len())
+                            || arguments.get(receipt.source_parameter_count..)
+                                != Some(expected_suffix.as_slice())
+                        {
                             errors.push(format!(
                                 "nested callable '{}' has an uncovered or generic MIR call edge",
                                 receipt.callee.0
@@ -693,6 +1044,15 @@ fn is_direct_copy_scalar_desc(catalog: &MirTypeCatalog, ty: &ResolvedTypeId) -> 
         )
 }
 
+fn is_nested_capture_i32_desc(catalog: &MirTypeCatalog, ty: &ResolvedTypeId) -> bool {
+    let Some(descriptor) = catalog.get(ty) else {
+        return false;
+    };
+    descriptor.ownership == MirOwnership::Copy
+        && descriptor.layout == MirLayout::Scalar
+        && descriptor.kind == super::types::MirTypeKind::Primitive(PrimitiveType::I32)
+}
+
 fn push_frame(output: &mut String, value: &str) {
     output.push_str(&value.len().to_string());
     output.push(':');
@@ -704,7 +1064,7 @@ pub(crate) fn canonical_nested_callable_scope_text(program: &MirProgram) -> Stri
     if program.nested_callable_scopes().is_empty() {
         return String::new();
     }
-    let mut text = String::from("mimi-mir-nested-callable-scope-table-v1\n");
+    let mut text = String::from("mimi-mir-nested-callable-scope-table-v2\n");
     for receipt in program.nested_callable_scopes().values() {
         text.push_str(&receipt.canonical_text());
     }
@@ -765,6 +1125,37 @@ mod tests {
     }
 
     #[test]
+    fn comptime_parent_does_not_create_an_executable_nested_callable_plan() {
+        let program = checked(
+            r#"
+comptime func compile_only() -> i32 {
+    func helper(value: i32) -> i32 { value + 1 }
+    helper(41)
+}
+func main() -> i32 { 0 }
+"#,
+        );
+        assert!(checked_nested_callable_scope_plan(&program, None)
+            .declarations
+            .is_empty());
+        assert!(unsupported_nested_callable_boundary_reason(&program, None).is_none());
+
+        let mir = MirProgram::from_checked_program(&program)
+            .expect("compile-time parent and its lexical helper are outside executable MIR");
+        assert!(mir.nested_callable_scopes().is_empty());
+        for owner in program.callables().keys().filter(|owner| {
+            owner.0 == "function:compile_only"
+                || owner.0.starts_with("function:compile_only/function:")
+        }) {
+            assert!(
+                !mir.functions().contains_key(owner),
+                "comptime scope owner '{}' leaked into executable MIR",
+                owner.0
+            );
+        }
+    }
+
+    #[test]
     fn root_scalar_helper_gets_a_scope_receipt_and_shadow_uses_exact_owner() {
         let program = checked(
             r#"
@@ -798,14 +1189,15 @@ mod tests {
     }
 
     #[test]
-    fn captured_and_nonroot_nested_helpers_have_no_scope_receipt() {
+    fn non_i32_captured_and_nonroot_nested_helpers_have_no_scope_receipt() {
         let captured = checked(
             r#"
                 extern "C" { func labs(value: i64) -> i64; }
-                func main(base: i64) -> i64 {
+                func captured_parent(base: i64) -> i64 {
                     func helper(value: i64) -> i64 { labs(base + value) }
                     helper(1 as i64)
                 }
+                func main() -> i32 { 0 }
             "#,
         );
         assert!(checked_nested_callable_scope_plan(&captured, None)
@@ -823,7 +1215,7 @@ mod tests {
         let branch_local = checked(
             r#"
                 extern "C" { func labs(value: i64) -> i64; }
-                func main(flag: bool) -> i64 {
+                func branch_parent(flag: bool) -> i64 {
                     if flag {
                         func helper(value: i64) -> i64 { labs(value) }
                         helper(1 as i64)
@@ -831,6 +1223,7 @@ mod tests {
                         0 as i64
                     }
                 }
+                func main() -> i32 { 0 }
             "#,
         );
         assert!(checked_nested_callable_scope_plan(&branch_local, None)
@@ -921,12 +1314,119 @@ mod tests {
     }
 
     #[test]
+    fn captured_copy_i32_nested_helper_uses_declaration_snapshot_in_all_mir_consumers() {
+        let program = checked(
+            r#"
+                func with_parameter(seed: i32) -> i32 {
+                    let mut offset = seed
+                    func nested_increment(value: i32) -> i32 { value + offset + seed }
+                    offset = 100
+                    nested_increment(40)
+                }
+                func main() -> i32 { with_parameter(1) }
+            "#,
+        );
+        let plan = checked_nested_callable_scope_plan(&program, None);
+        assert_eq!(plan.declarations.len(), 1);
+        let mir = MirProgram::from_checked_program(&program)
+            .expect("Copy i32 captures lower through a checker-owned lexical snapshot");
+        let receipt = mir
+            .nested_callable_scopes()
+            .values()
+            .next()
+            .expect("nested scope receipt");
+        assert_eq!(receipt.capture_slots.len(), 2);
+        assert_eq!(receipt.source_parameter_count, 1);
+        assert_eq!(
+            receipt
+                .capture_slots
+                .iter()
+                .map(|slot| slot.callee_parameter_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+            "hidden Copy captures follow the source-declared parameter"
+        );
+        let slot = &receipt.capture_slots[0];
+        assert_eq!(
+            mir.type_catalog()
+                .get(&slot.ty)
+                .expect("checked capture type")
+                .abi
+                .canonical_text(),
+            "i32"
+        );
+        assert_eq!(slot.callee_parameter_index, 1);
+        let parent = mir
+            .functions()
+            .get(&receipt.parent)
+            .expect("declaring owner MIR");
+        assert!(parent.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                instruction.id == slot.declaration_copy
+                    && matches!(
+                        &instruction.kind,
+                        MirInstructionKind::Copy { result, source }
+                            if result == &slot.snapshot && source == &slot.source
+                    )
+            })
+        }));
+        let mut forged_receipts = mir.nested_callable_scopes().clone();
+        forged_receipts
+            .get_mut(&receipt.callee)
+            .expect("nested scope receipt")
+            .capture_slots[0]
+            .source = crate::core::mir::MirValueId::new("local:forged-capture-source")
+            .expect("valid forged MIR value identity");
+        let errors = validate_nested_callable_scope_receipts(
+            mir.functions(),
+            mir.type_catalog(),
+            mir.transitions(),
+            mir.ffi_calls(),
+            &forged_receipts,
+        );
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("environment differs from the checker lexical snapshot")
+            }),
+            "a same-type forged source cannot replace the declaration snapshot: {errors:?}"
+        );
+
+        assert_eq!(
+            crate::core::mir::reference::MirReferenceInterpreter::new(&mir)
+                .execute(&NodeId("function:main".into()), &[])
+                .expect("reference nested capture snapshot"),
+            crate::core::mir::reference::MirRuntimeValue::Int(42),
+            "the nested helper keeps the declaration-time value after parent mutation"
+        );
+        let bytecode = crate::interp::bytecode::compile_mir_program(&mir)
+            .expect("compile the captured nested helper to AST-free bytecode");
+        assert!(bytecode.ast.is_none());
+        assert!(matches!(
+            crate::interp::bytecode::BytecodeVM::new(bytecode)
+                .run_value_for_component()
+                .expect("bytecode nested capture snapshot"),
+            crate::interp::Value::Int(42)
+        ));
+
+        let context = inkwell::context::Context::create();
+        let mut codegen = crate::codegen::CodeGenerator::new(&context, "nested_i32_snapshot");
+        codegen
+            .compile_mir_native(&mir)
+            .expect("native emitter accepts the hidden Copy i32 parameter ABI");
+        codegen
+            .module
+            .verify()
+            .expect("native captured nested helper module is valid LLVM");
+    }
+
+    #[test]
     fn excluded_ffi_callers_cannot_authorize_retained_nested_helpers() {
         let (program, _primary_source, ffi_source) = checked_split_sources(
             r#"
-                func main() -> f32 {
+                func main() -> i32 {
                     func increment(value: f32) -> f32 { value }
                     increment(41.0 as f32)
+                    0
                 }
             "#,
             r#"
@@ -1015,9 +1515,10 @@ mod tests {
     fn forged_pure_nested_scope_receipt_cannot_create_a_non_ffi_mir_graph() {
         let program = checked(
             r#"
-                func main() -> f32 {
+                func main() -> i32 {
                     func increment(value: f32) -> f32 { value }
                     increment(41.0 as f32)
+                    0
                 }
             "#,
         );
@@ -1044,6 +1545,15 @@ mod tests {
             .insert(declaration.0.clone(), declaration.1.clone());
         plan.declarations
             .insert(declaration.0.clone(), (parent, declaration.1));
+        plan.source_parameter_counts.insert(
+            declaration.0.clone(),
+            program
+                .callable(&declaration.0)
+                .expect("nested source callable")
+                .body
+                .parameters
+                .len(),
+        );
         let type_catalog =
             MirTypeCatalog::from_checked_program(&program).expect("pure helper type catalog");
         let functions = super::super::lower::lower_program_with_type_catalog_and_nested(
@@ -1203,10 +1713,11 @@ mod tests {
         let program = checked(
             r#"
                 extern "C" { func labs(value: i64) -> i64; }
-                func main(flag: bool) -> i64 {
+                func receipt_parent(flag: bool) -> i64 {
                     func helper(value: i64) -> i64 { labs(value) }
                     if flag { helper(-17 as i64) } else { helper(-25 as i64) }
                 }
+                func main() -> i32 { 0 }
             "#,
         );
         let mir = MirProgram::from_checked_program(&program).expect("nested scalar helper MIR");
@@ -1216,6 +1727,11 @@ mod tests {
             .next()
             .expect("scope receipt")
             .clone();
+        assert_eq!(receipt.parent.0, "function:receipt_parent");
+        assert!(receipt
+            .callee
+            .0
+            .starts_with("function:receipt_parent/function:helper:"));
 
         let missing = validate_nested_callable_scope_receipts(
             mir.functions(),

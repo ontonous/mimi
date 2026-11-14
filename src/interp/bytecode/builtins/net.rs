@@ -6,6 +6,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use crate::interp::SharedString;
 
 /// RAII close guard so HTTP helpers never leak the socket on early errors.
 struct FdGuard(i32);
@@ -66,7 +67,8 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_http_get,
     });
-    // Phase D (0.39.76): 收 cap 的 net API（SystemToken 能力门禁，运行时忽略）。
+    // Phase D (0.39.76): 收 cap 的 net API；runtime registry checks the
+    // concrete host/port before the socket connection.
     reg.register(BuiltinDesc {
         name: "http_get_guarded",
         arity: 2,
@@ -343,11 +345,11 @@ fn builtin_recv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
         )));
     }
     if n == 0 {
-        return Ok(Value::String(crate::interp::SharedString::new(String::new())));
+        return Ok(Value::String(SharedString::new(String::new())));
     }
     let n = n as usize;
     buf.truncate(n);
-    Ok(Value::String(crate::interp::SharedString::new(
+    Ok(Value::String(SharedString::new(
         String::from_utf8_lossy(&buf).to_string(),
     )))
 }
@@ -763,8 +765,33 @@ fn is_private_ipv4(v4: u32) -> bool {
 }
 
 /// Phase D (0.39.76): 收 cap 的 net API——url 为 args[0]，SystemToken 能力
-/// 门禁在 args[1]（运行时忽略）。语义同 http_get。
+/// 门禁在 args[1]；checker/CFG 负责线性消费，runtime registry 负责动态范围。
 fn builtin_http_get_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let token = match args.get(1) {
+        Some(Value::Int(token)) => *token,
+        Some(other) => {
+            return Err(InterpError::new(format!(
+                "http_get_guarded: capability must be SystemToken, found {}",
+                crate::interp::value::type_name(other)
+            )));
+        }
+        None => return Err(InterpError::new("http_get_guarded: missing capability")),
+    };
+    let url = args
+        .first()
+        .and_then(Value::as_string)
+        .ok_or_else(|| InterpError::new("http_get_guarded: url must be string"))?;
+    validate_http_url(url)?;
+    let endpoint = url.trim_start_matches("http://");
+    let host_part = endpoint.split_once('/').map_or(endpoint, |(host, _)| host);
+    let (host, port) = http_split_host_port(host_part)?;
+    let port = u16::try_from(port)
+        .map_err(|_| InterpError::new("http_get_guarded: invalid endpoint port"))?;
+    crate::runtime::capability_scope::check_endpoint(token, host, port).map_err(|error| {
+        InterpError::new(format!(
+            "http_get_guarded: capability scope denied: {error}"
+        ))
+    })?;
     builtin_http_get(_vm, &args[0..1])
 }
 
@@ -792,7 +819,7 @@ fn builtin_http_get(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         .split_once("\r\n\r\n")
         .map(|(_, b)| b)
         .unwrap_or(&response);
-    Ok(Value::String(crate::interp::SharedString::new(body.to_string())))
+    Ok(Value::String(SharedString::new(body.to_string())))
 }
 
 fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -815,14 +842,17 @@ fn builtin_http_post(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     let fd = http_connect(host, port)?;
     let request = format!(
         "POST {} HTTP/1.0\r\nHost: {}\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n{}",
-        path, host, body.len(), body
+        path,
+        host,
+        body.len(),
+        body
     );
     let response = http_send_recv(fd, &request)?;
     let res_body = response
         .split_once("\r\n\r\n")
         .map(|(_, b)| b)
         .unwrap_or(&response);
-    Ok(Value::String(crate::interp::SharedString::new(res_body.to_string())))
+    Ok(Value::String(SharedString::new(res_body.to_string())))
 }
 
 #[cfg(test)]

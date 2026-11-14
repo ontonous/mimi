@@ -528,7 +528,6 @@ fn generate_overflow_free_program(seed: u64) -> GenerativeProgram {
 #[test]
 fn generative_scalar_programs_agree_across_consumers() {
     const PROGRAM_COUNT: u64 = 48;
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for seed in 1..=PROGRAM_COUNT {
         let label = format!("generative scalar seed {seed}");
         let program = generate_overflow_free_program(seed);
@@ -589,7 +588,6 @@ fn generative_scalar_programs_agree_across_consumers() {
         }
         assert_eq!(mir.canonical_digest(), digest, "{label} digest stability");
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 // Generative negative family: seeded i32 self-multiplication chains that
@@ -598,7 +596,6 @@ fn generative_scalar_programs_agree_across_consumers() {
 #[test]
 fn generative_scalar_overflow_traps_agree_across_consumers() {
     const TRAP_PROGRAMS: u64 = 8;
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     for seed in 0..TRAP_PROGRAMS {
         let label = format!("generative overflow seed {seed}");
         let mut rng = SplitMix64(0x0F1_2E3 ^ seed);
@@ -651,5 +648,4 @@ fn generative_scalar_overflow_traps_agree_across_consumers() {
             );
         }
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }

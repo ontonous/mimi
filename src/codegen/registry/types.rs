@@ -1,8 +1,13 @@
 use crate::ast::*;
+#[cfg(test)]
 use crate::codegen::types;
 use crate::codegen::CodeGenerator;
+#[cfg(test)]
 use crate::error::{CompileError, MimiResult};
-use inkwell::types::{BasicType, BasicTypeEnum, StructType};
+#[cfg(test)]
+use inkwell::types::StructType;
+use inkwell::types::{BasicType, BasicTypeEnum};
+#[cfg(test)]
 use inkwell::values::BasicValueEnum;
 
 /// P0-2: how a variant's payload maps onto the constructor function's
@@ -10,6 +15,7 @@ use inkwell::values::BasicValueEnum;
 /// payload}` so anything that doesn't fit in a single primitive must be
 /// packed into a heap-allocated struct and ptrtoint-encoded into the
 /// i64 slot (matching the existing single-struct payload encoding).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 enum PayloadKind<'ctx> {
     /// Variant carries no payload (e.g. `None`).
@@ -402,6 +408,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
     }
 
+    #[cfg(test)]
     fn checked_native_layout_for_name(&self, name: &str) -> Option<BasicTypeEnum<'ctx>> {
         if let Some(declaration) = self.checked_native_declaration_by_name(name) {
             if declaration.generics.is_empty() {
@@ -456,6 +463,48 @@ impl<'ctx> CodeGenerator<'ctx> {
         variants.iter().find(|variant| variant.name == variant_name)
     }
 
+    fn checked_native_enum_variant_is_packed(
+        &self,
+        type_name: &str,
+        variant_name: &str,
+    ) -> Option<bool> {
+        let declaration = self.checked_native_declaration_by_name(type_name)?;
+        let variant = self.checked_native_enum_variant(type_name, variant_name)?;
+        if declaration.representation.repr_c {
+            return Some(false);
+        }
+        match (variant.shape, variant.members.as_slice()) {
+            (crate::core::ResolvedVariantShape::Unit, _) => Some(false),
+            (crate::core::ResolvedVariantShape::Tuple, [member]) => {
+                let ty = self.checked_native_type_llvm(&member.ty, false)?;
+                Some(matches!(ty, BasicTypeEnum::StructType(_)))
+            }
+            (_, members) if !members.is_empty() => {
+                for member in members {
+                    self.checked_native_type_llvm(&member.ty, false)?;
+                }
+                Some(true)
+            }
+            _ => None,
+        }
+    }
+
+    fn variant_payload_is_packed(&self, payload: &Option<VariantPayload>) -> bool {
+        let Some(payload) = payload else {
+            return false;
+        };
+        match payload {
+            VariantPayload::Tuple(types) if types.len() == 1 => {
+                matches!(
+                    self.llvm_type_for(&types[0]),
+                    Some(BasicTypeEnum::StructType(_)) | None
+                )
+            }
+            VariantPayload::Tuple(_) | VariantPayload::Record(_) => true,
+        }
+    }
+
+    #[cfg(test)]
     fn checked_native_enum_variant_payload(
         &self,
         type_name: &str,
@@ -492,6 +541,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// described by [`PayloadKind`]. Multi-arg tuples and struct
     /// payloads share the `Packed` branch so the existing
     /// `decode_payload_struct` match-side path keeps working.
+    #[cfg(test)]
     fn classify_variant_payload(&self, payload: &Option<VariantPayload>) -> PayloadKind<'ctx> {
         let Some(payload) = payload else {
             return PayloadKind::None;
@@ -567,8 +617,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         let Some((owner, _)) = self.find_variant_info(name) else {
             return false;
         };
-        if let Some(payload) = self.checked_native_enum_variant_payload(&owner, name) {
-            return matches!(payload, PayloadKind::Packed(_));
+        if let Some(packed) = self.checked_native_enum_variant_is_packed(&owner, name) {
+            return packed;
         }
         let Some(td) = self.type_defs.get(&owner) else {
             return false;
@@ -576,12 +626,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         let crate::ast::TypeDefKind::Enum(variants) = &td.kind else {
             return false;
         };
-        variants.iter().find(|v| v.name == name).is_some_and(|v| {
-            matches!(
-                self.classify_variant_payload(&v.payload),
-                PayloadKind::Packed(_)
-            )
-        })
+        variants
+            .iter()
+            .find(|v| v.name == name)
+            .is_some_and(|v| self.variant_payload_is_packed(&v.payload))
     }
 
     /// L6: the sorted-ordinal indices of the variants of custom enum
@@ -603,12 +651,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                     if let Some(ordinals) = ordered
                         .iter()
                         .map(|variant| {
-                            let payload =
-                                self.checked_native_enum_variant_payload(type_name, &variant.name)?;
-                            Some((
-                                variant.native_tag,
-                                matches!(payload, PayloadKind::Packed(_)),
-                            ))
+                            let packed = self
+                                .checked_native_enum_variant_is_packed(type_name, &variant.name)?;
+                            Some((variant.native_tag, packed))
                         })
                         .collect::<Option<Vec<_>>>()
                     {
@@ -639,12 +684,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         sorted
             .iter()
             .enumerate()
-            .filter(|(_, v)| {
-                matches!(
-                    self.classify_variant_payload(&v.payload),
-                    PayloadKind::Packed(_)
-                )
-            })
+            .filter(|(_, v)| self.variant_payload_is_packed(&v.payload))
             .map(|(i, _)| i as u64)
             .collect()
     }
@@ -681,6 +721,7 @@ impl<'ctx> CodeGenerator<'ctx> {
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
+    #[cfg(test)]
     pub(in crate::codegen) fn register_type_def(
         &mut self,
         t: &crate::ast::TypeDef,
@@ -1142,71 +1183,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 self.repr_c_record_names.insert(t.name.clone());
             }
         }
-        Ok(())
-    }
-
-    pub(in crate::codegen) fn register_actor_def(
-        &mut self,
-        actor: &crate::ast::ActorDef,
-    ) -> MimiResult<()> {
-        let mut field_tys = Vec::new();
-        let actor_owner = crate::core::NodeId(format!("actor:{}", actor.name));
-        if let Some(catalog) = &self.checked_native_declarations {
-            let declaration = catalog.actors.get(&actor_owner).ok_or_else(|| {
-                CompileError::Unsupported(format!(
-                    "checked native declarations have no Actor state layout for '{}'",
-                    actor.name
-                ))
-            })?;
-            for field in &declaration.descriptor.fields {
-                let ty = self
-                    .checked_native_type_llvm(&field.ty, false)
-                    .ok_or_else(|| {
-                        CompileError::LlvmError(format!(
-                            "cannot lower checked Actor field '{}' type '{}' to LLVM",
-                            field.name,
-                            field.ty.as_str()
-                        ))
-                    })?;
-                field_tys.push(ty);
-            }
-        } else {
-            // Standalone test/legacy compilation has no checked declaration
-            // catalog. Preserve its historical surface-based layout there.
-            for field in &actor.fields {
-                let ty = self
-                    .llvm_type_for(&field.ty)
-                    .unwrap_or(BasicTypeEnum::IntType(self.context.i64_type()));
-                field_tys.push(ty);
-            }
-        }
-        let llvm_ty = BasicTypeEnum::StructType(self.context.struct_type(&field_tys, false));
-        self.type_llvm.insert(actor.name.clone(), llvm_ty);
-
-        // Also register as a type definition for field access
-        let type_def = crate::ast::TypeDef {
-            meta: crate::ast::AstNodeMeta::inherited(
-                actor.meta.span,
-                crate::ast::AstOrigin::RuntimeSystem("codegen.actor_type"),
-            ),
-            name: actor.name.clone(),
-            pub_: actor.pub_,
-            kind: crate::ast::TypeDefKind::Record(
-                actor
-                    .fields
-                    .iter()
-                    .map(|f| crate::ast::Field {
-                        meta: f.meta,
-                        name: f.name.clone(),
-                        ty: f.ty.clone(),
-                    })
-                    .collect(),
-            ),
-            generics: Vec::new(),
-            derives: Vec::new(),
-            attributes: Vec::new(),
-        };
-        self.type_defs.insert(actor.name.clone(), type_def);
         Ok(())
     }
 }

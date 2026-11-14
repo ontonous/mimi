@@ -24,7 +24,8 @@ fn cross_compile_windows_target_llvm_object() {
     let context = inkwell::context::Context::create();
     let mut codegen = CodeGenerator::new(&context, "cross_test");
     codegen.target_triple = Some("x86_64-pc-windows-gnu".to_string());
-    codegen.compile_file(&file).expect("compile");
+    let checked = crate::core::check_program(&file).expect("check");
+    codegen.compile_checked(&checked).expect("compile checked");
 
     let tmp_dir = std::env::temp_dir().join(format!("mimi_cross_test_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("mkdir");
@@ -55,7 +56,8 @@ fn cross_compile_aarch64_linux_object() {
     let context = inkwell::context::Context::create();
     let mut codegen = CodeGenerator::new(&context, "cross_test_aarch64");
     codegen.target_triple = Some("aarch64-unknown-linux-gnu".to_string());
-    codegen.compile_file(&file).expect("compile");
+    let checked = crate::core::check_program(&file).expect("check");
+    codegen.compile_checked(&checked).expect("compile checked");
 
     let tmp_dir = std::env::temp_dir().join(format!("mimi_cross_aarch64_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("mkdir");
@@ -87,7 +89,8 @@ fn cross_compile_no_std_windows() {
     let mut codegen = CodeGenerator::new(&context, "cross_no_std");
     codegen.target_triple = Some("x86_64-pc-windows-gnu".to_string());
     codegen.no_std = true;
-    codegen.compile_file(&file).expect("compile");
+    let checked = crate::core::check_program(&file).expect("check");
+    codegen.compile_checked(&checked).expect("compile checked");
 
     let tmp_dir = std::env::temp_dir().join(format!("mimi_cross_no_std_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("mkdir");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn generic_identity_function() {
@@ -21,13 +22,18 @@ func id<T>(x: T) -> T {
     x
 }
 
-func main() -> string {
+func inferred_string() -> string {
     id("hello")
+}
+
+func main() -> i32 {
+    let _value = inferred_string()
+    0
 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello".to_string()))
+        bytecode_call_named(src, "inferred_string", vec![]).expect("generic helper should run"),
+        interp::Value::String(SharedString::new("hello".to_string()))
     );
 }
 

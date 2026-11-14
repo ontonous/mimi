@@ -106,7 +106,8 @@ pub struct FunctionBodyInput<'a> {
 pub fn lower_function_body(
     input: FunctionBodyInput<'_>,
 ) -> Result<ResolvedBody, Vec<ResolvedBodyError>> {
-    lower_function_body_with_captures(input, BTreeMap::new()).map(|lowered| lowered.body)
+    lower_function_body_with_captures(input, BTreeMap::new(), BTreeSet::new())
+        .map(|lowered| lowered.body)
 }
 
 /// Result type a function body is checked against. Async functions present
@@ -142,6 +143,7 @@ struct LoweredFunctionBody {
 fn lower_function_body_with_captures(
     input: FunctionBodyInput<'_>,
     captures: BTreeMap<String, ResolvedLocal>,
+    checked_unpack_candidates: BTreeSet<NodeId>,
 ) -> Result<LoweredFunctionBody, Vec<ResolvedBodyError>> {
     // 0.39.136 perf: cached O(1) lookup — this ran per function over the
     // whole type table (O(callables × types), quadratic on actor-dense files).
@@ -195,6 +197,7 @@ fn lower_function_body_with_captures(
         default_values: BTreeMap::new(),
         resolved_calls: BTreeMap::new(),
         capture_candidates: capture_ids,
+        checked_unpack_candidates,
         callable_captures: BTreeSet::new(),
         lambda_contexts: Vec::new(),
         lambda_owners: Vec::new(),
@@ -234,8 +237,23 @@ pub fn lower_checked_function_bodies(
     file: &File,
     program: &CheckedProgram,
 ) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
+    lower_checked_function_bodies_with_checked_unpack_candidates(file, program, &BTreeMap::new())
+}
+
+fn lower_checked_function_bodies_with_checked_unpack_candidates(
+    file: &File,
+    program: &CheckedProgram,
+    checked_unpack_candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
     let mut syntax = BTreeMap::new();
-    collect_function_syntax(&file.items, &mut syntax);
+    let function_qualified_names =
+        crate::core::resolved::top_level_function_qualified_names(&file.items, &file.sources);
+    collect_function_syntax(
+        &file.items,
+        &file.sources,
+        &function_qualified_names,
+        &mut syntax,
+    );
     let mut bodies = BTreeMap::new();
     let mut environments = BTreeMap::<NodeId, BTreeMap<String, ResolvedLocal>>::new();
     let mut errors = Vec::new();
@@ -272,6 +290,10 @@ pub fn lower_checked_function_bodies(
             continue;
         };
         let captures = environments.remove(owner).unwrap_or_default();
+        let owner_unpack_candidates = checked_unpack_candidates
+            .get(owner)
+            .cloned()
+            .unwrap_or_default();
         match lower_function_body_with_captures(
             FunctionBodyInput {
                 function,
@@ -299,6 +321,7 @@ pub fn lower_checked_function_bodies(
                 transition_fails: false,
             },
             captures,
+            owner_unpack_candidates,
         ) {
             Ok(lowered) => {
                 for (nested, environment) in &lowered.nested_environments {
@@ -415,7 +438,19 @@ pub fn lower_checked_callable_bodies(
     file: &File,
     program: &CheckedProgram,
 ) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
-    let functions = lower_checked_function_bodies(file, program)?;
+    lower_checked_callable_bodies_with_checked_unpack_candidates(file, program, &BTreeMap::new())
+}
+
+pub(crate) fn lower_checked_callable_bodies_with_checked_unpack_candidates(
+    file: &File,
+    program: &CheckedProgram,
+    checked_unpack_candidates: &BTreeMap<NodeId, BTreeSet<NodeId>>,
+) -> Result<BTreeMap<NodeId, ResolvedBody>, Vec<ResolvedBodyError>> {
+    let functions = lower_checked_function_bodies_with_checked_unpack_candidates(
+        file,
+        program,
+        checked_unpack_candidates,
+    )?;
     let transitions = lower_checked_transition_bodies(file, program)?;
     let mut bodies = functions;
     let mut errors = Vec::new();
@@ -443,6 +478,7 @@ pub enum ResolvedDeclarationExpressionKind {
     ConstantInitializer,
     ActorFieldInitializer,
     TraitParameterDefault,
+    CallableParameterDefault,
     ExternRequires,
     ExternEnsures,
 }
@@ -457,20 +493,228 @@ pub struct ResolvedDeclarationExpressionBody {
     pub body: Result<ResolvedBody, Vec<ResolvedBodyError>>,
 }
 
+/// The real declaration identity which owns a source-level expression root.
+/// In particular, actor fields share an actor owner but never share this
+/// field identity, and a declaration default is keyed by its declared
+/// parameter rather than by a later `DefaultArgument` use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedDeclarationRootIdentity {
+    Constant {
+        declaration: NodeId,
+    },
+    ActorField {
+        actor: NodeId,
+        field: NodeId,
+    },
+    TraitParameterDefault {
+        method: NodeId,
+        parameter: super::ResolvedParameterId,
+    },
+    CallableParameterDefault {
+        callable: NodeId,
+        parameter: super::ResolvedParameterId,
+    },
+}
+
+/// Checker-issued root handle for the FFI source roots currently being
+/// migrated. Its fields and constructor stay private: downstream consumers
+/// must resolve the body from the issuing CheckedProgram instead of pairing
+/// an arbitrary body with source metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedFfiSourceRoot {
+    root_node: NodeId,
+    owner: NodeId,
+    kind: ResolvedDeclarationExpressionKind,
+    identity: Option<ResolvedDeclarationRootIdentity>,
+    origin: Option<Origin>,
+    body_fingerprint: blake3::Hash,
+    call_census_valid: bool,
+    calls: Vec<CheckedFfiSourceCall>,
+    private_witness: blake3::Hash,
+}
+
+impl CheckedFfiSourceRoot {
+    pub fn root_node(&self) -> &NodeId {
+        &self.root_node
+    }
+
+    pub fn owner(&self) -> &NodeId {
+        &self.owner
+    }
+
+    pub fn kind(&self) -> ResolvedDeclarationExpressionKind {
+        self.kind
+    }
+
+    pub fn identity(&self) -> Option<&ResolvedDeclarationRootIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_ref()
+    }
+
+    /// Direct typed extern calls inside this declaration-owned expression.
+    /// This list is independent of any executable default-use occurrence.
+    pub fn calls(&self) -> &[CheckedFfiSourceCall] {
+        &self.calls
+    }
+
+    pub(crate) fn has_valid_witness(&self) -> bool {
+        self.private_witness == self.compute_witness()
+    }
+
+    pub(crate) fn has_valid_call_census(&self) -> bool {
+        self.call_census_valid
+    }
+
+    pub(crate) fn body_fingerprint(&self) -> blake3::Hash {
+        self.body_fingerprint
+    }
+
+    pub(crate) fn same_handle(&self, other: &Self) -> bool {
+        self.has_valid_witness() && other.has_valid_witness() && self == other
+    }
+
+    fn compute_witness(&self) -> blake3::Hash {
+        let material = format!(
+            "checked-ffi-source-root-v1\nroot={:?}\nowner={:?}\nkind={:?}\nidentity={:?}\norigin={:?}\nbody={:?}\ncensus_valid={}\ncalls={:?}",
+            self.root_node,
+            self.owner,
+            self.kind,
+            self.identity,
+            self.origin,
+            self.body_fingerprint,
+            self.call_census_valid,
+            self.calls.iter().map(|call| call.private_witness).collect::<Vec<_>>(),
+        );
+        blake3::hash(material.as_bytes())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_clone_with_root_node(&self, root_node: NodeId) -> Self {
+        let mut duplicate = self.clone();
+        duplicate.root_node = root_node.clone();
+        for call in &mut duplicate.calls {
+            call.root_node = root_node.clone();
+            call.private_witness = call.compute_witness();
+        }
+        duplicate.private_witness = duplicate.compute_witness();
+        duplicate
+    }
+}
+
+/// Checker-issued identity for one exact typed source call. The declaration
+/// NodeId is the resolved extern declaration, not a callee spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedFfiSourceCall {
+    root_node: NodeId,
+    root_owner: NodeId,
+    root_kind: ResolvedDeclarationExpressionKind,
+    root_identity: Option<ResolvedDeclarationRootIdentity>,
+    root_fingerprint: blake3::Hash,
+    call_node: NodeId,
+    external_declaration: NodeId,
+    call_origin: Origin,
+    call_fingerprint: blake3::Hash,
+    private_witness: blake3::Hash,
+}
+
+impl CheckedFfiSourceCall {
+    pub fn call_node(&self) -> &NodeId {
+        &self.call_node
+    }
+
+    pub fn external_declaration(&self) -> &NodeId {
+        &self.external_declaration
+    }
+
+    pub(crate) fn has_valid_witness(&self) -> bool {
+        self.private_witness == self.compute_witness()
+    }
+
+    pub(crate) fn belongs_to(&self, root: &CheckedFfiSourceRoot) -> bool {
+        self.has_valid_witness()
+            && self.root_node == root.root_node
+            && self.root_owner == root.owner
+            && self.root_kind == root.kind
+            && self.root_identity == root.identity
+            && self.root_fingerprint == root.body_fingerprint
+    }
+
+    pub(crate) fn same_handle(&self, other: &Self) -> bool {
+        self.has_valid_witness() && other.has_valid_witness() && self == other
+    }
+
+    pub(crate) fn matches_typed_expression(&self, expression: &ResolvedExpr) -> bool {
+        expression.node_id == self.call_node
+            && expression.origin == self.call_origin
+            && blake3::hash(format!("{expression:#?}").as_bytes()) == self.call_fingerprint
+            && matches!(
+                &expression.kind,
+                ResolvedExprKind::Call(ResolvedCall {
+                    callee: ResolvedCallee::Extern(declaration),
+                    ..
+                }) if declaration == &self.external_declaration
+            )
+    }
+
+    fn compute_witness(&self) -> blake3::Hash {
+        let material = format!(
+            "checked-ffi-source-call-v1\nroot={:?}\nowner={:?}\nkind={:?}\nidentity={:?}\nroot_fingerprint={:?}\ncall={:?}\nextern={:?}\norigin={:?}\ncall_fingerprint={:?}",
+            self.root_node,
+            self.root_owner,
+            self.root_kind,
+            self.root_identity,
+            self.root_fingerprint,
+            self.call_node,
+            self.external_declaration,
+            self.call_origin,
+            self.call_fingerprint,
+        );
+        blake3::hash(material.as_bytes())
+    }
+}
+
+/// Canonical data returned only after a root and call handle have been
+/// resolved back through their issuing CheckedProgram.
+#[derive(Debug)]
+pub struct CheckedFfiSourceCallContext<'a> {
+    pub root: &'a CheckedFfiSourceRoot,
+    pub body: &'a ResolvedBody,
+    /// The exact validated expression is cloned out of the temporary call
+    /// census, so the context never borrows its lookup map.
+    pub call: ResolvedExpr,
+    pub declaration: &'a super::ResolvedFfiDeclarationContract,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DeclarationExpressionRootSeed {
+    root_node: NodeId,
+    owner: NodeId,
+    kind: ResolvedDeclarationExpressionKind,
+    identity: Option<ResolvedDeclarationRootIdentity>,
+}
+
 /// Lower declaration-owned expressions while source syntax is still in the
 /// checker. Backend consumers receive this directory, never a new AST wrapper.
 pub(crate) fn lower_checked_declaration_expression_bodies(
     file: &File,
     program: &CheckedProgram,
-) -> BTreeMap<NodeId, ResolvedDeclarationExpressionBody> {
+) -> (
+    BTreeMap<NodeId, ResolvedDeclarationExpressionBody>,
+    Vec<DeclarationExpressionRootSeed>,
+) {
     use ResolvedDeclarationExpressionKind as K;
     let ids = NodeIdBuilder::new(&file.sources);
     let mut roots = BTreeMap::new();
+    let mut source_root_seeds = Vec::new();
     let mut add = |owner: NodeId,
                    expression: &Expr,
                    role: String,
                    display_name: String,
                    kind: K,
+                   identity: Option<ResolvedDeclarationRootIdentity>,
                    parameters: Vec<(String, NodeId, crate::ast::Type)>,
                    result: Option<crate::ast::Type>| {
         let meta = expression.meta();
@@ -500,6 +744,17 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                 .map(|error| ResolvedBodyError::new(node.clone(), error.message))
                 .collect())
         };
+        if matches!(
+            kind,
+            K::ConstantInitializer | K::ActorFieldInitializer | K::TraitParameterDefault
+        ) {
+            source_root_seeds.push(DeclarationExpressionRootSeed {
+                root_node: node.clone(),
+                owner: owner.clone(),
+                kind,
+                identity,
+            });
+        }
         roots.insert(
             node.clone(),
             ResolvedDeclarationExpressionBody {
@@ -520,6 +775,9 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                 "value".into(),
                 format!("constant {name}"),
                 K::ConstantInitializer,
+                Some(ResolvedDeclarationRootIdentity::Constant {
+                    declaration: NodeId(format!("constant:{name}")),
+                }),
                 Vec::new(),
                 None,
             ),
@@ -532,6 +790,20 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                             format!("field.{}.initializer", stable_id_fragment(&field.name)),
                             format!("{}::field {} initializer", actor.name, field.name),
                             K::ActorFieldInitializer,
+                            Some(ResolvedDeclarationRootIdentity::ActorField {
+                                actor: NodeId(format!("actor:{}", actor.name)),
+                                field: program
+                                    .actor(&actor.name)
+                                    .and_then(|resolved| resolved.field_ids.get(&field.name))
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        NodeId(format!(
+                                            "actor:{}:missing-field:{}",
+                                            actor.name,
+                                            stable_id_fragment(&field.name)
+                                        ))
+                                    }),
+                            }),
                             Vec::new(),
                             None,
                         );
@@ -568,6 +840,7 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                             "requires".into(),
                             format!("extern {} requires", function.name),
                             K::ExternRequires,
+                            None,
                             parameters.clone(),
                             function.ret.clone(),
                         );
@@ -579,6 +852,7 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                             "ensures".into(),
                             format!("extern {} ensures", function.name),
                             K::ExternEnsures,
+                            None,
                             parameters,
                             function.ret.clone(),
                         );
@@ -598,8 +872,36 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                         stable_id_fragment(&method.name),
                         crate::core::resolved::stable_text_hash(&key)
                     ));
-                    for parameter in &method.params {
+                    for (parameter_index, parameter) in method.params.iter().enumerate() {
                         if let Some(value) = &parameter.default_value {
+                            // Trait defaults are checked in parameter order,
+                            // so the declaration-expression body must expose
+                            // the same prefix of real method parameters. This
+                            // is a source-root environment only; the trait
+                            // method remains outside the executable body
+                            // directory.
+                            let visible_parameters = method.params[..parameter_index]
+                                .iter()
+                                .map(|prior| {
+                                    let identity = program
+                                        .resolved_trait_signature(&owner)
+                                        .and_then(|signature| {
+                                            signature
+                                                .parameters
+                                                .iter()
+                                                .find(|candidate| candidate.name == prior.name)
+                                        })
+                                        .map(|candidate| candidate.id.0.clone())
+                                        .unwrap_or_else(|| {
+                                            NodeId(format!(
+                                                "{}/missing-default-scope-parameter:{}",
+                                                owner.0,
+                                                stable_id_fragment(&prior.name)
+                                            ))
+                                        });
+                                    (prior.name.clone(), identity, prior.ty.clone())
+                                })
+                                .collect();
                             add(
                                 owner.clone(),
                                 value,
@@ -612,7 +914,26 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
                                     definition.name, method.name, parameter.name
                                 ),
                                 K::TraitParameterDefault,
-                                Vec::new(),
+                                Some(ResolvedDeclarationRootIdentity::TraitParameterDefault {
+                                    method: owner.clone(),
+                                    parameter: program
+                                        .resolved_trait_signature(&owner)
+                                        .and_then(|signature| {
+                                            signature
+                                                .parameters
+                                                .iter()
+                                                .find(|candidate| candidate.name == parameter.name)
+                                        })
+                                        .map(|parameter| parameter.id.clone())
+                                        .unwrap_or_else(|| {
+                                            super::ResolvedParameterId(NodeId(format!(
+                                                "{}/missing-default-parameter:{}",
+                                                owner.0,
+                                                stable_id_fragment(&parameter.name)
+                                            )))
+                                        }),
+                                }),
+                                visible_parameters,
                                 None,
                             );
                         }
@@ -627,7 +948,176 @@ pub(crate) fn lower_checked_declaration_expression_bodies(
             | Item::Session(_) => {}
         }
     }
-    roots
+    (roots, source_root_seeds)
+}
+
+/// Bind source declaration roots to exact typed FFI call nodes after the
+/// complete extern declaration catalog has been installed in CheckedProgram.
+pub(crate) fn build_checked_ffi_source_roots(
+    program: &CheckedProgram,
+    mut seeds: Vec<DeclarationExpressionRootSeed>,
+) -> Vec<CheckedFfiSourceRoot> {
+    // Callable parameter defaults are source declaration obligations even
+    // when no call omits the argument. Keep these roots separate from the
+    // `DefaultArgument` occurrences that may later consume them.
+    for (owner, body) in program.resolved_bodies() {
+        let Some(signature) = program.resolved_signature(owner) else {
+            continue;
+        };
+        for (parameter, expression) in &body.default_values {
+            if !signature
+                .parameters
+                .iter()
+                .any(|candidate| &candidate.id == parameter && candidate.has_default)
+            {
+                continue;
+            }
+            seeds.push(DeclarationExpressionRootSeed {
+                root_node: expression.node_id.clone(),
+                owner: owner.clone(),
+                kind: ResolvedDeclarationExpressionKind::CallableParameterDefault,
+                identity: Some(ResolvedDeclarationRootIdentity::CallableParameterDefault {
+                    callable: owner.clone(),
+                    parameter: parameter.clone(),
+                }),
+            });
+        }
+    }
+    let mut result = Vec::with_capacity(seeds.len());
+    for seed in seeds {
+        let root_record = program.declaration_expression_bodies().get(&seed.root_node);
+        let root_body_expression = root_record
+            .filter(|root| {
+                root.node_id == seed.root_node && root.owner == seed.owner && root.kind == seed.kind
+            })
+            .and_then(|root| root.body.as_ref().ok()?.root.result.as_deref());
+        let callable_default_expression = match seed.identity.as_ref() {
+            Some(ResolvedDeclarationRootIdentity::CallableParameterDefault {
+                callable,
+                parameter,
+            }) => program
+                .resolved_body(callable)
+                .and_then(|body| body.default_values.get(parameter)),
+            _ => None,
+        };
+        let (body, expression, body_fingerprint) = if let Some(expression) = root_body_expression {
+            let body_result = &root_record.expect("expression came from root record").body;
+            match body_result {
+                Ok(body) => (
+                    Some(body),
+                    Some(expression),
+                    checked_ffi_source_body_fingerprint(body, expression, root_record),
+                ),
+                Err(_) => (
+                    None,
+                    None,
+                    declaration_expression_fingerprint(root_record.expect("root record")),
+                ),
+            }
+        } else if let Some(expression) = callable_default_expression {
+            let body = program
+                .resolved_body(&seed.owner)
+                .expect("default expression came from callable body");
+            (
+                Some(body),
+                Some(expression),
+                checked_ffi_source_body_fingerprint(body, expression, None),
+            )
+        } else {
+            (
+                None,
+                None,
+                root_record
+                    .map(declaration_expression_fingerprint)
+                    .unwrap_or_else(|| {
+                        blake3::hash(format!("missing-checked-ffi-source-root:{seed:?}").as_bytes())
+                    }),
+            )
+        };
+        let origin = expression.map(|expression| expression.origin.clone());
+        let mut calls = Vec::new();
+        let call_census_valid = match (body, expression) {
+            (Some(body), Some(expression)) => match body
+                .call_expressions(program.resolved_types(), program.resolved_type_targets())
+            {
+                Ok(expressions) => {
+                    let root_nodes = expression
+                        .eager_source_nodes()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    for expression in expressions
+                        .values()
+                        .filter(|expression| root_nodes.contains(&expression.node_id))
+                    {
+                        let ResolvedExprKind::Call(call) = &expression.kind else {
+                            continue;
+                        };
+                        let ResolvedCallee::Extern(external_declaration) = &call.callee else {
+                            continue;
+                        };
+                        let mut checked_call = CheckedFfiSourceCall {
+                            root_node: seed.root_node.clone(),
+                            root_owner: seed.owner.clone(),
+                            root_kind: seed.kind,
+                            root_identity: seed.identity.clone(),
+                            root_fingerprint: body_fingerprint,
+                            call_node: expression.node_id.clone(),
+                            external_declaration: external_declaration.clone(),
+                            call_origin: expression.origin.clone(),
+                            call_fingerprint: blake3::hash(format!("{expression:#?}").as_bytes()),
+                            private_witness: blake3::hash(b"unsealed-checked-ffi-source-call"),
+                        };
+                        checked_call.private_witness = checked_call.compute_witness();
+                        calls.push(checked_call);
+                    }
+                    true
+                }
+                Err(_) => false,
+            },
+            _ => false,
+        };
+        let mut root = CheckedFfiSourceRoot {
+            root_node: seed.root_node,
+            owner: seed.owner,
+            kind: seed.kind,
+            identity: seed.identity,
+            origin,
+            body_fingerprint,
+            call_census_valid,
+            calls,
+            private_witness: blake3::hash(b"unsealed-checked-ffi-source-root"),
+        };
+        root.private_witness = root.compute_witness();
+        result.push(root);
+    }
+    result.sort_by(|left, right| {
+        left.root_node
+            .cmp(&right.root_node)
+            .then_with(|| format!("{:?}", left.identity).cmp(&format!("{:?}", right.identity)))
+    });
+    result
+}
+
+pub(crate) fn declaration_expression_fingerprint(
+    root: &ResolvedDeclarationExpressionBody,
+) -> blake3::Hash {
+    blake3::hash(format!("checked-declaration-expression-body-v1\n{root:#?}").as_bytes())
+}
+
+pub(crate) fn checked_ffi_source_body_fingerprint(
+    body: &ResolvedBody,
+    root_expression: &ResolvedExpr,
+    declaration_root: Option<&ResolvedDeclarationExpressionBody>,
+) -> blake3::Hash {
+    match declaration_root {
+        Some(root) => declaration_expression_fingerprint(root),
+        None => blake3::hash(
+            format!(
+                "checked-ffi-callable-default-body-v1\nbody={body:#?}\nroot={root_expression:#?}"
+            )
+            .as_bytes(),
+        ),
+    }
 }
 
 pub(super) fn declaration_canonical_type(
@@ -798,6 +1288,7 @@ fn lower_declaration_expression(
         default_values: BTreeMap::new(),
         resolved_calls: BTreeMap::new(),
         capture_candidates: BTreeSet::new(),
+        checked_unpack_candidates: BTreeSet::new(),
         callable_captures: BTreeSet::new(),
         lambda_contexts: Vec::new(),
         lambda_owners: Vec::new(),
@@ -847,11 +1338,21 @@ fn lower_declaration_expression(
     Ok(body)
 }
 
-fn collect_function_syntax<'a>(items: &'a [Item], out: &mut BTreeMap<NodeId, &'a FuncDef>) {
+fn collect_function_syntax<'a>(
+    items: &'a [Item],
+    sources: &crate::span::SourceRegistry,
+    function_qualified_names: &HashMap<(String, String), String>,
+    out: &mut BTreeMap<NodeId, &'a FuncDef>,
+) {
     for item in items {
         match item {
             Item::Func(function) => {
-                let owner = NodeId(format!("function:{}", function.name));
+                let qualified = crate::core::resolved::top_level_function_qualified_name(
+                    function,
+                    sources,
+                    function_qualified_names,
+                );
+                let owner = NodeId(format!("function:{qualified}"));
                 out.insert(owner.clone(), function);
                 collect_nested_function_syntax(&function.body, &owner, out);
             }
@@ -1162,6 +1663,7 @@ struct BodyLowerer<'a> {
     default_values: BTreeMap<super::ResolvedParameterId, ResolvedExpr>,
     resolved_calls: BTreeMap<NodeId, super::ResolvedCallee>,
     capture_candidates: BTreeSet<ResolvedLocalId>,
+    checked_unpack_candidates: BTreeSet<NodeId>,
     callable_captures: BTreeSet<ResolvedLocalId>,
     lambda_contexts: Vec<LambdaCaptureContext>,
     lambda_owners: Vec<NodeId>,
@@ -2085,11 +2587,11 @@ impl BodyLowerer<'_> {
                                 };
                                 let [constant] = candidates.as_slice() else {
                                     return Err(vec![ResolvedBodyError::new(
-                            node_id.clone(),
-                            format!(
-                                "identifier '{name}' does not resolve to exactly one local or constant"
-                            ),
-                        )]);
+                                        node_id.clone(),
+                                        format!(
+                                            "identifier '{name}' does not resolve to exactly one local or constant"
+                                        ),
+                                    )]);
                                 };
                                 ResolvedExprKind::Constant(constant.node_id.clone())
                             }
@@ -2404,13 +2906,57 @@ impl BodyLowerer<'_> {
                     // dispatches by concrete record type, codegen by vtable.
                     kind
                 } else {
-                    ResolvedExprKind::Call(self.lower_call(
-                        &node_id,
-                        callee,
-                        arguments,
-                        role,
-                        &[],
-                    )?)
+                    let call = self.lower_call(&node_id, callee, arguments, role, &[])?;
+                    let checked_unpack_target = self
+                        .checked_unpack_candidates
+                        .contains(&node_id)
+                        .then(|| match &call.callee {
+                            ResolvedCallee::Builtin(builtin) => match builtin.as_str() {
+                                "unpack_i32" => Some(PrimitiveType::I32),
+                                "unpack_string" => Some(PrimitiveType::String),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                        .flatten();
+                    if let Some(target) = checked_unpack_target {
+                        let target_type = super::primitive_type_id(target);
+                        let [argument] = call.arguments.as_slice() else {
+                            return Err(vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                "checked Map/Any unpack requires exactly one argument",
+                            )]);
+                        };
+                        if call.result != target_type
+                            || ty != target_type
+                            || !call.type_arguments.is_empty()
+                            || call.permission.is_some()
+                            || !call.effects.is_empty()
+                            || !call.session.is_empty()
+                            || argument.conversion.kind != CheckedConversionKind::Identity
+                            || argument.conversion.from != argument.value.ty
+                            || argument.conversion.to != argument.value.ty
+                            || !matches!(
+                                self.types.get(&argument.value.ty),
+                                Some(ResolvedType::DynamicAny { .. })
+                            )
+                        {
+                            return Err(vec![ResolvedBodyError::new(
+                                node_id.clone(),
+                                "checked Map/Any unpack call differs from its exact typed source contract",
+                            )]);
+                        }
+                        ResolvedExprKind::Cast {
+                            value: Box::new(argument.value.clone()),
+                            conversion: CheckedConversion {
+                                kind: CheckedConversionKind::DynamicAnyUnpack,
+                                from: argument.value.ty.clone(),
+                                to: target_type,
+                            },
+                        }
+                    } else {
+                        ResolvedExprKind::Call(call)
+                    }
                 }
             }
             Expr::Turbofish(name, _, arguments) => {
@@ -2494,7 +3040,7 @@ impl BodyLowerer<'_> {
                 }))
             }
             Expr::QuoteInterpolate(_) | Expr::NamedArg(_, _) => {
-                return self.unsupported(&node_id, expr_kind(expr))
+                return self.unsupported(&node_id, expr_kind(expr));
             }
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         };
@@ -2583,7 +3129,7 @@ impl BodyLowerer<'_> {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     "lambda expression does not have a canonical function type",
-                )])
+                )]);
             }
         };
         if params.len() != parameter_types.len() {
@@ -3333,7 +3879,7 @@ impl BodyLowerer<'_> {
                     ),
                 )]);
             };
-            *function
+            function
         };
         let signature = self.signatures.get(&function.node_id).ok_or_else(|| {
             vec![ResolvedBodyError::new(
@@ -4063,7 +4609,7 @@ impl BodyLowerer<'_> {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     format!("local '{}' is not callable", local.0 .0),
-                )])
+                )]);
             }
         };
         if arguments.len() != parameters.len() {
@@ -4420,12 +4966,12 @@ impl BodyLowerer<'_> {
         }))
     }
 
-    /// dyn trait method dispatch placeholder: `sensor.read()` on a
-    /// `dyn Trait` receiver. Programs with traits/impls leave the resolved
-    /// native slice (eligibility), so interp (bytecode, dispatches by
-    /// concrete record type) and codegen (legacy, vtable fat pointer) handle
-    /// execution from the raw AST; the resolved body only needs a
-    /// type-correct placeholder for CFG/ownership passes.
+    /// Typed placeholder for a `dyn Trait` method call. Language-spec §3.9
+    /// removes dynamic Protocol method dispatch from the Mimi surface; the
+    /// canonical dispatcher and direct checked consumers reject this shape
+    /// before it can reach Bytecode or native compatibility execution. The
+    /// placeholder remains only so checker lowering can finish the typed body
+    /// and the shared boundary can report a stable route diagnostic.
     fn lower_dyn_method_call(
         &mut self,
         node_id: &NodeId,
@@ -4837,7 +5383,7 @@ impl BodyLowerer<'_> {
                         "actor {operation} result does not identify actor '{}'",
                         actor.node_id.0
                     ),
-                )])
+                )]);
             }
         }
         Ok(Some(ResolvedCall {
@@ -5339,7 +5885,7 @@ impl BodyLowerer<'_> {
                                 return Err(vec![ResolvedBodyError::new(
                                     node_id.clone(),
                                     "tuple pattern shape disagrees with canonical scrutinee type",
-                                )])
+                                )]);
                             }
                         }
                     }
@@ -5365,7 +5911,7 @@ impl BodyLowerer<'_> {
                         return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
                             "array pattern shape disagrees with canonical scrutinee type",
-                        )])
+                        )]);
                     }
                 };
                 let element_types = vec![element; patterns.len()];
@@ -6087,7 +6633,7 @@ impl BodyLowerer<'_> {
                             parameter.0
                         ),
                     )]
-                })
+                });
             }
             ResolvedType::Nominal {
                 item,
@@ -6667,7 +7213,7 @@ impl BodyLowerer<'_> {
                 return Err(vec![ResolvedBodyError::new(
                     node_id.clone(),
                     "weak binding initializer has no compatible canonical strong ownership type",
-                )])
+                )]);
             }
             (crate::ast::SharedKind::Shared, _) => initializer,
         };
@@ -7104,7 +7650,7 @@ impl BodyLowerer<'_> {
                         return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
                             "non-transparent type unexpectedly has a canonical target",
-                        )])
+                        )]);
                     }
                 };
                 return Ok(CheckedConversion {
@@ -7123,7 +7669,7 @@ impl BodyLowerer<'_> {
                         return Err(vec![ResolvedBodyError::new(
                             node_id.clone(),
                             "non-transparent type unexpectedly has a canonical target",
-                        )])
+                        )]);
                     }
                 };
                 return Ok(CheckedConversion {
@@ -7275,7 +7821,7 @@ impl BodyLowerer<'_> {
                                 self.type_display(from),
                                 self.type_display(to)
                             ),
-                        )])
+                        )]);
                     }
                 }
             }
@@ -7311,7 +7857,7 @@ impl BodyLowerer<'_> {
         let item = match self.types.get(nominal) {
             Some(ResolvedType::Nominal { item, .. }) => item,
             Some(ResolvedType::Newtype { inner, .. }) => {
-                return Ok(Some((ResolvedTypeKind::Newtype, inner.clone())))
+                return Ok(Some((ResolvedTypeKind::Newtype, inner.clone())));
             }
             _ => return Ok(None),
         };
@@ -7397,7 +7943,7 @@ impl BodyLowerer<'_> {
                         from.as_str(),
                         to.as_str()
                     ),
-                )
+                );
             }
         };
         Ok(CheckedConversion {
@@ -7614,7 +8160,7 @@ fn numeric_width(primitive: super::PrimitiveType) -> Option<u16> {
         | PrimitiveType::F64 => 64,
         PrimitiveType::I128 | PrimitiveType::U128 => 128,
         PrimitiveType::Bool | PrimitiveType::Char | PrimitiveType::String | PrimitiveType::Unit => {
-            return None
+            return None;
         }
     })
 }
@@ -9606,5 +10152,49 @@ func main() -> i32 { 0 }
             &call.callee,
             ResolvedCallee::Function(owner) if owner == nested_owner
         ));
+    }
+
+    #[test]
+    fn checked_ffi_source_handles_reject_wrong_root_body_call_and_extern() {
+        let file = parse(
+            r#"
+extern "C" {
+    func foreign(value: i32) -> i32;
+    func other(value: i32) -> i32;
+}
+const SEED: i32 = foreign(1);
+func main() -> i32 { 0 }
+"#,
+        );
+        let program = crate::core::check_program(&file).expect("check root handle fixture");
+        let root = program
+            .checked_ffi_source_roots()
+            .iter()
+            .find(|root| root.kind() == ResolvedDeclarationExpressionKind::ConstantInitializer)
+            .expect("constant source root");
+        let call = root.calls().first().expect("typed extern call");
+        program
+            .checked_ffi_source_call_context(root, call)
+            .expect("original checker-issued identities resolve");
+
+        let mut wrong_root = root.clone();
+        wrong_root.root_node = NodeId("forged:root-node".into());
+        assert!(program.checked_ffi_source_root_body(&wrong_root).is_err());
+
+        let mut wrong_body = root.clone();
+        wrong_body.body_fingerprint = blake3::hash(b"different typed source body");
+        assert!(program.checked_ffi_source_root_body(&wrong_body).is_err());
+
+        let mut wrong_call = call.clone();
+        wrong_call.call_node = NodeId("forged:call-node".into());
+        assert!(program
+            .checked_ffi_source_call_context(root, &wrong_call)
+            .is_err());
+
+        let mut wrong_external = call.clone();
+        wrong_external.external_declaration = NodeId("extern:other-declaration".into());
+        assert!(program
+            .checked_ffi_source_call_context(root, &wrong_external)
+            .is_err());
     }
 }

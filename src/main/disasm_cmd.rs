@@ -98,50 +98,112 @@ pub fn disasm_file(path: &Path) -> ! {
     // S14: disasm is a consumer of the already-closed scalar-collection
     // island.  A recognized island that fails canonical preflight is a hard
     // error; it must not regain the old compiler as an implicit fallback.
-    let program =
-        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
-            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                let receipt = canonical.route_receipt("disasm-canonical-v1");
-                match mimi::interp::bytecode::compile_mir_program_with_route_receipt(
-                    &canonical, &receipt,
-                ) {
-                    Ok(program) => program,
-                    Err(errors) => {
-                        eprintln!("error: canonical MIR bytecode is not eligible:");
-                        for error in errors {
-                            // Route receipt/manifest failures must keep their
-                            // registered code even though disasm exits
-                            // directly instead of returning through the
-                            // top-level CLI error boundary.
-                            eprintln!("{}", render_mir_bytecode_error(&error));
-                        }
-                        process::exit(1);
+    let program = match crate::canonical_dispatch::select_default_route(
+        &checked_program,
+        &merged_file,
+    ) {
+        crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
+            let profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+                &checked_program,
+                "disasm-canonical-v1",
+            );
+            let receipt = canonical.route_receipt(profile);
+            if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+                eprintln!(
+                    "MIMI_ROUTE_CENSUS route-admission consumer=disasm mode=default checker_profile={} mir_digest={} receipt_identity_digest={}",
+                    profile,
+                    canonical.canonical_digest(),
+                    receipt.route_identity_digest(),
+                );
+            }
+            let has_owned_get_result_branch_v3 = checked_program
+                .resource_analyses()
+                .values()
+                .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt());
+            let bytecode = if profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+                && has_owned_get_result_branch_v3
+            {
+                mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                    &checked_program,
+                    &canonical,
+                )
+            } else if profile
+                == mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+            {
+                // The direct tuple owner slice uses the same Checker-bound
+                // L1 adapter as run/test; L2 remains verifier-only.
+                mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+                        &checked_program,
+                        &canonical,
+                        &receipt,
+                    )
+            } else if profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE
+            {
+                // DynamicArg0 is an AST-free opcode authorized only by
+                // the exact CheckedProgram/MIR receipt. Disassembly uses
+                // the same route binder as execution consumers.
+                mimi::interp::bytecode::compile_mir_program_with_dynamic_keys_get_route(
+                    &checked_program,
+                    &canonical,
+                )
+            } else if profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE
+            {
+                mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+                    &checked_program,
+                    &canonical,
+                )
+            } else {
+                mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            };
+            match bytecode {
+                Ok(program) => program,
+                Err(errors) => {
+                    eprintln!("error: canonical MIR bytecode is not eligible:");
+                    for error in errors {
+                        // Route receipt/manifest failures must keep their
+                        // registered code even though disasm exits
+                        // directly instead of returning through the
+                        // top-level CLI error boundary.
+                        eprintln!("{}", render_mir_bytecode_error(&error));
                     }
+                    process::exit(1);
                 }
             }
-            crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
-                let message = format!("default Canonical MIR route rejected: {reason}");
-                if mimi::diagnostic::codes::canonical_mir_route_code_in_message(&message).is_some()
-                {
-                    eprintln!("{}", crate::format_cli_error(&message));
-                } else {
-                    eprintln!("error: {}", message);
-                }
-                process::exit(1);
+        }
+        crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+            let message = format!("default Canonical MIR route rejected: {reason}");
+            if mimi::diagnostic::codes::canonical_mir_route_code_in_message(&message).is_some() {
+                eprintln!("{}", crate::format_cli_error(&message));
+            } else {
+                eprintln!("error: {}", message);
             }
-            crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
-                crate::canonical_dispatch::report_legacy_route(_reason);
-                let mut compiler = mimi::interp::bytecode::BytecodeCompiler::new();
-                compiler.install_checked_program(&checked_program);
-                match compiler.compile_file(&merged_file) {
-                    Ok(program) => program,
-                    Err(e) => {
-                        eprintln!("error: compilation failed: {}", e);
-                        process::exit(1);
-                    }
+            process::exit(1);
+        }
+        crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
+            crate::canonical_dispatch::report_legacy_route(_reason);
+            let mut compiler = mimi::interp::bytecode::BytecodeCompiler::new();
+            compiler.install_checked_program(&checked_program);
+            match compiler.compile_file(&merged_file) {
+                Ok(program) => program,
+                Err(e) => {
+                    eprintln!("error: compilation failed: {}", e);
+                    process::exit(1);
                 }
             }
-        };
+        }
+        crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+            eprintln!("error: verifier-only FFI owner slice has no bytecode representation");
+            process::exit(1);
+        }
+        crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+            eprintln!(
+                "error: direct tuple Get L2 semantic projection has no bytecode representation"
+            );
+            process::exit(1);
+        }
+    };
 
     print!(
         "{}",
@@ -159,7 +221,7 @@ mod tests {
     #[test]
     fn disasm_route_error_renderer_keeps_registered_code() {
         let error = MirBytecodeError {
-            function: mimi::core::NodeId("mir-program".into()),
+            function: mimi::core::resolved::NodeId("mir-program".into()),
             message: "MIR-RECEIPT-MANIFEST-001: future field".into(),
         };
         let rendered = strip_ansi(&render_mir_bytecode_error(&error));
@@ -177,7 +239,7 @@ mod tests {
     #[test]
     fn disasm_route_error_renderer_matches_direct_diagnostic_for_wrapped_code() {
         let error = MirBytecodeError {
-            function: mimi::core::NodeId("mir-program".into()),
+            function: mimi::core::resolved::NodeId("mir-program".into()),
             message: format!(
                 "bytecode wrapper: {}: canonical route manifest rejected: future field",
                 mimi::core::mir::MIR_ROUTE_MANIFEST_ERROR_CODE
@@ -201,7 +263,7 @@ mod tests {
     #[test]
     fn disasm_plain_error_renderer_keeps_indented_legacy_shape() {
         let error = MirBytecodeError {
-            function: mimi::core::NodeId("bad".into()),
+            function: mimi::core::resolved::NodeId("bad".into()),
             message: "unsupported MIR instruction".into(),
         };
         assert_eq!(

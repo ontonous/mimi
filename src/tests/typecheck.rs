@@ -26,9 +26,11 @@ fn typecheck_double_mut_borrow_error() {
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
-    let r1 = &mut x;
-    let r2 = &mut x;
-    println(*r1);
+    unsafe {
+        let r1 = &mut x;
+        let r2 = &mut x;
+        println(*r1);
+    }
     1
 }
 "#;
@@ -54,9 +56,11 @@ fn typecheck_imm_mut_borrow_error() {
     let src = r#"
 func main() -> i32 {
     let x = 42;
-    let r1 = &x;
-    let r2 = &mut x;
-    println(*r1);
+    unsafe {
+        let r1 = &x;
+        let r2 = &mut x;
+        println(*r1);
+    }
     1
 }
 "#;
@@ -80,8 +84,11 @@ fn typecheck_double_imm_borrow_ok() {
     let src = r#"
 func main() -> i32 {
     let x = 42;
-    let r1 = &x;
-    let r2 = &x;
+    unsafe {
+        let r1 = &x;
+        let r2 = &x;
+        println(*r1 + *r2);
+    }
     1
 }
 "#;
@@ -98,10 +105,13 @@ fn typecheck_borrow_scope_isolation() {
     let src = r#"
 func main() -> i32 {
     let x = 42;
-    {
-        let r = &mut x;
+    unsafe {
+        {
+            let r = &mut x;
+        }
+        let r2 = &x;
+        println(*r2);
     }
-    let r2 = &x;
     1
 }
 "#;
@@ -116,11 +126,13 @@ fn nll_borrow_released_after_last_use() {
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
-    let r = &x;
-    let _ = *r;
-    // r is no longer used, so x should be borrowable again
-    let r2 = &mut x;
-    *r2 = 100;
+    unsafe {
+        let r = &x;
+        let _ = *r;
+        // r is no longer used, so x should be borrowable again
+        let r2 = &mut x;
+        *r2 = 100;
+    }
     1
 }
 "#;
@@ -139,11 +151,13 @@ fn nll_mut_borrow_after_last_use_of_imm() {
     let src = r#"
 func main() -> i32 {
     let mut x = 10;
-    let r1 = &x;
-    let val = *r1;
-    // r1 is no longer used
-    let r2 = &mut x;
-    *r2 = val + 1;
+    unsafe {
+        let r1 = &x;
+        let val = *r1;
+        // r1 is no longer used
+        let r2 = &mut x;
+        *r2 = val + 1;
+    }
     1
 }
 "#;
@@ -162,15 +176,23 @@ fn nll_still_rejects_concurrent_borrows() {
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
-    let r1 = &x;
-    let r2 = &mut x;
-    let _ = *r1;
+    unsafe {
+        let r1 = &x;
+        let r2 = &mut x;
+        let _ = *r1;
+    }
     1
 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
-    assert!(result.is_err(), "Overlapping borrows should be rejected");
+    let errors = result.expect_err("overlapping borrows should be rejected");
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error.code.as_deref() == Some(crate::diagnostic::codes::E0300) }),
+        "expected canonical E0300 loan conflict, got: {errors:?}"
+    );
 }
 
 #[test]
@@ -179,9 +201,11 @@ fn nll_unused_ref_releases_borrow() {
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
-    let _r1 = &x;
-    let r2 = &mut x;
-    *r2 = 100;
+    unsafe {
+        let _r1 = &x;
+        let r2 = &mut x;
+        *r2 = 100;
+    }
     1
 }
 "#;
@@ -200,17 +224,22 @@ fn nll_rejects_mut_during_active_borrow() {
     let src = r#"
 func main() -> i32 {
     let mut x = 42;
-    let r1 = &x;
-    let r2 = &mut x;
-    println(*r1);
+    unsafe {
+        let r1 = &x;
+        let r2 = &mut x;
+        println(*r1);
+    }
     1
 }
 "#;
     let file = parse(src);
     let result = core::check(&file);
+    let errors = result.expect_err("an active shared loan must reject a mutable loan");
     assert!(
-        result.is_err(),
-        "Should reject &mut while &x reference is still used later"
+        errors
+            .iter()
+            .any(|error| { error.code.as_deref() == Some(crate::diagnostic::codes::E0300) }),
+        "expected canonical E0300 loan conflict, got: {errors:?}"
     );
 }
 
@@ -220,8 +249,12 @@ fn nll_borrow_used_in_last_statement() {
     let src = r#"
 func main() -> i32 {
     let x = 42;
-    let r = &x;
-    *r
+    let mut result = 0;
+    unsafe {
+        let r = &x;
+        result = *r;
+    }
+    result
 }
 "#;
     let file = parse(src);
@@ -386,10 +419,11 @@ fn typecheck_numeric_coercion_i32_to_i64_arg() {
 fn typecheck_numeric_coercion_i32_to_f64() {
     // e895f82: is_numeric_coercion allows i32 literal → f64 declared type
     let src = r#"
-        func main() -> f64 {
+        func widened() -> f64 {
             let x: f64 = 3
             x
         }
+        func main() -> i32 { 0 }
     "#;
     let result = check_source(src);
     assert!(
@@ -462,11 +496,12 @@ fn typecheck_binary_numeric_coercion_i32_i64_all_ops() {
 #[test]
 fn typecheck_binary_numeric_coercion_i32_f64() {
     let src = r#"
-        func main() -> f64 {
+        func mixed_sum() -> f64 {
             let x: i32 = 1;
             let y: f64 = 2.5;
             x + y
         }
+        func main() -> i32 { 0 }
     "#;
     let result = check_source(src);
     assert!(
@@ -479,11 +514,12 @@ fn typecheck_binary_numeric_coercion_i32_f64() {
 #[test]
 fn typecheck_binary_numeric_coercion_i64_f64() {
     let src = r#"
-        func main() -> f64 {
+        func mixed_product() -> f64 {
             let x: i64 = 1;
             let y: f64 = 2.5;
             x * y
         }
+        func main() -> i32 { 0 }
     "#;
     let result = check_source(src);
     assert!(
@@ -584,9 +620,11 @@ fn warn_shared_write_write_parasteps() {
     let src = r#"
 func main() -> i32 {
     shared x = 0
-    parasteps {
-        *x = 1
-        *x = 2
+    unsafe {
+        parasteps {
+            *x = 1
+            *x = 2
+        }
     }
     0
 }
@@ -633,9 +671,11 @@ fn warn_no_shared_write_write_parasteps() {
 func main() -> i32 {
     shared x = 0
     shared y = 0
-    parasteps {
-        *x = 1
-        *y = 2
+    unsafe {
+        parasteps {
+            *x = 1
+            *y = 2
+        }
     }
     0
 }
@@ -657,8 +697,10 @@ fn warn_no_shared_write_single_step_parasteps() {
     let src = r#"
 func main() -> i32 {
     shared x = 0
-    parasteps {
-        *x = 1
+    unsafe {
+        parasteps {
+            *x = 1
+        }
     }
     0
 }
@@ -713,12 +755,15 @@ fn typecheck_arena_escape_ref_to_outer_rejected() {
     // Assigning arena-scoped ref to outer-scope ref → error
     let src = r#"
 func main() -> i32 {
-    let mut x: &i32 = &0;
-    arena {
-        let ref y = 42;
-        x = y;
+    unsafe {
+        let mut x: &i32 = &0;
+        arena {
+            let ref y = 42;
+            x = y;
+        }
+        *x
     }
-    *x
+    0
 }
 "#;
     let result = check_source(src);
@@ -740,10 +785,14 @@ fn typecheck_arena_no_escape_value_copy_ok() {
     // Copying value out of arena (via deref) is fine → no error
     let src = r#"
 func main() -> i32 {
-    arena {
-        let ref x = 42;
-        *x
+    let mut result = 0;
+    unsafe {
+        arena {
+            let ref x = 42;
+            result = *x;
+        }
     }
+    result
 }
 "#;
     let result = check_source(src);
@@ -759,10 +808,12 @@ fn typecheck_arena_ref_stays_in_scope_ok() {
     // Using arena ref within arena scope is fine → no error
     let src = r#"
 func main() -> i32 {
-    arena {
-        let ref x = 42;
-        let ref y = 10;
-        println(*x + *y);
+    unsafe {
+        arena {
+            let ref x = 42;
+            let ref y = 10;
+            println(*x + *y);
+        }
     }
     0
 }
@@ -807,7 +858,7 @@ fn typecheck_string_transform_builtins_reject_non_string_values() {
         "str_to_upper([1, 2])",
         "str_to_lower([1, 2])",
     ] {
-        let src = format!("func main() -> string {{ {call} }}");
+        let src = format!("func main() -> i32 {{ {call}; 0 }}");
         let errors = check_source(&src).expect_err("string transform must reject List input");
         assert!(
             errors
@@ -833,24 +884,35 @@ func main() -> bool {
 #[test]
 fn typecheck_regex_find_return_string() {
     let src = r#"
-func main() -> string {
+func find_match() -> string {
     regex_find("hello", "[a-z]+")
 }
+func main() -> i32 {
+    println(find_match())
+    0
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
+    let (_, stdout) = run_source_with_stdout(src);
+    assert_eq!(stdout.trim(), "hello");
 }
 
 #[test]
 fn typecheck_regex_replace_wrong_args() {
-    check_source(
+    let errors = check_source(
         r#"
-func main() -> string {
-    regex_replace("hello", "pattern")
+func main() -> i32 {
+    regex_replace("hello", "pattern");
+    0
 }
 "#,
     )
     .expect_err("regex_replace with 2 args should fail typecheck");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0242)),
+        "expected E0242 for regex_replace arity, got {errors:?}"
+    );
 }
 
 // ─── Generic bounds type check tests (L2) ─────────────────────
@@ -897,15 +959,22 @@ func main() -> i32 {
 
 #[test]
 fn typecheck_generic_bounds_copy_rejected_for_string() {
-    check_source(
+    let errors = check_source(
         r#"
 func copy_it<T: Copy>(x: T) -> T { x }
-func main() -> string {
-    copy_it("hello")
+func main() -> i32 {
+    copy_it("hello");
+    0
 }
 "#,
     )
     .expect_err("string should NOT satisfy Copy bound");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0253)),
+        "expected E0253 for a String Copy-bound violation, got {errors:?}"
+    );
 }
 
 #[test]
@@ -1812,9 +1881,10 @@ fn regr_le_h4_scientific_notation_typecheck() {
     // LE-H4: scientific notation produces a valid float type
     assert!(check_source(
         r#"
-func main() -> f64 {
+func scientific_notation() -> f64 {
     1.5e3
 }
+func main() -> i32 { 0 }
 "#,
     )
     .is_ok());
@@ -1936,9 +2006,13 @@ fn assign_while_borrowed_rejected() {
     let src = r#"
 func main() -> i32 {
     let mut x = 1
-    let r = &x
-    x = 2
-    *r
+    let mut result = 0
+    unsafe {
+        let r = &x
+        x = 2
+        result = *r
+    }
+    result
 }
 "#;
     let r = check_source(src);
@@ -2104,5 +2178,518 @@ func main() -> i32 {
         check_source(src).is_ok(),
         "i32→i64 widening should be accepted: {:?}",
         check_source(src)
+    );
+}
+
+#[test]
+fn cast_target_resolves_pending_empty_list_typevar_in_actor_initializer() {
+    // Mirrors the production `[] as List<string>` actor-field initializer in
+    // MimiChat. The list element variable is intentionally still pending when
+    // Cast inference starts; its explicit target must determine it.
+    let src = r#"
+actor MessageCache {
+    entries: List<string> = [] as List<string>
+}
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(src);
+    assert!(
+        result.is_ok(),
+        "the cast target should resolve the empty-list element type: {result:?}"
+    );
+}
+
+#[test]
+fn incompatible_pending_typevar_cast_reports_e0200() {
+    let src = r#"
+actor MessageCache {
+    count: i32 = [] as i32
+}
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).expect_err("a list cannot be inferred as an integer");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+                && diagnostic
+                    .message
+                    .contains("cannot infer explicit cast source type")
+        }),
+        "expected the unresolved cast source to get E0200, got: {errors:?}"
+    );
+}
+
+#[test]
+fn executable_main_accepts_each_scalar_entry_result_kind() {
+    let cases = [
+        ("unit", "func main() {}"),
+        ("bool", "func main() -> bool { true }"),
+        ("i32", "func main() -> i32 { 0 }"),
+        ("i64", "func main() -> i64 { 0 }"),
+        (
+            "transparent i32 alias",
+            "type ExitCode = i32\nfunc main() -> ExitCode { 0 }",
+        ),
+    ];
+
+    for (label, source) in cases {
+        let result = check_source(source);
+        assert!(
+            result.is_ok(),
+            "the {label} executable entry result should be accepted: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn executable_main_rejects_source_parameters_generics_and_non_scalar_results() {
+    let cases = [
+        (
+            "Mimi source parameter",
+            "func main(code: i32) -> i32 { code }",
+        ),
+        ("generic parameter", "func main<T>() -> i32 { 0 }"),
+        (
+            "Result return",
+            "func main() -> Result<string, string> { Err(\"failed\") }",
+        ),
+        ("Option return", "func main() -> Option<i32> { Some(0) }"),
+        ("aggregate return", "func main() -> (i32, i32) { (0, 0) }"),
+        ("string return", "func main() -> string { \"status\" }"),
+        ("float return", "func main() -> f64 { 0.0 }"),
+    ];
+
+    for (label, source) in cases {
+        let errors = check_source(source)
+            .expect_err("the entry signature must be rejected at the checker boundary");
+        assert!(
+            errors
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some(crate::diagnostic::codes::E0447)),
+            "expected E0447 for {label}, got: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn inventory_646_result_valued_main_is_rejected_with_e0447_at_its_result_type() {
+    let source = "func main() -> Result<string, string> { Err(\"failed\") }";
+    let file = parse(source);
+    let errors = core::check(&file).expect_err("Result-valued executable main is source-negative");
+    let diagnostic = errors
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0447))
+        .expect("inventory-646 fixture must report E0447");
+    assert_eq!(
+        diagnostic.span.start_line, 1,
+        "E0447 should point to the main result annotation"
+    );
+    assert!(
+        diagnostic.message.contains("Result<string, string>"),
+        "diagnostic should identify the unsupported entry result: {diagnostic:?}"
+    );
+}
+
+#[test]
+fn actor_method_cannot_write_non_mut_field_without_runs_flow() {
+    let source = r#"
+actor Counter {
+    base: i32 = 10
+
+    func bump(delta: i32) -> i32 {
+        self.base = self.base + delta
+        self.base
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let expected_line = source
+        .lines()
+        .position(|line| line.trim_start().starts_with("self.base ="))
+        .expect("base assignment line")
+        + 1;
+    let errors = check_source(source).expect_err("no-Flow Actor field writes bypass Flow state");
+    let diagnostic = errors
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0448))
+        .expect("no-Flow Actor field write must report E0448");
+    assert_eq!(
+        diagnostic.span.start_line, expected_line,
+        "E0448 should point at the field assignment"
+    );
+    assert!(diagnostic.message.contains("Counter::bump"));
+    assert!(diagnostic.message.contains("'base'"));
+}
+
+#[test]
+fn actor_method_cannot_write_field_even_when_actor_runs_flow() {
+    let source = r#"
+flow CounterFlow {
+    state Ready { base: i32 }
+    transition bump(Ready, delta: i32) -> Ready {
+        return Ready { base: self.base + delta }
+    }
+}
+
+actor Counter runs CounterFlow {
+    base: i32 = 10
+    func bypass(delta: i32) {
+        self.base = self.base + delta
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(source).expect_err("Actor methods cannot bypass Flow transitions");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0448)),
+        "expected E0448 for runs-Flow Actor method write, got: {errors:?}"
+    );
+}
+
+#[test]
+fn actor_method_cannot_mutate_list_field_through_in_place_builtin() {
+    for mutation in ["push(self.entries, value)", "pop(self.entries)"] {
+        let source = format!(
+            r#"
+actor Cache {{
+    entries: List<i32> = []
+    func mutate(value: i32) {{
+        {mutation}
+    }}
+}}
+
+func main() -> i32 {{ 0 }}
+"#
+        );
+        let errors =
+            check_source(&source).expect_err("push/pop mutates the Actor-owned list in place");
+        assert!(
+            errors
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some(crate::diagnostic::codes::E0448)),
+            "expected E0448 for `{mutation}` on an Actor field, got: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn actor_method_cannot_assign_through_list_field_index() {
+    let source = r#"
+actor Cache {
+    entries: List<i32> = [0]
+    func replace(value: i32) {
+        self.entries[0] = value
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(source).expect_err("indexed Actor-field assignment persists state");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0448)),
+        "expected E0448 for indexed field assignment, got: {errors:?}"
+    );
+}
+
+#[test]
+fn actor_method_cannot_mutate_aliased_field_inside_nested_function() {
+    let source = r#"
+actor Cache {
+    entries: List<i32> = []
+    func append(value: i32) {
+        let saved = self.entries
+        func append_saved(item: i32) {
+            push(saved, item)
+        }
+        append_saved(value)
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors =
+        check_source(source).expect_err("a nested helper cannot mutate an aliased Actor field");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0448)),
+        "expected E0448 for a nested in-place write through an Actor-field alias: {errors:?}"
+    );
+}
+
+#[test]
+fn actor_method_cannot_write_field_inside_deferred_closure() {
+    let source = r#"
+actor Counter {
+    count: i32 = 0
+    func increment() {
+        let deferred = fn() {
+            self.count = self.count + 1
+        }
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(source).expect_err("Actor-field writes in closures are persistent");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0448)),
+        "expected E0448 for a closure write to an Actor field, got: {errors:?}"
+    );
+}
+
+#[test]
+fn actor_flow_root_rejects_non_i32_implicit_payload_initialization() {
+    let source = r#"
+flow Account {
+    state Ready { balance: i32, owner: string }
+    transition initialize(Ready, owner: string) -> Ready {
+        return Ready { balance: self.balance, owner: owner }
+    }
+}
+
+actor Wallet runs Account {}
+func main() -> i32 { 0 }
+"#;
+    let expected_line = source
+        .lines()
+        .position(|line| line.contains("owner: string"))
+        .expect("root payload owner field")
+        + 1;
+    let errors = check_source(source)
+        .expect_err("the implicit root state cannot initialize a string payload");
+    let diagnostic = errors
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0450))
+        .expect("non-i32 implicit root payload must report E0450");
+    assert_eq!(diagnostic.span.start_line, expected_line);
+    assert!(diagnostic.message.contains("Account"));
+    assert!(diagnostic.message.contains("Ready"));
+    assert!(diagnostic.message.contains("owner"));
+}
+
+#[test]
+fn actor_flow_root_accepts_i32_defaults_and_empty_root_with_explicit_initialization() {
+    let multi_i32_root = r#"
+flow CounterFlow {
+    state Ready { left: i32, right: i32 }
+}
+actor Counter runs CounterFlow {}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(multi_i32_root).is_ok(),
+        "each i32 payload field in the implicit root state starts at zero"
+    );
+
+    let explicit_initialization = r#"
+flow Account {
+    state Uninitialized {}
+    state Ready { balance: i32, owner: string }
+    transition initialize(Uninitialized, balance: i32, owner: string) -> Ready {
+        return Ready { balance: balance, owner: owner }
+    }
+}
+actor Wallet runs Account {}
+func main() -> i32 { 0 }
+"#;
+    assert!(
+        check_source(explicit_initialization).is_ok(),
+        "a non-i32 payload may be initialized by a transition from an empty root"
+    );
+}
+
+#[test]
+fn untyped_session_pair_reports_e0242_while_typed_form_remains_accepted() {
+    let untyped = "func main() -> i32 { let pair = session_pair(); 0 }";
+    let errors =
+        check_source(untyped).expect_err("bare integer Session handles are not a Mimi API");
+    assert!(
+        errors.iter().any(|diagnostic| diagnostic.code.as_deref()
+            == Some(crate::diagnostic::codes::E0242)
+            && diagnostic.message.contains("session_pair::<P>()")),
+        "expected the typed-session migration diagnostic, got: {errors:?}"
+    );
+
+    let typed = crate::tests::parse(include_str!(
+        "../../tests/fixtures/mir_typed_session_pair_bind.mimi"
+    ));
+    assert!(
+        core::check(&typed).is_ok(),
+        "explicit protocol type arguments remain the supported Session API"
+    );
+}
+
+#[test]
+fn safe_source_rejects_reference_and_dereference_operators_at_the_operator_span() {
+    let source = "func main() -> i32 {\n    let value = 41\n    *(&value)\n}\n";
+    let errors = check_source(source).expect_err("raw operators need an explicit unsafe context");
+    let diagnostics: Vec<_> = errors
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449))
+        .collect();
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.span.start_line == 3 && diagnostic.span.start_col == 5
+        }),
+        "the outer `*` must be pinned to its operator span: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.span.start_line == 3 && diagnostic.span.start_col == 7
+        }),
+        "the nested `&` must also be diagnosed at its operator span: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn safe_reference_types_and_extern_declarations_report_e0449_at_the_type_operator() {
+    let source = "func read(value: &i32) -> i32 { *value }\nfunc main() -> i32 { 0 }\n";
+    let errors = check_source(source).expect_err("a safe callable cannot expose a reference type");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449)
+                && diagnostic.span.start_line == 1
+                && diagnostic.span.start_col == 18
+        }),
+        "the reference type diagnostic should start at `&`: {errors:?}"
+    );
+
+    let extern_declaration = r#"
+extern "C" {
+    func takes_raw(value: *i32) -> i32;
+}
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(extern_declaration)
+        .expect_err("an extern import declaration does not grant raw-pointer permission");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449)
+        }),
+        "extern declaration pointer types must report E0449: {errors:?}"
+    );
+
+    let explicit_wrapper = r#"
+extern "C" func read_raw(value: *i32) -> i32 { *value }
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(explicit_wrapper).err().unwrap_or_default();
+    assert!(
+        errors
+            .iter()
+            .all(|diagnostic| diagnostic.code.as_deref() != Some(crate::diagnostic::codes::E0449)),
+        "an explicit wrapper signature and body admit raw pointer use: {errors:?}"
+    );
+}
+
+#[test]
+fn unsafe_and_ffi_wrapper_contexts_allow_operators_but_do_not_leak_to_nested_callables() {
+    let explicit_unsafe = r#"
+func main() -> i32 {
+    let value = 41
+    let mut result = 0
+    unsafe {
+        result = *(&value)
+    }
+    result
+}
+"#;
+    let errors = check_source(explicit_unsafe).err().unwrap_or_default();
+    assert!(
+        errors
+            .iter()
+            .all(|diagnostic| diagnostic.code.as_deref() != Some(crate::diagnostic::codes::E0449)),
+        "the direct body of unsafe admits raw operators: {errors:?}"
+    );
+
+    let ffi_wrapper = r#"
+extern "C" func unwrap(value: i32) -> i32 {
+    *(&value)
+}
+func main() -> i32 { unwrap(41) }
+"#;
+    let ffi_errors = check_source(ffi_wrapper).err().unwrap_or_default();
+    assert!(
+        ffi_errors
+            .iter()
+            .all(|diagnostic| diagnostic.code.as_deref() != Some(crate::diagnostic::codes::E0449)),
+        "an explicit FFI wrapper body admits raw operators: {ffi_errors:?}"
+    );
+
+    let deferred_nested_func = r#"
+func main() -> i32 {
+    unsafe {
+        func later() -> i32 {
+            let value = 41
+            *(&value)
+        }
+    }
+    0
+}
+"#;
+    let nested_errors = check_source(deferred_nested_func)
+        .expect_err("nested named functions do not inherit lexical unsafe permission");
+    assert!(
+        nested_errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449)),
+        "nested named function should report E0449: {nested_errors:?}"
+    );
+
+    let deferred_closure = r#"
+func main() -> i32 {
+    unsafe {
+        let later = fn() -> i32 {
+            let value = 41
+            *(&value)
+        }
+    }
+    0
+}
+"#;
+    let closure_errors = check_source(deferred_closure)
+        .expect_err("closure bodies do not inherit lexical unsafe permission");
+    assert!(
+        closure_errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449)),
+        "deferred closure should report E0449: {closure_errors:?}"
+    );
+}
+
+#[test]
+fn stateless_actor_metadata_read_and_flow_transition_update_are_accepted() {
+    let source = r#"
+actor Greeter {
+    name: string = "world"
+    func greeting() -> string { "hello " + self.name }
+}
+
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
+    }
+}
+
+actor Counter runs CounterFlow {}
+
+func main() -> i32 { 0 }
+"#;
+    let result = check_source(source);
+    assert!(
+        result.is_ok(),
+        "read-only Actor metadata and Flow transition updates remain legal: {result:?}"
     );
 }

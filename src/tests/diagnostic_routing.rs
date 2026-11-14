@@ -193,7 +193,7 @@ fn verifier_dependency_failure_retains_dependency_source() {
             "pub func broken(x: i32) -> i32 {\n",
             "    requires: x > 0\n",
             "    ensures: result > 0\n",
-            "    0\n",
+            "    -1\n",
             "}\n"
         ),
     )
@@ -202,15 +202,22 @@ fn verifier_dependency_failure_retains_dependency_source() {
     let mut loader = crate::loader::ModuleLoader::new(root.clone());
     loader.load_main(&main_path).expect("load verifier graph");
     let file = loader.merge_all().expect("merge verifier graph");
+    let program = crate::core::check_program(&file).expect("typecheck verifier graph");
     let result = verifier
-        .verify_file(&file)
+        .verify_checked(&program)
         .into_iter()
         .find(|result| result.func_name == "broken")
         .expect("dependency verification result");
-    assert_eq!(result.status, crate::verifier::VerifStatus::Failed);
-    let diagnostic = result.diagnostic.expect("structured verifier diagnostic");
+    assert_eq!(result.status, crate::verifier::VerifStatus::Disproven);
+    let diagnostic = result
+        .diagnostic
+        .as_ref()
+        .expect("structured verifier diagnostic");
+    assert_eq!(diagnostic.severity, crate::diagnostic::Severity::Error);
+    assert_eq!(diagnostic.code, None);
     assert!(diagnostic.span.source_id.is_known());
-    assert!(diagnostic.span.start_line > 0 && diagnostic.span.start_col > 0);
+    assert_eq!(diagnostic.span.start_line, 3, "the failed Ensures contract");
+    assert!(diagnostic.span.start_col > 0);
     let record = file
         .sources
         .record(diagnostic.span.source_id)
@@ -219,6 +226,18 @@ fn verifier_dependency_failure_retains_dependency_source() {
         .disk_path
         .as_deref()
         .is_some_and(|path| path.ends_with("dep.mimi")));
+    let artifact = result.artifact.as_ref().expect("Resolved proof artifact");
+    assert_eq!(
+        artifact.engine,
+        crate::verifier::ProofArtifact::ENGINE_RESOLVED
+    );
+    assert_eq!(
+        artifact.proof_profile,
+        crate::verifier::ProofArtifact::PROFILE_VERIFIED_CORE_1
+    );
+    assert!(!artifact.resolved_ir_hash.is_empty());
+    assert!(artifact.mir_hash.is_empty());
+    assert!(artifact.mir_route_receipt.is_none());
 
     let _ = fs::remove_dir_all(root);
 }

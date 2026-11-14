@@ -4,11 +4,11 @@
 //! interpreter and LLVM codegen, asserting identical output.
 //!
 //! Strategy: generators produce **function body** snippets (a block of
-//! statements ending with a value expression). The test wraps the body
-//! differently for each backend:
-//! - Interpreter: `func main() -> T { BODY; RESULT }` → returns last-expr value
-//! - Codegen:     `func main() -> i32 { BODY; println(RESULT); 0 }`
-//!   Then compares interp Value Display with codegen stdout.
+//! statements ending with a value expression). Each backend runs the same
+//! legal program: a named helper returns the generated value and `main`
+//! observes it with `println` before returning `i32` zero. This keeps
+//! aggregate/non-scalar values out of the entry-point ABI while comparing
+//! the helper's actual output across Bytecode and native execution.
 //!
 //! Normal `cargo test` runs a small smoke sample because every case invokes
 //! LLVM object generation, the system linker, and a child executable.
@@ -16,7 +16,7 @@
 //! Extended fuzz run:
 //! `PROPTEST_CASES=1000 cargo test fuzz::target_differential -- --nocapture`
 
-use crate::tests::{compile_and_run, run_source};
+use crate::tests::{compile_and_run, run_source, run_source_with_stdout};
 use proptest::prelude::*;
 
 const DIFFERENTIAL_SMOKE_CASES: u32 = 8;
@@ -34,22 +34,25 @@ fn differential_config() -> ProptestConfig {
 // ─── General-purpose assertion helpers ───────────────────────────
 
 /// Assert a body+result expression across both backends.
-/// `ret_ty` is the interpreter wrapper's return type (used for
-/// `Value::Display` formatting, which must match codegen's `println` output).
+/// `ret_ty` belongs to a named helper; the generated entry point always
+/// returns `i32` and prints the helper result so both backends observe it.
 fn assert_body_ret(ret_ty: &str, body: &str, result: &str) {
-    let interp_src = format!("func main() -> {} {{\n{}\n{}\n}}", ret_ty, body, result);
-    let cg_src = format!(
-        "func main() -> i32 {{\n{}\nprintln({});\n0\n}}",
-        body, result
+    let src = format!(
+        "func generated_result() -> {} {{\n{}\n{}\n}}\n\
+         func main() -> i32 {{\n    println(generated_result());\n    0\n}}",
+        ret_ty, body, result
     );
-    let v = run_source(&interp_src);
-    let interp_str = format!("{}", v);
-    let cg_stdout = compile_and_run(&cg_src).expect("codegen should compile and run");
-    let cg_str = cg_stdout.trim();
+    let (interp_value, interp_stdout) = run_source_with_stdout(&src);
     assert_eq!(
-        interp_str, cg_str,
+        interp_value,
+        crate::interp::Value::Int(0),
+        "generated main must return its legal scalar result"
+    );
+    let native_stdout = compile_and_run(&src).expect("codegen should compile and run");
+    assert_eq!(
+        interp_stdout, native_stdout,
         "differential mismatch\nbody:\n{}\nresult: {}\ninterp: {}\ncodegen: {}",
-        body, result, interp_str, cg_str
+        body, result, interp_stdout, native_stdout
     );
 }
 

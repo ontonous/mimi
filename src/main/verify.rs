@@ -108,11 +108,72 @@ pub(crate) fn verify(
         })?;
     }
 
+    // Dynamic Protocol dispatch has no supported default, explicit MIR, or
+    // diagnostic-only verifier path after its removal from the language
+    // surface. Check this boundary before `--dump-z3` or the compatibility
+    // verifier can bypass the normal default-route selector.
+    if let Some(reason) =
+        crate::canonical_dispatch::dynamic_protocol_method_boundary_diagnostic(&checked_program)
+    {
+        return Err(format!("default Canonical MIR route rejected: {reason}"));
+    }
+
     // P1-24: compute source hash for ProofArtifact tamper detection.
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
     let source_hash_for_provenance = source_hash.clone();
 
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(
+        &checked_program,
+    ) {
+        if dump_z3 {
+            return Err(
+                "--dump-z3 is not available for the direct tuple Get semantic-projection disposition".into(),
+            );
+        }
+        match crate::canonical_dispatch::select_default_verification_route(
+            &checked_program,
+            &merged_file,
+        ) {
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {}
+            crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+                return Err(format!("direct tuple Get L2 route rejected: {reason}"));
+            }
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
+                return Err(format!(
+                    "direct tuple Get L2 verifier route refused Legacy fallback: {reason:?}"
+                ));
+            }
+            crate::canonical_dispatch::DefaultMirRoute::Canonical(_) => {
+                return Err(
+                    "direct tuple Get L2 source receipt unexpectedly selected executable MIR"
+                        .into(),
+                );
+            }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                return Err(
+                    "direct tuple Get L2 source receipt selected an unrelated verifier-only route"
+                        .into(),
+                );
+            }
+        }
+        let disposition =
+            mimi::verifier::verify_checked_program_ordinary_map_direct_tuple_get_unpack_l2(
+                &checked_program,
+            )?;
+        println!(
+            "L2SemanticProjectionValidated: semantic projection validated; no runtime ownership theorem claimed (profile={}, mir_digest={}, route_identity_digest={})",
+            disposition.profile,
+            disposition.mir_digest,
+            disposition.route_identity_digest,
+        );
+        return Ok(());
+    }
+
     let mut default_legacy_reason = None;
+    let direct_print_result_candidate =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            .is_direct_print_result();
     let canonical = if mir {
         if dump_z3 {
             return Err("--dump-z3 is not available with --mir".into());
@@ -122,10 +183,48 @@ pub(crate) fn verify(
         {
             return Err(format!("canonical MIR verifier input rejected: {reason}"));
         }
-        Some(
-            crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)
-                .map_err(|error| format!("canonical MIR verifier input rejected: {error}"))?,
-        )
+        if mimi::core::mir::has_ordinary_map_set_result_route_candidate(&checked_program)
+            || mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate(
+                &checked_program,
+            )
+            || mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate(&checked_program)
+            || mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate(&checked_program)
+            || mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(&checked_program)
+            || direct_print_result_candidate
+        {
+            match crate::canonical_dispatch::select_default_verification_route(
+                &checked_program,
+                &merged_file,
+            ) {
+                crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
+                    Some(*canonical)
+                }
+                crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
+                    return Err(format!(
+                        "explicit canonical MIR verifier route refused Legacy fallback: {reason:?}"
+                    ));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+                    return Err(format!("canonical MIR verifier input rejected: {reason}"));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                    return Err(
+                        "explicit --mir does not select the verifier-only FFI owner-slice route"
+                            .into(),
+                    );
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    return Err(
+                        "direct tuple Get L2 must use its dedicated semantic-projection verifier API".into(),
+                    );
+                }
+            }
+        } else {
+            Some(
+                crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)
+                    .map_err(|error| format!("canonical MIR verifier input rejected: {error}"))?,
+            )
+        }
     } else if dump_z3 {
         None
     } else {
@@ -139,6 +238,18 @@ pub(crate) fn verify(
                 default_legacy_reason = Some(reason);
                 None
             }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                // The dual verifier reuses the same structural preflight and
+                // validates the exact Checker-bound owner-slice receipt. No
+                // executable MIR route or legacy fallback is selected here.
+                None
+            }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                return Err(
+                    "direct tuple Get L2 must use its dedicated semantic-projection verifier API"
+                        .into(),
+                );
+            }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                 return Err(format!("default Canonical MIR route rejected: {reason}"));
             }
@@ -149,19 +260,151 @@ pub(crate) fn verify(
     // provenance line below.  The verifier consumes the same receipt object;
     // this is only a read-only view after verification, never a second route
     // construction.
-    // A selected MIR route still goes through the checked library boundary
-    // when Z3 is unavailable. That boundary reports owner-scoped
-    // InfrastructureError/NITS rows without constructing a solver; direct
-    // MIR consumption here would otherwise turn the same request into a
-    // top-level SolverSession initialization error.
-    let canonical_mir_available = canonical
-        .as_ref()
-        .is_some_and(|_| mimi::verifier::is_z3_available());
-    let canonical_mir_selected = canonical.is_some();
+    // Routes that need symbolic proof work still go through the checked
+    // library boundary when Z3 is unavailable. That boundary reports
+    // owner-scoped InfrastructureError/NITS rows without constructing a
+    // solver; the SetResult L2 route below is neutral and needs no solver.
     let canonical_receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
         &checked_program,
         "verify-canonical-v1",
     );
+    // SetResult and the existing typed Set/Get profiles have verifier-owned
+    // non-symbolic projections. The two Set/GetAny-i32 profiles require
+    // checked hit/miss and failure-branch proof results, so they remain behind
+    // the Z3 availability condition below.
+    let canonical_mir_available = canonical.as_ref().is_some_and(|_| {
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE
+            || canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE
+            || canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE
+            || canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+            || canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE
+            || mimi::verifier::is_z3_available()
+    });
+    let canonical_mir_selected = canonical.is_some();
+    let set_result_candidate =
+        mimi::core::mir::has_ordinary_map_set_result_route_candidate(&checked_program);
+    let set_result_l2_receipt_profile =
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE;
+    if set_result_candidate != set_result_l2_receipt_profile {
+        return Err(format!(
+            "canonical Map SetResult verifier route rejected: Checker admission/profile mismatch (admitted={set_result_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if set_result_l2_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map SetResult verifier route rejected: Checker admission has no canonical L2 MIR graph to validate".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_set_result_l2_verifier_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical Map SetResult verifier route rejected: {reason}"))?;
+    }
+    let set_get_i32_candidate =
+        mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate(&checked_program);
+    let set_get_i32_l2_profile =
+        canonical_receipt_profile == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE;
+    if set_get_i32_candidate != set_get_i32_l2_profile {
+        return Err(format!(
+            "canonical Map Set/Get-i32 verifier route rejected: Checker admission/profile mismatch (admitted={set_get_i32_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if set_get_i32_candidate {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map Set/Get-i32 verifier route rejected: Checker admission has no canonical L2 MIR graph to assess".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_set_get_i32_l2_verifier_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| format!("canonical Map Set/Get-i32 verifier route rejected: {reason}"))?;
+    }
+    let set_get_any_result_i32_candidate =
+        mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate(&checked_program);
+    let set_get_any_result_i32_l2_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE;
+    if set_get_any_result_i32_candidate != set_get_any_result_i32_l2_profile {
+        return Err(format!(
+            "canonical Map Set/GetAny-Result-i32 verifier route rejected: Checker admission/profile mismatch (admitted={set_get_any_result_i32_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if set_get_any_result_i32_candidate {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map Set/GetAny-Result-i32 verifier route rejected: Checker admission has no canonical L2 MIR graph to assess".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical Map Set/GetAny-Result-i32 verifier route rejected: {reason}")
+        })?;
+    }
+    let set_get_any_i32_candidate =
+        mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate(&checked_program);
+    let set_get_any_i32_l2_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE;
+    if set_get_any_i32_candidate != set_get_any_i32_l2_profile {
+        return Err(format!(
+            "canonical Map Set/GetAny-i32 verifier route rejected: Checker admission/profile mismatch (admitted={set_get_any_i32_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if set_get_any_i32_candidate {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map Set/GetAny-i32 verifier route rejected: Checker admission has no canonical L2 MIR graph to assess".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_set_get_any_i32_l2_verifier_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical Map Set/GetAny-i32 verifier route rejected: {reason}")
+        })?;
+    }
+    let set_get_string_candidate =
+        mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(&checked_program);
+    let set_get_string_l2_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE;
+    if set_get_string_candidate != set_get_string_l2_profile {
+        return Err(format!(
+            "canonical Map Set/Get-String verifier route rejected: Checker admission/profile mismatch (admitted={set_get_string_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if set_get_string_candidate {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map Set/Get-String verifier route rejected: Checker admission has no canonical L2 MIR graph to assess".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_set_get_string_l2_verifier_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical Map Set/Get-String verifier route rejected: {reason}")
+        })?;
+    }
+    let direct_print_result_l2_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE;
+    if direct_print_result_candidate != direct_print_result_l2_profile {
+        return Err(format!(
+            "canonical Map DirectPrintResult verifier route rejected: Checker admission/profile mismatch (admitted={direct_print_result_candidate}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if direct_print_result_candidate {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical Map DirectPrintResult verifier route rejected: Checker admission has no canonical MIR graph to assess".to_string()
+        })?;
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_direct_print_result_route(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical Map DirectPrintResult verifier route rejected: {reason}")
+        })?;
+    }
     let get_or_default_string_admitted =
         mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
             .ordinary_map_owned_any_v2_get_or_default_string();
@@ -431,6 +674,31 @@ pub(crate) fn verify(
         )
         .map_err(|reason| format!("canonical RecordUnit verifier route rejected: {reason}"))?;
     }
+    let map_set_drop_control_result_branch_admitted =
+        mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
+            .ordinary_map_owned_any_v2
+            == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult;
+    let map_set_drop_control_result_branch_receipt_profile = canonical_receipt_profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
+    if map_set_drop_control_result_branch_admitted
+        != map_set_drop_control_result_branch_receipt_profile
+    {
+        return Err(format!(
+            "canonical MapSetDropControlResult verifier route rejected: Checker admission/profile mismatch (admitted={map_set_drop_control_result_branch_admitted}, profile={canonical_receipt_profile})"
+        ));
+    }
+    if map_set_drop_control_result_branch_receipt_profile {
+        let program = canonical.as_ref().ok_or_else(|| {
+            "canonical MapSetDropControlResult verifier route rejected: Checker admission has no canonical MIR receipt to validate".to_string()
+        })?;
+        crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(
+            &checked_program,
+            program,
+        )
+        .map_err(|reason| {
+            format!("canonical MapSetDropControlResult verifier route rejected: {reason}")
+        })?;
+    }
     let map_set_drop_control_admitted =
         mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
             .ordinary_map_owned_any_v2
@@ -630,6 +898,27 @@ pub(crate) fn verify(
         if canonical_mir_available {
             let receipt = canonical.route_receipt(canonical_receipt_profile);
             if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
+            {
+                // The Result-branch Values route carries its own
+                // CheckedProgram-bound verifier contract; the generic MIR
+                // entry intentionally refuses its nested Map Result signal.
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
                 == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE
             {
                 mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_checked_get_route(
@@ -811,9 +1100,63 @@ pub(crate) fn verify(
                     source_hash,
                 )?
             } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
                 == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_BRANCH_LOCAL_SET_DIAMOND_PROFILE
             {
                 mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_set_get_any_i32_l2_verifier_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_set_get_any_result_i32_l2_verifier_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_set_get_i32_l2_verifier_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_set_get_string_l2_verifier_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_direct_print_result_route(
                     &checked_program,
                     &canonical,
                     &receipt,
@@ -932,12 +1275,12 @@ pub(crate) fn verify(
                 .and_then(|subject| {
                     checked_program
                         .node_meta()
-                        .get(&mimi::core::NodeId(subject.clone()))
+                        .get(&mimi::core::resolved::NodeId(subject.clone()))
                 })
                 .or_else(|| {
                     checked_program
                         .node_meta()
-                        .get(&mimi::core::NodeId(result.func_name.clone()))
+                        .get(&mimi::core::resolved::NodeId(result.func_name.clone()))
                 })
             {
                 diagnostic.span = meta.origin.user_span();
@@ -999,8 +1342,8 @@ pub(crate) fn verify(
         // Show per-function stats table if --stats is set
         if show_stats {
             println!(
-                "{:30} {:>10} {:>12} {:>8}  {}",
-                "Function", "Status", "Constraints", "Time", "Proof profile / scope"
+                "{:30} {:>10} {:>12} {:>8}  Proof profile / scope",
+                "Function", "Status", "Constraints", "Time"
             );
             println!("{}", "-".repeat(110));
         }

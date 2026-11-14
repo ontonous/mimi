@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn interp_if_else() {
@@ -93,11 +94,13 @@ func area(s: Shape) -> f64 {
     }
 }
 
-func main() -> f64 {
+func match_enum_result() -> f64 {
     area(Circle(2.0)) + area(Rectangle(3.0, 4.0))
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "match_enum_result", vec![])
+        .expect("match enum result helper should run");
     assert!(matches!(v, interp::Value::Float(_)));
 }
 
@@ -588,14 +591,16 @@ func main() -> bool {
 #[test]
 fn array_display() {
     let src = r#"
-func main() -> string {
+func array_display_result() -> string {
     let arr: [i32; 3] = [1, 2, 3];
     return to_string(arr);
 }
+func main() -> i32 { 0 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("[1, 2, 3]".to_string()))
+        bytecode_call_named(src, "array_display_result", vec![])
+            .expect("array display helper should run"),
+        interp::Value::String(SharedString::new("[1, 2, 3]".to_string()))
     );
 }
 
@@ -674,13 +679,15 @@ func main() -> i32 {
 #[test]
 fn slice_full_unicode_string() {
     let src = r#"
-func main() -> string {
+func unicode_slice_result() -> string {
     "你好"[..]
 }
+func main() -> i32 { 0 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("你好".into()))
+        bytecode_call_named(src, "unicode_slice_result", vec![])
+            .expect("unicode slice helper should run"),
+        interp::Value::String(SharedString::new("你好".into()))
     );
 }
 
@@ -751,29 +758,33 @@ func main() -> bool {
 #[test]
 fn slice_display() {
     let src = r#"
-func main() -> string {
+func slice_display_result() -> string {
     let arr = [10, 20, 30];
     let s = arr[1..3];
     return to_string(s);
 }
+func main() -> i32 { 0 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("[20, 30]".to_string()))
+        bytecode_call_named(src, "slice_display_result", vec![])
+            .expect("slice display helper should run"),
+        interp::Value::String(SharedString::new("[20, 30]".to_string()))
     );
 }
 
 #[test]
 fn slice_of_string() {
     let src = r#"
-func main() -> string {
+func slice_string_result() -> string {
     let s = "hello world";
     return s[0..5];
 }
+func main() -> i32 { 0 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello".to_string()))
+        bytecode_call_named(src, "slice_string_result", vec![])
+            .expect("string slice helper should run"),
+        interp::Value::String(SharedString::new("hello".to_string()))
     );
 }
 
@@ -1098,9 +1109,10 @@ fn typecheck_if_mixed_literals_with_expected() {
 func test() -> f64 {
     if true { 1.5 } else { 2.5 }
 }
-func main() -> f64 { test() }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v =
+        bytecode_call_named(src, "test", vec![]).expect("mixed-literal result helper should run");
     assert_eq!(v, interp::Value::Float(1.5));
 }
 
@@ -1146,31 +1158,30 @@ func main() -> i32 {
 
 #[test]
 fn actor_method_requires_checked() {
-    // I-H3: actor methods honor requires when verify_contracts is on.
+    // I-H3: Flow-backed Actor transitions honor requires when contracts are on.
     let src = r#"
-actor Box {
-    x: i32 = 0
-    func set(n: i32) {
+flow BoxFlow {
+    state Active { x: i32 }
+    transition set(Active, n: i32) -> Active {
         requires: n >= 0
-        self.x = n
+        return Active { x: n }
     }
-    func get() -> i32 { self.x }
+    transition get(Active) -> Active { return Active { x: self.x } }
 }
+actor Box runs BoxFlow {}
 func main() -> i32 {
     let b = Box.spawn()
+    let initial = b.get()
+    if initial.x != 0 { return 1 }
     b.set(-1)
     0
 }
 "#;
     let r = std::panic::catch_unwind(|| run_source(src));
-    // Either Err from run_source or panic on contract — both OK if violation surfaces.
-    // run_source panics on Err typically.
-    assert!(r.is_err() || matches!(r, Ok(_)));
-    // NOTE: In the bytecode VM, actor method calls are asynchronous (mailbox dispatch).
-    // The requires violation occurs in the actor worker thread, not in main's execution,
-    // so main returns Ok(0). This is a known semantic difference from the tree-walker
-    // (which dispatched actor methods synchronously). Contract checking for actor methods
-    // is deferred to a future sprint.
+    assert!(
+        r.is_err(),
+        "Flow transition requires violation should surface"
+    );
 }
 
 #[test]

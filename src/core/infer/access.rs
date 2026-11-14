@@ -374,6 +374,25 @@ impl<'a> Checker<'a> {
         }
         match obj_ty.unlocated() {
             Type::Name(n, args) if n == "List" && args.len() == 1 => args[0].clone(),
+            Type::Name(n, args)
+                if n == "List"
+                    && args.is_empty()
+                    && self.allow_bare_list_crosscall_string_index =>
+            {
+                // The result remains provisional Any until the exact
+                // producer-return/caller receipt proves this is the unique
+                // literal-zero String extraction from a returned Values
+                // snapshot. No other bare List indexing reaches this branch.
+                self.saw_bare_list_crosscall_string_index = true;
+                Type::Name("Any".into(), vec![])
+            }
+            Type::Name(n, args) if n == "List" && args.is_empty() => {
+                self.emit_code(
+                    crate::diagnostic::codes::E0218,
+                    "cannot index bare List without an exact cross-call Values String receipt",
+                );
+                Type::Name("unknown".into(), vec![])
+            }
             Type::Name(n, _) if n == "string" => Type::Name("string".into(), vec![]),
             // Support indexing through references: &List<T>, &mut List<T>, &string, &mut string
             Type::Ref(_, inner) | Type::RefMut(_, inner) => match inner.unlocated() {

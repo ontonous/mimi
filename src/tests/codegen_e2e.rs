@@ -3,6 +3,17 @@
 // ============================================================
 
 use super::*;
+use crate::interp::SharedString;
+
+fn run_non_scalar_helper(src: &str, helper: &str) -> Result<interp::Value, String> {
+    let main_value = run_source_result(src)?;
+    if main_value != interp::Value::Int(0) {
+        return Err(format!(
+            "valid main must invoke {helper} before returning its process status; got {main_value:?}"
+        ));
+    }
+    bytecode_call_named(src, helper, Vec::new())
+}
 
 #[test]
 fn e2e_projected_field_reference_writes_back_to_original_storage() {
@@ -106,8 +117,10 @@ fn e2e_add() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    let stdout = compile_and_run(r#"func main() -> i32 { println(2 + 3); 0 }"#)
-        .expect("src/tests/codegen_e2e.rs:16 unwrap failed");
+    let stdout = checked_codegen_compile_and_run_without_legacy(
+        r#"func main() -> i32 { println(2 + 3); 0 }"#,
+    )
+    .expect("src/tests/codegen_e2e.rs:16 unwrap failed");
     assert_eq!(stdout.trim(), "5");
 }
 
@@ -301,9 +314,9 @@ fn e2e_recursive_function() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    let stdout = compile_and_run(
+    let stdout = checked_codegen_compile_and_run_without_legacy(
         r#"
-        func factorial(n: i32) -> i32 {
+        extern "C" func factorial(n: i32) -> i32 {
             if n <= 1 { 1 } else { n * factorial(n - 1) }
         }
         func main() -> i32 {
@@ -313,7 +326,7 @@ fn e2e_recursive_function() {
         }
     "#,
     )
-    .expect("src/tests/codegen_e2e.rs:145 unwrap failed");
+    .expect("recursive C-export must compile through checked Codegen");
     assert_eq!(stdout.trim(), "120\n3628800");
 }
 
@@ -545,7 +558,9 @@ fn e2e_f64_println() {
         eprintln!("SKIP: cc not available");
         return;
     }
-    let stdout = compile_and_run(
+    // Scalar f64 println is in the canonical production profile; keep this
+    // end-to-end regression on the checked native route.
+    let stdout = checked_codegen_compile_and_run(
         r#"
         func main() -> i32 {
             let pi: f64 = 3.14159
@@ -670,6 +685,218 @@ fn e2e_extern_strlen() {
     )
     .expect("src/tests/codegen_e2e.rs:379 unwrap failed");
     assert_eq!(stdout.trim(), "11");
+}
+
+#[test]
+fn e2e_extern_string_argument_isolated_from_c_mutation() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_mutate_string(value: string) -> i32
+        }
+        func main() -> i32 {
+            let original = "mutable"
+            let alias = original
+            println(__mimi_extern_test_mutate_string(original))
+            println(original)
+            println(alias)
+            0
+        }
+    "#,
+    )
+    .expect("C must receive an isolated writable copy of a Mimi String");
+    assert_eq!(stdout.trim(), "1\nmutable\nmutable");
+}
+
+#[test]
+fn e2e_extern_string_argument_rejects_embedded_nul() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let error = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_strlen(value: string) -> i32
+        }
+        func main() -> i32 {
+            println(__mimi_extern_test_strlen("prefix\0suffix"))
+            0
+        }
+    "#,
+    )
+    .expect_err("a Mimi String with embedded NUL cannot be represented by the C string ABI");
+    assert!(
+        error.contains("Mimi String passed to C contains embedded NUL"),
+        "C string conversion must reject lossy embedded-NUL input: {error}"
+    );
+}
+
+#[test]
+fn checked_codegen_string_equality_and_order_compare_embedded_nul_suffixes() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+        func main() -> i32 {
+            let left = "prefix\0left"
+            let right = "prefix\0right"
+            println(left == right)
+            println(left != right)
+            println(left == "prefix\0left")
+            println(left < right)
+            0
+        }
+    "#,
+    )
+    .expect("String comparisons must include bytes after embedded NUL");
+    assert_eq!(stdout.trim(), "false\ntrue\ntrue\ntrue");
+}
+
+#[test]
+fn checked_codegen_extern_string_return_copies_valid_utf8_and_counts_unicode_scalars() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_unicode_string() -> string
+        }
+        func main() -> i32 {
+            let value = __mimi_extern_test_unicode_string()
+            println(value)
+            println(len(value))
+            0
+        }
+    "#,
+    )
+    .expect("legacy codegen should copy and admit valid UTF-8 C strings");
+    // `len(string)` counts Unicode scalar values; the return ABI's explicit
+    // byte length is tested at the runtime boundary separately.
+    assert_eq!(stdout.trim(), "雪\n1");
+}
+
+#[test]
+fn checked_codegen_extern_string_ensures_measure_the_mimi_result() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = compile_and_verify_contracts(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_unicode_string() -> string
+                ensures: len(result) == 1;
+        }
+        func main() -> i32 {
+            println(__mimi_extern_test_unicode_string())
+            0
+        }
+    "#,
+    )
+    .expect("String ensures must observe the validated Mimi result representation");
+    assert_eq!(stdout.trim(), "雪");
+}
+
+#[test]
+fn checked_codegen_extern_string_return_copies_mutable_c_storage() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_mutable_string() -> string
+            func __mimi_extern_test_mutate_return_string()
+        }
+        func main() -> i32 {
+            let value = __mimi_extern_test_mutable_string()
+            __mimi_extern_test_mutate_return_string()
+            println(value)
+            println(len(value))
+            0
+        }
+    "#,
+    )
+    .expect("a borrowed mutable C return must be copied into stable Mimi storage");
+    assert_eq!(stdout.trim(), "original\n8");
+}
+
+#[test]
+fn checked_codegen_extern_string_return_copies_before_freeing_argument_buffer() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let stdout = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_echo_string(value: string) -> string
+        }
+        func main() -> i32 {
+            let value = __mimi_extern_test_echo_string("roundtrip")
+            println(value)
+            println(len(value))
+            0
+        }
+    "#,
+    )
+    .expect("the wrapper must copy a returned pointer before freeing its C argument copy");
+    assert_eq!(stdout.trim(), "roundtrip\n9");
+}
+
+#[test]
+fn checked_codegen_extern_string_return_rejects_invalid_utf8() {
+    if !can_link() {
+        eprintln!("SKIP: cc not available");
+        return;
+    }
+    let error = checked_codegen_compile_and_run(
+        r#"
+        extern "C" {
+            func __mimi_extern_test_invalid_utf8_string() -> string
+        }
+        func main() -> i32 {
+            let value = __mimi_extern_test_invalid_utf8_string()
+            println(len(value))
+            0
+        }
+    "#,
+    )
+    .expect_err("invalid UTF-8 from a C char* must fail closed at ingress");
+    assert!(
+        error.contains("Mimi String ingress rejected invalid UTF-8"),
+        "invalid C UTF-8 must trap in the ingress validation helper: {error}"
+    );
+}
+
+#[test]
+fn checked_codegen_extern_string_return_stays_outside_closed_canonical_profile() {
+    let error = checked_codegen_compile_and_observe(
+        r#"
+        extern "C" {
+            func foreign_text() -> string
+        }
+        func main() -> i32 {
+            println(len(foreign_text()))
+            0
+        }
+    "#,
+    )
+    .expect_err("checked production codegen must keep its FFI route gate closed");
+    assert!(
+        error.contains("MIR-FFI-DECLARATION-001"),
+        "checked routing must reject unsupported String FFI at the declaration gate: {error}"
+    );
 }
 
 #[test]
@@ -2085,7 +2312,7 @@ fn e2e_valgrind_a2_value_glue_product_returns_legacy_caller() {
         eprintln!("SKIP: valgrind not available");
         return;
     }
-    let stdout = legacy_codegen_compile_and_run_with_value_glue_valgrind(
+    let stdout = checked_codegen_compile_and_run_with_value_glue_valgrind(
         r#"
         type Pair { left: string, right: string, number: i32 }
         type Outer { pair: Pair, tail: string }
@@ -2194,7 +2421,7 @@ fn e2e_valgrind_a2_value_glue_variant_returns() {
         checked_codegen_compile_and_run_with_value_glue_config(source, &actor_valgrind_config)
             .expect("resolved A2 variant glue must be Valgrind-clean");
     let legacy =
-        legacy_codegen_compile_and_run_with_value_glue_config(source, &actor_valgrind_config)
+        checked_codegen_compile_and_run_with_value_glue_config(source, &actor_valgrind_config)
             .expect("legacy A2 variant glue must be Valgrind-clean");
     assert_eq!(resolved.lines().count(), 48);
     assert_eq!(legacy, resolved);
@@ -4627,7 +4854,7 @@ fn e2e_datetime_millis_to_seconds() {
 
 #[test]
 fn e2e_datetime_format_duration_secs() {
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
         func format_duration_secs(total_secs: i64) -> string {
             let ds_days = total_secs / 86400
@@ -4638,12 +4865,18 @@ fn e2e_datetime_format_duration_secs() {
             let ds_seconds = ds_rem2 % 60
             to_string(ds_days) + "d " + to_string(ds_hours) + "h " + to_string(ds_minutes) + "m " + to_string(ds_seconds) + "s"
         }
-        func main() -> string { format_duration_secs(90061) }
+        func datetime_duration_secs_value() -> string { format_duration_secs(90061) }
+        func main() -> i32 {
+            datetime_duration_secs_value()
+            0
+        }
     "#,
-    );
+        "datetime_duration_secs_value",
+    )
+    .expect("datetime duration helper should run");
     assert_eq!(
         val,
-        interp::Value::String(crate::interp::SharedString::new("1d 1h 1m 1s".to_string()))
+        interp::Value::String(SharedString::new("1d 1h 1m 1s".to_string()))
     );
 }
 
@@ -4667,15 +4900,24 @@ fn e2e_datetime_constants() {
 #[test]
 fn e2e_env_get_var() {
     std::env::set_var("MIMI_TEST_ENV_VAR", "hello");
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
-        func main() -> string {
+        func environment_value() -> string {
             let result = getenv("MIMI_TEST_ENV_VAR")
             result.unwrap()
         }
+        func main() -> i32 {
+            environment_value()
+            0
+        }
     "#,
+        "environment_value",
+    )
+    .expect("environment helper should run");
+    assert_eq!(
+        val,
+        interp::Value::String(SharedString::new("hello".to_string()))
     );
-    assert_eq!(val, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
     std::env::remove_var("MIMI_TEST_ENV_VAR");
 }
 
@@ -4711,16 +4953,27 @@ fn e2e_env_missing_var() {
 #[test]
 fn e2e_env_get_var_or() {
     std::env::remove_var("MIMI_TEST_OR_VAR");
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
         func get_var_or(name: string, default: string) -> string {
             let result = getenv(name)
             if result.is_ok() { result.unwrap() } else { default }
         }
-        func main() -> string { get_var_or("MIMI_TEST_OR_VAR", "fallback") }
+        func environment_fallback_value() -> string {
+            get_var_or("MIMI_TEST_OR_VAR", "fallback")
+        }
+        func main() -> i32 {
+            environment_fallback_value()
+            0
+        }
     "#,
+        "environment_fallback_value",
+    )
+    .expect("environment fallback helper should run");
+    assert_eq!(
+        val,
+        interp::Value::String(SharedString::new("fallback".to_string()))
     );
-    assert_eq!(val, interp::Value::String(crate::interp::SharedString::new("fallback".to_string())));
 }
 
 // ===================== Stdlib: text (interpreter) =====================
@@ -4766,19 +5019,25 @@ fn e2e_text_is_numeric() {
 
 #[test]
 fn e2e_text_slugify() {
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
         func slugify(s: string) -> string {
             let lower = str_to_lower(s)
             let parts = str_split(lower, " ")
             str_join(parts, "-")
         }
-        func main() -> string { slugify("Hello World Test") }
+        func slugify_value() -> string { slugify("Hello World Test") }
+        func main() -> i32 {
+            slugify_value()
+            0
+        }
     "#,
-    );
+        "slugify_value",
+    )
+    .expect("slugify helper should run");
     assert_eq!(
         val,
-        interp::Value::String(crate::interp::SharedString::new("hello-world-test".to_string()))
+        interp::Value::String(SharedString::new("hello-world-test".to_string()))
     );
 }
 
@@ -4795,7 +5054,7 @@ fn e2e_text_count_lines() {
 
 #[test]
 fn e2e_text_indent() {
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
         func indent_text(s: string, n: i32) -> string {
             let lines = str_split(s, "\n")
@@ -4805,10 +5064,19 @@ fn e2e_text_indent() {
             }
             str_join(res, "\n")
         }
-        func main() -> string { indent_text("a\nb", 2) }
+        func indent_text_value() -> string { indent_text("a\nb", 2) }
+        func main() -> i32 {
+            indent_text_value()
+            0
+        }
     "#,
+        "indent_text_value",
+    )
+    .expect("indent text helper should run");
+    assert_eq!(
+        val,
+        interp::Value::String(SharedString::new("  a\n  b".to_string()))
     );
-    assert_eq!(val, interp::Value::String(crate::interp::SharedString::new("  a\n  b".to_string())));
 }
 
 // ===================== Stdlib: result (interpreter) =====================
@@ -4862,7 +5130,7 @@ fn e2e_result_unwrap_or_function() {
 
 #[test]
 fn e2e_datetime_format_duration_ms() {
-    let val = run_source(
+    let val = run_non_scalar_helper(
         r#"
         func format_duration_secs(total_secs: i64) -> string {
             let ds_days = total_secs / 86400
@@ -4878,12 +5146,18 @@ fn e2e_datetime_format_duration_ms() {
             let rem_ms = ms % 1000
             format_duration_secs(total_secs) + "." + to_string(rem_ms) + "ms"
         }
-        func main() -> string { format_duration_ms(90061123) }
+        func datetime_duration_ms_value() -> string { format_duration_ms(90061123) }
+        func main() -> i32 {
+            datetime_duration_ms_value()
+            0
+        }
     "#,
-    );
+        "datetime_duration_ms_value",
+    )
+    .expect("datetime duration milliseconds helper should run");
     assert_eq!(
         val,
-        interp::Value::String(crate::interp::SharedString::new("1d 1h 1m 1s.123ms".to_string()))
+        interp::Value::String(SharedString::new("1d 1h 1m 1s.123ms".to_string()))
     );
 }
 
@@ -5037,7 +5311,10 @@ func main() -> i32 {
     0
 }
 "#;
-    assert_eq!(compile_and_run(src).unwrap().trim(), "42\n42");
+    assert_eq!(
+        checked_codegen_compile_and_run(src).unwrap().trim(),
+        "42\n42"
+    );
 }
 
 #[test]

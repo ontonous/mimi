@@ -15,11 +15,13 @@ use super::*;
 #[test]
 fn borrow_imm_simple() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
+extern "C" func read(x: &i32) -> i32 { *x }
 func main() -> i32 {
     let a = 42;
-    let r = &a;
-    read(r);
+    unsafe {
+        let r = &a;
+        read(r);
+    }
     a
 }
 "#;
@@ -32,11 +34,13 @@ func main() -> i32 {
 #[test]
 fn borrow_mut_simple() {
     let src = r#"
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 41;
-    let r = &mut a;
-    write(r);
+    unsafe {
+        let r = &mut a;
+        write(r);
+    }
     a
 }
 "#;
@@ -49,14 +53,17 @@ func main() -> i32 {
 #[test]
 fn borrow_imm_mut_sequential() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func read(x: &i32) -> i32 { *x }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 41;
-    let r1 = &a;
-    let v = read(r1);
-    let r2 = &mut a;
-    write(r2);
+    let mut v = 0;
+    unsafe {
+        let r1 = &a;
+        v = read(r1);
+        let r2 = &mut a;
+        write(r2);
+    }
     v + a
 }
 "#;
@@ -69,13 +76,15 @@ func main() -> i32 {
 #[test]
 fn borrow_reborrow_imm() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
+extern "C" func read(x: &i32) -> i32 { *x }
 func main() -> i32 {
     let a = 42;
-    let r1 = &a;
-    let r2 = &*r1;
-    read(r1);
-    read(r2);
+    unsafe {
+        let r1 = &a;
+        let r2 = &*r1;
+        read(r1);
+        read(r2);
+    }
     a
 }
 "#;
@@ -85,12 +94,14 @@ func main() -> i32 {
 #[test]
 fn borrow_mut_reborrow_imm() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
+extern "C" func read(x: &i32) -> i32 { *x }
 func main() -> i32 {
     let mut a = 42;
-    let r1 = &mut a;
-    let r2 = &*r1;
-    read(r2);
+    unsafe {
+        let r1 = &mut a;
+        let r2 = &*r1;
+        read(r2);
+    }
     a
 }
 "#;
@@ -104,12 +115,14 @@ func main() -> i32 {
 #[test]
 fn borrow_mut_reborrow_mut() {
     let src = r#"
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 42;
-    let r1 = &mut a;
-    let r2 = &mut *r1;
-    write(r2);
+    unsafe {
+        let r1 = &mut a;
+        let r2 = &mut *r1;
+        write(r2);
+    }
     a
 }
 "#;
@@ -127,8 +140,10 @@ type Inner { value: i32 }
 type Outer { inner: Inner }
 func main() -> i32 {
     let mut item = Outer { inner: Inner { value: 7 } }
-    let value = &mut item.inner.value
-    *value = 12
+    unsafe {
+        let value = &mut item.inner.value
+        *value = 12
+    }
     item.inner.value
 }
 "#;
@@ -140,8 +155,10 @@ fn borrow_projected_tuple_mutates_original_tuple_in_interpreter() {
     let src = r#"
 func main() -> i32 {
     let mut pair = (4, 8)
-    let value = &mut pair.1
-    *value = 11
+    unsafe {
+        let value = &mut pair.1
+        *value = 11
+    }
     pair.1
 }
 "#;
@@ -151,15 +168,18 @@ func main() -> i32 {
 #[test]
 fn borrow_nll_release_after_last_use() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func read(x: &i32) -> i32 { *x }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 42;
-    let r = &a;
-    let v = read(r);
-    // r is no longer used — borrow released (NLL)
-    let r2 = &mut a;
-    write(r2);
+    let mut v = 0;
+    unsafe {
+        let r = &a;
+        v = read(r);
+        // r is no longer used — borrow released (NLL)
+        let r2 = &mut a;
+        write(r2);
+    }
     v + a
 }
 "#;
@@ -172,14 +192,17 @@ func main() -> i32 {
 #[test]
 fn borrow_nll_mut_after_imm_last_use() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
+extern "C" func read(x: &i32) -> i32 { *x }
 func main() -> i32 {
     let mut a = 42;
-    let r = &a;
-    let v = read(r);
-    // r no longer used — safe to &mut
-    let r2 = &mut a;
-    *r2 = v + 1;
+    let mut v = 0;
+    unsafe {
+        let r = &a;
+        v = read(r);
+        // r no longer used — safe to &mut
+        let r2 = &mut a;
+        *r2 = v + 1;
+    }
     a
 }
 "#;
@@ -192,12 +215,16 @@ func main() -> i32 {
 #[test]
 fn borrow_double_imm_ok() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
+extern "C" func read(x: &i32) -> i32 { *x }
 func main() -> i32 {
     let a = 42;
-    let r1 = &a;
-    let r2 = &a;
-    read(r1) + read(r2)
+    let mut result = 0;
+    unsafe {
+        let r1 = &a;
+        let r2 = &a;
+        result = read(r1) + read(r2);
+    }
+    result
 }
 "#;
     assert!(check_source(src).is_ok(), "multiple &x allowed");
@@ -208,56 +235,74 @@ func main() -> i32 {
 #[test]
 fn borrow_double_mut_rejected() {
     let src = r#"
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 42;
-    let r1 = &mut a;
-    let r2 = &mut a;
-    write(r1);
-    write(r2);
+    unsafe {
+        let r1 = &mut a;
+        let r2 = &mut a;
+        write(r1);
+        write(r2);
+    }
     a
 }
 "#;
-    assert!(check_source(src).is_err(), "double &mut should be rejected");
+    let errors = check_source(src).expect_err("double `&mut` should be rejected");
+    assert!(
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0301)
+        }),
+        "overlapping mutable loans should report E0301: {errors:?}"
+    );
 }
 
 #[test]
 fn borrow_imm_then_mut_rejected() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func read(x: &i32) -> i32 { *x }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 42;
-    let r1 = &a;
-    let r2 = &mut a;
-    write(r2);
-    read(r1);
+    unsafe {
+        let r1 = &a;
+        let r2 = &mut a;
+        write(r2);
+        read(r1);
+    }
     a
 }
 "#;
+    let errors = check_source(src).expect_err("an overlapping shared/mutable borrow must fail");
     assert!(
-        check_source(src).is_err(),
-        "& then &mut (both used) should be rejected"
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0300)
+        }),
+        "shared then mutable overlap should report E0300: {errors:?}"
     );
 }
 
 #[test]
 fn borrow_mut_then_imm_rejected() {
     let src = r#"
-func read(x: &i32) -> i32 { *x }
-func write(x: &mut i32) { *x = *x + 1 }
+extern "C" func read(x: &i32) -> i32 { *x }
+extern "C" func write(x: &mut i32) { *x = *x + 1 }
 func main() -> i32 {
     let mut a = 42;
-    let r1 = &mut a;
-    let r2 = &a;
-    write(r1);
-    read(r2);
+    unsafe {
+        let r1 = &mut a;
+        let r2 = &a;
+        write(r1);
+        read(r2);
+    }
     a
 }
 "#;
+    let errors = check_source(src).expect_err("an overlapping mutable/shared borrow must fail");
     assert!(
-        check_source(src).is_err(),
-        "&mut then & (both used) should be rejected"
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0302)
+        }),
+        "mutable then shared overlap should report E0302: {errors:?}"
     );
 }
 
@@ -269,9 +314,11 @@ fn borrow_field_level_disjoint() {
 type Pair { a: i32, b: i32 }
 func main() -> i32 {
     let mut p = Pair { a: 1, b: 2 };
-    let ra = &p.a;
-    let rb = &mut p.b;
-    println(*ra + *rb);
+    unsafe {
+        let ra = &p.a;
+        let rb = &mut p.b;
+        println(*ra + *rb);
+    }
     0
 }
 "#;
@@ -284,12 +331,16 @@ func main() -> i32 {
 #[test]
 fn borrow_fn_return_ref() {
     let src = r#"
-func first(x: &i32, _y: &i32) -> &i32 { x }
+extern "C" func first(x: &i32, _y: &i32) -> &i32 { x }
 func main() -> i32 {
     let a = 10;
     let b = 20;
-    let r = first(&a, &b);
-    *r
+    let mut result = 0;
+    unsafe {
+        let r = first(&a, &b);
+        result = *r;
+    }
+    result
 }
 "#;
     assert!(
@@ -301,15 +352,19 @@ func main() -> i32 {
 #[test]
 fn borrow_fn_mut_to_imm_return() {
     let src = r#"
-func mut_to_imm(x: &mut i32) -> &i32 {
+extern "C" func mut_to_imm(x: &mut i32) -> &i32 {
     *x = *x + 1;
     let r: &i32 = &*x;
     r
 }
 func main() -> i32 {
     let mut a = 41;
-    let r = mut_to_imm(&mut a);
-    *r
+    let mut result = 0;
+    unsafe {
+        let r = mut_to_imm(&mut a);
+        result = *r;
+    }
+    result
 }
 "#;
     assert!(
@@ -323,14 +378,18 @@ fn borrow_conditional_return() {
     // Mimi does not support explicit lifetime params; the test validates that
     // conditional branches returning references type-check correctly.
     let src = r#"
-func choose(cond: bool, x: &i32, y: &i32) -> &i32 {
+extern "C" func choose(cond: bool, x: &i32, y: &i32) -> &i32 {
     if cond { x } else { y }
 }
 func main() -> i32 {
     let a = 10;
     let b = 20;
-    let r = choose(true, &a, &b);
-    *r
+    let mut result = 0;
+    unsafe {
+        let r = choose(true, &a, &b);
+        result = *r;
+    }
+    result
 }
 "#;
     assert!(
@@ -344,9 +403,17 @@ fn borrow_closure_capture_ref() {
     let src = r#"
 func main() -> i32 {
     let a = 42;
-    let r = &a;
-    let f = fn() -> i32 { *r };
-    f()
+    let mut result = 0;
+    unsafe {
+        let r = &a;
+        let f = fn() -> i32 {
+            let mut captured = 0;
+            unsafe { captured = *r; }
+            captured
+        };
+        result = f();
+    }
+    result
 }
 "#;
     assert!(
@@ -356,7 +423,7 @@ func main() -> i32 {
 }
 
 #[test]
-fn borrow_self_referential() {
+fn borrow_self_referential_type_requires_explicit_low_level_context() {
     let src = r#"
 type Container { val: i32, ptr: &i32 }
 func main() -> i32 {
@@ -365,9 +432,12 @@ func main() -> i32 {
     0
 }
 "#;
+    let errors = check_source(src).expect_err("record reference fields are outside safe source");
     assert!(
-        check_source(src).is_ok(),
-        "self-referential borrow should pass"
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0449)
+        }),
+        "the record reference field must report E0449: {errors:?}"
     );
 }
 
@@ -376,7 +446,7 @@ func main() -> i32 {
 #[test]
 fn borrow_match_guard_uses_ref() {
     let src = r#"
-func check(x: &i32) -> i32 {
+extern "C" func check(x: &i32) -> i32 {
     let val = *x;
     let result = match val {
         v if v > 10 => { *x }
@@ -386,7 +456,11 @@ func check(x: &i32) -> i32 {
 }
 func main() -> i32 {
     let a = 42;
-    check(&a)
+    let mut result = 0;
+    unsafe {
+        result = check(&a);
+    }
+    result
 }
 "#;
     assert!(
@@ -402,10 +476,14 @@ fn borrow_field_level_nll_release() {
 type Point { x: i32, y: i32 }
 func main() -> i32 {
     let p = Point { x: 1, y: 2 };
-    let r = &p.x;
-    let val = *r;
-    let p2 = Point { x: 3, y: 4 };
-    val + p2.x
+    let mut result = 0;
+    unsafe {
+        let r = &p.x;
+        let val = *r;
+        let p2 = Point { x: 3, y: 4 };
+        result = val + p2.x;
+    }
+    result
 }
 "#;
     assert!(
@@ -420,9 +498,13 @@ fn borrow_nll_cross_block() {
     let src = r#"
 func main() -> i32 {
     let a = 10;
-    let r = &a;
-    let v = *r;
-    { v + 1 }
+    let mut result = 0;
+    unsafe {
+        let r = &a;
+        let v = *r;
+        { result = v + 1; }
+    }
+    result
 }
 "#;
     assert!(
@@ -437,9 +519,13 @@ fn borrow_nll_multi_block() {
     let src = r#"
 func main() -> i32 {
     let a = 10;
-    let r = &a;
-    let v = *r;
-    { v + 1 }
+    let mut result = 0;
+    unsafe {
+        let r = &a;
+        let v = *r;
+        { result = v + 1; }
+    }
+    result
 }
 "#;
     assert!(
@@ -455,9 +541,13 @@ fn borrow_index_mut_basic() {
     let src = r#"
 func main() -> i32 {
     let mut xs = [1, 2, 3];
-    let r = &mut xs[1];
-    *r = 99;
-    xs[1]
+    let mut result = 0;
+    unsafe {
+        let r = &mut xs[1];
+        *r = 99;
+        result = xs[1];
+    }
+    result
 }
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(99));
@@ -468,8 +558,12 @@ fn borrow_index_imm_basic() {
     let src = r#"
 func main() -> i32 {
     let xs = [1, 2, 3];
-    let r = &xs[1];
-    *r
+    let mut result = 0;
+    unsafe {
+        let r = &xs[1];
+        result = *r;
+    }
+    result
 }
 "#;
     assert_eq!(run_source(src), crate::interp::Value::Int(2));
@@ -480,14 +574,19 @@ fn borrow_index_mut_typecheck_rejects_imm() {
     let src = r#"
 func main() -> i32 {
     let xs = [1, 2, 3];
-    let r = &xs[1];
-    *r = 99;
+    unsafe {
+        let r = &xs[1];
+        *r = 99;
+    }
     xs[1]
 }
 "#;
+    let errors = check_source(src).expect_err("an immutable reference cannot be assigned through");
     assert!(
-        check_source(src).is_err(),
-        "assign through &xs[i] should be rejected"
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0233)
+        }),
+        "assignment through `&xs[i]` should report E0233: {errors:?}"
     );
 }
 
@@ -496,16 +595,21 @@ fn borrow_index_mut_conflict_rejected() {
     let src = r#"
 func main() -> i32 {
     let mut xs = [1, 2, 3];
-    let r1 = &mut xs[1];
-    let r2 = &mut xs[1];
-    *r1 = 10;
-    *r2 = 20;
+    unsafe {
+        let r1 = &mut xs[1];
+        let r2 = &mut xs[1];
+        *r1 = 10;
+        *r2 = 20;
+    }
     xs[1]
 }
 "#;
+    let errors = check_source(src).expect_err("overlapping mutable element loans must fail");
     assert!(
-        check_source(src).is_err(),
-        "double &mut xs[i] should be rejected"
+        errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0301)
+        }),
+        "double `&mut xs[i]` should report E0301: {errors:?}"
     );
 }
 

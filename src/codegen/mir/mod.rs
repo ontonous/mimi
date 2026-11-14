@@ -17,7 +17,7 @@ use inkwell::context::Context;
 use inkwell::module::Linkage;
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PhiValue,
+    AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PhiValue,
 };
 use inkwell::{FloatPredicate, IntPredicate};
 
@@ -45,13 +45,51 @@ mod validate;
 use abi::{
     native_basic_type, native_copy_variant_payload_type, native_list_kind,
     native_non_copy_variant_payload_type, native_non_copy_variant_payload_type_strict,
+    native_ordinary_map_computed_string_key_owner_chain_set_any_result_llvm_type,
+    native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi,
+    native_ordinary_map_direct_tuple_get_l1_result_variant_abi,
+    native_ordinary_map_new_result_llvm_type, native_ordinary_map_new_result_variant_abi,
+    native_ordinary_map_set_drop_control_result_llvm_type,
+    native_ordinary_map_set_drop_control_result_variant_abi,
+    native_ordinary_map_set_get_any_i32_result_llvm_type,
+    native_ordinary_map_set_get_any_i32_result_variant_abi,
+    native_ordinary_map_set_get_any_result_i32_llvm_type,
+    native_ordinary_map_set_get_any_result_i32_root_llvm_type,
+    native_ordinary_map_set_get_any_result_i32_root_variant_abi,
+    native_ordinary_map_set_get_any_result_i32_variant_abi,
+    native_ordinary_map_set_get_string_result_llvm_type,
+    native_ordinary_map_set_get_string_result_variant_abi,
+    native_ordinary_map_set_result_llvm_type, native_ordinary_map_set_result_variant_abi,
     native_variant_abi, native_variant_abi_with_generic_result,
     validate_native_non_copy_record_type, validate_native_product_type,
-    validate_native_recursive_tuple_type, NativeVariantAbi,
+    validate_native_recursive_tuple_type, NativeVariantAbi, NativeVariantPayloadSlot,
 };
 pub(crate) use eligibility::checked_managed_any_unpack_coverage;
-pub use eligibility::validate_mir_native;
 use eligibility::{instruction_kind, mir_symbol, native_symbol_fragment, NativeMirError};
+pub use eligibility::{
+    validate_checked_mir_native_get_or_default_i32_route,
+    validate_checked_mir_native_get_or_default_string_route,
+    validate_checked_mir_native_map_root_get_any_caller_route,
+    validate_checked_mir_native_map_root_producer_caller_route,
+    validate_checked_mir_native_ordinary_map_new_result_route,
+    validate_checked_mir_native_ordinary_map_owned_any_v2_direct_print_result_route,
+    validate_checked_mir_native_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route,
+    validate_checked_mir_native_ordinary_map_owned_any_v2_set_get_any_i32_route,
+    validate_checked_mir_native_ordinary_map_owned_any_v2_set_get_any_result_i32_route,
+    validate_checked_mir_native_ordinary_map_set_get_i32_route,
+    validate_checked_mir_native_ordinary_map_set_get_string_route,
+    validate_checked_mir_native_ordinary_map_set_result_route,
+    validate_checked_mir_native_values_crosscall_string_caller_index1_route,
+    validate_checked_mir_native_values_crosscall_string_caller_route,
+    validate_checked_mir_native_values_producer_caller_route,
+    validate_checked_mir_native_values_result_crosscall_string_caller_index1_route,
+    validate_checked_mir_native_values_result_crosscall_string_caller_route, validate_mir_native,
+    validate_mir_native_checked_get_route,
+    validate_mir_native_computed_string_key_owner_chain_route,
+    validate_mir_native_dynamic_keys_get_route,
+    validate_mir_native_map_set_drop_control_result_route,
+};
+use ordinary_map_owned_any_v2::native_direct_print_result_root_result_abi;
 use validate::NativeMirValidator;
 
 /// Resolve one canonical MIR function owner to the exact LLVM symbol used by
@@ -75,24 +113,178 @@ mod ordinary_map_owned_get;
 mod ownership;
 mod runtime_glue;
 mod scalar;
+mod string_list;
 
 #[cfg(test)]
 #[path = "ffi_vararg_tests.rs"]
 mod ffi_vararg_tests;
 
+#[cfg(test)]
+mod string_list_tests;
+
 struct NativeMirEmitter<'a, 'ctx> {
     generator: &'a mut CodeGenerator<'ctx>,
     program: &'a MirProgram,
+    report_canonical_mir_native_census: bool,
+    register_map_runtime_shutdown: bool,
+    dynamic_keys_get_authorized: bool,
+    ordinary_map_new_result_l1_authorized: bool,
+    ordinary_map_set_result_l1_authorized: bool,
+    ordinary_map_set_get_i32_l1_authorized: bool,
+    ordinary_map_set_get_any_i32_l1_authorized: bool,
+    ordinary_map_set_get_any_result_i32_l1_authorized: bool,
+    ordinary_map_set_get_string_l1_authorized: bool,
+    ordinary_map_direct_tuple_get_unpack_l1_authorized: bool,
+    ordinary_map_direct_print_result_authorized: bool,
+    computed_string_key_owner_chain_l1_authorized: bool,
+    map_set_drop_control_result_l1_authorized: bool,
+    values_local_index_i32_result_branch_l1_authorized: bool,
+    ordinary_map_owned_get_result_branch_v3_authorized: bool,
     functions: BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
     ffi_functions: BTreeMap<String, FunctionValue<'ctx>>,
     actor_dispatchers: BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalMirNativeCensusEntry {
+    owner: String,
+    llvm_symbol: String,
+    has_body: bool,
+    verified: bool,
+}
+
+fn canonical_mir_native_census_enabled() -> bool {
+    matches!(std::env::var("MIMI_ROUTE_CENSUS").as_deref(), Ok("1"))
+}
+
+fn canonical_mir_native_owner_event(owner: &str) -> String {
+    format!("info: canonical MIR native emitted owner='{owner}'")
+}
+
+fn canonical_mir_native_summary_event(emitted: usize, expected: usize, mir_digest: &str) -> String {
+    format!(
+        "info: canonical MIR native compiled {emitted}/{expected} function(s), 0 fell back; mir_digest={mir_digest}"
+    )
+}
+
+fn validate_canonical_mir_native_census_roster(
+    expected_owners: &[String],
+    entries: &[CanonicalMirNativeCensusEntry],
+) -> Result<(), String> {
+    let expected = expected_owners.iter().cloned().collect::<BTreeSet<_>>();
+    if expected.len() != expected_owners.len() {
+        return Err("canonical MIR census contains duplicate expected owners".into());
+    }
+    if entries.len() != expected_owners.len() {
+        return Err(format!(
+            "canonical MIR census has {} emitted entries for {} MIR functions",
+            entries.len(),
+            expected_owners.len()
+        ));
+    }
+
+    let mut observed_owners = BTreeSet::new();
+    let mut observed_symbols = BTreeSet::new();
+    for entry in entries {
+        if !observed_owners.insert(entry.owner.clone()) {
+            return Err(format!(
+                "canonical MIR census contains duplicate emitted owner '{}'",
+                entry.owner
+            ));
+        }
+        if !expected.contains(&entry.owner) {
+            return Err(format!(
+                "canonical MIR census emitted unexpected owner '{}'",
+                entry.owner
+            ));
+        }
+        if !observed_symbols.insert(entry.llvm_symbol.clone()) {
+            return Err(format!(
+                "canonical MIR census maps multiple owners to LLVM symbol '{}'",
+                entry.llvm_symbol
+            ));
+        }
+        if !entry.has_body {
+            return Err(format!(
+                "canonical MIR census owner '{}' is only an LLVM declaration",
+                entry.owner
+            ));
+        }
+        if !entry.verified {
+            return Err(format!(
+                "canonical MIR census owner '{}' failed LLVM function verification",
+                entry.owner
+            ));
+        }
+    }
+    if observed_owners != expected {
+        let missing = expected
+            .difference(&observed_owners)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "canonical MIR census is missing emitted owners: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
-    fn new(generator: &'a mut CodeGenerator<'ctx>, program: &'a MirProgram) -> Self {
+    fn new(
+        generator: &'a mut CodeGenerator<'ctx>,
+        program: &'a MirProgram,
+        dynamic_keys_get_authorized: bool,
+    ) -> Self {
+        let report_canonical_mir_native_census = !generator.suppress_canonical_mir_native_census;
+        // These checker-certified owner routes allocate into process-wide
+        // registries. Register teardown for every ABI family, including V1
+        // owned-get/lifecycle owners and the independent Map/Any owner V1.
+        let register_map_runtime_shutdown = program.functions().values().any(|function| {
+            let ownership = &function.ownership;
+            ownership.has_checker_map_any_owner_actions()
+                || ownership.has_checker_ordinary_map_owned_any_v2_actions()
+                || ownership
+                    .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                    .is_some()
+                || ownership.ordinary_map_new_result_receipt().is_some()
+                || ownership.ordinary_map_set_lineage_receipt().is_some()
+                || ownership
+                    .ordinary_map_set_get_i32_lineage_receipt()
+                    .is_some()
+                || ownership
+                    .ordinary_map_set_get_any_i32_lineage_receipt()
+                    .is_some()
+                || ownership
+                    .ordinary_map_set_get_any_result_i32_lineage_receipt()
+                    .is_some()
+                || ownership
+                    .ordinary_map_set_get_string_lineage_receipt()
+                    .is_some()
+                || ownership
+                    .ordinary_map_owned_any_v2_direct_print_result_receipt()
+                    .is_some()
+                || ownership.has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+                || ownership.has_checker_ordinary_map_owner_lifecycle_v1_actions()
+        });
         Self {
             generator,
             program,
+            report_canonical_mir_native_census,
+            register_map_runtime_shutdown,
+            dynamic_keys_get_authorized,
+            ordinary_map_new_result_l1_authorized: false,
+            ordinary_map_set_result_l1_authorized: false,
+            ordinary_map_set_get_i32_l1_authorized: false,
+            ordinary_map_set_get_any_i32_l1_authorized: false,
+            ordinary_map_set_get_any_result_i32_l1_authorized: false,
+            ordinary_map_set_get_string_l1_authorized: false,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            ordinary_map_owned_get_result_branch_v3_authorized: false,
             functions: BTreeMap::new(),
             ffi_functions: BTreeMap::new(),
             actor_dispatchers: BTreeMap::new(),
@@ -100,6 +292,52 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     }
 
     fn compile(mut self) -> Result<(), NativeMirError> {
+        let has_owned_get_result_branch_v3 = self.program.functions().values().any(|function| {
+            function
+                .ownership
+                .ordinary_map_owned_get_result_branch_v3_receipt()
+                .is_some()
+                || function.blocks.values().any(|block| {
+                    block.instructions.iter().any(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
+                                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
+                        )
+                    })
+                })
+        });
+        if has_owned_get_result_branch_v3
+            && !self.ordinary_map_owned_get_result_branch_v3_authorized
+        {
+            return Err(NativeMirError::new(
+                "ordinary Map owned-Get ResultBranchV3",
+                "fallible New/Set native lowering requires its exact CheckedProgram-bound route",
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        }
+        // This fused callsite operation has a native contract of its own.
+        // Revalidate its typed MIR receipt before adding any LLVM declarations
+        // so an incomplete, duplicated, or tampered profile cannot partially
+        // mutate the destination module.
+        ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_get_or_default_i32_native_contract(
+            self.program,
+        )
+        .map_err(|messages| {
+            NativeMirError::new(
+                "OrdinaryMapOwnedAnyV2GetOrDefaultI32 native preflight",
+                messages.join("; "),
+            )
+        })?;
+        ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_get_or_default_string_native_contract(
+            self.program,
+        )
+        .map_err(|messages| {
+            NativeMirError::new(
+                "OrdinaryMapOwnedAnyV2GetOrDefaultString native preflight",
+                messages.join("; "),
+            )
+        })?;
         self.declare_canonical_runtime_helpers();
         self.declare_actor_runtime();
         self.declare_functions()?;
@@ -122,6 +360,19 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 &self.functions,
                 &self.ffi_functions,
                 &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
                 function,
                 llvm_function,
             )
@@ -130,11 +381,789 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         self.emit_actor_dispatchers()?;
         self.emit_actor_root_wrapper()?;
         self.emit_scalar_export_wrappers()?;
+        let census_roster =
+            if self.report_canonical_mir_native_census && canonical_mir_native_census_enabled() {
+                Some(self.validated_native_function_roster()?)
+            } else {
+                None
+            };
         self.generator
             .module
             .verify()
             .map_err(|error| NativeMirError::new("LLVM module", error.to_string()))?;
+        if let Some(roster) = census_roster {
+            for entry in &roster {
+                eprintln!("{}", canonical_mir_native_owner_event(&entry.owner));
+            }
+            eprintln!(
+                "{}",
+                canonical_mir_native_summary_event(
+                    roster.len(),
+                    self.program.functions().len(),
+                    &self.program.canonical_digest(),
+                )
+            );
+        }
         Ok(())
+    }
+
+    /// Emit the exact Checker/MIR NewResult graph after its production route
+    /// receipt and native shape have been validated by the checked entrypoint.
+    fn compile_ordinary_map_new_result_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_new_result_l1_native_route(self.program)?;
+        self.ordinary_map_new_result_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native NewResult emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native NewResult function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator
+            .module
+            .verify()
+            .map_err(|error| NativeMirError::new("LLVM NewResult module", error.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit the exact Checker/MIR SetResult graph after its independent
+    /// SetLineage route receipt and native shape have been validated by the
+    /// checked entrypoint.
+    fn compile_ordinary_map_set_result_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_set_result_l1_native_route(self.program)?;
+        self.ordinary_map_set_result_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native SetResult emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native SetResult function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator
+            .module
+            .verify()
+            .map_err(|error| NativeMirError::new("LLVM SetResult module", error.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit the exact Checker-issued New/Set/Get-i32 graph after its own
+    /// SetGet lineage route has been validated by the checked entrypoint.
+    fn compile_ordinary_map_set_get_i32_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_set_get_i32_l1_native_route(self.program)?;
+        self.ordinary_map_set_get_i32_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native Set/Get-i32 emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native Set/Get-i32 function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator
+            .module
+            .verify()
+            .map_err(|error| NativeMirError::new("LLVM Set/Get-i32 module", error.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit the exact Checker-issued New/Set/GetAny/unpack-i32 graph after its
+    /// independent composite receipt and native L1 shape have been validated.
+    /// This bit authorizes the Result-aware generic GetAny path only for this
+    /// graph; the typed Get-i32 and CheckedGet capabilities stay independent.
+    fn compile_ordinary_map_set_get_any_i32_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_set_get_any_i32_l1_native_route(self.program)?;
+        self.ordinary_map_set_get_any_i32_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native Set/GetAny-i32 emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native Set/GetAny-i32 function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM Set/GetAny-i32 module", error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Emit the exact Checker-certified direct tuple Get L1 graph after its
+    /// independent source, route digest, executable MIR, and TypeDesc gates.
+    /// This capability is disjoint from the composite i32 GetAny route.
+    fn compile_ordinary_map_direct_tuple_get_unpack_l1(
+        mut self,
+        checked: &crate::core::CheckedProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_direct_tuple_get_unpack_l1_native_route(
+            checked,
+            self.program,
+            receipt,
+        )?;
+        self.ordinary_map_direct_tuple_get_unpack_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during direct tuple Get L1 emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native direct tuple Get L1 function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM direct tuple Get L1 module", error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Emit the exact nested Result DirectPrint graph only after the checked
+    /// route receipt, dedicated Core MIR graph, and native shape gate have
+    /// been validated. This authorization is independent of both flat
+    /// DirectPrint and ordinary owner-v2 readiness.
+    fn compile_ordinary_map_direct_print_result_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_direct_print_result_l1_native_route(self.program)?;
+        self.ordinary_map_direct_print_result_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during nested Result DirectPrint emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native nested Result DirectPrint function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        let census_roster =
+            if self.report_canonical_mir_native_census && canonical_mir_native_census_enabled() {
+                Some(self.validated_native_function_roster()?)
+            } else {
+                None
+            };
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM nested Result DirectPrint module", error.to_string())
+        })?;
+        if let Some(roster) = census_roster {
+            for entry in &roster {
+                eprintln!("{}", canonical_mir_native_owner_event(&entry.owner));
+            }
+            eprintln!(
+                "{}",
+                canonical_mir_native_summary_event(
+                    roster.len(),
+                    self.program.functions().len(),
+                    &self.program.canonical_digest(),
+                )
+            );
+        }
+        Ok(())
+    }
+
+    /// Emit the exact Checker/MIR computed String-key owner chain. This
+    /// private route is the only native authorization for the branch-aware
+    /// Any-payload SetResult opcode; ordinary `compile()` keeps that opcode
+    /// closed and continues to use the generic variant gate unchanged.
+    fn compile_ordinary_map_computed_string_key_owner_chain_route(
+        mut self,
+        checked: &crate::core::CheckedProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_l1_native_route(
+            checked,
+            self.program,
+            receipt,
+        )?;
+        NativeMirValidator::with_computed_string_key_owner_chain_authorization(self.program)
+            .validate()
+            .map_err(|errors| {
+                NativeMirError::new(
+                    "ComputedStringKeyOwnerChain native MIR validation",
+                    errors
+                        .into_iter()
+                        .map(|error| format!("{}: {}", error.subject, error.message))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })?;
+        self.computed_string_key_owner_chain_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during computed String-key owner-chain emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "computed String-key owner-chain LLVM function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        let census_roster =
+            if self.report_canonical_mir_native_census && canonical_mir_native_census_enabled() {
+                Some(self.validated_native_function_roster()?)
+            } else {
+                None
+            };
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new(
+                "LLVM computed String-key owner-chain module",
+                error.to_string(),
+            )
+        })?;
+        if let Some(roster) = census_roster {
+            for entry in &roster {
+                eprintln!("{}", canonical_mir_native_owner_event(&entry.owner));
+            }
+            eprintln!(
+                "{}",
+                canonical_mir_native_summary_event(
+                    roster.len(),
+                    self.program.functions().len(),
+                    &self.program.canonical_digest(),
+                )
+            );
+        }
+        Ok(())
+    }
+
+    /// Emit the independently receipted MapSetDropControl Result branch.
+    /// This path has a dedicated native capability and never borrows the
+    /// computed-key owner-chain authorization.
+    fn compile_ordinary_map_set_drop_control_result_route(
+        mut self,
+        checked: &crate::core::CheckedProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_owned_any_v2_map_set_drop_control_result_l1_native_route(
+            checked,
+            self.program,
+            receipt,
+        )?;
+        NativeMirValidator::with_map_set_drop_control_result_authorization(self.program)
+            .validate()
+            .map_err(|errors| {
+                NativeMirError::new(
+                    "MapSetDropControlResult native MIR validation",
+                    errors
+                        .into_iter()
+                        .map(|error| format!("{}: {}", error.subject, error.message))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })?;
+        self.map_set_drop_control_result_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during MapSetDropControlResult emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "MapSetDropControlResult LLVM function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM MapSetDropControlResult module", error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Emit the independently receipted nested-Result Values profile. It has
+    /// a dedicated authorization bit so the Label-only MapSetDropControl
+    /// path and computed-key owner-chain route cannot authorize this i32 CFG.
+    fn compile_ordinary_map_values_local_index_i32_result_branch_route(
+        mut self,
+        checked: &crate::core::CheckedProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_l1_native_route(
+            checked,
+            self.program,
+            receipt,
+        )?;
+        NativeMirValidator::with_values_local_index_i32_result_branch_authorization(self.program)
+            .validate()
+            .map_err(|errors| {
+                NativeMirError::new(
+                    "ValuesLocalIndexI32ResultBranch native MIR validation",
+                    errors
+                        .into_iter()
+                        .map(|error| format!("{}: {}", error.subject, error.message))
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            })?;
+        self.values_local_index_i32_result_branch_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during ValuesLocalIndexI32ResultBranch emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "ValuesLocalIndexI32ResultBranch LLVM function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new(
+                "LLVM ValuesLocalIndexI32ResultBranch module",
+                error.to_string(),
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Emit the exact Checker/MIR fallible `map_get_any` lineage after its
+    /// independent Result-valued source receipt and native L1 shape gate have
+    /// both been validated. This authorization is separate from the older
+    /// tuple-valued GetAny and unpack-i32 route.
+    fn compile_ordinary_map_set_get_any_result_i32_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_set_get_any_result_i32_l1_native_route(self.program)?;
+        self.ordinary_map_set_get_any_result_i32_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native Set/GetAny-Result emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native Set/GetAny-Result function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM Set/GetAny-Result module", error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Emit the isolated New/Set<String>/Get<String> graph after both the
+    /// Checker-bound execution receipt and the dedicated native L1 shape gate
+    /// have been validated. This authorization never opens the generic
+    /// ManagedAny Set/Get path or the distinct i32 result profile.
+    fn compile_ordinary_map_set_get_string_l1(mut self) -> Result<(), NativeMirError> {
+        validate::validate_ordinary_map_set_get_string_l1_native_route(self.program)?;
+        self.ordinary_map_set_get_string_l1_authorized = true;
+        self.declare_canonical_runtime_helpers();
+        self.declare_functions()?;
+        let owners = self.program.functions().keys().cloned().collect::<Vec<_>>();
+        for owner in owners {
+            let function = self.program.functions().get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "function disappeared during native Set/Get-String emission",
+                )
+            })?;
+            let llvm_function = *self.functions.get(&owner).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "native Set/Get-String function declaration is absent",
+                )
+            })?;
+            NativeMirFunctionEmitter::new(
+                self.generator,
+                self.program,
+                &self.functions,
+                &self.ffi_functions,
+                &self.actor_dispatchers,
+                self.register_map_runtime_shutdown,
+                self.dynamic_keys_get_authorized,
+                self.ordinary_map_new_result_l1_authorized,
+                self.ordinary_map_set_result_l1_authorized,
+                self.ordinary_map_set_get_i32_l1_authorized,
+                self.ordinary_map_set_get_any_i32_l1_authorized,
+                self.ordinary_map_set_get_any_result_i32_l1_authorized,
+                self.ordinary_map_set_get_string_l1_authorized,
+                self.ordinary_map_direct_tuple_get_unpack_l1_authorized,
+                self.ordinary_map_direct_print_result_authorized,
+                self.computed_string_key_owner_chain_l1_authorized,
+                self.map_set_drop_control_result_l1_authorized,
+                self.values_local_index_i32_result_branch_l1_authorized,
+                function,
+                llvm_function,
+            )
+            .emit()?;
+        }
+        self.generator.module.verify().map_err(|error| {
+            NativeMirError::new("LLVM Set/Get-String module", error.to_string())
+        })?;
+        Ok(())
+    }
+
+    /// Build a complete MIR-function roster from the actual emitted LLVM
+    /// entities. This is only used by the opt-in route census; a missing,
+    /// colliding, body-less, or individually invalid function fails closed
+    /// before any success event is printed.
+    fn validated_native_function_roster(
+        &self,
+    ) -> Result<Vec<CanonicalMirNativeCensusEntry>, NativeMirError> {
+        if self.functions.len() != self.program.functions().len() {
+            return Err(NativeMirError::new(
+                "canonical MIR census",
+                format!(
+                    "LLVM function map contains {} entries for {} MIR functions",
+                    self.functions.len(),
+                    self.program.functions().len()
+                ),
+            ));
+        }
+
+        let mut entries = Vec::with_capacity(self.program.functions().len());
+        let mut expected_owners = Vec::with_capacity(self.program.functions().len());
+        for (owner, _) in self.program.functions() {
+            expected_owners.push(owner.0.clone());
+            let registered = self.functions.get(owner).copied().ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    "canonical MIR census has no emitted LLVM function",
+                )
+            })?;
+            let symbol = if let Some(export) = self.program.export_declaration(owner) {
+                export.body_symbol.clone()
+            } else {
+                actor_status::actor_native_symbol(self.program, owner)
+                    .map_err(|message| NativeMirError::new(owner.0.clone(), message))?
+            };
+            let actual_symbol = registered.get_name().to_string_lossy().into_owned();
+            if actual_symbol != symbol {
+                return Err(NativeMirError::new(
+                    owner.0.clone(),
+                    format!(
+                        "canonical MIR census expected LLVM symbol '{symbol}', found '{actual_symbol}'"
+                    ),
+                ));
+            }
+            let module_function = self.generator.module.get_function(&symbol).ok_or_else(|| {
+                NativeMirError::new(
+                    owner.0.clone(),
+                    format!("canonical MIR census LLVM entity '{symbol}' is absent"),
+                )
+            })?;
+            if module_function.as_value_ref() != registered.as_value_ref() {
+                return Err(NativeMirError::new(
+                    owner.0.clone(),
+                    format!(
+                        "canonical MIR census LLVM symbol '{symbol}' does not resolve to its registered function"
+                    ),
+                ));
+            }
+            entries.push(CanonicalMirNativeCensusEntry {
+                owner: owner.0.clone(),
+                llvm_symbol: symbol,
+                has_body: !registered.get_basic_blocks().is_empty(),
+                verified: registered.verify(false),
+            });
+        }
+        validate_canonical_mir_native_census_roster(&expected_owners, &entries)
+            .map_err(|message| NativeMirError::new("canonical MIR census", message))?;
+        Ok(entries)
     }
 
     /// Canonical-only runtime declarations belong to the MIR adapter, not to
@@ -142,6 +1171,66 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     /// an otherwise unrelated legacy LLVM golden from changing merely because
     /// a new MIR glue operation was added.
     fn declare_canonical_runtime_helpers(&self) {
+        if self.dynamic_keys_get_authorized
+            && self
+                .generator
+                .module
+                .get_function("mimi_args_init")
+                .is_none()
+        {
+            let context = self.generator.context;
+            let i8_ptr = context.ptr_type(inkwell::AddressSpace::default());
+            self.generator.module.add_function(
+                "mimi_args_init",
+                context.void_type().fn_type(
+                    &[
+                        BasicMetadataTypeEnum::IntType(context.i32_type()),
+                        BasicMetadataTypeEnum::PointerType(i8_ptr),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        if self.register_map_runtime_shutdown
+            && self
+                .generator
+                .module
+                .get_function("mimi_mir_ordinary_map_domain_register_shutdown")
+                .is_none()
+        {
+            self.generator.module.add_function(
+                "mimi_mir_ordinary_map_domain_register_shutdown",
+                self.generator.context.void_type().fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
+        let has_ordinary_map_owner_observer = self
+            .program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson { .. }
+                        | MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln { .. }
+                )
+            });
+        if self
+            .generator
+            .module
+            .get_function("mimi_mir_assert_no_live_managed_any_v2_lists")
+            .is_none()
+        {
+            let void = self.generator.context.void_type();
+            self.generator.module.add_function(
+                "mimi_mir_assert_no_live_managed_any_v2_lists",
+                void.fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
         if self
             .generator
             .module
@@ -330,41 +1419,6 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         let i64 = self.generator.context.i64_type();
         let i32 = self.generator.context.i32_type();
         let void = self.generator.context.void_type();
-        let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
-        let has_canonical_string_concat = self.program.functions().values().any(|function| {
-            function.blocks.values().any(|block| {
-                block.instructions.iter().any(|instruction| {
-                    let crate::core::mir::MirInstructionKind::Binary {
-                        result,
-                        op: crate::core::ir::ResolvedBinaryOp::Add,
-                        left,
-                        right,
-                    } = &instruction.kind
-                    else {
-                        return false;
-                    };
-                    [result, left, right].iter().all(|value| {
-                        function
-                            .values
-                            .get(*value)
-                            .is_some_and(|value| value.ty == string_ty)
-                    })
-                })
-            })
-        });
-        if has_canonical_string_concat
-            && self
-                .generator
-                .module
-                .get_function("mimi_mir_string_concat_checkpoint")
-                .is_none()
-        {
-            self.generator.module.add_function(
-                "mimi_mir_string_concat_checkpoint",
-                i32.fn_type(&[BasicMetadataTypeEnum::IntType(i32)], false),
-                Some(Linkage::External),
-            );
-        }
         if self
             .generator
             .module
@@ -597,34 +1651,6 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
         if self
             .program
             .type_catalog()
-            .get(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
-            .is_some()
-        {
-            for symbol in [
-                "mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string",
-                "mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string",
-            ] {
-                if self.generator.module.get_function(symbol).is_none() {
-                    self.generator.module.add_function(
-                        symbol,
-                        i32.fn_type(
-                            &[
-                                BasicMetadataTypeEnum::PointerType(i8_ptr),
-                                BasicMetadataTypeEnum::IntType(i64),
-                                BasicMetadataTypeEnum::PointerType(i8_ptr),
-                                BasicMetadataTypeEnum::PointerType(i8_ptr),
-                            ],
-                            false,
-                        ),
-                        Some(Linkage::External),
-                    );
-                }
-            }
-        }
-
-        if self
-            .program
-            .type_catalog()
             .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
             .is_some()
         {
@@ -678,6 +1704,16 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     i32.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
                 ),
                 (
+                    "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size_status",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
                     "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_contains",
                     i32.fn_type(
                         &[
@@ -702,6 +1738,46 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     );
                 }
             }
+
+            if has_ordinary_map_owner_observer {
+                // The JSON helper returns a detached NUL-terminated
+                // allocation. Declare only the narrow C/runtime helpers
+                // needed to recover its byte length, print it, and release
+                // the scratch allocation. Map programs without observers do
+                // not acquire these extra LLVM declarations.
+                for (name, function_type) in [
+                    (
+                        "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_to_json",
+                        i8_ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i64)], false),
+                    ),
+                    (
+                        "strlen",
+                        i64.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                    ),
+                    (
+                        "mimi_print_bytes",
+                        void.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                            ],
+                            false,
+                        ),
+                    ),
+                    (
+                        "mimi_string_free",
+                        void.fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr)], false),
+                    ),
+                ] {
+                    if self.generator.module.get_function(name).is_none() {
+                        self.generator.module.add_function(
+                            name,
+                            function_type,
+                            Some(Linkage::External),
+                        );
+                    }
+                }
+            }
         }
 
         if self
@@ -710,10 +1786,18 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             .get(&crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id())
             .is_some()
         {
+            let i64_ptr = self
+                .generator
+                .context
+                .ptr_type(inkwell::AddressSpace::default());
             let ordinary_map_owned_get_helpers = [
                 (
                     "mimi_mir_ordinary_map_owned_get_i32_string_v1_new",
                     i64.fn_type(&[], false),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_new_result",
+                    i32.fn_type(&[BasicMetadataTypeEnum::PointerType(i64_ptr)], false),
                 ),
                 (
                     "mimi_mir_ordinary_map_owned_get_i32_string_v1_clone",
@@ -732,6 +1816,19 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                     ),
                 ),
                 (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32_result",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
                     "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string",
                     i64.fn_type(
                         &[
@@ -740,6 +1837,20 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                             BasicMetadataTypeEnum::IntType(i64),
                             BasicMetadataTypeEnum::PointerType(i8_ptr),
                             BasicMetadataTypeEnum::IntType(i64),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string_result",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
                         ],
                         false,
                     ),
@@ -986,6 +2097,76 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                         false,
                     ),
                 ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_set_i32_result",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::IntType(i32),
+                            BasicMetadataTypeEnum::PointerType(i64_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_get_i32_result",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(i32_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_mir_ordinary_map_owned_any_v2_keys_unpack_copy_string",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                        ],
+                        false,
+                    ),
+                ),
+                (
+                    "mimi_ordinary_map_owned_any_v2_keys_list",
+                    i32.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(i64),
+                            BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                        ],
+                        false,
+                    ),
+                ),
             ];
             for (name, function_type) in ordinary_map_owned_any_v2_helpers {
                 if self.generator.module.get_function(name).is_none() {
@@ -994,6 +2175,59 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                         function_type,
                         Some(Linkage::External),
                     );
+                }
+            }
+
+            if self.ordinary_map_set_get_string_l1_authorized
+                || self.ordinary_map_direct_print_result_authorized
+            {
+                let string_result_helpers = [
+                    (
+                        "mimi_ordinary_map_owned_any_v2_set_string_result",
+                        i32.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                                BasicMetadataTypeEnum::PointerType(opaque_ptr),
+                                BasicMetadataTypeEnum::PointerType(i64_ptr),
+                            ],
+                            false,
+                        ),
+                    ),
+                    (
+                        "mimi_ordinary_map_owned_any_v2_get_string_result",
+                        i32.fn_type(
+                            &[
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::IntType(i64),
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                // LLVM 18 uses opaque pointers, so `char **`
+                                // has the same pointer TypeRef as `char *`.
+                                BasicMetadataTypeEnum::PointerType(i8_ptr),
+                                BasicMetadataTypeEnum::PointerType(i64_ptr),
+                            ],
+                            false,
+                        ),
+                    ),
+                ];
+                for (name, function_type) in string_result_helpers {
+                    if self.generator.module.get_function(name).is_none() {
+                        self.generator.module.add_function(
+                            name,
+                            function_type,
+                            Some(Linkage::External),
+                        );
+                    }
                 }
             }
 
@@ -1097,14 +2331,10 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     fn declare_functions(&mut self) -> Result<(), NativeMirError> {
         for (owner, function) in self.program.functions() {
             let export = self.program.export_declaration(owner);
-            let symbol = if export.is_some() {
-                export
-                    .expect("checked scalar export disappeared")
-                    .body_symbol
-                    .clone()
-            } else {
-                actor_status::actor_native_symbol(self.program, owner)
-                    .map_err(|message| NativeMirError::new(owner.0.clone(), message))?
+            let symbol = match export {
+                Some(export) => export.body_symbol.clone(),
+                None => actor_status::actor_native_symbol(self.program, owner)
+                    .map_err(|message| NativeMirError::new(owner.0.clone(), message))?,
             };
             let tagged = actor_status::is_actor_tagged(self.program, owner);
             let mut parameter_types = function
@@ -1118,6 +2348,15 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                         .map(BasicMetadataTypeEnum::from)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            if self.dynamic_keys_get_authorized && owner.0 == "function:main" {
+                parameter_types.push(self.generator.context.i32_type().into());
+                parameter_types.push(
+                    self.generator
+                        .context
+                        .ptr_type(inkwell::AddressSpace::default())
+                        .into(),
+                );
+            }
             let result_desc = self
                 .program
                 .type_catalog()
@@ -1181,26 +2420,27 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .parameters
                 .iter()
                 .map(|(_, kind)| match kind {
-                    NativeExportScalarKind::I32 => {
-                        BasicMetadataTypeEnum::IntType(self.generator.context.i32_type())
-                    }
-                    NativeExportScalarKind::I64 => {
-                        BasicMetadataTypeEnum::IntType(self.generator.context.i64_type())
-                    }
-                    NativeExportScalarKind::F32 => {
-                        BasicMetadataTypeEnum::FloatType(self.generator.context.f32_type())
-                    }
-                    NativeExportScalarKind::F64 => {
-                        BasicMetadataTypeEnum::FloatType(self.generator.context.f64_type())
-                    }
-                    NativeExportScalarKind::Bool => {
-                        BasicMetadataTypeEnum::IntType(self.generator.context.i8_type())
-                    }
-                    NativeExportScalarKind::Unit => {
-                        unreachable!("Unit cannot be an export parameter")
-                    }
+                    NativeExportScalarKind::I32 => Ok(BasicMetadataTypeEnum::IntType(
+                        self.generator.context.i32_type(),
+                    )),
+                    NativeExportScalarKind::I64 => Ok(BasicMetadataTypeEnum::IntType(
+                        self.generator.context.i64_type(),
+                    )),
+                    NativeExportScalarKind::F32 => Ok(BasicMetadataTypeEnum::FloatType(
+                        self.generator.context.f32_type(),
+                    )),
+                    NativeExportScalarKind::F64 => Ok(BasicMetadataTypeEnum::FloatType(
+                        self.generator.context.f64_type(),
+                    )),
+                    NativeExportScalarKind::Bool => Ok(BasicMetadataTypeEnum::IntType(
+                        self.generator.context.i8_type(),
+                    )),
+                    NativeExportScalarKind::Unit => Err(NativeMirError::new(
+                        declaration.public_symbol.clone(),
+                        "scalar export parameter has unsupported Unit ABI kind",
+                    )),
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, _>>()?;
             let function_type = match declaration.result.1 {
                 NativeExportScalarKind::Unit => self
                     .generator
@@ -1567,6 +2807,19 @@ struct NativeMirFunctionEmitter<'a, 'ctx> {
     ffi_functions: &'a BTreeMap<String, FunctionValue<'ctx>>,
     actor_dispatchers: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
     actor_domain: Option<inkwell::values::IntValue<'ctx>>,
+    register_map_runtime_shutdown: bool,
+    dynamic_keys_get_authorized: bool,
+    ordinary_map_new_result_l1_authorized: bool,
+    ordinary_map_set_result_l1_authorized: bool,
+    ordinary_map_set_get_i32_l1_authorized: bool,
+    ordinary_map_set_get_any_i32_l1_authorized: bool,
+    ordinary_map_set_get_any_result_i32_l1_authorized: bool,
+    ordinary_map_set_get_string_l1_authorized: bool,
+    ordinary_map_direct_tuple_get_unpack_l1_authorized: bool,
+    ordinary_map_direct_print_result_authorized: bool,
+    computed_string_key_owner_chain_l1_authorized: bool,
+    map_set_drop_control_result_l1_authorized: bool,
+    values_local_index_i32_result_branch_l1_authorized: bool,
     function: &'a MirFunction,
     llvm_function: FunctionValue<'ctx>,
     blocks: BTreeMap<MirBlockId, BasicBlock<'ctx>>,
@@ -1587,6 +2840,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         functions: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
         ffi_functions: &'a BTreeMap<String, FunctionValue<'ctx>>,
         actor_dispatchers: &'a BTreeMap<crate::core::NodeId, FunctionValue<'ctx>>,
+        register_map_runtime_shutdown: bool,
+        dynamic_keys_get_authorized: bool,
+        ordinary_map_new_result_l1_authorized: bool,
+        ordinary_map_set_result_l1_authorized: bool,
+        ordinary_map_set_get_i32_l1_authorized: bool,
+        ordinary_map_set_get_any_i32_l1_authorized: bool,
+        ordinary_map_set_get_any_result_i32_l1_authorized: bool,
+        ordinary_map_set_get_string_l1_authorized: bool,
+        ordinary_map_direct_tuple_get_unpack_l1_authorized: bool,
+        ordinary_map_direct_print_result_authorized: bool,
+        computed_string_key_owner_chain_l1_authorized: bool,
+        map_set_drop_control_result_l1_authorized: bool,
+        values_local_index_i32_result_branch_l1_authorized: bool,
         function: &'a MirFunction,
         llvm_function: FunctionValue<'ctx>,
     ) -> Self {
@@ -1597,6 +2863,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ffi_functions,
             actor_dispatchers,
             actor_domain: None,
+            register_map_runtime_shutdown,
+            dynamic_keys_get_authorized,
+            ordinary_map_new_result_l1_authorized,
+            ordinary_map_set_result_l1_authorized,
+            ordinary_map_set_get_i32_l1_authorized,
+            ordinary_map_set_get_any_i32_l1_authorized,
+            ordinary_map_set_get_any_result_i32_l1_authorized,
+            ordinary_map_set_get_string_l1_authorized,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized,
+            ordinary_map_direct_print_result_authorized,
+            computed_string_key_owner_chain_l1_authorized,
+            map_set_drop_control_result_l1_authorized,
+            values_local_index_i32_result_branch_l1_authorized,
             function,
             llvm_function,
             blocks: BTreeMap::new(),
@@ -1615,6 +2894,60 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .get(&block.id)
                 .ok_or_else(|| NativeMirError::new(block.id.to_string(), "LLVM block is absent"))?;
             self.generator.builder.position_at_end(llvm_block);
+            if self.dynamic_keys_get_authorized
+                && self.function.owner.0 == "function:main"
+                && block.id == self.function.entry
+            {
+                let argc = self.llvm_function.get_nth_param(0).ok_or_else(|| {
+                    NativeMirError::new(
+                        self.function.owner.0.clone(),
+                        "DynamicKeysGet native main lacks host argc",
+                    )
+                })?;
+                let argv = self.llvm_function.get_nth_param(1).ok_or_else(|| {
+                    NativeMirError::new(
+                        self.function.owner.0.clone(),
+                        "DynamicKeysGet native main lacks host argv",
+                    )
+                })?;
+                let args_init = self
+                    .generator
+                    .module
+                    .get_function("mimi_args_init")
+                    .ok_or_else(|| {
+                        NativeMirError::new(
+                            self.function.owner.0.clone(),
+                            "DynamicKeysGet runtime argument initializer is absent",
+                        )
+                    })?;
+                self.generator
+                    .builder
+                    .build_call(args_init, &[argc.into(), argv.into()], "mimi_args_init")
+                    .map_err(|error| {
+                        NativeMirError::new(self.function.owner.0.clone(), error.to_string())
+                    })?;
+            }
+            if self.register_map_runtime_shutdown
+                && self.function.owner.0 == "function:main"
+                && block.id == self.function.entry
+            {
+                let shutdown_registration = self
+                    .generator
+                    .module
+                    .get_function("mimi_mir_ordinary_map_domain_register_shutdown")
+                    .ok_or_else(|| {
+                        NativeMirError::new(
+                            self.function.owner.0.clone(),
+                            "ordinary Map shutdown registration declaration is absent",
+                        )
+                    })?;
+                self.generator
+                    .builder
+                    .build_call(shutdown_registration, &[], "")
+                    .map_err(|error| {
+                        NativeMirError::new(self.function.owner.0.clone(), error.to_string())
+                    })?;
+            }
             for instruction in &block.instructions {
                 if let Err(error) =
                     self.emit_instruction(&instruction.kind, instruction.id.as_str())
@@ -1712,11 +3045,102 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 {
                     continue;
                 }
-                let ty = native_basic_type(
-                    self.generator.context,
-                    self.program.type_catalog(),
-                    &info.ty,
-                )?;
+                let ty = if self.ordinary_map_direct_print_result_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_direct_print_result_root_result_abi(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                        parameter.value.as_str(),
+                    )?
+                    .1
+                    .into()
+                } else if self.ordinary_map_set_get_any_i32_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_ordinary_map_set_get_any_i32_result_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_set_get_any_result_i32_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_ordinary_map_set_get_any_result_i32_root_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_set_result_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_ordinary_map_set_result_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_set_get_string_l1_authorized
+                    && (info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                        || self
+                            .function
+                            .ownership
+                            .ordinary_map_set_get_string_lineage_receipt()
+                            .is_some_and(|receipt| info.ty == receipt.get_result_type))
+                {
+                    native_ordinary_map_set_get_string_result_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_set_get_any_result_i32_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::
+                            ordinary_map_owned_any_v2_get_any_result_envelope_type_id()
+                {
+                    native_ordinary_map_set_get_any_result_i32_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_set_get_i32_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_ordinary_map_set_result_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else if self.ordinary_map_new_result_l1_authorized
+                    && info.ty
+                        == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    native_ordinary_map_new_result_llvm_type(
+                        self.generator.context,
+                        self.function,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                } else {
+                    native_basic_type(
+                        self.generator.context,
+                        self.program.type_catalog(),
+                        &info.ty,
+                    )?
+                };
                 let phi = self
                     .generator
                     .builder
@@ -1730,6 +3154,95 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
         }
         Ok(())
+    }
+
+    fn validate_nested_direct_print_result_drop(
+        &self,
+        value: &MirValueId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        if !self.ordinary_map_direct_print_result_authorized {
+            return Ok(());
+        }
+        let receipt = self
+            .function
+            .ownership
+            .ordinary_map_owned_any_v2_direct_print_result_receipt()
+            .ok_or_else(|| {
+                NativeMirError::new(subject, "nested Result DirectPrint receipt disappeared")
+            })?;
+        let matching_set = receipt
+            .operations
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Set
+                    && attempt.point == receipt.set_operation
+            })
+            .collect::<Vec<_>>();
+        let [set] = matching_set.as_slice() else {
+            return Err(NativeMirError::new(
+                subject,
+                "nested Result DirectPrint receipt has no unique Set operation for Drop binding",
+            ));
+        };
+        let [_, set_key, set_payload] = set.arguments.as_slice() else {
+            return Err(NativeMirError::new(
+                subject,
+                "nested Result DirectPrint Set operation has no complete Drop operand census",
+            ));
+        };
+        let key = MirValueId::new(format!("literal:{}", set_key.0))
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let get_key = MirValueId::new(format!("literal:{}", receipt.get_key.0))
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let pair = MirValueId::new(format!("local:{}", receipt.pair_local.0 .0))
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let mut allowed = vec![
+            (
+                format!(
+                    "inst:ordinary_map_direct_print_result_l1:drop_set_key:{}",
+                    set_key.0
+                ),
+                key,
+            ),
+            (
+                format!(
+                    "inst:ordinary_map_direct_print_result_l1:drop_get_key:{}",
+                    receipt.get_key.0
+                ),
+                get_key,
+            ),
+            (
+                format!(
+                    "inst:ordinary_map_direct_print_result_l1:drop_pair:{}",
+                    receipt.pair_drop.0
+                ),
+                pair,
+            ),
+        ];
+        if matches!(
+            receipt.shape,
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultShape::HitString
+        ) {
+            allowed.push((
+                format!(
+                    "inst:ordinary_map_direct_print_result_l1:drop_set_payload:{}",
+                    set_payload.0
+                ),
+                MirValueId::new(format!("literal:{}", set_payload.0))
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            ));
+        }
+        if allowed.iter().any(|(expected_subject, expected_value)| {
+            expected_subject == subject && expected_value == value
+        }) {
+            Ok(())
+        } else {
+            Err(NativeMirError::new(
+                subject,
+                "native Drop is not bound to a key, String payload, or pair settlement in the nested Result DirectPrint Checker receipt",
+            ))
+        }
     }
 
     fn emit_instruction(
@@ -2113,11 +3626,33 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_ordinary_map_contains(result, root, key, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson {
+                result,
+                root,
+                callsite,
+            } => {
+                let value =
+                    self.emit_ordinary_map_observer_to_json(result, root, callsite, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln {
+                result,
+                root,
+                callsite,
+            } => {
+                self.emit_ordinary_map_observer_println(result, root, callsite, subject)?;
+                // Unit is retained only in canonical MIR; it has no LLVM SSA
+                // value and cannot be used as a fabricated runtime operand.
+            }
             MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { root } => {
                 self.emit_ordinary_map_drop(root, subject)?;
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => {
                 let value = self.emit_ordinary_map_owned_get_new(result, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { result } => {
+                let value = self.emit_ordinary_map_owned_get_new_result(result, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
@@ -2128,6 +3663,16 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             } => {
                 let value =
                     self.emit_ordinary_map_owned_get_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value = self
+                    .emit_ordinary_map_owned_get_set_result(result, source, key, value, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
@@ -2182,7 +3727,89 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.emit_ordinary_map_owned_get_drop(root, subject)?;
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
-                let value = self.emit_ordinary_map_owned_any_v2_new(result, subject)?;
+                let value = if self.ordinary_map_direct_print_result_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_owned_any_v2_direct_print_result_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_direct_tuple_get_unpack_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_set_get_any_result_i32_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_set_get_any_result_i32_lineage_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_set_get_any_i32_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_set_get_any_i32_lineage_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_set_get_string_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_set_get_string_lineage_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_set_get_i32_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_set_get_i32_lineage_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_set_result_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_set_lineage_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.values_local_index_i32_result_branch_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_owned_any_v2_cfg_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.computed_string_key_owner_chain_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_owned_any_v2_cfg_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else if self.ordinary_map_new_result_l1_authorized
+                    && self
+                        .function
+                        .ownership
+                        .ordinary_map_new_result_receipt()
+                        .is_some()
+                {
+                    self.emit_ordinary_map_owned_any_v2_new_result(result, subject)?
+                } else {
+                    self.emit_ordinary_map_owned_any_v2_new(result, subject)?
+                };
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
@@ -2193,6 +3820,66 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             } => {
                 let value =
                     self.emit_ordinary_map_owned_any_v2_set(result, source, key, value, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_set_result(
+                    result, source, key, value, subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                if self.map_set_drop_control_result_l1_authorized {
+                    let value = self.emit_ordinary_map_owned_any_v2_map_set_drop_control_result(
+                        result, source, key, value, subject,
+                    )?;
+                    self.values.insert(result.clone(), value);
+                } else if self.values_local_index_i32_result_branch_l1_authorized {
+                    let value = self.emit_ordinary_map_owned_any_v2_map_set_drop_control_result(
+                        result, source, key, value, subject,
+                    )?;
+                    self.values.insert(result.clone(), value);
+                } else if self.computed_string_key_owner_chain_l1_authorized {
+                    let value = self.emit_ordinary_map_owned_any_v2_set_any_result(
+                        result, source, key, value, subject,
+                    )?;
+                    self.values.insert(result.clone(), value);
+                } else {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any SetAnyResult requires its exact dedicated native route",
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { result, root, key } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_get_i32_result(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetStringResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_set_string_result(
+                    result, source, key, value, subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetStringResult { result, root, key } => {
+                let value = self
+                    .emit_ordinary_map_owned_any_v2_get_string_result(result, root, key, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
@@ -2218,6 +3905,53 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     self.emit_ordinary_map_owned_any_v2_get_any(result, root, key, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult { result, root, key } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_get_any_result(result, root, key, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultI32 {
+                result,
+                root,
+                key,
+                default,
+                callsite,
+                call_target,
+                type_argument,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_get_or_default_i32(
+                    result,
+                    root,
+                    key,
+                    default,
+                    callsite,
+                    call_target,
+                    type_argument,
+                    subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultString {
+                result,
+                root,
+                key,
+                default,
+                callsite,
+                call_target,
+                type_argument,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_get_or_default_string(
+                    result,
+                    root,
+                    key,
+                    default,
+                    callsite,
+                    call_target,
+                    type_argument,
+                    subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
                 result,
                 pair,
@@ -2225,6 +3959,15 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             } => {
                 let value =
                     self.emit_ordinary_map_owned_any_v2_unpack(result, pair, projection, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Println {
+                result,
+                pair,
+                projection,
+            } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_println(result, pair, projection, subject)?;
                 self.values.insert(result.clone(), value);
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
@@ -2242,6 +3985,25 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 let value = self.emit_ordinary_map_owned_any_v2_values(result, root, subject)?;
                 self.values.insert(result.clone(), value);
             }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Keys { result, root } => {
+                let value = self.emit_ordinary_map_owned_any_v2_keys(result, root, subject)?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack {
+                result,
+                keys,
+                projection,
+            } => {
+                let value = self.emit_ordinary_map_owned_any_v2_keys_unpack(
+                    result, keys, projection, subject,
+                )?;
+                self.values.insert(result.clone(), value);
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 { result, projection } => {
+                let value =
+                    self.emit_ordinary_map_owned_any_v2_dynamic_arg0(result, projection, subject)?;
+                self.values.insert(result.clone(), value);
+            }
             MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
                 let value = self.emit_ordinary_map_owned_any_v2_is_empty(result, root, subject)?;
                 self.values.insert(result.clone(), value);
@@ -2250,6 +4012,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.emit_ordinary_map_owned_any_v2_drop(root, subject)?;
             }
             MirInstructionKind::Drop { value } => {
+                self.validate_nested_direct_print_result_drop(value, subject)?;
+                if self.map_set_drop_control_result_l1_authorized {
+                    self.validate_map_set_drop_control_result_generic_drop(value, subject)?;
+                } else if self.values_local_index_i32_result_branch_l1_authorized {
+                    self.validate_values_local_index_i32_result_branch_generic_drop(
+                        value, subject,
+                    )?;
+                }
                 self.emit_drop(value, subject)?;
             }
             MirInstructionKind::BuiltinCall {
@@ -2414,12 +4184,341 @@ mod tests {
     use crate::core::ir::{ResolvedBinaryOp, ResolvedLiteral};
     use crate::core::mir::reference::{MirProgram, MirReferenceInterpreter, MirRuntimeValue};
     use crate::core::mir::types::{MirBuiltinKind, MirGlueKind, MirLayout, MirTypeKind};
-    use crate::core::mir::MirInstructionKind;
+    use crate::core::mir::{
+        MirInstruction, MirInstructionId, MirInstructionKind, MirValue, MirValueId,
+    };
+    use crate::interp::bytecode::Op;
     use crate::interp::bytecode::{compile_mir_program, BytecodeVM};
     use crate::interp::Value;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use inkwell::context::Context;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Index1SetTemporaryTamper {
+        RemoveKeyDrop,
+        RetargetPayloadCloneDrop,
+        AddKeyOwnerUse,
+        ReorderTemporaryDrops,
+    }
+
+    fn tamper_index1_unselected_set_temporary(
+        program: &mut MirProgram,
+        tamper: Index1SetTemporaryTamper,
+    ) {
+        let proof = program
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
+            .expect("derive the exact V2 Index1 bridge before tampering")
+            .into_iter()
+            .next()
+            .expect("one V2 Index1 aggregate bridge");
+        let entry = proof
+            .producer_set_entries
+            .iter()
+            .find(|entry| entry.key == "a")
+            .expect("sorted, non-selected Set entry a")
+            .clone();
+        let mut producer = program
+            .functions()
+            .get(&proof.producer_owner)
+            .expect("producer MIR function")
+            .clone();
+
+        let key_drop = entry
+            .key_temporary_drop_instruction
+            .clone()
+            .expect("V2 key temporary Drop identity");
+        let payload_clone_drop = entry
+            .payload_clone_drop_instruction
+            .clone()
+            .expect("V2 payload-clone temporary Drop identity");
+        match tamper {
+            Index1SetTemporaryTamper::RemoveKeyDrop => {
+                let mut removed = 0;
+                for block in producer.blocks.values_mut() {
+                    let before = block.instructions.len();
+                    block
+                        .instructions
+                        .retain(|instruction| instruction.id != key_drop);
+                    removed += before - block.instructions.len();
+                }
+                assert_eq!(removed, 1, "remove exactly the receipted key Drop");
+            }
+            Index1SetTemporaryTamper::RetargetPayloadCloneDrop => {
+                let drop = producer
+                    .blocks
+                    .values_mut()
+                    .flat_map(|block| &mut block.instructions)
+                    .find(|instruction| instruction.id == payload_clone_drop)
+                    .expect("payload-clone temporary Drop");
+                let MirInstructionKind::Drop { value } = &mut drop.kind else {
+                    panic!("receipted payload-clone cleanup is not a generic Drop");
+                };
+                *value = entry.payload_value.clone();
+            }
+            Index1SetTemporaryTamper::AddKeyOwnerUse => {
+                let key_type = producer
+                    .values
+                    .get(&entry.key_value)
+                    .expect("receipted Set key value")
+                    .ty
+                    .clone();
+                let extra_value = MirValueId::new("expr:index1_tamper_extra_key_clone")
+                    .expect("fresh extra cloned key identity");
+                producer.values.insert(
+                    extra_value.clone(),
+                    MirValue {
+                        id: extra_value.clone(),
+                        ty: key_type,
+                    },
+                );
+                let clone_id = MirInstructionId::new("inst:index1_tamper_extra_key_clone")
+                    .expect("fresh extra key Clone instruction identity");
+                let drop_id = MirInstructionId::new("inst:index1_tamper_extra_key_drop")
+                    .expect("fresh extra key Drop instruction identity");
+                let block = producer
+                    .blocks
+                    .values_mut()
+                    .find(|block| {
+                        block
+                            .instructions
+                            .iter()
+                            .any(|instruction| instruction.id == entry.set_instruction)
+                    })
+                    .expect("Set instruction block");
+                let set_position = block
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.id == entry.set_instruction)
+                    .expect("Set instruction position");
+                block.instructions.splice(
+                    set_position..set_position,
+                    [
+                        MirInstruction {
+                            id: clone_id,
+                            kind: MirInstructionKind::Clone {
+                                result: extra_value.clone(),
+                                source: entry.key_value.clone(),
+                            },
+                        },
+                        MirInstruction {
+                            id: drop_id,
+                            kind: MirInstructionKind::Drop { value: extra_value },
+                        },
+                    ],
+                );
+            }
+            Index1SetTemporaryTamper::ReorderTemporaryDrops => {
+                let block = producer
+                    .blocks
+                    .values_mut()
+                    .find(|block| {
+                        block
+                            .instructions
+                            .iter()
+                            .any(|instruction| instruction.id == key_drop)
+                            && block
+                                .instructions
+                                .iter()
+                                .any(|instruction| instruction.id == payload_clone_drop)
+                    })
+                    .expect("both Set temporary Drops share one block");
+                let key_position = block
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.id == key_drop)
+                    .expect("key temporary Drop position");
+                let clone_position = block
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.id == payload_clone_drop)
+                    .expect("payload-clone temporary Drop position");
+                assert_eq!(
+                    key_position + 1,
+                    clone_position,
+                    "canonical cleanup is adjacent"
+                );
+                block.instructions.swap(key_position, clone_position);
+            }
+        }
+
+        program.replace_function_for_test_only(producer);
+    }
+
+    static NATIVE_STRING_CONCAT_FAILURE_FREE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    // SAFETY: the native MIR emitter calls this C ABI hook only with a live
+    // String allocation. The runtime free function retains its normal owner
+    // bookkeeping while this wrapper records the number of releases.
+    unsafe extern "C" fn observe_native_string_concat_free(pointer: *mut std::ffi::c_char) {
+        NATIVE_STRING_CONCAT_FAILURE_FREE_CALLS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: forwarded unchanged from the generated native String drop.
+        unsafe { crate::runtime::mimi_string_free(pointer) };
+    }
+
+    // SAFETY: runtime abort synchronously provides a live diagnostic snapshot;
+    // this isolated child exits from the callback instead of unwinding through
+    // the generated C ABI.
+    unsafe extern "C" fn native_string_concat_failure_handler(message: *const std::ffi::c_char) {
+        let typed_diagnostic = !message.is_null()
+            // SAFETY: runtime abort keeps its diagnostic snapshot alive during
+            // the callback.
+            && unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_bytes()
+                .windows(b"[E0800]".len())
+                .any(|window| window == b"[E0800]");
+        let allocation_attempts = crate::runtime::ordinary_map_string_concat_attempts_for_test(0);
+        let publication_attempts = crate::runtime::ordinary_map_string_concat_attempts_for_test(1);
+        let releases = NATIVE_STRING_CONCAT_FAILURE_FREE_CALLS.load(Ordering::SeqCst);
+        let domain_settled = crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .is_ok_and(|counts| counts.owned_strings == 0 && counts.roots == 0);
+        eprintln!(
+            "native-mir-string-concat-publication injected={typed_diagnostic} allocation_attempts={allocation_attempts} publication_attempts={publication_attempts} releases={releases} domain_settled={domain_settled}"
+        );
+        let exit_code = if typed_diagnostic
+            && allocation_attempts == 1
+            && publication_attempts == 1
+            && releases == 3
+            && domain_settled
+        {
+            0
+        } else {
+            97
+        };
+        // SAFETY: this callback runs only in the test's isolated subprocess.
+        unsafe { libc::_exit(exit_code) }
+    }
+
+    fn run_native_string_concat_program(program: &MirProgram, failure_stage: i32) -> i32 {
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_string_concat_checkpoint");
+        generator
+            .compile_mir_native(program)
+            .expect("native String concatenation MIR emission");
+        generator
+            .module
+            .verify()
+            .expect("native String concatenation module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(
+            native_ir.contains("call i32 @mimi_mir_string_concat_checkpoint(i32 1)"),
+            "native concat must emit the publication checkpoint"
+        );
+        assert!(
+            native_ir.contains("[E0800] String concatenation publication failed"),
+            "native publication failure must preserve the typed diagnostic"
+        );
+        assert!(
+            native_ir.contains("call i32 @mimi_mir_ordinary_map_domain_own_string"),
+            "the Map-bearing MIR must register the concat result before publication"
+        );
+        let engine = generator
+            .module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("native String concatenation execution engine");
+        for (symbol, address) in [
+            (
+                "mimi_str_clone",
+                crate::runtime::mimi_str_clone as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new",
+                crate::runtime::mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_new as *const ()
+                    as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32",
+                crate::runtime::mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32
+                    as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop",
+                crate::runtime::mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_drop
+                    as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_own_string",
+                crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_register_shutdown",
+                crate::runtime::mimi_mir_ordinary_map_domain_register_shutdown as *const ()
+                    as usize,
+            ),
+            (
+                "mimi_str_concat_ll",
+                crate::runtime::mimi_str_concat_ll as *const () as usize,
+            ),
+            (
+                "mimi_mir_string_concat_checkpoint",
+                crate::runtime::mimi_mir_string_concat_checkpoint as *const () as usize,
+            ),
+            (
+                "mimi_string_free",
+                observe_native_string_concat_free as *const () as usize,
+            ),
+            (
+                "mimi_runtime_abort",
+                crate::runtime::mimi_runtime_abort as *const () as usize,
+            ),
+            (
+                "mimi_mir_assert_no_live_managed_any_v2_lists",
+                crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+            ),
+        ] {
+            assert_ne!(
+                address, 0,
+                "native String concatenation mapping for {symbol}"
+            );
+            let import = generator
+                .module
+                .get_function(symbol)
+                .unwrap_or_else(|| panic!("native String concatenation is missing {symbol}"));
+            assert_eq!(
+                import.count_basic_blocks(),
+                0,
+                "native String concatenation {symbol} must be a runtime import"
+            );
+            engine.add_global_mapping(&import, address);
+        }
+        crate::codegen::assert_execution_engine_linked(
+            &engine,
+            "calling native String concatenation main",
+        );
+        let entry = generator.module.get_function("main").expect("native main");
+        assert_eq!(entry.count_params(), 0);
+        assert_eq!(
+            entry.get_type().get_return_type(),
+            Some(context.i32_type().into())
+        );
+        // SAFETY: the emitted entry has a checked zero-argument i32 ABI and
+        // the JIT engine remains alive for the duration of this call.
+        let run = unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("main") }
+            .expect("native String concatenation main entry");
+        NATIVE_STRING_CONCAT_FAILURE_FREE_CALLS.store(0, Ordering::SeqCst);
+        if failure_stage == 1 {
+            crate::runtime::mimi_runtime_set_error_handler(Some(
+                native_string_concat_failure_handler,
+            ));
+        }
+        let (result, allocation_attempts, publication_attempts) =
+            crate::runtime::with_ordinary_map_string_concat_failure_for_test(failure_stage, || {
+                // SAFETY: same verified entry and live engine as above.
+                let result = unsafe { run.call() };
+                (
+                    result,
+                    crate::runtime::ordinary_map_string_concat_attempts_for_test(0),
+                    crate::runtime::ordinary_map_string_concat_attempts_for_test(1),
+                )
+            });
+        assert_eq!(allocation_attempts, 1);
+        assert_eq!(publication_attempts, 1);
+        if failure_stage == 1 {
+            crate::runtime::mimi_runtime_set_error_handler(None);
+        }
+        result
+    }
 
     fn canonical_program(source: &str) -> MirProgram {
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -2428,9 +4527,117 @@ mod tests {
         MirProgram::from_checked_program(&checked).expect("canonical MIR")
     }
 
+    fn assert_checker_rejects_wrong_v2_unpack_source(source: &str, context: &str) {
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex wrong V2 unpack source");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse wrong V2 unpack source");
+        let diagnostics = crate::core::check_program(&file).expect_err(context);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0200")),
+            "wrong V2 unpack must fail in the source checker with E0200: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn native_mir_string_concat_publication_checkpoint_matches_consumers() {
+        const CHILD_ENV: &str = "MIMI_NATIVE_MIR_STRING_CONCAT_FAILURE_CHILD";
+        let program = canonical_program(
+            r#"
+            // Keep a supported ordinary-Map TypeDesc in the same canonical
+            // program. The witness is compiled but not called, so the test
+            // exercises Map-domain String registration without adding live
+            // Map roots to the failure path.
+            func map_type_witness() -> i32 {
+                let empty = map_new()
+                let root = map_set(empty, "seed", 7)
+                drop(empty)
+                drop(root)
+                0
+            }
+            func main() -> i32 {
+                let left = "left"
+                let right = "right"
+                let joined = left + right
+                drop(joined)
+                0
+            }
+            "#,
+        );
+
+        assert!(
+            program
+                .type_catalog()
+                .get(&crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id())
+                .is_some(),
+            "the canonical MIR test fixture carries the ordinary Map TypeDesc"
+        );
+
+        if std::env::var(CHILD_ENV).as_deref() == Ok("1") {
+            // The abort callback exits this process after observing the real
+            // generated publication-failure edge and its three String frees.
+            let _ = run_native_string_concat_program(&program, 1);
+            panic!("injected native String publication failure returned normally");
+        }
+
+        let owner = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("reference String concatenation succeeds");
+        let bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("compile String concatenation bytecode"),
+        )
+        .run_value()
+        .expect("bytecode String concatenation succeeds");
+        assert_eq!(reference, MirRuntimeValue::Int(0));
+        assert!(matches!(bytecode, Value::Int(0)));
+        assert_eq!(
+            run_native_string_concat_program(&program, -1),
+            0,
+            "native String concatenation success remains unchanged"
+        );
+
+        let test_module = module_path!()
+            .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+            .expect("unit-test module path starts with the crate name");
+        let test_name = format!(
+            "{test_module}::native_mir_string_concat_publication_checkpoint_matches_consumers"
+        );
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg(&test_name)
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("run isolated native String publication failure");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "native publication-failure child failed: status={} stdout={stdout} stderr={stderr}",
+            output.status
+        );
+        assert!(
+            stderr.contains("[E0800] String concatenation publication failed"),
+            "native publication failure must report E0800: {stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "native-mir-string-concat-publication injected=true allocation_attempts=1 publication_attempts=1 releases=3 domain_settled=true"
+            ),
+            "native publication failure must stage both checkpoints, free the result plus inputs exactly once, and clear their Map-domain receipts: {stderr}"
+        );
+    }
+
     #[test]
     fn owner_v2_public_native_and_bytecode_execution_boundaries_require_readiness() {
-        assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         let source = r#"
 type Label { text: string }
 func main() -> i32 {
@@ -2471,9 +4678,31 @@ func main() -> i32 {
         assert_native_gate(generator.compile_mir_native(&program));
         assert_native_gate(generator.compile_mir_native_with_route_receipt(&program, &receipt));
         assert_native_gate(generator.compile_mir_native_with_route_manifest(&program, &manifest));
+        let direct_receipt =
+            program.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+        assert_native_gate(
+            generator.compile_mir_native_with_route_receipt(&program, &direct_receipt),
+        );
+        let build_receipt =
+            program.route_receipt(crate::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE);
+        assert_native_gate(
+            generator.compile_mir_native_with_route_receipt(&program, &build_receipt),
+        );
         assert_native_gate(
             generator.compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt),
         );
+
+        let narrow_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE);
+        let narrow_errors = CodeGenerator::new(&context, "owner_v2_forged_checked_get_gate")
+            .compile_mir_native_with_route_receipt(&program, &narrow_receipt)
+            .expect_err("broad owner-v2 operations cannot borrow the CheckedGet native gate");
+        assert!(narrow_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("CheckedGet native route rejected")
+        }));
 
         fn assert_vm_gate<T: std::fmt::Debug>(result: Result<T, crate::interp::InterpError>) {
             let error =
@@ -2514,6 +4743,1502 @@ func main() -> i32 {
         assert!(
             vm.take_stdout().is_empty(),
             "gate precedes source side effects"
+        );
+    }
+
+    #[test]
+    fn exact_checked_get_receipt_authorizes_native_emission_without_opening_broad_v2() {
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = r#"
+func main() -> bool {
+    let empty = map_new()
+    let root = map_set(empty, "answer", true)
+    let pair = map_get(root, "answer")
+    drop(empty)
+    drop(root)
+    let found = pair.0
+    let payload = pair.1 as bool
+    drop(pair)
+    found && payload
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2;
+        assert_eq!(
+            admission,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::CheckedGet
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("CheckedGet MIR");
+        let generic_native_errors = crate::codegen::mir::validate_mir_native(&program)
+            .expect_err("the generic native validator cannot authorize Bool CheckedGet");
+        let generic_native_errors = format!("{generic_native_errors:?}");
+        assert!(
+            generic_native_errors.contains("Set value is outside the canonical i32/String/Label")
+                && generic_native_errors.contains("unpack result is neither canonical i32"),
+            "the generic native path must keep both Bool owner checks closed: {generic_native_errors}"
+        );
+        let generic_receipt = program.route_receipt("canonical-dispatch-v1");
+        assert!(
+            crate::codegen::mir::validate_mir_native_checked_get_route(&program, &generic_receipt)
+                .is_err(),
+            "a generic route receipt cannot authorize the Bool CheckedGet exception"
+        );
+        let checked_get_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE);
+        crate::codegen::mir::validate_mir_native_checked_get_route(&program, &checked_get_receipt)
+            .expect("the exact Checker-bound CheckedGet receipt admits native Bool");
+        let context = Context::create();
+        let digest = program.canonical_digest();
+        for (module_name, profile) in [
+            (
+                "exact_checked_get_native_route",
+                crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE,
+            ),
+            (
+                "exact_checked_get_build_route",
+                crate::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+            ),
+            (
+                "exact_checked_get_verifier_route",
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE,
+            ),
+        ] {
+            let receipt = program.route_receipt(profile);
+            let mut generator = CodeGenerator::new(&context, module_name);
+            generator
+                .compile_mir_native_with_route_receipt(&program, &receipt)
+                .expect("an exact CheckedGet route receipt authorizes its native consumer");
+            assert_eq!(
+                generator.mir_native_compiled_digest.as_deref(),
+                Some(digest.as_str())
+            );
+        }
+        let mut checked_generator = CodeGenerator::new(&context, "checked_get_bool_checked_entry");
+        checked_generator
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &checked_get_receipt)
+            .expect("CheckedProgram coverage admits only the exact Bool CheckedGet receipt");
+        let values_receipt = program
+            .route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let cross_profile_errors = CodeGenerator::new(&context, "checked_get_values_receipt")
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &values_receipt)
+            .expect_err("ValuesFieldMove cannot borrow a CheckedGet graph");
+        assert!(cross_profile_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("ValuesFieldMove native route rejected")
+        }));
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_computed_key_get_route_preflights_and_runs_natively_without_opening_broad_v2() {
+        use crate::core::mir::{
+            MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE,
+            ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_computed_key_get.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2;
+        assert_eq!(
+            admission,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ComputedKeyGet
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("ComputedKeyGet MIR");
+        let receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE);
+        let context = Context::create();
+
+        let raw_errors = CodeGenerator::new(&context, "computed_key_get_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR receipts cannot authorize ComputedKeyGet");
+        assert!(raw_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let generic_errors = CodeGenerator::new(&context, "computed_key_get_generic_checked")
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+            .expect_err("the generic CheckedProgram route cannot authorize ComputedKeyGet");
+        assert!(generic_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("dedicated CheckedProgram native route entry")
+        }));
+
+        let broad_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let wrong_profile_errors = CodeGenerator::new(&context, "computed_key_get_wrong_profile")
+            .compile_checked_mir_native_with_computed_key_get_route(
+                &checked,
+                &program,
+                &broad_receipt,
+            )
+            .expect_err("ComputedKeyGet requires its exact profile");
+        assert!(wrong_profile_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic.message.contains("requires profile")
+        }));
+
+        let mut tampered_receipt = receipt.clone();
+        tampered_receipt.mir_digest = "0".repeat(64);
+        let tampered_errors = CodeGenerator::new(&context, "computed_key_get_tampered_receipt")
+            .compile_checked_mir_native_with_computed_key_get_route(
+                &checked,
+                &program,
+                &tampered_receipt,
+            )
+            .expect_err("a receipt for another MIR digest is rejected");
+        assert!(tampered_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated checker");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated checker");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated program");
+        let unrelated_checker_errors =
+            CodeGenerator::new(&context, "computed_key_get_unrelated_checker")
+                .compile_checked_mir_native_with_computed_key_get_route(
+                    &unrelated_checked,
+                    &program,
+                    &receipt,
+                )
+                .expect_err("the receipt cannot be paired with unrelated Checker evidence");
+        assert!(unrelated_checker_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("ComputedKeyGet native route rejected")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "computed_key_get_production_native");
+        native
+            .compile_checked_mir_native_with_computed_key_get_route(&checked, &program, &receipt)
+            .expect("the exact Checker/MIR ComputedKeyGet profile passes native preflight");
+        native.module.verify().expect("valid ComputedKeyGet LLVM");
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let engine = native
+            .module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .expect("ComputedKeyGet native execution engine");
+        for (symbol, address) in [
+            (
+                "mimi_ordinary_map_owned_any_v2_new",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_set",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_set as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_get",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_get as *const () as usize,
+            ),
+            (
+                "mimi_ordinary_map_owned_any_v2_drop",
+                crate::runtime::mimi_ordinary_map_owned_any_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_new",
+                crate::runtime::mimi_any_payload_v2_new as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_drop",
+                crate::runtime::mimi_any_payload_v2_drop as *const () as usize,
+            ),
+            (
+                "mimi_any_payload_v2_unpack",
+                crate::runtime::mimi_any_payload_v2_unpack as *const () as usize,
+            ),
+            (
+                "mimi_str_concat_ll",
+                crate::runtime::mimi_str_concat_ll as *const () as usize,
+            ),
+            (
+                "mimi_mir_string_concat_checkpoint",
+                crate::runtime::mimi_mir_string_concat_checkpoint as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_own_string",
+                crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
+            ),
+            (
+                "mimi_mir_ordinary_map_domain_register_shutdown",
+                crate::runtime::mimi_mir_ordinary_map_domain_register_shutdown as *const ()
+                    as usize,
+            ),
+            (
+                "mimi_str_clone",
+                crate::runtime::mimi_str_clone as *const () as usize,
+            ),
+            (
+                "mimi_string_free",
+                crate::runtime::mimi_string_free as *const () as usize,
+            ),
+            (
+                "mimi_runtime_abort",
+                crate::runtime::mimi_runtime_abort as *const () as usize,
+            ),
+            (
+                "mimi_trap_overflow",
+                crate::runtime::mimi_trap_overflow as *const () as usize,
+            ),
+            (
+                "mimi_mir_assert_no_live_managed_any_v2_lists",
+                crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+            ),
+        ] {
+            assert_ne!(
+                address, 0,
+                "ComputedKeyGet runtime mapping for {symbol} must be non-empty"
+            );
+            let import = native.module.get_function(symbol).unwrap_or_else(|| {
+                panic!("ComputedKeyGet native module is missing required runtime import {symbol}")
+            });
+            assert_eq!(
+                import.count_basic_blocks(),
+                0,
+                "ComputedKeyGet {symbol} must be a body-less runtime import"
+            );
+            engine.add_global_mapping(&import, address);
+        }
+        let entry = native.module.get_function("main").expect("native main");
+        assert_eq!(entry.count_params(), 0);
+        assert_eq!(
+            entry.get_type().get_return_type(),
+            Some(context.i32_type().into())
+        );
+        // SAFETY: the generated entry has a checked zero-argument i32 ABI,
+        // and every runtime import it uses is mapped above to its Mimi runtime.
+        let run = unsafe { engine.get_function::<unsafe extern "C" fn() -> i32>("main") }
+            .expect("verified native main entry");
+        crate::codegen::assert_execution_engine_linked(
+            &engine,
+            "calling ComputedKeyGet native main",
+        );
+        // SAFETY: `run` is the checked zero-argument i32 entry and its engine
+        // remains alive for this call; the native entry takes no pointers.
+        assert_eq!(unsafe { run.call() }, 0);
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_values_field_move_receipt_authorizes_only_checked_native_emission() {
+        use crate::core::mir::{
+            MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE, ORDINARY_MAP_OWNED_ANY_V2_ISLAND,
+            ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_field_move.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked)
+            .ordinary_map_owned_any_v2;
+        assert_eq!(
+            admission,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesFieldMove
+        );
+        let program = MirProgram::from_checked_program(&checked).expect("ValuesFieldMove MIR");
+        super::checked_managed_any_unpack_coverage(&checked, &program)
+            .expect("the direct Values conversion is joined to its field-move receipt");
+        let receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let context = Context::create();
+
+        let raw_error = CodeGenerator::new(&context, "values_field_move_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR cannot authorize Checker-owned Values evidence");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "values_field_move_checked_route");
+        native
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+            .expect("the exact CheckedProgram ValuesFieldMove receipt admits native emission");
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let mut missing = CodeGenerator::new(&context, "values_field_move_missing_receipt");
+        let missing_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let missing_errors = missing
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &missing_receipt)
+            .expect_err("the broad V2 receipt cannot stand in for ValuesFieldMove");
+        assert!(missing_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_errors = CodeGenerator::new(&context, "values_field_move_mutated_receipt")
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &mutated_receipt)
+            .expect_err("a mutated ValuesFieldMove route receipt is rejected");
+        assert!(mutated_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let checked_get_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE);
+        let cross_profile_errors = CodeGenerator::new(&context, "values_field_move_get_receipt")
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &checked_get_receipt)
+            .expect_err("CheckedGet cannot authorize a ValuesFieldMove graph");
+        assert!(cross_profile_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("CheckedGet native route rejected")
+        }));
+
+        let whole_drop_source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "whole drop" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let snapshot = values(root)
+    let item = snapshot[0] as Label
+    drop(snapshot)
+    drop(empty)
+    drop(root)
+    drop(label)
+    drop(item)
+    0
+}
+"#;
+        let tokens = Lexer::new(whole_drop_source)
+            .tokenize()
+            .expect("lex whole-drop");
+        let file = Parser::new(tokens).parse_file().expect("parse whole-drop");
+        let whole_drop_checked = crate::core::check_program(&file).expect("check whole-drop");
+        let whole_drop_program =
+            MirProgram::from_checked_program(&whole_drop_checked).expect("whole-drop MIR");
+        let whole_drop_receipt =
+            whole_drop_program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let whole_drop_errors = CodeGenerator::new(&context, "values_field_move_whole_drop")
+            .compile_checked_mir_native_with_route_receipt(
+                &whole_drop_checked,
+                &whole_drop_program,
+                &whole_drop_receipt,
+            )
+            .expect_err("whole-record Drop cannot borrow the field-move route");
+        assert!(whole_drop_errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("ValuesFieldMove native route rejected")
+        }));
+
+        let extra_field_source = r#"
+type Label { text: string, number: i32 }
+func main() -> i32 {
+    let label = Label { text: "extra field", number: 7 }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let snapshot = values(root)
+    let item = snapshot[0] as Label
+    drop(snapshot)
+    drop(empty)
+    drop(root)
+    drop(label)
+    drop(item)
+    0
+}
+"#;
+        let tokens = Lexer::new(extra_field_source)
+            .tokenize()
+            .expect("lex extra-field");
+        let file = Parser::new(tokens).parse_file().expect("parse extra-field");
+        let extra_field_errors =
+            crate::core::check_program(&file).expect_err("check extra-field must fail closed");
+        assert!(
+            extra_field_errors.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+                    && diagnostic
+                        .message
+                        .contains("exact receipt-backed canonical Label")
+            }),
+            "multi-field nominal unpack must fail at the checked boundary: {extra_field_errors:?}"
+        );
+    }
+
+    #[test]
+    fn exact_values_snapshot_replacement_receipt_authorizes_only_its_checked_native_route() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_ISLAND, ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_snapshot_replacement.mimi"
+        );
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex snapshot replacement");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse snapshot replacement");
+        let checked = crate::core::check_program(&file).expect("check snapshot replacement");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesSnapshotReplacement
+        );
+
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("snapshot replacement has canonical MIR");
+        let profile = CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesSnapshotReplacement;
+        assert_eq!(
+            profile.as_str(),
+            "map-any-owner-v2-values-snapshot-replacement-v1"
+        );
+        let receipt = program.route_receipt(profile.as_str());
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_snapshot_replacement_route(
+            &checked, &program,
+        )
+        .expect("the checked replacement, snapshot and both indexed field moves agree");
+        receipt
+            .validate_against_program(&program)
+            .expect("the exact replacement profile receipt binds this MIR graph");
+        let generic_coverage_error = super::checked_managed_any_unpack_coverage(&checked, &program)
+            .expect_err(
+                "the generic CheckedGet/ValuesFieldMove gate cannot borrow snapshot authority",
+            );
+        assert!(generic_coverage_error.contains("exact Values field-move profile"));
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "values_snapshot_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR cannot mint snapshot-replacement Checker authority");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let generic_checked_error =
+            CodeGenerator::new(&context, "values_snapshot_generic_checked_receipt")
+                .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+                .expect_err("the generic checked receipt entry cannot mint this profile");
+        assert!(generic_checked_error
+            .iter()
+            .any(|diagnostic| { diagnostic.code.as_deref() == Some("E0722") }));
+
+        let mut native = CodeGenerator::new(&context, "values_snapshot_checked_route");
+        native
+            .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                &checked, &program, &receipt,
+            )
+            .expect("the exact CheckedProgram route authorizes native emission");
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let broad_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let broad_error = CodeGenerator::new(&context, "values_snapshot_broad_receipt")
+            .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                &checked,
+                &program,
+                &broad_receipt,
+            )
+            .expect_err("the broad V2 receipt cannot authorize this narrow route");
+        assert!(broad_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)));
+
+        let field_move_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let wrong_profile_error =
+            CodeGenerator::new(&context, "values_snapshot_field_move_receipt")
+                .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                    &checked,
+                    &program,
+                    &field_move_receipt,
+                )
+                .expect_err("ValuesFieldMove cannot authorize snapshot replacement");
+        assert!(wrong_profile_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_error = CodeGenerator::new(&context, "values_snapshot_mutated_receipt")
+            .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                &checked,
+                &program,
+                &mutated_receipt,
+            )
+            .expect_err("a changed route digest cannot authorize native emission");
+        assert!(mutated_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let mut tampered_program = program.clone();
+        let mut tampered_function = tampered_program
+            .functions()
+            .get(&owner)
+            .expect("snapshot-replacement main MIR")
+            .clone();
+        let set = tampered_function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                )
+            })
+            .expect("one receipted snapshot-replacement Set");
+        set.id = crate::core::mir::MirInstructionId::new("inst:forged:snapshot-replacement-set")
+            .expect("valid forged instruction identity");
+        tampered_program.replace_function_for_test_only(tampered_function);
+        let tampered_program_error = CodeGenerator::new(&context, "values_snapshot_mutated_mir")
+            .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                &checked,
+                &tampered_program,
+                &receipt,
+            )
+            .expect_err("mutating a receipted MIR Set cannot retain its route authority");
+        assert!(tampered_program_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated source");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated source");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated source");
+        let unrelated_error = CodeGenerator::new(&context, "values_snapshot_wrong_checked_program")
+            .compile_checked_mir_native_with_values_snapshot_replacement_route(
+                &unrelated_checked,
+                &program,
+                &receipt,
+            )
+            .expect_err("unrelated CheckedProgram source cannot authorize this MIR");
+        assert!(unrelated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_values_local_index_i32_result_branch_receipt_authorizes_only_its_checked_native_route()
+    {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_ISLAND, ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!("../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_local_index_i32_result_branch.mimi");
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex local-index source");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse local-index source");
+        let checked = crate::core::check_program(&file).expect("check local-index source");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesLocalIndexI32ResultBranch
+        );
+
+        let materialized = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("local-index Result-branch canonical route");
+        let program = materialized.program;
+        let profile =
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranch;
+        assert_eq!(
+            profile.as_str(),
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
+        );
+        let receipt = crate::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+            &checked, &program,
+        )
+        .expect("Checker and MIR receipts bind all three Result paths and the local i32 unpack");
+        assert_eq!(receipt.profile, profile.as_str());
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_mir_route(
+            &program,
+        )
+        .expect("MIR route binds New/Set Result branches, the local zero, and one dropped snapshot");
+        receipt
+            .validate_against_program(&program)
+            .expect("route receipt binds this exact MIR graph");
+        assert!(
+            super::checked_managed_any_unpack_coverage(&checked, &program).is_err(),
+            "generic Any coverage cannot borrow the local-index route authority"
+        );
+
+        let context = Context::create();
+        let raw_error =
+            CodeGenerator::new(&context, "values_local_index_result_branch_raw_receipt")
+                .compile_mir_native_with_route_receipt(&program, &receipt)
+                .expect_err("raw MIR cannot mint Result-branch Checker authority");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let generic_checked_error = CodeGenerator::new(
+            &context,
+            "values_local_index_result_branch_generic_checked_receipt",
+        )
+        .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+        .expect_err("generic checked receipt entry cannot mint the Result-branch profile");
+        assert!(generic_checked_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut native =
+            CodeGenerator::new(&context, "values_local_index_result_branch_checked_route");
+        native
+            .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+                &checked, &program, &receipt,
+            )
+            .expect("exact CheckedProgram route authorizes native emission");
+        native
+            .module
+            .verify()
+            .expect("native Result-branch route LLVM module verifies");
+        let execution = crate::tests::link_and_observe_canonical_mir(&native)
+            .expect("run native Result-branch route executable");
+        assert_eq!(execution.exit_code, Some(41), "{}", execution.stderr);
+        assert!(execution.stdout.is_empty(), "{}", execution.stdout);
+        assert!(execution.stderr.is_empty(), "{}", execution.stderr);
+
+        let broad_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let broad_error =
+            CodeGenerator::new(&context, "values_local_index_result_branch_broad_receipt")
+                .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+                    &checked,
+                    &program,
+                    &broad_receipt,
+                )
+                .expect_err("the broad V2 receipt cannot authorize this narrow route");
+        assert!(broad_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let field_move_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let wrong_profile_error = CodeGenerator::new(
+            &context,
+            "values_local_index_result_branch_field_move_receipt",
+        )
+        .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+            &checked,
+            &program,
+            &field_move_receipt,
+        )
+        .expect_err("the Label field-move profile cannot authorize local indexing");
+        assert!(wrong_profile_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_error =
+            CodeGenerator::new(&context, "values_local_index_result_branch_mutated_receipt")
+                .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+                    &checked,
+                    &program,
+                    &mutated_receipt,
+                )
+                .expect_err("a changed route digest cannot authorize native emission");
+        assert!(mutated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let mut tampered_program = program.clone();
+        let mut tampered_function = tampered_program
+            .functions()
+            .get(&owner)
+            .expect("local-index Result-branch main MIR")
+            .clone();
+        let set = tampered_function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                )
+            })
+            .expect("one receipted Result-branch local-index SetAnyResult");
+        set.id =
+            crate::core::mir::MirInstructionId::new("inst:forged:local-index-result-branch-set")
+                .expect("valid forged instruction identity");
+        tampered_program.replace_function_for_test_only(tampered_function);
+        let tampered_error =
+            CodeGenerator::new(&context, "values_local_index_result_branch_mutated_mir")
+                .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+                    &checked,
+                    &tampered_program,
+                    &receipt,
+                )
+                .expect_err("mutating a receipted Map Set cannot retain route authority");
+        assert!(tampered_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated source");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated source");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated source");
+        let unrelated_error = CodeGenerator::new(
+            &context,
+            "values_local_index_result_branch_wrong_checked_program",
+        )
+        .compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+            &unrelated_checked,
+            &program,
+            &receipt,
+        )
+        .expect_err("unrelated CheckedProgram cannot authorize this MIR");
+        assert!(unrelated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_keys_snapshot_receipt_authorizes_only_its_checked_native_route() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_ISLAND, ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = r#"
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let snapshot = keys(root)
+    drop(empty)
+    drop(root)
+    let key = snapshot[0]
+    drop(snapshot)
+    println(key)
+    drop(key)
+    0
+}
+"#;
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex KeysSnapshot source");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse KeysSnapshot source");
+        let checked = crate::core::check_program(&file).expect("check KeysSnapshot source");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot
+        );
+        let program =
+            MirProgram::from_checked_program(&checked).expect("KeysSnapshot canonical MIR");
+        let profile = CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2KeysSnapshot;
+        assert_eq!(profile.as_str(), "map-any-owner-v2-keys-snapshot-v1");
+        let receipt = crate::core::mir::validate_ordinary_map_owned_any_v2_keys_snapshot_route(
+            &checked, &program,
+        )
+        .expect("Checker source and MIR witness bind the exact Keys snapshot and index zero");
+        assert_eq!(receipt.profile, profile.as_str());
+        receipt
+            .validate_against_program(&program)
+            .expect("exact route receipt binds the native MIR graph");
+        crate::core::mir::validate_ordinary_map_owned_any_v2_keys_snapshot_mir_route(&program)
+            .expect("MIR witness proves the copied key remains live after root/list drops");
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "keys_snapshot_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR receipt cannot mint Checker KeysSnapshot authority");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+        let generic_checked_error =
+            CodeGenerator::new(&context, "keys_snapshot_generic_checked_receipt")
+                .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+                .expect_err("generic checked route entry cannot mint KeysSnapshot authority");
+        assert!(generic_checked_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut native = CodeGenerator::new(&context, "keys_snapshot_checked_route");
+        native
+            .compile_checked_mir_native_with_keys_snapshot_route(&checked, &program, &receipt)
+            .expect("exact Checker and MIR receipts authorize native Keys emission");
+        native
+            .module
+            .verify()
+            .expect("native KeysSnapshot LLVM verifies");
+        let native_ir = native.module.print_to_string().to_string();
+        assert!(native_ir.contains("@mimi_ordinary_map_owned_any_v2_keys_list"));
+        assert!(native_ir.contains("@mimi_mir_ordinary_map_owned_any_v2_keys_unpack_copy_string"));
+        let execution = crate::tests::link_and_observe_canonical_mir(&native)
+            .expect("run native KeysSnapshot executable");
+        assert_eq!(execution.exit_code, Some(0), "{}", execution.stderr);
+        assert_eq!(execution.stdout, "answer\n");
+        assert!(execution.stderr.is_empty(), "{}", execution.stderr);
+
+        let broad_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let broad_error = CodeGenerator::new(&context, "keys_snapshot_broad_receipt")
+            .compile_checked_mir_native_with_keys_snapshot_route(&checked, &program, &broad_receipt)
+            .expect_err("the broad V2 receipt cannot authorize KeysSnapshot");
+        assert!(broad_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let values_receipt = program.route_receipt(
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE,
+        );
+        let non_keys_error = CodeGenerator::new(&context, "keys_snapshot_non_keys_receipt")
+            .compile_checked_mir_native_with_keys_snapshot_route(
+                &checked,
+                &program,
+                &values_receipt,
+            )
+            .expect_err("a non-Keys Values receipt cannot authorize Keys emission");
+        assert!(non_keys_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_error = CodeGenerator::new(&context, "keys_snapshot_mutated_receipt")
+            .compile_checked_mir_native_with_keys_snapshot_route(
+                &checked,
+                &program,
+                &mutated_receipt,
+            )
+            .expect_err("a changed MIR digest cannot authorize KeysSnapshot");
+        assert!(mutated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated source");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated source");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated source");
+        let unrelated_error = CodeGenerator::new(&context, "keys_snapshot_wrong_checked_program")
+            .compile_checked_mir_native_with_keys_snapshot_route(
+                &unrelated_checked,
+                &program,
+                &receipt,
+            )
+            .expect_err("unrelated CheckedProgram cannot authorize this MIR");
+        assert!(unrelated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_values_mixed_snapshot_receipt_authorizes_only_its_checked_native_route() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_ISLAND, ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_mixed_snapshot.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex mixed snapshot");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse mixed snapshot");
+        let checked = crate::core::check_program(&file).expect("check mixed snapshot");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesMixedSnapshot
+        );
+
+        let program =
+            MirProgram::from_checked_program(&checked).expect("mixed snapshot has canonical MIR");
+        let profile = CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshot;
+        assert_eq!(
+            profile.as_str(),
+            "map-any-owner-v2-values-mixed-snapshot-v1"
+        );
+        let receipt = program.route_receipt(profile.as_str());
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_mixed_snapshot_route(
+            &checked, &program,
+        )
+        .expect("Checker and MIR receipts bind the exact sorted i32/String/Label snapshot");
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_mixed_snapshot_mir_route(
+            &program,
+        )
+        .expect("MIR-only route rederives the three indexed payloads and owner settlements");
+        receipt
+            .validate_against_program(&program)
+            .expect("the mixed snapshot route receipt binds this exact MIR graph");
+        assert!(
+            super::checked_managed_any_unpack_coverage(&checked, &program).is_err(),
+            "generic Values coverage cannot borrow the mixed-snapshot route authority"
+        );
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "values_mixed_snapshot_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR cannot mint mixed-snapshot Checker authority");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let generic_checked_error =
+            CodeGenerator::new(&context, "values_mixed_snapshot_generic_checked_receipt")
+                .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+                .expect_err("the generic checked receipt entry cannot mint this profile");
+        assert!(generic_checked_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("E0722")));
+
+        let mut native = CodeGenerator::new(&context, "values_mixed_snapshot_checked_route");
+        native
+            .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                &checked, &program, &receipt,
+            )
+            .expect("the exact CheckedProgram route authorizes native emission");
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let broad_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let broad_error = CodeGenerator::new(&context, "values_mixed_snapshot_broad_receipt")
+            .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                &checked,
+                &program,
+                &broad_receipt,
+            )
+            .expect_err("the broad V2 receipt cannot authorize this narrow route");
+        assert!(broad_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let snapshot_replacement_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE);
+        let wrong_profile_error =
+            CodeGenerator::new(&context, "values_mixed_snapshot_replacement_receipt")
+                .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                    &checked,
+                    &program,
+                    &snapshot_replacement_receipt,
+                )
+                .expect_err("snapshot replacement cannot authorize mixed snapshot");
+        assert!(wrong_profile_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let field_move_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE);
+        let field_move_error =
+            CodeGenerator::new(&context, "values_mixed_snapshot_field_move_receipt")
+                .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                    &checked,
+                    &program,
+                    &field_move_receipt,
+                )
+                .expect_err("the single-Label field-move profile cannot authorize mixed snapshot");
+        assert!(field_move_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_error = CodeGenerator::new(&context, "values_mixed_snapshot_mutated_receipt")
+            .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                &checked,
+                &program,
+                &mutated_receipt,
+            )
+            .expect_err("a changed route digest cannot authorize native emission");
+        assert!(mutated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let mut tampered_program = program.clone();
+        let mut tampered_function = tampered_program
+            .functions()
+            .get(&owner)
+            .expect("mixed-snapshot main MIR")
+            .clone();
+        let set = tampered_function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                )
+            })
+            .expect("one receipted mixed-snapshot Set");
+        set.id = crate::core::mir::MirInstructionId::new("inst:forged:mixed-snapshot-set")
+            .expect("valid forged instruction identity");
+        tampered_program.replace_function_for_test_only(tampered_function);
+        let tampered_error = CodeGenerator::new(&context, "values_mixed_snapshot_mutated_mir")
+            .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                &checked,
+                &tampered_program,
+                &receipt,
+            )
+            .expect_err("mutating a receipted Set cannot retain route authority");
+        assert!(tampered_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated source");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated source");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated source");
+        let unrelated_error =
+            CodeGenerator::new(&context, "values_mixed_snapshot_wrong_checked_program")
+                .compile_checked_mir_native_with_values_mixed_snapshot_route(
+                    &unrelated_checked,
+                    &program,
+                    &receipt,
+                )
+                .expect_err("unrelated CheckedProgram cannot authorize this MIR");
+        assert!(unrelated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn exact_values_mixed_snapshot_remove_receipt_authorizes_only_its_checked_native_route() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_ISLAND, ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_snapshot_remove.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex snapshot remove");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse snapshot remove");
+        let checked = crate::core::check_program(&file).expect("check snapshot remove");
+        assert_eq!(
+            crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                .ordinary_map_owned_any_v2,
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesMixedSnapshotRemove
+        );
+
+        let program =
+            MirProgram::from_checked_program(&checked).expect("snapshot remove has canonical MIR");
+        let profile = CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshotRemove;
+        assert_eq!(
+            profile.as_str(),
+            "map-any-owner-v2-values-mixed-snapshot-remove-v1"
+        );
+        let receipt = program.route_receipt(profile.as_str());
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_route(
+            &checked, &program,
+        )
+        .expect("the dedicated route binds its nested snapshot and exact Remove receipts");
+        super::ordinary_map_owned_any_v2::
+            validate_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_native_contract(
+                &program,
+            )
+            .expect("the nested snapshot has the common native Values/unpack contract");
+        receipt
+            .validate_against_program(&program)
+            .expect("the exact snapshot-remove receipt binds this MIR graph");
+        assert!(
+            super::checked_managed_any_unpack_coverage(&checked, &program).is_err(),
+            "generic Values coverage cannot borrow mixed-snapshot-remove authority"
+        );
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "values_snapshot_remove_raw_receipt")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR cannot mint snapshot-remove Checker authority");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("requires CheckedProgram validation")
+        }));
+
+        let generic_checked_error =
+            CodeGenerator::new(&context, "values_snapshot_remove_generic_checked_receipt")
+                .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+                .expect_err("the generic checked-receipt entry cannot mint this profile");
+        assert!(generic_checked_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("E0722")));
+
+        let mut native = CodeGenerator::new(&context, "values_snapshot_remove_checked_route");
+        native
+            .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                &checked, &program, &receipt,
+            )
+            .expect("the exact Checker/MIR profile authorizes native emission");
+        let native_ir = native.module.print_to_string().to_string();
+        for runtime in [
+            "mimi_ordinary_map_owned_any_v2_remove",
+            "mimi_ordinary_map_owned_any_v2_values_list",
+            "mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string",
+        ] {
+            assert!(native_ir.contains(runtime), "native IR omits {runtime}");
+        }
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let broad_receipt = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let broad_error = CodeGenerator::new(&context, "values_snapshot_remove_broad_receipt")
+            .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                &checked,
+                &program,
+                &broad_receipt,
+            )
+            .expect_err("the broad V2 receipt cannot authorize this narrow route");
+        assert!(broad_error
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)));
+
+        let snapshot_receipt =
+            program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE);
+        let wrong_profile_error =
+            CodeGenerator::new(&context, "values_snapshot_remove_snapshot_receipt")
+                .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                    &checked,
+                    &program,
+                    &snapshot_receipt,
+                )
+                .expect_err("mixed snapshot alone cannot authorize the additional Remove");
+        assert!(wrong_profile_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut mutated_receipt = receipt.clone();
+        mutated_receipt.mir_digest = "0".repeat(64);
+        let mutated_error = CodeGenerator::new(&context, "values_snapshot_remove_mutated_receipt")
+            .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                &checked,
+                &program,
+                &mutated_receipt,
+            )
+            .expect_err("a changed route digest cannot authorize native emission");
+        assert!(mutated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let owner = crate::core::NodeId("function:main".into());
+        let mut tampered_program = program.clone();
+        let mut tampered_function = tampered_program
+            .functions()
+            .get(&owner)
+            .expect("snapshot-remove main MIR")
+            .clone();
+        let remove = tampered_function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
+                )
+            })
+            .expect("one receipted snapshot-remove Remove");
+        remove.id = crate::core::mir::MirInstructionId::new("inst:forged:snapshot-remove")
+            .expect("valid forged instruction identity");
+        tampered_program.replace_function_for_test_only(tampered_function);
+        let tampered_error = CodeGenerator::new(&context, "values_snapshot_remove_mutated_mir")
+            .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                &checked,
+                &tampered_program,
+                &receipt,
+            )
+            .expect_err("mutating the receipted Remove cannot retain route authority");
+        assert!(tampered_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+
+        let unrelated_tokens = Lexer::new("func main() -> i32 { 0 }")
+            .tokenize()
+            .expect("lex unrelated source");
+        let unrelated_file = Parser::new(unrelated_tokens)
+            .parse_file()
+            .expect("parse unrelated source");
+        let unrelated_checked =
+            crate::core::check_program(&unrelated_file).expect("check unrelated source");
+        let unrelated_error =
+            CodeGenerator::new(&context, "values_snapshot_remove_wrong_checked_program")
+                .compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+                    &unrelated_checked,
+                    &program,
+                    &receipt,
+                )
+                .expect_err("unrelated CheckedProgram cannot authorize this MIR");
+        assert!(unrelated_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+    }
+
+    #[test]
+    fn checked_any_unpack_coverage_requires_an_exact_v2_receipt_for_label() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_checked_get_hit_label.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+
+        super::checked_managed_any_unpack_coverage(&checked, &program)
+            .expect("the exact Checker-issued Label conversion and V2 unpack receipt match");
+        assert_eq!(
+            program
+                .ordinary_map_owned_any_v2_unpack_result_receipts()
+                .expect("derive exact V2 unpack receipts")
+                .len(),
+            1
+        );
+
+        let no_unpack_source = r#"
+type Label { text: string }
+func main() -> bool {
+    let empty = map_new()
+    let root = map_set(empty, "value", Label { text: "no unpack receipt" })
+    drop(empty)
+    drop(root)
+    true
+}
+"#;
+        let tokens = Lexer::new(no_unpack_source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked_no_unpack = crate::core::check_program(&file).expect("check no-unpack case");
+        let without_mir_receipt =
+            MirProgram::from_checked_program(&checked_no_unpack).expect("canonical no-unpack MIR");
+        assert!(without_mir_receipt
+            .ordinary_map_owned_any_v2_unpack_result_receipts()
+            .expect("derive receipts from the no-unpack MIR")
+            .is_empty());
+        let error = super::checked_managed_any_unpack_coverage(&checked, &without_mir_receipt)
+            .expect_err("a Checked Label conversion cannot be authorized without its MIR receipt");
+        assert!(
+            error.contains("complete canonical owner receipt coverage"),
+            "missing V2 Label receipt must fail closed, got: {error}"
+        );
+
+        let other_record_source = r#"
+type Other { text: string }
+func main() -> bool {
+    let empty = map_new()
+    let root = map_set(empty, "value", Other { text: "not Label" })
+    let pair = map_get(root, "value")
+    drop(empty)
+    drop(root)
+    let payload = pair.1 as Other
+    drop(pair)
+    drop(payload)
+    true
+}
+"#;
+        let tokens = Lexer::new(other_record_source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked_other = crate::core::check_program(&file).expect("check non-Label record");
+        let program_other =
+            MirProgram::from_checked_program(&checked_other).expect("non-Label diagnostic MIR");
+        let error = super::checked_managed_any_unpack_coverage(&checked_other, &program_other)
+            .expect_err("same-layout nominal records do not acquire the CheckedGet Label profile");
+        assert!(
+            error.contains("exact V2 Label descriptor contracts"),
+            "non-Label nominal target must fail closed, got: {error}"
+        );
+    }
+
+    #[test]
+    fn canonical_mir_native_census_events_have_stable_format_and_counts() {
+        assert_eq!(
+            super::canonical_mir_native_owner_event("function:main"),
+            "info: canonical MIR native emitted owner='function:main'"
+        );
+        assert_eq!(
+            super::canonical_mir_native_summary_event(2, 2, &"a".repeat(64)),
+            format!(
+                "info: canonical MIR native compiled 2/2 function(s), 0 fell back; mir_digest={}",
+                "a".repeat(64)
+            )
+        );
+    }
+
+    #[test]
+    fn canonical_mir_native_census_rejects_incomplete_duplicate_and_declared_rosters() {
+        let expected = vec!["function:first".into(), "function:second".into()];
+        let entry = |owner: &str, symbol: &str| super::CanonicalMirNativeCensusEntry {
+            owner: owner.into(),
+            llvm_symbol: symbol.into(),
+            has_body: true,
+            verified: true,
+        };
+        let complete = vec![
+            entry("function:first", "first"),
+            entry("function:second", "second"),
+        ];
+        assert!(super::validate_canonical_mir_native_census_roster(&expected, &complete).is_ok());
+
+        let incomplete = vec![entry("function:first", "first")];
+        assert!(
+            super::validate_canonical_mir_native_census_roster(&expected, &incomplete)
+                .unwrap_err()
+                .contains("emitted entries")
+        );
+
+        let duplicate_owner = vec![
+            entry("function:first", "first"),
+            entry("function:first", "second"),
+        ];
+        assert!(
+            super::validate_canonical_mir_native_census_roster(&expected, &duplicate_owner)
+                .unwrap_err()
+                .contains("duplicate emitted owner")
+        );
+
+        let duplicate_symbol = vec![
+            entry("function:first", "same"),
+            entry("function:second", "same"),
+        ];
+        assert!(
+            super::validate_canonical_mir_native_census_roster(&expected, &duplicate_symbol)
+                .unwrap_err()
+                .contains("multiple owners")
+        );
+
+        let declared = vec![
+            entry("function:first", "first"),
+            super::CanonicalMirNativeCensusEntry {
+                has_body: false,
+                ..entry("function:second", "second")
+            },
+        ];
+        assert!(
+            super::validate_canonical_mir_native_census_roster(&expected, &declared)
+                .unwrap_err()
+                .contains("only an LLVM declaration")
+        );
+
+        let invalid = vec![
+            entry("function:first", "first"),
+            super::CanonicalMirNativeCensusEntry {
+                verified: false,
+                ..entry("function:second", "second")
+            },
+        ];
+        assert!(
+            super::validate_canonical_mir_native_census_roster(&expected, &invalid)
+                .unwrap_err()
+                .contains("failed LLVM function verification")
         );
     }
 
@@ -2680,7 +6405,7 @@ func main() -> i32 {
             .execute_with_output(&main, &[])
             .expect("reference V2 dynamic String keys");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
-        assert_eq!(reference.output, "true\ntrue\nfalse\n");
+        assert_eq!(reference.output, "true\ntrue\nfalse\ntrue\n");
 
         let mut vm = BytecodeVM::new(
             compile_mir_program(&program).expect("AST-free V2 dynamic String key bytecode"),
@@ -2813,7 +6538,6 @@ func main() -> i32 {
             "mimi_ordinary_map_owned_any_v2_contains",
             "mimi_ordinary_map_owned_any_v2_get",
             "mimi_str_concat_ll",
-            "mimi_mir_string_concat_checkpoint",
             "mimi_mir_ordinary_map_domain_own_string",
         ] {
             assert!(native_ir.contains(runtime), "native IR omits {runtime}");
@@ -2887,8 +6611,286 @@ func main() -> i32 {
                 "--errors-for-leak-kinds=definite,indirect,possible".into(),
                 "--error-exitcode=97".into(),
             ],
+            retain_tmp_if_requested: std::env::var_os(
+                "MIMI_MAP_V2_VALUES_STATIC_OOB_L3_ARTIFACT_DIR",
+            )
+            .is_some(),
             ..crate::tests::E2EConfig::default()
         }
+    }
+
+    fn memcheck_pid_payloads(stderr: &str) -> Result<Vec<String>, String> {
+        let mut pid: Option<&str> = None;
+        let mut payloads = Vec::new();
+        for line in stderr.lines() {
+            if let Some(prefixed) = line.strip_prefix("==") {
+                let Some((line_pid, payload)) = prefixed.split_once("==") else {
+                    return Err(format!("malformed Valgrind PID prefix: {line}"));
+                };
+                if line_pid.is_empty() || !line_pid.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(format!("invalid Valgrind PID prefix: {line}"));
+                }
+                if pid.is_some_and(|expected| expected != line_pid) {
+                    return Err("Valgrind report contains more than one PID".into());
+                }
+                pid = Some(line_pid);
+                payloads.push(payload.trim().to_owned());
+            } else if [
+                "Memcheck, a memory error detector",
+                "Command:",
+                "HEAP SUMMARY:",
+                "LEAK SUMMARY:",
+                "ERROR SUMMARY:",
+                "in use at exit:",
+                "total heap usage:",
+                "All heap blocks were freed",
+                "definitely lost:",
+                "indirectly lost:",
+                "possibly lost:",
+                "still reachable:",
+                "suppressed:",
+            ]
+            .iter()
+            .any(|marker| line.contains(marker))
+            {
+                return Err(format!(
+                    "Valgrind summary line lacks its PID prefix: {line}"
+                ));
+            }
+        }
+        if pid.is_none() {
+            return Err("Valgrind report has no PID-prefixed lines".into());
+        }
+        Ok(payloads)
+    }
+
+    fn summary_line<'a>(payloads: &'a [String], prefix: &str) -> Result<&'a str, String> {
+        let mut matches = payloads
+            .iter()
+            .filter(|line| line.starts_with(prefix))
+            .map(String::as_str);
+        let first = matches
+            .next()
+            .ok_or_else(|| format!("missing Valgrind summary line {prefix:?}"))?;
+        if matches.next().is_some() {
+            return Err(format!("duplicate Valgrind summary line {prefix:?}"));
+        }
+        Ok(first)
+    }
+
+    fn count_summary_lines(payloads: &[String], exact: &str) -> usize {
+        payloads
+            .iter()
+            .filter(|line| line.as_str() == exact)
+            .count()
+    }
+
+    fn parse_memcheck_bytes_blocks(line: &str, prefix: &str) -> Result<(u64, u64), String> {
+        let body = line
+            .strip_prefix(prefix)
+            .ok_or_else(|| format!("unexpected Valgrind leak row: {line}"))?;
+        let (bytes, blocks) = body
+            .split_once(" bytes in ")
+            .ok_or_else(|| format!("malformed Valgrind leak row: {line}"))?;
+        let blocks = blocks
+            .strip_suffix(" blocks")
+            .ok_or_else(|| format!("malformed Valgrind block count: {line}"))?;
+        let parse_count = |value: &str| {
+            value
+                .trim()
+                .replace(',', "")
+                .parse::<u64>()
+                .map_err(|_| format!("malformed Valgrind count in row: {line}"))
+        };
+        Ok((parse_count(bytes)?, parse_count(blocks)?))
+    }
+
+    fn parse_memcheck_total_heap_usage(line: &str) -> Result<(u64, u64), String> {
+        let body = line
+            .strip_prefix("total heap usage: ")
+            .ok_or_else(|| format!("malformed total heap usage row: {line}"))?;
+        let (allocs, body) = body
+            .split_once(" allocs, ")
+            .ok_or_else(|| format!("malformed allocation count: {line}"))?;
+        let (frees, bytes) = body
+            .split_once(" frees, ")
+            .ok_or_else(|| format!("malformed free count: {line}"))?;
+        let bytes = bytes
+            .strip_suffix(" bytes allocated")
+            .ok_or_else(|| format!("malformed allocated byte count: {line}"))?;
+        let parse_count = |value: &str| {
+            value
+                .trim()
+                .replace(',', "")
+                .parse::<u64>()
+                .map_err(|_| format!("malformed total heap count: {line}"))
+        };
+        let allocs = parse_count(allocs)?;
+        let frees = parse_count(frees)?;
+        let _bytes_allocated = parse_count(bytes)?;
+        if frees > allocs {
+            return Err(format!(
+                "Valgrind reports more frees than allocations: {line}"
+            ));
+        }
+        Ok((allocs, frees))
+    }
+
+    fn validate_clean_map_any_memcheck_report(stderr: &str) -> Result<(), String> {
+        let payloads = memcheck_pid_payloads(stderr)?;
+        if count_summary_lines(&payloads, "Memcheck, a memory error detector") != 1 {
+            return Err("expected exactly one complete Memcheck banner".into());
+        }
+        if count_summary_lines(&payloads, "HEAP SUMMARY:") != 1 {
+            return Err("expected exactly one HEAP SUMMARY".into());
+        }
+        if summary_line(&payloads, "Command: ").is_err() {
+            return Err("expected exactly one Valgrind Command line".into());
+        }
+        let total_heap = summary_line(&payloads, "total heap usage: ")?;
+        let (allocs, frees) = parse_memcheck_total_heap_usage(total_heap)?;
+        let in_use = summary_line(&payloads, "in use at exit: ")?;
+        let (in_use_bytes, in_use_blocks) =
+            parse_memcheck_bytes_blocks(in_use, "in use at exit: ")?;
+        let all_free_marker = "All heap blocks were freed -- no leaks are possible";
+        let all_free_count = count_summary_lines(&payloads, all_free_marker);
+        let leak_header_count = count_summary_lines(&payloads, "LEAK SUMMARY:");
+        let categories = [
+            ("definitely lost:", true),
+            ("indirectly lost:", true),
+            ("possibly lost:", true),
+            ("still reachable:", false),
+            ("suppressed:", true),
+        ];
+        let mut category_rows = Vec::new();
+        for (prefix, must_be_zero) in categories {
+            let matching = payloads
+                .iter()
+                .filter(|line| line.starts_with(prefix))
+                .collect::<Vec<_>>();
+            if all_free_count == 1 && leak_header_count == 0 {
+                if !matching.is_empty() {
+                    return Err(format!(
+                        "all-free report unexpectedly contains {prefix} rows"
+                    ));
+                }
+                continue;
+            }
+            if matching.len() != 1 {
+                return Err(format!(
+                    "expected one {prefix} row in reachable-form report; observed {}",
+                    matching.len()
+                ));
+            }
+            let (bytes, blocks) = parse_memcheck_bytes_blocks(matching[0], prefix)?;
+            if must_be_zero && (bytes != 0 || blocks != 0) {
+                return Err(format!("nonzero Memcheck leak category: {}", matching[0]));
+            }
+            if !must_be_zero {
+                category_rows.push((bytes, blocks));
+            }
+        }
+        let total_leak_rows = payloads
+            .iter()
+            .filter(|line| {
+                categories
+                    .iter()
+                    .any(|(prefix, _)| line.starts_with(prefix))
+            })
+            .count();
+        if all_free_count == 1 {
+            if leak_header_count != 0 || in_use_bytes != 0 || in_use_blocks != 0 || allocs != frees
+            {
+                return Err("all-free report has inconsistent leak/header/heap counters".into());
+            }
+        } else {
+            if all_free_count != 0 || leak_header_count != 1 || total_leak_rows != 5 {
+                return Err("expected one complete reachable-form LEAK SUMMARY".into());
+            }
+            if category_rows.as_slice() != [(in_use_bytes, in_use_blocks)] {
+                return Err("heap-at-exit bytes/blocks differ from still-reachable summary".into());
+            }
+        }
+        if count_summary_lines(
+            &payloads,
+            "ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)",
+        ) != 1
+            || payloads
+                .iter()
+                .filter(|line| line.starts_with("ERROR SUMMARY:"))
+                .count()
+                != 1
+        {
+            return Err("expected one exact zero-error/zero-suppression summary".into());
+        }
+        Ok(())
+    }
+
+    fn assert_map_any_memcheck_parser_regressions() {
+        let all_free = concat!(
+            "==41== Memcheck, a memory error detector\n",
+            "==41== Command: /tmp/map-any-test\n",
+            "==41==\n",
+            "==41== HEAP SUMMARY:\n",
+            "==41==     in use at exit: 0 bytes in 0 blocks\n",
+            "==41==   total heap usage: 73 allocs, 73 frees, 9,174 bytes allocated\n",
+            "==41==\n",
+            "==41== All heap blocks were freed -- no leaks are possible\n",
+            "==41==\n",
+            "==41== For lists of detected and suppressed errors, rerun with: -s\n",
+            "==41== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)\n",
+        );
+        assert!(
+            validate_clean_map_any_memcheck_report(all_free).is_ok(),
+            "Valgrind's genuine three-row all-free form is accepted"
+        );
+
+        let reachable = concat!(
+            "==42== Memcheck, a memory error detector\n",
+            "==42== Command: /tmp/map-any-test\n",
+            "==42==\n",
+            "==42== HEAP SUMMARY:\n",
+            "==42==     in use at exit: 192 bytes in 1 blocks\n",
+            "==42==   total heap usage: 73 allocs, 72 frees, 9,174 bytes allocated\n",
+            "==42==\n",
+            "==42== LEAK SUMMARY:\n",
+            "==42==    definitely lost: 0 bytes in 0 blocks\n",
+            "==42==    indirectly lost: 0 bytes in 0 blocks\n",
+            "==42==      possibly lost: 0 bytes in 0 blocks\n",
+            "==42==    still reachable: 192 bytes in 1 blocks\n",
+            "==42==         suppressed: 0 bytes in 0 blocks\n",
+            "==42==\n",
+            "==42== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)\n",
+        );
+        let reachable_result = validate_clean_map_any_memcheck_report(reachable);
+        assert!(
+            reachable_result.is_ok(),
+            "the complete reachable-form summary is accepted: {reachable_result:?}"
+        );
+
+        let duplicate_loss = reachable.replace(
+            "==42==    definitely lost: 0 bytes in 0 blocks\n",
+            "==42==    definitely lost: 0 bytes in 0 blocks\n==42==    definitely lost: 1 bytes in 1 blocks\n",
+        );
+        assert!(
+            validate_clean_map_any_memcheck_report(&duplicate_loss).is_err(),
+            "a duplicate nonzero leak row cannot hide beside the zero row"
+        );
+        let truncated = reachable.replace("==42== Command: /tmp/map-any-test\n", "");
+        assert!(
+            validate_clean_map_any_memcheck_report(&truncated).is_err(),
+            "a summary-only truncated report is rejected"
+        );
+        let mixed_pid = reachable.replace("==42== ERROR SUMMARY:", "==43== ERROR SUMMARY:");
+        assert!(
+            validate_clean_map_any_memcheck_report(&mixed_pid).is_err(),
+            "summary lines from another process cannot be mixed in"
+        );
+        let invalid_counts = all_free.replace("73 allocs, 73 frees", "73 allocs, 74 frees");
+        assert!(
+            validate_clean_map_any_memcheck_report(&invalid_counts).is_err(),
+            "all-free reports cannot claim more frees than allocations"
+        );
     }
 
     fn assert_clean_map_any_memcheck(
@@ -2907,156 +6909,17 @@ func main() -> i32 {
         if let Some(code) = expected_trap {
             assert!(observed.stderr.contains(code), "{}", observed.stderr);
         }
-        assert!(
-            observed.stderr.contains("ERROR SUMMARY: 0 errors"),
-            "strict Map/Any Memcheck reported memory errors: {}",
-            observed.stderr
-        );
-        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-            assert!(
-                observed
-                    .stderr
-                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                "strict Map/Any Memcheck reported {kind}: {}",
+        if let Err(reason) = validate_clean_map_any_memcheck_report(&observed.stderr) {
+            panic!(
+                "strict Map/Any Memcheck report rejected: {reason}: {}",
                 observed.stderr
             );
         }
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_receipted_empty_values_match_consumers() {
-        let source = r#"
-            func main() -> i32 {
-                ensures: result == 0
-                let root = map_new()
-                let snapshot = values(root)
-                drop(snapshot)
-                drop(root)
-                0
-            }
-        "#;
-        let tokens = Lexer::new(source).tokenize().expect("lex");
-        let file = Parser::new(tokens).parse_file().expect("parse");
-        let checked = crate::core::check_program(&file).expect("check");
-        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
-        let selection = program
-            .ordinary_map_owned_any_v2_payload_selection_receipt()
-            .expect("empty-selection receipt validates")
-            .expect("New action proves the empty payload closure");
-        assert!(selection.entries.is_empty());
-        assert!(selection.selected_types.is_empty());
-        selection
-            .validate_against_program(&program)
-            .expect("empty selection remains bound to the exact Checker/MIR program");
-        let foreign_program = canonical_program(
-            r#"
-                func main() -> i32 {
-                    let root = map_new()
-                    let snapshot = values(root)
-                    drop(snapshot)
-                    drop(root)
-                    1
-                }
-            "#,
-        );
-        let foreign_selection = foreign_program
-            .ordinary_map_owned_any_v2_payload_selection_receipt()
-            .expect("foreign program empty selection validates")
-            .expect("foreign program has its own exact empty-root Values receipt");
-        assert!(foreign_selection.entries.is_empty());
-        assert!(foreign_selection.selected_types.is_empty());
-        assert!(
-            selection
-                .validate_against_program(&foreign_program)
-                .is_err(),
-            "an empty selection receipt cannot authorize another MIR program"
-        );
-        assert!(
-            super::ordinary_map_owned_any_v2::ordinary_map_owned_any_v2_values_selector_frame(
-                &foreign_program,
-                &selection,
-            )
-            .is_err(),
-            "native selector framing must revalidate the receipt against its exact MIR program"
-        );
-        // These source-level ListLen/MIR clone paths do not yet carry an
-        // exact V2 Values-list receipt. Keep this test on the Values producer
-        // itself; dedicated VM/runtime tests assert that its empty result has
-        // length zero.
-        let admission = crate::core::mir::classify_canonical_mir_route_admission(&checked);
-        assert_eq!(
-            admission.ordinary_map_owned_any_v2,
-            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::StagedGetValues
-        );
-        assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
-        crate::verifier::validate_mir_capabilities(&program)
-            .expect("empty-root query receipts pass capability validation");
-        let proof_results = crate::verifier::verify_mir(&program, String::new())
-            .expect("Verifier consumes the same empty-root MIR");
-        let main_proof = proof_results
-            .iter()
-            .find(|result| result.func_name == "function:main")
-            .expect("the empty-root result contract is visible to Verifier");
-        assert_eq!(
-            main_proof.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset,
-            "diagnostic-only V2 does not issue an empty-root proof: {}",
-            main_proof.message
-        );
-        assert!(main_proof.artifact.is_none());
-
-        let main = crate::core::NodeId("function:main".into());
-        let reference = MirReferenceInterpreter::new(&program)
-            .execute_with_output(&main, &[])
-            .expect("reference executes the receipted empty-root query");
-        assert_eq!(reference.value, MirRuntimeValue::Int(0));
-        assert_eq!(reference.output, "");
-
-        let mut vm = BytecodeVM::new(
-            compile_mir_program(&program)
-                .expect("AST-free bytecode compiles an empty Values query"),
-        );
-        assert!(matches!(
-            vm.run_value_for_component()
-                .expect("bytecode executes an empty Values query"),
-            Value::Int(0)
-        ));
-        assert_eq!(vm.take_stdout(), reference.output);
-
-        crate::codegen::mir::validate_mir_native(&program)
-            .expect("native admission accepts the program-bound empty selector");
-        let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_empty_root");
-        generator
-            .compile_mir_native_for_component(&program)
-            .expect("native compiler emits the program-bound empty selector");
-        generator
-            .module
-            .verify()
-            .expect("native empty-root query module verifies");
-        let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("native executes empty-root queries");
-        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
-        assert_eq!(native.stdout, reference.output);
-        assert_eq!(native.stderr, "");
-
-        if std::process::Command::new("valgrind")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        {
-            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
-                &generator,
-                &strict_map_any_memcheck_config(),
-            )
-            .expect("empty-root query runs under strict Memcheck");
-            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
-        }
-    }
-
-    #[test]
-    fn ordinary_map_owned_any_v2_clone_uses_one_mir_across_verifier_reference_bytecode_native_and_memcheck(
-    ) {
+    fn ordinary_map_owned_any_v2_raw_clone_mir_is_rejected_by_verifier_but_executes_on_consumers() {
+        assert_map_any_memcheck_parser_regressions();
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_clone.mimi"
         ));
@@ -3065,24 +6928,12 @@ func main() -> i32 {
         crate::codegen::mir::validate_mir_native(&program)
             .expect("native admission revalidates the same Clone and GetAny receipts");
 
-        let verification = crate::verifier::verify_mir(&program, String::new())
-            .expect("public verifier consumes the same Clone MIR");
-        let main_proof = verification
-            .iter()
-            .find(|result| result.func_name == "function:main")
-            .expect("main's explicit postcondition has a verifier result");
-        assert_eq!(
-            main_proof.status,
-            crate::verifier::VerifStatus::NotInTrustedSubset,
-            "V2 must stay fail-closed until its production gate opens: {}",
-            main_proof.message
-        );
-        assert!(main_proof
-            .message
-            .contains("diagnostic-only while V2 production readiness is disabled"));
+        let verifier_error = crate::verifier::verify_mir(&program, String::new())
+            .expect_err("a broad MIR receipt cannot authorize Map/Any CloneIsolation");
         assert!(
-            main_proof.artifact.is_none(),
-            "a diagnostic-only V2 result must not emit a proof artifact"
+            verifier_error
+                .contains("CloneIsolation requires the exact Checker-aware verifier route"),
+            "the raw verifier must reject an unbound clone route: {verifier_error}"
         );
 
         let main = crate::core::NodeId("function:main".into());
@@ -3129,6 +6980,807 @@ func main() -> i32 {
             .expect("native cloned-root lifecycle runs under strict Memcheck");
             assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
         }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_len_deep_clone_runs_across_all_consumers() {
+        let program = canonical_program(&ordinary_map_owned_any_v2_values_unpack_native_source(
+            "let snapshot_count = snapshot.len()\nprintln(snapshot_count)",
+        ));
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("Values snapshot and borrowed Clone receipts pass capability validation");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native admission revalidates the Values Clone and settlement receipts");
+
+        let values_receipt = program
+            .ordinary_map_owned_any_v2_values_result_receipts()
+            .expect("canonical Values snapshot receipt")
+            .into_iter()
+            .next()
+            .expect("one Values snapshot");
+        assert!(values_receipt.validate_against_program(&program).is_ok());
+        let values_type = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+        let values_clones = program
+            .functions()
+            .values()
+            .flat_map(|function| function.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::Clone { source, .. }
+                        if source.as_str() == values_receipt.binding.as_str()
+                )
+            })
+            .count();
+        assert_eq!(values_type, values_receipt.mir_result_type);
+        assert_eq!(
+            values_clones, 1,
+            "Values.len borrows through one owned snapshot Clone"
+        );
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("Reference executes the same Values snapshot Clone");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "3\n");
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program)
+                .expect("AST-free bytecode compiles the Values snapshot Clone"),
+        );
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode executes the same Values snapshot Clone"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_values_len_clone");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("native compiler consumes the same Values snapshot Clone");
+        generator
+            .module
+            .verify()
+            .expect("native Values snapshot Clone module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        assert!(
+            native_ir.contains("@mimi_mir_list_clone_managed_any_v2("),
+            "Values borrow Clone uses the V2 deep-copy runtime path"
+        );
+        assert!(
+            native_ir.contains("[E0800] ordinary Map/Any owner-v2 Values List Clone failed"),
+            "native null-clone abort retains the verifier's capacity/trap category"
+        );
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("native executes and settles the same Values snapshot Clone");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("native Values Clone lifecycle runs under strict Memcheck");
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
+        }
+    }
+
+    #[test]
+    fn values_producer_caller_checked_route_emits_native_pointer_abi() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex Values bridge");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Values bridge");
+        let checked = crate::core::check_program(&file).expect("check Values bridge");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Values producer/caller has canonical MIR");
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR producer-caller route");
+        let bridge_receipts = program
+            .ordinary_map_owned_any_v2_values_producer_caller_receipts()
+            .expect("derive exact MIR producer-caller bridge receipt");
+        let [bridge_receipt] = bridge_receipts.as_slice() else {
+            panic!("expected one exact MIR producer-caller bridge receipt");
+        };
+        assert_eq!(
+            bridge_receipt.producer_checker_snapshot_type,
+            bridge_receipt.checker_producer.snapshot_type
+        );
+        assert_eq!(
+            bridge_receipt.producer_return_source_type,
+            bridge_receipt.producer_checker_snapshot_type
+        );
+        assert_eq!(
+            bridge_receipt.producer_return_target_type,
+            bridge_receipt.producer_surface_return_type
+        );
+        assert_eq!(
+            bridge_receipt.call_surface_result_type,
+            bridge_receipt.checker_caller.result_type
+        );
+        assert_eq!(
+            bridge_receipt.producer_surface_return_type,
+            bridge_receipt.call_surface_result_type
+        );
+        assert_ne!(
+            bridge_receipt.checker_producer.snapshot_type, bridge_receipt.producer_result_type,
+            "Checker List<DynamicAny> source and dedicated MIR Values TypeDesc are separate identities"
+        );
+        assert_ne!(
+            bridge_receipt.checker_caller.result_type, bridge_receipt.call_result_type,
+            "Checker surface List result and dedicated MIR Values call result are separate identities"
+        );
+        assert_ne!(
+            bridge_receipt.checker_caller.owner_type, bridge_receipt.owner_type,
+            "Checker owner obligation and dedicated MIR Values Drop TypeDesc are separate identities"
+        );
+        assert_eq!(
+            receipt.profile,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller.as_str()
+        );
+        crate::codegen::mir::validate_checked_mir_native_values_producer_caller_route(
+            &checked, &program, &receipt,
+        )
+        .expect("native preflight revalidates exact Checker and MIR evidence");
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "values_bridge_raw_route")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR receipt cannot authorize the producer return");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("dedicated ValuesProducerCaller native route")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "values_bridge_checked_route");
+        native
+            .compile_checked_mir_native_with_values_producer_caller_route(
+                &checked, &program, &receipt,
+            )
+            .expect("only the dedicated Checker/MIR route authorizes native emission");
+        native
+            .module
+            .verify()
+            .expect("producer/caller native module verifies");
+        let native_ir = native.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_mir_list_len_managed_any_v2"));
+        assert!(native_ir.contains("mir_map_any_v2_values_list_out"));
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+    }
+
+    #[test]
+    fn values_crosscall_string_caller_index1_native_entry_is_exact_and_versioned() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE,
+        };
+
+        let checked_mir_from = |source: &str| {
+            let tokens = Lexer::new(source).tokenize().expect("lex Values caller");
+            let file = Parser::new(tokens)
+                .parse_file()
+                .expect("parse Values caller");
+            let checked = crate::core::check_program(&file).expect("check Values caller");
+            let program = MirProgram::from_checked_program(&checked)
+                .expect("lower Values caller to canonical MIR");
+            (checked, program)
+        };
+
+        let (checked, program) = checked_mir_from(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1.mimi"
+        ));
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR V2 index-one receipt");
+        assert_eq!(
+            receipt.profile,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+                .as_str()
+        );
+        crate::codegen::mir::validate_checked_mir_native_values_crosscall_string_caller_index1_route(
+            &checked, &program, &receipt,
+        )
+        .expect("native V2 preflight revalidates exact Checker/MIR evidence");
+
+        let context = Context::create();
+        let generic_error = CodeGenerator::new(&context, "values_crosscall_index1_generic")
+            .compile_checked_mir_native_with_route_receipt(&checked, &program, &receipt)
+            .expect_err("the generic CheckedProgram route cannot authorize Index1");
+        assert!(generic_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("ValuesCrosscallStringCallerIndex1 requires its dedicated")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "values_crosscall_index1_checked");
+        native
+            .compile_checked_mir_native_with_values_crosscall_string_caller_index1_route(
+                &checked, &program, &receipt,
+            )
+            .expect("exact V2 Checker/MIR route authorizes native emission");
+        native
+            .module
+            .verify()
+            .expect("cross-call Values index-one native module verifies");
+        let native_ir = native.module.print_to_string().to_string();
+        assert!(native_ir.contains("mir_map_any_v2_unpack_string_copy_status"));
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+
+        let mut wrong_profile = receipt.clone();
+        wrong_profile.profile =
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller
+                .as_str()
+                .into();
+        let profile_error =
+            crate::codegen::mir::validate_checked_mir_native_values_crosscall_string_caller_index1_route(
+                &checked,
+                &program,
+                &wrong_profile,
+            )
+            .expect_err("the preserved V1 profile cannot authorize the V2 native route");
+        assert!(profile_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let (v1_checked, v1_program) = checked_mir_from(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_crosscall_string_caller.mimi"
+        ));
+        let mut wrong_index =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+                &v1_checked,
+                &v1_program,
+            )
+            .expect("the separate V1 index-zero route remains valid");
+        wrong_index.profile =
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+                .as_str()
+                .into();
+        let index_error =
+            crate::codegen::mir::validate_checked_mir_native_values_crosscall_string_caller_index1_route(
+                &v1_checked,
+                &v1_program,
+                &wrong_index,
+            )
+            .expect_err("a V1 index-zero Checker/MIR receipt cannot authorize V2 index one");
+        assert!(index_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mixed_receipt_error =
+            crate::codegen::mir::validate_checked_mir_native_values_crosscall_string_caller_index1_route(
+                &checked,
+                &program,
+                &wrong_index,
+            )
+            .expect_err("a V1 MIR receipt mixed with V2 CheckedProgram evidence is rejected");
+        assert!(mixed_receipt_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_RECEIPT_ERROR_CODE)
+        }));
+    }
+
+    #[test]
+    fn values_crosscall_string_caller_index1_native_entry_rejects_unselected_set_cleanup_tampering_before_emission(
+    ) {
+        use crate::core::mir::CanonicalMirRouteProfile;
+
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1.mimi"
+        );
+        let profile =
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+                .as_str();
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let context = Context::create();
+
+        for tamper in [
+            Index1SetTemporaryTamper::RemoveKeyDrop,
+            Index1SetTemporaryTamper::RetargetPayloadCloneDrop,
+            Index1SetTemporaryTamper::AddKeyOwnerUse,
+            Index1SetTemporaryTamper::ReorderTemporaryDrops,
+        ] {
+            let tokens = Lexer::new(source).tokenize().expect("lex Index1 fixture");
+            let file = Parser::new(tokens)
+                .parse_file()
+                .expect("parse Index1 fixture");
+            let checked = crate::core::check_program(&file).expect("check Index1 fixture");
+            let mut program = MirProgram::from_checked_program(&checked)
+                .expect("lower Index1 fixture to canonical MIR");
+            tamper_index1_unselected_set_temporary(&mut program, tamper);
+            let receipt = program.route_receipt(profile);
+            let mut native = CodeGenerator::new(
+                &context,
+                &format!("values_crosscall_index1_tamper_{tamper:?}"),
+            );
+            native.shared = true;
+            let native_user_symbols = program
+                .functions()
+                .keys()
+                .map(|owner| {
+                    crate::codegen::mir::native_symbol_for_owner(owner)
+                        .expect("resolve native MIR user-function symbol")
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            let defined_functions_before_route_rejection = native
+                .module
+                .get_functions()
+                .filter(|function| function.count_basic_blocks() > 0)
+                .map(|function| function.get_name().to_string_lossy().into_owned())
+                .collect::<std::collections::BTreeSet<_>>();
+            let errors = native
+                .compile_checked_mir_native_with_values_crosscall_string_caller_index1_route(
+                    &checked, &program, &receipt,
+                )
+                .expect_err("the checked native Index1 entry rejects malformed cleanup evidence");
+
+            assert!(!errors.is_empty(), "{tamper:?} yields a route rejection");
+            assert!(
+                errors.iter().any(|error| {
+                    error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                        || error.code.as_deref()
+                            == Some(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+                }),
+                "{tamper:?} is rejected by the Checker/MIR route gate: {errors:?}"
+            );
+            assert_eq!(
+                native
+                    .module
+                    .get_functions()
+                    .filter(|function| function.count_basic_blocks() > 0)
+                    .map(|function| function.get_name().to_string_lossy().into_owned())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                defined_functions_before_route_rejection,
+                "{tamper:?} is rejected before any native function body is emitted"
+            );
+            assert!(
+                native_user_symbols.iter().all(|symbol| native
+                    .module
+                    .get_function(symbol)
+                    .is_none_or(|function| function.count_basic_blocks() == 0)),
+                "{tamper:?} emits no MIR user-function bodies"
+            );
+            assert!(
+                native.mir_native_compiled_digest.is_none(),
+                "{tamper:?} produces no native MIR emission evidence"
+            );
+            assert!(
+                !native.shared_dynamic_any_preflight_passed,
+                "{tamper:?} produces no shared native preflight evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn map_root_producer_caller_checked_route_emits_handle_abi() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex Map-root bridge");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Map-root bridge");
+        let checked = crate::core::check_program(&file).expect("check Map-root bridge");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Map-root producer/caller has canonical MIR");
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_map_root_producer_caller_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR Map-root producer-caller route");
+        let bridge_receipts = program
+            .ordinary_map_owned_any_v2_map_root_producer_caller_receipts()
+            .expect("derive exact MIR Map-root producer-caller bridge receipt");
+        let [bridge_receipt] = bridge_receipts.as_slice() else {
+            panic!("expected one exact MIR Map-root producer-caller bridge receipt");
+        };
+        assert_eq!(
+            bridge_receipt.root_type,
+            crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+        );
+        assert_eq!(
+            receipt.profile,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller.as_str()
+        );
+        crate::codegen::mir::validate_checked_mir_native_map_root_producer_caller_route(
+            &checked, &program, &receipt,
+        )
+        .expect("native preflight revalidates the exact Checker and MIR evidence");
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "map_root_bridge_raw_route")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR receipt cannot authorize the producer root return");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("dedicated MapRootProducerCaller native route")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "map_root_bridge_checked_route");
+        native
+            .compile_checked_mir_native_with_map_root_producer_caller_route(
+                &checked, &program, &receipt,
+            )
+            .expect("only the dedicated Checker/MIR route authorizes native emission");
+        native
+            .module
+            .verify()
+            .expect("Map-root producer/caller module verifies");
+        let producer_symbol =
+            crate::codegen::mir::native_symbol_for_owner(&bridge_receipt.producer_owner)
+                .expect("resolve exact producer symbol");
+        let producer = native
+            .module
+            .get_function(&producer_symbol)
+            .expect("native producer definition");
+        assert_eq!(
+            producer.get_type().get_return_type(),
+            Some(context.i64_type().into()),
+            "the receipted owner crosses the native call boundary as its i64 handle"
+        );
+        let native_ir = native.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_new"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_set"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_size"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_drop"));
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+    }
+
+    #[test]
+    fn map_root_get_any_caller_checked_route_emits_owned_string_bridge() {
+        use crate::core::mir::{
+            CanonicalMirRouteProfile, MIR_ROUTE_COVERAGE_ERROR_CODE,
+            ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+        };
+
+        const {
+            assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_get_any_caller.mimi"
+        );
+        let tokens = Lexer::new(source)
+            .tokenize()
+            .expect("lex Map-root GetAny bridge");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Map-root GetAny bridge");
+        let checked = crate::core::check_program(&file).expect("check Map-root GetAny bridge");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Map-root GetAny caller has canonical MIR");
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_map_root_get_any_caller_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR Map-root GetAny caller route");
+        let bridge_receipts = program
+            .ordinary_map_owned_any_v2_map_root_get_any_caller_receipts()
+            .expect("derive exact MIR Map-root GetAny bridge receipt");
+        let [bridge_receipt] = bridge_receipts.as_slice() else {
+            panic!("expected one exact MIR Map-root GetAny bridge receipt");
+        };
+        assert_eq!(
+            bridge_receipt.root_type,
+            crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+        );
+        assert_eq!(
+            bridge_receipt.string_type,
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+        );
+        assert_eq!(
+            receipt.profile,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller.as_str()
+        );
+        assert_eq!(
+            bridge_receipt.unpack_result.payload_source,
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+        );
+        assert_eq!(
+            bridge_receipt.get_any_result.settlement_instruction,
+            bridge_receipt.unpack_result.settlement_instruction,
+            "the borrowed GetAny token settles with the pair Drop"
+        );
+        let caller = program
+            .functions()
+            .get(&bridge_receipt.caller_owner)
+            .expect("receipted Map-root GetAny caller");
+        assert_eq!(caller.blocks.len(), 1, "Map-root caller is straight-line");
+        let caller_block = caller
+            .blocks
+            .values()
+            .next()
+            .expect("Map-root caller block exists");
+        let instruction_position = |id: &crate::core::mir::MirInstructionId| {
+            caller_block
+                .instructions
+                .iter()
+                .position(|instruction| &instruction.id == id)
+                .expect("receipt-bound Drop instruction exists")
+        };
+        assert!(
+            instruction_position(&bridge_receipt.caller_root_drop_instruction)
+                < instruction_position(&bridge_receipt.get_any_result.settlement_instruction)
+        );
+        assert!(
+            instruction_position(&bridge_receipt.get_any_result.settlement_instruction)
+                < instruction_position(&bridge_receipt.caller_string_drop_instruction)
+        );
+        crate::codegen::mir::validate_checked_mir_native_map_root_get_any_caller_route(
+            &checked, &program, &receipt,
+        )
+        .expect("native preflight revalidates exact Checker, unpack and Drop evidence");
+
+        let context = Context::create();
+        let raw_error = CodeGenerator::new(&context, "map_root_get_any_raw_route")
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("raw MIR receipt cannot authorize the GetAny/String route");
+        assert!(raw_error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("dedicated MapRootGetAnyCaller native route")
+        }));
+
+        let mut native = CodeGenerator::new(&context, "map_root_get_any_checked_route");
+        native
+            .compile_checked_mir_native_with_map_root_get_any_caller_route(
+                &checked, &program, &receipt,
+            )
+            .expect("only the dedicated Checker/MIR route authorizes native emission");
+        native
+            .module
+            .verify()
+            .expect("Map-root GetAny caller module verifies");
+        let producer_symbol =
+            crate::codegen::mir::native_symbol_for_owner(&bridge_receipt.producer_owner)
+                .expect("resolve exact producer symbol");
+        let producer = native
+            .module
+            .get_function(&producer_symbol)
+            .expect("native producer definition");
+        assert_eq!(
+            producer.get_type().get_return_type(),
+            Some(context.i64_type().into()),
+            "the receipted Map root crosses the native call boundary as its i64 handle"
+        );
+        let native_ir = native.module.print_to_string().to_string();
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_new"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_set"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_get"));
+        assert!(native_ir.contains("mimi_any_payload_v2_unpack"));
+        assert!(native_ir.contains("mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string"));
+        assert!(native_ir.contains("mimi_ordinary_map_owned_any_v2_drop"));
+        assert_eq!(
+            native.mir_native_compiled_digest.as_deref(),
+            Some(program.canonical_digest().as_str())
+        );
+    }
+
+    #[test]
+    fn map_root_producer_caller_native_gate_rejects_mismatched_call_result_type() {
+        use crate::core::mir::{MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
+
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex Map-root bridge");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Map-root bridge");
+        let checked = crate::core::check_program(&file).expect("check Map-root bridge");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Map-root producer/caller has canonical MIR");
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_map_root_producer_caller_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR Map-root producer-caller route");
+        let bridge_receipts = program
+            .ordinary_map_owned_any_v2_map_root_producer_caller_receipts()
+            .expect("derive exact MIR Map-root producer-caller bridge receipt");
+        let [bridge_receipt] = bridge_receipts.as_slice() else {
+            panic!("expected one exact MIR Map-root producer-caller bridge receipt");
+        };
+
+        let mut forged = program.clone();
+        let mut caller = forged
+            .functions()
+            .get(&bridge_receipt.caller_owner)
+            .expect("receipted caller")
+            .clone();
+        caller
+            .values
+            .get_mut(&bridge_receipt.caller_call_result)
+            .expect("producer Call result")
+            .ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        forged.replace_function_for_test_only(caller);
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native MIR validation rejects a mismatched producer Call result TypeDesc");
+        assert!(native_error.iter().any(|diagnostic| {
+            diagnostic.message.contains("MapRoot")
+                || diagnostic.message.contains("Map-root")
+                || diagnostic.code.as_deref() == Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+        let checked_error =
+            crate::codegen::mir::validate_checked_mir_native_map_root_producer_caller_route(
+                &checked, &forged, &receipt,
+            )
+            .expect_err("checked native route rejects the post-receipt TypeDesc mutation");
+        assert!(checked_error.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_deref(),
+                Some(MIR_ROUTE_COVERAGE_ERROR_CODE | MIR_ROUTE_RECEIPT_ERROR_CODE)
+            )
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "map_root_bridge_mismatched_result");
+        let defined_functions_before_emission = generator
+            .module
+            .get_functions()
+            .filter(|function| function.count_basic_blocks() > 0)
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let emission_error = generator
+            .compile_checked_mir_native_with_map_root_producer_caller_route(
+                &checked, &forged, &receipt,
+            )
+            .expect_err("mismatched Call result is rejected before native emission");
+        assert!(emission_error.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_deref(),
+                Some(MIR_ROUTE_COVERAGE_ERROR_CODE | MIR_ROUTE_RECEIPT_ERROR_CODE)
+            )
+        }));
+        assert_eq!(
+            generator
+                .module
+                .get_functions()
+                .filter(|function| function.count_basic_blocks() > 0)
+                .map(|function| function.get_name().to_string_lossy().into_owned())
+                .collect::<std::collections::BTreeSet<_>>(),
+            defined_functions_before_emission,
+            "route rejection must precede MIR function-body emission"
+        );
+    }
+
+    #[test]
+    fn values_producer_caller_native_gate_rejects_mismatched_call_result_type() {
+        use crate::core::mir::{MIR_ROUTE_COVERAGE_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
+
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex Values bridge");
+        let file = Parser::new(tokens)
+            .parse_file()
+            .expect("parse Values bridge");
+        let checked = crate::core::check_program(&file).expect("check Values bridge");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Values producer/caller has canonical MIR");
+        let receipt =
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_route(
+                &checked, &program,
+            )
+            .expect("exact Checker/MIR producer-caller route");
+        let bridge_receipts = program
+            .ordinary_map_owned_any_v2_values_producer_caller_receipts()
+            .expect("derive exact MIR producer-caller bridge receipt");
+        let [bridge_receipt] = bridge_receipts.as_slice() else {
+            panic!("expected one exact MIR producer-caller bridge receipt");
+        };
+
+        let mut forged = program.clone();
+        let mut caller = forged
+            .functions()
+            .get(&bridge_receipt.caller_owner)
+            .expect("receipted caller")
+            .clone();
+        caller
+            .values
+            .get_mut(&bridge_receipt.call_result)
+            .expect("producer Call result")
+            .ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        forged.replace_function_for_test_only(caller);
+
+        let native_error = crate::codegen::mir::validate_mir_native(&forged)
+            .expect_err("native MIR validation rejects a mismatched producer Call result TypeDesc");
+        assert!(native_error.iter().any(|diagnostic| {
+            diagnostic.message.contains("Values")
+                || diagnostic
+                    .message
+                    .to_ascii_lowercase()
+                    .contains("call result")
+        }));
+        let checked_error =
+            crate::codegen::mir::validate_checked_mir_native_values_producer_caller_route(
+                &checked, &forged, &receipt,
+            )
+            .expect_err("the checked native route rejects the same post-receipt type mutation");
+        assert!(checked_error.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_deref(),
+                Some(MIR_ROUTE_COVERAGE_ERROR_CODE | MIR_ROUTE_RECEIPT_ERROR_CODE)
+            )
+        }));
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "values_bridge_mismatched_result");
+        let defined_functions_before_emission = generator
+            .module
+            .get_functions()
+            .filter(|function| function.count_basic_blocks() > 0)
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let emission_error = generator
+            .compile_checked_mir_native_with_values_producer_caller_route(
+                &checked, &forged, &receipt,
+            )
+            .expect_err("mismatched Call result is rejected before native emission");
+        assert!(emission_error.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_deref(),
+                Some(MIR_ROUTE_COVERAGE_ERROR_CODE | MIR_ROUTE_RECEIPT_ERROR_CODE)
+            )
+        }));
+        assert!(
+            generator
+                .module
+                .get_functions()
+                .filter(|function| function.count_basic_blocks() > 0)
+                .map(|function| function.get_name().to_string_lossy().into_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+                == defined_functions_before_emission,
+            "route rejection must precede MIR function-body emission"
+        );
     }
 
     #[test]
@@ -3218,18 +7870,30 @@ func main() -> i32 {
             assert_clean_map_any_memcheck(&memcheck, 0, "true\n42\n", None);
         }
 
-        for (name, body, code) in [
-            (
-                "wrong-tag",
-                "let rejected = snapshot[1] as string\nprintln(rejected)",
-                "E0800",
-            ),
-            (
+        let wrong_tag_source = ordinary_map_owned_any_v2_values_unpack_native_source(
+            "let rejected = snapshot[1] as string\nprintln(rejected)",
+        );
+        let wrong_tag_tokens = Lexer::new(&wrong_tag_source)
+            .tokenize()
+            .expect("lex statically mismatched Values payload");
+        let wrong_tag_file = Parser::new(wrong_tag_tokens)
+            .parse_file()
+            .expect("parse statically mismatched Values payload");
+        let wrong_tag_diagnostics = crate::core::check_program(&wrong_tag_file)
+            .expect_err("a statically wrong key-sorted payload type must fail in Checker");
+        assert!(
+            wrong_tag_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0200")),
+            "wrong-index payload cast must fail closed: {wrong_tag_diagnostics:?}"
+        );
+
+        {
+            let (name, body, code) = (
                 "out-of-bounds",
                 "let rejected = snapshot[3] as i32\nprintln(rejected)",
                 "E0803",
-            ),
-        ] {
+            );
             let rejected =
                 canonical_program(&ordinary_map_owned_any_v2_values_unpack_native_source(body));
             let reference_error = MirReferenceInterpreter::new(&rejected)
@@ -3276,6 +7940,494 @@ func main() -> i32 {
         }
     }
 
+    fn persist_static_values_oob_l3_memcheck(
+        index: i64,
+        observed: &crate::tests::NativeRunObservation,
+    ) {
+        use std::path::PathBuf;
+
+        let Some(root) = std::env::var_os("MIMI_MAP_V2_VALUES_STATIC_OOB_L3_ARTIFACT_DIR") else {
+            return;
+        };
+        let case_name = match index {
+            1 => "raw-index-1",
+            -2 => "raw-index-minus-2",
+            _ => panic!("unexpected static Values OOB index for L3 evidence: {index}"),
+        };
+        let root = PathBuf::from(root);
+        let case_dir = root.join(case_name);
+        std::fs::create_dir(&case_dir).expect("fresh static Values OOB case evidence directory");
+        std::fs::write(case_dir.join("valgrind.stderr.bin"), &observed.stderr_bytes)
+            .expect("preserve raw Valgrind stderr");
+        std::fs::write(case_dir.join("stdout.bin"), &observed.stdout_bytes)
+            .expect("preserve raw native stdout");
+        std::fs::write(
+            case_dir.join("run.status.txt"),
+            format!(
+                "raw_index={index}\nexit_code={}\nexpected_exit_code=1\nexpected_trap=E0803\n",
+                observed
+                    .exit_code
+                    .map_or_else(|| "signal".into(), |code| code.to_string())
+            ),
+        )
+        .expect("preserve static Values OOB process status");
+
+        let write_argv = |path: &std::path::Path, argv: &[String]| {
+            let mut bytes = Vec::new();
+            for argument in argv {
+                bytes.extend_from_slice(argument.as_bytes());
+                bytes.push(0);
+            }
+            std::fs::write(path, bytes).expect("preserve exact native command argv");
+        };
+        let write_command = |path: &std::path::Path, argv: &[String]| {
+            std::fs::write(
+                path,
+                argv.iter()
+                    .map(|argument| format!("{argument:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .expect("preserve readable native command");
+        };
+
+        let run_command = observed
+            .actual_run_command
+            .as_ref()
+            .expect("strict Memcheck observation has exact Valgrind argv");
+        write_argv(&case_dir.join("valgrind.command.argv.nul"), run_command);
+        write_command(&case_dir.join("valgrind.command.txt"), run_command);
+        let mut replay_run_command = run_command.clone();
+        *replay_run_command
+            .last_mut()
+            .expect("Valgrind command ends with the native program") = "./relinked-program".into();
+        write_argv(
+            &case_dir.join("valgrind.replay.argv.nul"),
+            &replay_run_command,
+        );
+        write_command(
+            &case_dir.join("valgrind.replay.command.txt"),
+            &replay_run_command,
+        );
+        std::fs::write(case_dir.join("valgrind.replay.cwd.txt"), ".\n")
+            .expect("record Valgrind replay working directory");
+
+        write_argv(
+            &case_dir.join("link.command.argv.nul"),
+            &observed.actual_link_command,
+        );
+        write_command(
+            &case_dir.join("link.command.txt"),
+            &observed.actual_link_command,
+        );
+
+        let mut artifact_records = Vec::new();
+        let mut replay_link_command = observed.actual_link_command.clone();
+        for artifact in &observed.artifacts {
+            let (persisted_path, replay_path) = match artifact.role {
+                "native-binary" => (case_dir.join("program"), "./relinked-program"),
+                "native-object" => (case_dir.join("native-object"), "./native-object"),
+                "runtime-archive" => (case_dir.join("runtime-archive"), "./runtime-archive"),
+                _ => continue,
+            };
+            std::fs::copy(&artifact.path, &persisted_path)
+                .expect("preserve strict Memcheck native input/output artifact");
+            let bytes = std::fs::read(&persisted_path).expect("read copied native artifact");
+            let copied_hash = blake3::hash(&bytes).to_hex().to_string();
+            let source_path = artifact.path.to_string_lossy().into_owned();
+            for argument in &mut replay_link_command {
+                if argument == &source_path {
+                    *argument = replay_path.into();
+                }
+            }
+            artifact_records.push(format!(
+                "role={}\nsource_path={}\npersisted_path={}\nblake3={}\nhash_before_link={}\nhash_before_run={}\nhash_after_run={}\nstable_during_execution={}\n",
+                artifact.role,
+                source_path,
+                persisted_path.display(),
+                copied_hash,
+                artifact.hash_before_link.as_deref().unwrap_or("<not-retained>"),
+                artifact.hash_before_run.as_deref().unwrap_or("<not-retained>"),
+                artifact.hash_after_run.as_deref().unwrap_or("<not-retained>"),
+                artifact
+                    .stable_during_execution
+                    .map_or_else(|| "<not-retained>".to_owned(), |stable| stable.to_string()),
+            ));
+        }
+        let output_flag = replay_link_command
+            .iter()
+            .position(|argument| argument == "-o")
+            .expect("native linker argv has an output flag");
+        *replay_link_command
+            .get_mut(output_flag + 1)
+            .expect("native linker output flag has a path") = "./relinked-program".into();
+        std::fs::write(
+            case_dir.join("native-artifacts.txt"),
+            artifact_records.join("\n"),
+        )
+        .expect("preserve native artifact hashes and paths");
+        write_argv(&case_dir.join("link.replay.argv.nul"), &replay_link_command);
+        write_command(
+            &case_dir.join("link.replay.command.txt"),
+            &replay_link_command,
+        );
+        std::fs::write(case_dir.join("link.replay.cwd.txt"), ".\n")
+            .expect("record native link replay working directory");
+
+        let kept_tmp_dir = observed
+            .kept_tmp_dir
+            .as_ref()
+            .expect("evidence mode retains the native temporary directory for copying");
+        std::fs::remove_dir_all(kept_tmp_dir)
+            .expect("clean temporary directory after preserving required evidence");
+        std::fs::write(case_dir.join("native-tmp-cleaned.txt"), "true\n")
+            .expect("record cleanup of temporary native artifacts");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_static_oob_without_selected_target_traps_before_get() {
+        ordinary_map_owned_any_v2_values_static_oob_without_selected_target_traps_before_get_at(1);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_static_negative_oob_without_selected_target_traps_before_get(
+    ) {
+        ordinary_map_owned_any_v2_values_static_oob_without_selected_target_traps_before_get_at(-2);
+    }
+
+    fn ordinary_map_owned_any_v2_values_static_oob_without_selected_target_traps_before_get_at(
+        index: i64,
+    ) {
+        let source = r#"
+            func main() -> i32 {
+                let text = "only selected String payload"
+                let empty = map_new()
+                let root = map_set(empty, "string", text)
+                let snapshot = values(root)
+                let rejected = snapshot[__INDEX__] as i32
+                println(rejected)
+                drop(snapshot)
+                drop(empty)
+                drop(root)
+                drop(text)
+                0
+            }
+            "#
+        .replace("__INDEX__", &index.to_string());
+        let program = canonical_program(&source);
+
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let selection = program
+            .ordinary_map_owned_any_v2_payload_selection_receipt()
+            .expect("Map payload selection receipt")
+            .expect("one Map payload selection");
+        selection
+            .validate_against_program(&program)
+            .expect("selection receipt is bound to the exact Map payload TypeDesc set");
+        assert_eq!(selection.selected_types.len(), 1);
+        assert_eq!(selection.selected_types[0].type_id, string_type);
+        assert!(
+            selection
+                .selected_types
+                .iter()
+                .all(|selected| selected.type_id != i32_type),
+            "i32 is not present in any selected Map payload TypeDesc"
+        );
+
+        let receipts = program
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("exact indexed Values unpack receipt");
+        let [receipt] = receipts.as_slice() else {
+            panic!("one receipt-bound Values unpack");
+        };
+        receipt
+            .validate_against_program(&program)
+            .expect("the Values receipt independently validates its OOB index and snapshot");
+        assert_eq!(receipt.result_type, i32_type);
+        assert_eq!(
+            receipt.index_disposition,
+            crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition::AlwaysOutOfBounds {
+                raw_index: index,
+                snapshot_len: 1,
+            }
+        );
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("native L1/L2 capability checks accept the receipt-bound OOB operation");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native route validation accepts OOB with an unselected target TypeDesc");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(
+            &context,
+            "mir_native_values_oob_target_absent_from_selection",
+        );
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("native emitter compiles the receipt-bound OOB branch");
+        generator
+            .module
+            .verify()
+            .expect("native LLVM module verifies");
+        let native_ir = generator.module.print_to_string().to_string();
+        let main = crate::core::NodeId("function:main".into());
+        let reference_error = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect_err("Reference reports the receipt-bound static OOB");
+        assert!(
+            reference_error.message.contains("E0803"),
+            "{reference_error:?}"
+        );
+
+        let mut vm = BytecodeVM::new(
+            compile_mir_program(&program).expect("AST-free static OOB bytecode program"),
+        );
+        let bytecode_error = vm
+            .run_value_for_component()
+            .expect_err("bytecode reports the receipt-bound static OOB");
+        assert_eq!(bytecode_error.code(), "E0803");
+        assert!(vm.take_stdout().is_empty());
+
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run native receipt-bound static OOB");
+        assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
+        assert!(native.stderr.contains("E0803"), "{}", native.stderr);
+        assert!(native.stdout.is_empty(), "{}", native.stdout);
+        let l3_evidence_requested =
+            std::env::var_os("MIMI_MAP_V2_VALUES_STATIC_OOB_L3_ARTIFACT_DIR").is_some();
+        let valgrind_available = std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        assert!(
+            !l3_evidence_requested || valgrind_available,
+            "static Values OOB strict L3 requires Valgrind; refusing a skipped Memcheck run"
+        );
+        if valgrind_available {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("run static OOB trap under strict Memcheck");
+            if l3_evidence_requested {
+                persist_static_values_oob_l3_memcheck(index, &memcheck);
+            }
+            assert_clean_map_any_memcheck(&memcheck, 1, "", Some("E0803"));
+        }
+
+        assert!(
+            native_ir.contains("call void @mimi_runtime_abort("),
+            "native code emits a runtime abort call for the receipt-bound E0803 path"
+        );
+        let e0803_message_symbol = native_ir
+            .lines()
+            .find(|line| line.contains("c\"[E0803] list index out of bounds"))
+            .and_then(|line| line.split_once(" = ").map(|(symbol, _)| symbol))
+            .expect("static OOB trap has its canonical E0803 message global");
+        let e0803_abort_call = format!("call void @mimi_runtime_abort(ptr {e0803_message_symbol})");
+        let main_start = native_ir
+            .find("define i32 @main() {")
+            .expect("canonical native module defines main");
+        let main_end = native_ir[main_start..]
+            .find("\n}")
+            .map(|offset| main_start + offset + 2)
+            .expect("canonical native main has a closing brace");
+        let mut current_block = String::new();
+        let mut static_oob_abort_block = None;
+        for line in native_ir[main_start..main_end].lines() {
+            if !line.starts_with(' ') && line.contains(':') && !line.starts_with("define") {
+                if current_block.contains(&e0803_abort_call) {
+                    static_oob_abort_block = Some(current_block.clone());
+                }
+                current_block.clear();
+            }
+            current_block.push_str(line);
+            current_block.push('\n');
+        }
+        if current_block.contains(&e0803_abort_call) {
+            static_oob_abort_block = Some(current_block);
+        }
+        let static_oob_abort_block =
+            static_oob_abort_block.expect("the E0803 abort belongs to a native basic block");
+        assert!(
+            static_oob_abort_block.contains(&e0803_abort_call),
+            "the receipt-bound static OOB block emits its canonical E0803 abort"
+        );
+        assert!(
+            !static_oob_abort_block.contains("mir_ordinary_map_trap_drop"),
+            "static OOB must not clean Map roots before reporting the receipt-bound E0803"
+        );
+        for runtime_call in [
+            "call i32 @mimi_mir_list_get_managed_any_v2(",
+            "call i32 @mimi_any_payload_v2_unpack(",
+        ] {
+            assert!(
+                !native_ir.contains(runtime_call),
+                "static OOB must trap without emitting `{runtime_call}`"
+            );
+        }
+
+        let i32_llvm_suffix = context
+            .i32_type()
+            .print_to_string()
+            .to_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        for target_glue in [
+            format!("mimi_any_payload_v2_clone_glue__scalar__llvm_{i32_llvm_suffix}"),
+            format!("mimi_any_payload_v2_drop_glue__scalar__llvm_{i32_llvm_suffix}"),
+        ] {
+            assert!(
+                !native_ir.contains(&target_glue),
+                "static OOB must not emit selected-target glue `{target_glue}`"
+            );
+        }
+
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("run native receipt-bound Values OOB case");
+        assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
+        assert!(native.stderr.contains("E0803"), "{}", native.stderr);
+        assert!(native.stdout.is_empty(), "{}", native.stdout);
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_values_label_field_move_runs_across_all_consumers() {
+        use crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind as OwnerSettlement;
+
+        let program = canonical_program(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_field_move.mimi"
+        ));
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("the full source/MIR receipt is a verifier capability");
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native preflight rechecks the field and String-read receipts");
+
+        let receipts = program
+            .ordinary_map_owned_any_v2_values_unpack_result_receipts()
+            .expect("same MIR carries direct field-move and borrowed-read receipts");
+        let [receipt] = receipts.as_slice() else {
+            panic!("one direct Values Label unpack");
+        };
+        assert_eq!(
+            receipt.result_owner_settlement,
+            OwnerSettlement::DirectStringFieldMove
+        );
+        let field_move = receipt
+            .result_owner_field_move
+            .as_ref()
+            .expect("one whole-Label consuming projection");
+        assert_eq!(field_move.source.text_read_uses.len(), 2);
+        assert_eq!(field_move.text_read_uses.len(), 2);
+        assert!(field_move.source.has_exact_source_use_sets());
+        let [eq_read, ne_read] = field_move.text_read_uses.as_slice() else {
+            panic!("MIR carries one equality and one inequality read")
+        };
+        assert_eq!(eq_read.source.peer_literal, "expected");
+        assert_eq!(eq_read.op, ResolvedBinaryOp::Equal);
+        assert_eq!(ne_read.source.peer_literal, "unexpected");
+        assert_eq!(ne_read.op, ResolvedBinaryOp::NotEqual);
+
+        let main = crate::core::NodeId("function:main".into());
+        let reference = MirReferenceInterpreter::new(&program)
+            .execute_with_output(&main, &[])
+            .expect("reference executes the selected child String after parent cleanup");
+        assert_eq!(reference.value, MirRuntimeValue::Int(0));
+        assert_eq!(reference.output, "true\ntrue\n");
+
+        let bytecode = compile_mir_program(&program)
+            .expect("AST-free bytecode emits the same MIR source-use receipt");
+        let proto = &bytecode.functions[bytecode.entry as usize];
+        let (unpack_pc, _) = proto
+            .code
+            .iter()
+            .enumerate()
+            .find(|(_, op)| matches!(op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }))
+            .expect("one bytecode Values unpack");
+        let bytecode_binding = bytecode
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .and_then(|receipt| {
+                receipt.ordinary_map_owned_any_v2_values_unpack_binding_at_pc(
+                    bytecode.entry,
+                    u32::try_from(unpack_pc).expect("bytecode PC fits the receipt ABI"),
+                )
+            })
+            .expect("exact bytecode unpack binding");
+        let bytecode_field_move = bytecode_binding
+            .result_owner_field_move
+            .as_ref()
+            .expect("bytecode keeps the field-move receipt");
+        assert_eq!(bytecode_field_move.receipt, *field_move);
+        let [bytecode_eq_read, bytecode_ne_read] = bytecode_field_move.text_read_uses.as_slice()
+        else {
+            panic!("bytecode carries exact equality and inequality bindings");
+        };
+        for (bytecode_read, mir_read, not_equal) in [
+            (bytecode_eq_read, eq_read, false),
+            (bytecode_ne_read, ne_read, true),
+        ] {
+            assert_eq!(bytecode_read.receipt, *mir_read);
+            let operands_match = match proto.code.get(bytecode_read.pc as usize) {
+                Some(Op::Eq { rd, ra, rb }) if !not_equal => {
+                    *rd == bytecode_read.rd
+                        && *ra == bytecode_read.left_reg
+                        && *rb == bytecode_read.right_reg
+                }
+                Some(Op::Ne { rd, ra, rb }) if not_equal => {
+                    *rd == bytecode_read.rd
+                        && *ra == bytecode_read.left_reg
+                        && *rb == bytecode_read.right_reg
+                }
+                _ => false,
+            };
+            assert!(
+                operands_match,
+                "Bytecode operator/register receipt must be exact"
+            );
+            assert!(bytecode_read.pc > bytecode_field_move.text_binding_pc);
+            assert!(bytecode_read.pc < bytecode_field_move.text_drop_pc);
+        }
+        let mut vm = BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value_for_component()
+                .expect("bytecode executes the same lifecycle"),
+            Value::Int(0)
+        ));
+        assert_eq!(vm.take_stdout(), reference.output);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_values_label_field_move");
+        generator
+            .compile_mir_native_for_component(&program)
+            .expect("test-only native consumer accepts the same admitted MIR receipt");
+        generator
+            .module
+            .verify()
+            .expect("native LLVM module verifies");
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("test-only native execution uses the direct field-move fixture");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout, reference.output);
+        assert_eq!(native.stderr, "");
+
+        if std::process::Command::new("valgrind")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
+                &generator,
+                &strict_map_any_memcheck_config(),
+            )
+            .expect("test-only native field move runs under strict Memcheck");
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
+        }
+    }
+
     fn ordinary_map_owned_any_v2_unpack_native_source(key: &str) -> String {
         format!(
             r#"
@@ -3286,7 +8438,7 @@ func main() -> i32 {
                 let numbers = map_set(empty, "number", 42)
                 let mixed = map_set(numbers, "label", label)
                 let pair = map_get(mixed, "{key}")
-                let value = pair.1 as i32
+                let value = unpack_i32(pair.1)
                 drop(pair)
                 drop(empty)
                 drop(numbers)
@@ -3299,8 +8451,241 @@ func main() -> i32 {
         )
     }
 
+    fn ordinary_map_owned_any_v2_print_native_source(value: &str, get_key: &str) -> String {
+        format!(
+            r#"
+            func main() -> i32 {{
+                let empty = map_new()
+                let root = map_set(empty, "value", {value})
+                let pair = map_get(root, "{get_key}")
+                drop(empty)
+                drop(root)
+                println(pair.1)
+                drop(pair)
+                0
+            }}
+            "#
+        )
+    }
+
     #[test]
-    fn ordinary_map_owned_any_v2_unpack_executes_in_native_and_traps_on_wrong_tag() {
+    fn ordinary_map_owned_any_v2_direct_print_runs_native_for_i32_and_string_hits() {
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let fixtures = [
+            (
+                ordinary_map_owned_any_v2_print_native_source("negative", "value").replace(
+                    "let empty = map_new()",
+                    "let negative: i32 = -137\n                let empty = map_new()",
+                ),
+                "-137\n",
+                false,
+            ),
+            (
+                ordinary_map_owned_any_v2_print_native_source("\"owned\\0🧪 值\"", "value"),
+                "owned\0🧪 值\n",
+                true,
+            ),
+            (
+                ordinary_map_owned_any_v2_print_native_source("\"present payload\"", "missing"),
+                "0\n",
+                true,
+            ),
+        ];
+        for (source, expected, has_string) in fixtures {
+            let program = canonical_program(&source);
+            crate::codegen::mir::validate_mir_native(&program)
+                .expect("native preflight accepts only the exact direct Any print receipt");
+            let receipts = program
+                .ordinary_map_owned_any_v2_println_receipts()
+                .expect("Core derives the source-bound V2 Any println receipt");
+            assert_eq!(receipts.len(), 1);
+            receipts[0]
+                .validate_against_program(&program)
+                .expect("print receipt binds the GetAny root, key, projection and call");
+            let main = program
+                .functions()
+                .get(&crate::core::NodeId("function:main".into()))
+                .expect("main MIR");
+            let print_instructions = main
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .filter(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Println { .. }
+                    )
+                })
+                .count();
+            assert_eq!(print_instructions, 1);
+
+            let context = Context::create();
+            let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_print");
+            generator
+                .compile_mir_native_for_component(&program)
+                .expect("native V2 direct Any println emitter");
+            generator
+                .module
+                .verify()
+                .expect("native V2 direct Any println module verifies");
+            let ir = generator.module.print_to_string().to_string();
+            assert!(ir.contains("mimi_any_payload_v2_unpack"));
+            if has_string {
+                assert!(ir.contains("mir_map_any_v2_print_string_fallback_allowed"));
+                assert!(ir.contains("mimi_print_bytes"));
+            }
+            assert!(ir.contains("printf"));
+            assert!(!ir.contains("mimi_mir_managed_any_i32_string_v1"));
+
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("native V2 direct Any println executable");
+            assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+            assert_eq!(native.stdout.as_bytes(), expected.as_bytes());
+            assert_eq!(native.stderr, "");
+        }
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_direct_print_requires_its_exact_native_route_receipt() {
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_i32.mimi"
+        );
+        let program = canonical_program(source);
+        crate::core::mir::validate_ordinary_map_owned_any_v2_direct_print_mir_route(&program)
+            .expect("the fixture has the exact Checker-sealed DirectPrint shape");
+        let receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE);
+        receipt
+            .validate_against_program(&program)
+            .expect("the dedicated route receipt binds this immutable MIR");
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "direct_print_route_receipt");
+        generator
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect("the exact DirectPrint receipt authorizes the narrow native slice");
+        generator
+            .module
+            .verify()
+            .expect("DirectPrint native module verifies");
+        assert_eq!(generator.test_mir_native_route_receipt(), Some(&receipt));
+
+        let broad_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND);
+        let error = CodeGenerator::new(&context, "direct_print_broad_receipt")
+            .compile_mir_native_with_route_receipt(&program, &broad_receipt)
+            .expect_err("the broad V2 receipt does not authorize DirectPrint");
+        assert!(error.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        }));
+
+        let mut forged = program.clone();
+        let (owner, mut function, instruction_id) = forged
+            .functions()
+            .iter()
+            .find_map(|(owner, function)| {
+                function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .find(|instruction| {
+                        matches!(
+                            instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Println { .. }
+                        )
+                    })
+                    .map(|instruction| (owner.clone(), function.clone(), instruction.id.clone()))
+            })
+            .expect("Checker-lowered DirectPrint instruction");
+        let instruction = function
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find(|instruction| instruction.id == instruction_id)
+            .expect("same DirectPrint instruction in owner");
+        instruction.kind = MirInstructionKind::Nop;
+        forged.replace_function_for_test_only(function);
+        let forged_receipt =
+            forged.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE);
+        let mut forged_generator = CodeGenerator::new(&context, "direct_print_forged_receipt");
+        let errors = forged_generator
+            .compile_mir_native_with_route_receipt(&forged, &forged_receipt)
+            .expect_err("a resealed MIR digest cannot replace the DirectPrint operation receipt");
+        assert!(errors.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && diagnostic
+                    .message
+                    .contains("DirectPrint native route rejected")
+        }));
+        assert!(forged_generator.test_mir_native_route_receipt().is_none());
+        assert_eq!(owner.0, "function:main");
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_print_rejects_mismatched_projection_before_llvm_emission() {
+        let mut program = canonical_program(&ordinary_map_owned_any_v2_print_native_source(
+            "17", "value",
+        ));
+        let receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE);
+        receipt
+            .validate_against_program(&program)
+            .expect("the original MIR has the exact DirectPrint receipt");
+        let owner = crate::core::NodeId("function:main".into());
+        let mut main = program.functions().get(&owner).expect("main MIR").clone();
+        let projection = main
+            .blocks
+            .values_mut()
+            .flat_map(|block| &mut block.instructions)
+            .find_map(|instruction| match &mut instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Println { projection, .. } => {
+                    Some(projection)
+                }
+                _ => None,
+            })
+            .expect("exact V2 print operation");
+        *projection = crate::core::NodeId("forged:other-source-projection".into());
+        program.replace_function_for_test_only(main);
+
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_print_forgery");
+        let declarations_before = generator
+            .module
+            .get_functions()
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        let error = generator
+            .compile_mir_native_with_route_receipt(&program, &receipt)
+            .expect_err("a forged source projection must fail native preflight");
+        assert!(error.iter().any(|diagnostic| {
+            diagnostic.message.contains("println")
+                || diagnostic.message.contains("projection")
+                || diagnostic.message.contains("receipt")
+        }));
+        for function in ["main", "mimi_any_payload_v2_unpack"] {
+            assert!(
+                generator.module.get_function(function).is_none(),
+                "the mismatched projection must be rejected before adding LLVM function {function}"
+            );
+        }
+        let declarations_after = generator
+            .module
+            .get_functions()
+            .map(|function| function.get_name().to_string_lossy().into_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            declarations_after, declarations_before,
+            "preflight rejection must not add LLVM declarations to CodeGenerator's runtime baseline"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_unpack_executes_in_native_and_rejects_wrong_query_type() {
         for (key, expected_output) in [("number", "42\n"), ("absent", "0\n")] {
             let program = canonical_program(&ordinary_map_owned_any_v2_unpack_native_source(key));
             crate::verifier::validate_mir_capabilities(&program)
@@ -3362,89 +8747,13 @@ func main() -> i32 {
                     },
                 )
                 .expect("strict Memcheck for the native V2 unpack success path");
-                assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-                assert_eq!(memcheck.stdout, expected_output);
-                assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-                for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-                    assert!(
-                        memcheck
-                            .stderr
-                            .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                        "native V2 unpack reported {kind}: {}",
-                        memcheck.stderr
-                    );
-                }
+                assert_clean_map_any_memcheck(&memcheck, 0, expected_output, None);
             }
         }
 
-        let mismatch = canonical_program(&ordinary_map_owned_any_v2_unpack_native_source("label"));
-        let main = crate::core::NodeId("function:main".into());
-        let reference_error = MirReferenceInterpreter::new(&mismatch)
-            .execute_with_output(&main, &[])
-            .expect_err("Reference traps on a selected Label/i32 mismatch");
-        assert!(reference_error.message.contains("E0800"));
-        let mut vm = BytecodeVM::new(
-            compile_mir_program(&mismatch).expect("AST-free bytecode wrong-tag case"),
-        );
-        let bytecode_error = vm
-            .run_value_for_component()
-            .expect_err("bytecode traps on a selected Label/i32 mismatch");
-        assert_eq!(bytecode_error.code(), "E0800");
-
-        let context = Context::create();
-        let mut generator = CodeGenerator::new(&context, "mir_native_map_any_v2_unpack_mismatch");
-        generator
-            .compile_mir_native_for_component(&mismatch)
-            .expect("native V2 mismatch path emits its runtime type check");
-        if std::process::Command::new("valgrind")
-            .arg("--version")
-            .output()
-            .is_ok_and(|output| output.status.success())
-        {
-            let mismatch_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
-                &generator,
-                &crate::tests::E2EConfig {
-                    use_valgrind: true,
-                    valgrind_args: vec![
-                        "--tool=memcheck".into(),
-                        "--leak-check=full".into(),
-                        "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
-                        "--error-exitcode=97".into(),
-                    ],
-                    ..crate::tests::E2EConfig::default()
-                },
-            )
-            .expect("run wrong-tag trap under Memcheck");
-            assert_eq!(
-                mismatch_memcheck.exit_code,
-                Some(1),
-                "{}",
-                mismatch_memcheck.stderr
-            );
-            assert!(mismatch_memcheck.stderr.contains("E0800"));
-            assert!(
-                mismatch_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"),
-                "wrong-tag trap must clean up without memory errors: {}",
-                mismatch_memcheck.stderr
-            );
-            for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-                assert!(
-                    mismatch_memcheck
-                        .stderr
-                        .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                    "wrong-tag trap reported {kind}: {}",
-                    mismatch_memcheck.stderr
-                );
-            }
-        }
-        let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("run the native V2 wrong-tag executable");
-        assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
-        assert!(native.stderr.contains("E0800"), "{}", native.stderr);
-        assert!(
-            native.stdout.is_empty(),
-            "the post-unpack print must not run"
+        assert_checker_rejects_wrong_v2_unpack_source(
+            &ordinary_map_owned_any_v2_unpack_native_source("label"),
+            "a queried Label payload cannot be unpacked as i32",
         );
     }
 
@@ -3461,7 +8770,7 @@ func main() -> i32 {
                 let with_label = map_set(stored, "label", label)
                 let mixed = map_set(with_label, "number", 42)
                 let pair = map_get(mixed, "{key}")
-                let value = pair.1 as string
+                let value = unpack_string(pair.1)
                 drop(pair)
                 drop(empty)
                 drop(stored)
@@ -3503,7 +8812,7 @@ func main() -> i32 {
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_record_unpack_returns_owned_label_and_traps_on_miss_or_mismatch() {
+    fn ordinary_map_owned_any_v2_record_unpack_returns_owned_label_and_rejects_wrong_query() {
         let hit = canonical_program(&ordinary_map_owned_any_v2_record_unpack_native_source(
             "label",
         ));
@@ -3521,10 +8830,22 @@ func main() -> i32 {
             .expect("native V2 Label unpack LLVM module verifies");
         let native_ir = generator.module.print_to_string().to_string();
         assert!(native_ir.contains("mimi_any_payload_v2_unpack"));
-        assert!(native_ir.contains("mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string"));
+        let copy_string_call = native_ir
+            .find("call i32 @mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string")
+            .expect("native V2 Label unpack uses the cap-free owned String bridge");
+        // LLVM omits the requested instruction name for a void-returning call,
+        // so identify the generated cleanup by its drop-glue callee instead.
+        let temporary_drop = native_ir[copy_string_call..]
+            .find("call void @mimi_any_payload_v2_drop_glue__")
+            .map(|offset| copy_string_call + offset)
+            .expect("native V2 Label callback payload is released through its exact drop glue");
+        let status_branch = native_ir[temporary_drop..]
+            .find("mir_map_any_v2_unpack_string_copy_ok")
+            .map(|offset| temporary_drop + offset)
+            .expect("native V2 Label unpack checks copy status only after releasing the callback payload");
         assert!(
-            native_ir.contains("call void @mimi_any_payload_v2_drop_glue__"),
-            "the void-returning temporary Label cleanup call is present in LLVM IR"
+            copy_string_call < temporary_drop && temporary_drop < status_branch,
+            "String copy result is published only after the callback payload is dropped on both status paths"
         );
         let native = crate::tests::link_and_observe_canonical_mir(&generator)
             .expect("run the native V2 Label unpack executable");
@@ -3547,73 +8868,19 @@ func main() -> i32 {
             },
         )
         .expect("run native V2 Label unpack under strict Memcheck");
-        assert_eq!(hit_memcheck.exit_code, Some(0), "{}", hit_memcheck.stderr);
-        assert_eq!(hit_memcheck.stdout, "true\n");
-        assert!(hit_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-            assert!(
-                hit_memcheck
-                    .stderr
-                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                "native V2 Label unpack reported {kind}: {}",
-                hit_memcheck.stderr
-            );
-        }
+        assert_clean_map_any_memcheck(&hit_memcheck, 0, "true\n", None);
 
-        let main = crate::core::NodeId("function:main".into());
+        let _main = crate::core::NodeId("function:main".into());
         for key in ["absent", "number"] {
-            let rejected =
-                canonical_program(&ordinary_map_owned_any_v2_record_unpack_native_source(key));
-            crate::codegen::mir::validate_mir_native(&rejected)
-                .expect("selected Label unpack receipt remains admissible on a miss/mismatch path");
-            let context = Context::create();
-            let mut rejected_generator =
-                CodeGenerator::new(&context, "mir_native_map_any_v2_record_unpack_rejected");
-            rejected_generator
-                .compile_mir_native_for_component(&rejected)
-                .expect("native V2 Label miss/mismatch path emits the exact runtime type check");
-            let native = crate::tests::link_and_observe_canonical_mir(&rejected_generator)
-                .expect("run native V2 Label miss/mismatch executable");
-            assert_eq!(native.exit_code, Some(1), "{}", native.stderr);
-            assert!(native.stderr.contains("E0800"), "{}", native.stderr);
-            assert!(native.stdout.is_empty());
-
-            let memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
-                &rejected_generator,
-                &crate::tests::E2EConfig {
-                    use_valgrind: true,
-                    valgrind_args: vec![
-                        "--tool=memcheck".into(),
-                        "--leak-check=full".into(),
-                        "--show-leak-kinds=all".into(),
-                        "--errors-for-leak-kinds=definite,indirect,possible".into(),
-                        "--error-exitcode=97".into(),
-                    ],
-                    ..crate::tests::E2EConfig::default()
-                },
-            )
-            .expect("run native V2 Label miss/mismatch under strict Memcheck");
-            assert_eq!(memcheck.exit_code, Some(1), "{}", memcheck.stderr);
-            assert!(memcheck.stderr.contains("E0800"));
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-                assert!(
-                    memcheck
-                        .stderr
-                        .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                    "native V2 Label miss/mismatch reported {kind}: {}",
-                    memcheck.stderr
-                );
-            }
-            let reference_error = MirReferenceInterpreter::new(&rejected)
-                .execute_with_output(&main, &[])
-                .expect_err("Reference traps on a Label miss or wrong payload tag");
-            assert!(reference_error.message.contains("E0800"));
+            assert_checker_rejects_wrong_v2_unpack_source(
+                &ordinary_map_owned_any_v2_record_unpack_native_source(key),
+                "a Label unpack requires the queried key to select a Label payload",
+            );
         }
     }
 
     #[test]
-    fn ordinary_map_owned_any_v2_string_unpack_clones_on_hit_and_traps_on_miss() {
+    fn ordinary_map_owned_any_v2_string_unpack_clones_on_selected_key_and_rejects_wrong_query() {
         let hit = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
             "present",
         ));
@@ -3671,131 +8938,14 @@ func main() -> i32 {
             },
         )
         .expect("strict Memcheck for native V2 String unpack success");
-        assert_eq!(hit_memcheck.exit_code, Some(0), "{}", hit_memcheck.stderr);
-        assert_eq!(hit_memcheck.stdout, "detached String payload\ntrue\n");
-        assert!(hit_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-            assert!(
-                hit_memcheck
-                    .stderr
-                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                "native V2 String unpack reported {kind}: {}",
-                hit_memcheck.stderr
+        assert_clean_map_any_memcheck(&hit_memcheck, 0, "detached String payload\ntrue\n", None);
+
+        for key in ["absent", "number"] {
+            assert_checker_rejects_wrong_v2_unpack_source(
+                &ordinary_map_owned_any_v2_string_unpack_native_source(key),
+                "a String unpack requires the queried key to select a String payload",
             );
         }
-
-        let miss = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
-            "absent",
-        ));
-        let reference_error = MirReferenceInterpreter::new(&miss)
-            .execute_with_output(&main, &[])
-            .expect_err("Reference traps when the canonical i32 miss is unpacked as String");
-        assert!(reference_error.message.contains("E0800"));
-        let mut miss_vm =
-            BytecodeVM::new(compile_mir_program(&miss).expect("AST-free bytecode V2 String miss"));
-        let bytecode_error = miss_vm
-            .run_value_for_component()
-            .expect_err("bytecode traps when the canonical i32 miss is unpacked as String");
-        assert_eq!(bytecode_error.code(), "E0800");
-
-        let context = Context::create();
-        let mut miss_generator = CodeGenerator::new(&context, "mir_native_map_any_v2_string_miss");
-        miss_generator
-            .compile_mir_native_for_component(&miss)
-            .expect("native V2 String miss path emits its exact type check");
-        let miss_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
-            &miss_generator,
-            &crate::tests::E2EConfig {
-                use_valgrind: true,
-                valgrind_args: vec![
-                    "--tool=memcheck".into(),
-                    "--leak-check=full".into(),
-                    "--show-leak-kinds=all".into(),
-                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
-                    "--error-exitcode=97".into(),
-                ],
-                ..crate::tests::E2EConfig::default()
-            },
-        )
-        .expect("run native V2 String miss trap under strict Memcheck");
-        assert_eq!(miss_memcheck.exit_code, Some(1), "{}", miss_memcheck.stderr);
-        assert!(miss_memcheck.stderr.contains("E0800"));
-        assert!(miss_memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-            assert!(
-                miss_memcheck
-                    .stderr
-                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                "native V2 String miss reported {kind}: {}",
-                miss_memcheck.stderr
-            );
-        }
-
-        let wrong_tag = canonical_program(&ordinary_map_owned_any_v2_string_unpack_native_source(
-            "number",
-        ));
-        let reference_error = MirReferenceInterpreter::new(&wrong_tag)
-            .execute_with_output(&main, &[])
-            .expect_err("Reference traps when the selected payload is i32, not String");
-        assert!(reference_error.message.contains("E0800"));
-        let mut wrong_tag_vm = BytecodeVM::new(
-            compile_mir_program(&wrong_tag).expect("AST-free bytecode V2 String wrong-tag"),
-        );
-        let bytecode_error = wrong_tag_vm
-            .run_value_for_component()
-            .expect_err("bytecode traps when the selected payload is i32, not String");
-        assert_eq!(bytecode_error.code(), "E0800");
-
-        let context = Context::create();
-        let mut wrong_tag_generator =
-            CodeGenerator::new(&context, "mir_native_map_any_v2_string_wrong_tag");
-        wrong_tag_generator
-            .compile_mir_native_for_component(&wrong_tag)
-            .expect("native V2 String wrong-tag path emits its exact type check");
-        let wrong_tag_memcheck = crate::tests::link_and_observe_canonical_mir_with_config(
-            &wrong_tag_generator,
-            &crate::tests::E2EConfig {
-                use_valgrind: true,
-                valgrind_args: vec![
-                    "--tool=memcheck".into(),
-                    "--leak-check=full".into(),
-                    "--show-leak-kinds=all".into(),
-                    "--errors-for-leak-kinds=definite,indirect,possible".into(),
-                    "--error-exitcode=97".into(),
-                ],
-                ..crate::tests::E2EConfig::default()
-            },
-        )
-        .expect("run native V2 String wrong-tag trap under strict Memcheck");
-        assert_eq!(
-            wrong_tag_memcheck.exit_code,
-            Some(1),
-            "{}",
-            wrong_tag_memcheck.stderr
-        );
-        assert!(wrong_tag_memcheck.stderr.contains("E0800"));
-        assert!(wrong_tag_memcheck
-            .stderr
-            .contains("ERROR SUMMARY: 0 errors"));
-        for kind in ["definitely lost", "indirectly lost", "possibly lost"] {
-            assert!(
-                wrong_tag_memcheck
-                    .stderr
-                    .contains(&format!("{kind}: 0 bytes in 0 blocks")),
-                "native V2 String wrong-tag reported {kind}: {}",
-                wrong_tag_memcheck.stderr
-            );
-        }
-        let wrong_tag_native = crate::tests::link_and_observe_canonical_mir(&wrong_tag_generator)
-            .expect("run native V2 String wrong-tag executable");
-        assert_eq!(
-            wrong_tag_native.exit_code,
-            Some(1),
-            "{}",
-            wrong_tag_native.stderr
-        );
-        assert!(wrong_tag_native.stderr.contains("E0800"));
-        assert!(wrong_tag_native.stdout.is_empty());
     }
 
     #[test]
@@ -3911,18 +9061,7 @@ func main() -> i32 {
                     memcheck.stderr
                 );
             }
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, "2\n1\n0\n1\n");
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, "2\n1\n0\n1\n", None);
         }
     }
 
@@ -4063,12 +9202,38 @@ func main() -> i32 {
                 .unwrap_or_else(|| panic!("missing ordinary Map lifecycle proof for {name}"));
             assert_eq!(
                 result.status,
-                crate::verifier::VerifStatus::Proven,
+                crate::verifier::VerifStatus::Disproven,
                 "{}: {}",
                 name,
                 result.message
             );
+            assert!(
+                result
+                    .message
+                    .contains("can reach trap 'E0800' under requires"),
+                "{name}: native Map capacity failure must remain a reachable trap: {}",
+                result.message
+            );
+            assert!(
+                result.diagnostic.as_ref().is_some_and(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains("can reach trap 'E0800' under requires")
+                }),
+                "{name}: the E0800 trap must retain its diagnostic"
+            );
         }
+        assert!(!verification.iter().any(|result| {
+            [
+                "checked_source_preserving",
+                "checked_remove_preserving",
+                "checked_dynamic_contains",
+                "checked_mixed_payload",
+            ]
+            .iter()
+            .any(|name| result.func_name.ends_with(name))
+                && result.status == crate::verifier::VerifStatus::Proven
+        }));
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_ordinary_map_owner_v1");
@@ -4132,18 +9297,7 @@ func main() -> i32 {
                 },
             )
             .expect("production ordinary Map lifecycle under strict Memcheck");
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, reference.output);
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
         }
     }
 
@@ -4240,18 +9394,7 @@ func main() -> i32 {
                 },
             )
             .expect("production MapAnyOwner v1 Contains path under strict Memcheck");
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, reference.output);
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
         }
 
         let (_owner, function) = program
@@ -4424,10 +9567,18 @@ func main() -> i32 {
                 .any(|error| error.to_string().contains("MapAnyOwner v1")),
             "native validator errors: {forged_remove_native_errors:#?}"
         );
-        assert!(crate::verifier::validate_mir_capabilities(&forged_remove)
-            .expect_err("verifier capability gate must reject the forged MapAnyOwner v1 key")
-            .iter()
-            .any(|error| error.contains("MapAnyOwner v1")));
+        let forged_remove_verifier_errors =
+            crate::verifier::validate_mir_capabilities(&forged_remove)
+                .expect_err("verifier capability gate must reject the forged MapAnyOwner v1 key");
+        assert!(
+            forged_remove_verifier_errors.iter().any(|error| {
+                error.contains("canonical MIR structural preflight rejected")
+                    && error.contains(
+                        "MapRoot operation disagrees with its private Checker root/type/key receipt",
+                    )
+            }),
+            "verifier must reject the key/receipt disagreement before capability admission: {forged_remove_verifier_errors:#?}"
+        );
         assert!(crate::verifier::verify_mir_with_route_receipt(
             &forged_remove,
             &verifier_receipt,
@@ -4499,11 +9650,17 @@ func main() -> i32 {
                 .iter()
                 .any(|error| error.to_string().contains("MapAnyOwner v1"))
         );
-        assert!(
+        let missing_drop_verifier_errors =
             crate::verifier::validate_mir_capabilities(&missing_string_drop)
-                .expect_err("omitted MapAnyOwner v1 String Drop must fail verifier admission")
-                .iter()
-                .any(|error| error.contains("MapAnyOwner v1"))
+                .expect_err("omitted MapAnyOwner v1 String Drop must fail verifier admission");
+        assert!(
+            missing_drop_verifier_errors.iter().any(|error| {
+                error.contains("canonical MIR structural preflight rejected")
+                    && error.contains(
+                        "MapRoot operation disagrees with its private Checker root/type/key receipt",
+                    )
+            }),
+            "verifier must reject the missing String payload Drop through its Checker receipt: {missing_drop_verifier_errors:#?}"
         );
 
         let context = Context::create();
@@ -4548,18 +9705,7 @@ func main() -> i32 {
                 },
             )
             .expect("production String MapAnyOwner v1 lifecycle under Memcheck");
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, reference.output);
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
         }
     }
 
@@ -4677,18 +9823,7 @@ func main() -> i32 {
                 },
             )
             .expect("production MapAnyOwner v1 runtime under strict Memcheck");
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, reference.output);
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, &reference.output, None);
         }
     }
 
@@ -4852,18 +9987,7 @@ func main() -> i32 {
                 },
             )
             .expect("production runtime MapAnyOwner v1 lifecycle under Memcheck");
-            assert_eq!(memcheck.exit_code, Some(0), "{}", memcheck.stderr);
-            assert_eq!(memcheck.stdout, "0\n");
-            assert!(memcheck.stderr.contains("ERROR SUMMARY: 0 errors"));
-            assert!(memcheck
-                .stderr
-                .contains("definitely lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("indirectly lost: 0 bytes in 0 blocks"));
-            assert!(memcheck
-                .stderr
-                .contains("possibly lost: 0 bytes in 0 blocks"));
+            assert_clean_map_any_memcheck(&memcheck, 0, "0\n", None);
         }
     }
 
@@ -4890,7 +10014,7 @@ func main() -> i32 {
     #[test]
     fn silent_local_flow_transition_is_one_four_consumer_production_island() {
         let program = canonical_program(
-            "flow Counter { state Zero { n: i32 } transition inc(Zero) -> Zero { return Zero { n: self.n + 1 } } } func main() -> i32 { let c = Zero { n: 41 } let c2 = Counter::inc(c) c2.n }",
+            "flow Counter { state Zero { n: i32 } state Active { n: i32 } transition inc(Zero, amount: i32) -> Active { return Active { n: self.n + amount } } } func main() -> i32 { let c = Zero { n: 41 } let active = Counter::inc(c, 1) active.n }",
         );
         let transition = crate::core::NodeId("transition:Counter::inc::Zero".into());
         let contract = program
@@ -4903,6 +10027,8 @@ func main() -> i32 {
             crate::core::mir::MirTransitionEffect::SilentLocal
         );
         assert_eq!(contract.source, contract.parameters[0]);
+        assert_eq!(contract.parameters.len(), 2, "source state + i32 event arg");
+        assert_ne!(contract.source, contract.result, "transition changes state");
         let state_desc = program
             .type_catalog()
             .get(&contract.source)
@@ -4933,11 +10059,12 @@ func main() -> i32 {
             function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
                     matches!(
-                        instruction.kind,
+                        &instruction.kind,
                         crate::core::mir::MirInstructionKind::FlowTransition {
-                            transition: ref owner,
+                            transition: owner,
+                            arguments,
                             ..
-                        } if owner == &transition
+                        } if owner == &transition && arguments.len() == 2
                     )
                 })
             })
@@ -6663,14 +11790,15 @@ func main() -> i32 {
         // validator-level Remainder rejection is pinned directly on the
         // TypeDesc catalog in core::mir::tests instead.  This test keeps
         // the positive admission face: the emitter accepts the multiply
-        // program and declares main.
-        let program = canonical_program("func main() -> f64 { 1.0 * 2.0 }");
+        // program and declares its named helper.
+        let program =
+            canonical_program("func multiply_f64() -> f64 { 1.0 * 2.0 }\nfunc main() -> i32 { 0 }");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_f64_binary_rejected_test");
         generator
             .compile_mir_native(&program)
             .expect("R6-1067 admits f64 Multiply into the native emitter");
-        assert!(generator.module.get_function("main").is_some());
+        assert!(generator.module.get_function("multiply_f64").is_some());
     }
 
     #[test]
@@ -6885,15 +12013,17 @@ func main() -> i32 {
     #[test]
     fn bytecode_option_f64_unwrap_none_matches_reference_trap() {
         let program = canonical_program(
-            "func main() -> f64 { let value: Option<f64> = None; value.unwrap() }",
+            "func unwrap_none_f64() -> f64 { let value: Option<f64> = None; value.unwrap() }\nfunc main() -> i32 { 0 }",
         );
-        let owner = crate::core::NodeId("function:main".into());
+        let owner = crate::core::NodeId("function:unwrap_none_f64".into());
         let reference = MirReferenceInterpreter::new(&program)
             .execute(&owner, &[])
             .expect_err("reference Option<f64>.unwrap(None) must trap");
-        let bytecode = compile_mir_program(&program).expect("Option<f64> unwrap(None) bytecode");
-        let bytecode_error = BytecodeVM::new(bytecode)
-            .run_value()
+        let mut bytecode = BytecodeVM::new(
+            compile_mir_program(&program).expect("Option<f64> unwrap(None) bytecode"),
+        );
+        let bytecode_error = bytecode
+            .call_named("unwrap_none_f64", vec![])
             .expect_err("bytecode Option<f64>.unwrap(None) must trap");
         assert!(reference.to_string().contains("E0800"));
         assert_eq!(bytecode_error.code(), "E0800");
@@ -7528,9 +12658,9 @@ func main() -> i32 {
     #[test]
     fn native_validator_rejects_non_copy_switch_move_default_before_llvm_declarations() {
         let program = canonical_program(
-            "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(text) => text, _ => \"fallback\" } }",
+            "func match_option_string() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(text) => text, _ => \"fallback\" } }\nfunc main() -> i32 { 0 }",
         );
-        let owner = crate::core::NodeId("function:main".into());
+        let owner = crate::core::NodeId("function:match_option_string".into());
         assert!(program.functions().get(&owner).is_some_and(|function| {
             function.blocks.values().any(|block| {
                 matches!(
@@ -7654,14 +12784,14 @@ func main() -> i32 {
     }
 
     #[test]
-    fn canonical_mir_rejects_non_scalar_list_before_any_backend() {
-        let tokens = Lexer::new("func main() -> i32 { let values = [\"x\"]; drop(values); 0 }")
+    fn canonical_mir_rejects_nested_string_list_before_any_backend() {
+        let tokens = Lexer::new("func main() -> i32 { let values = [[\"x\"]]; drop(values); 0 }")
             .tokenize()
             .expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
         let error = MirProgram::from_checked_program(&checked)
-            .expect_err("non-scalar List must fail before any backend");
+            .expect_err("nested String List must fail before any backend");
         let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
             panic!("unexpected canonical List rejection: {error:?}");
         };
@@ -8109,7 +13239,7 @@ func main() -> i32 {
     #[test]
     fn native_emitter_materializes_scalar_set_to_list_adapter() {
         let program = canonical_program(
-            "func main() -> List<i32> { let values: Set<i32> = {3, 1, 2, 1}; values.to_list() }",
+            "func set_to_list_value() -> List<i32> { let values: Set<i32> = {3, 1, 2, 1}; values.to_list() }\nfunc main() -> i32 { 0 }",
         );
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_scalar_set_to_list_test");
@@ -8127,6 +13257,7 @@ func main() -> i32 {
             .module
             .verify()
             .expect("native scalar Set.to_list module verifies");
+        assert!(generator.module.get_function("set_to_list_value").is_some());
         assert!(generator
             .module
             .get_function("mimi_mir_set_to_list_scalar")
@@ -9716,6 +14847,13 @@ func main() -> i32 {
         let program = canonical_program(include_str!(
             "../../../tests/fixtures/mir_native_generic_result_unwrap_f64_err.mimi"
         ));
+        let helper = crate::core::NodeId("function:unwrap_f64_err".into());
+        assert!(
+            program.functions().contains_key(&helper),
+            "the f64 Result trap belongs to the exact helper owner"
+        );
+        let helper_symbol = super::native_symbol_for_owner(&helper)
+            .expect("resolve the exact native MIR helper owner");
         let context = Context::create();
         let mut generator =
             CodeGenerator::new(&context, "mir_native_generic_result_unwrap_f64_err");
@@ -9726,8 +14864,17 @@ func main() -> i32 {
             .module
             .verify()
             .expect("native generic Result f64 unwrap Err module verifies");
+        let helper_function = generator
+            .module
+            .get_function(&helper_symbol)
+            .expect("native adapter emits the exact f64 helper owner");
+        assert!(
+            !helper_function.get_basic_blocks().is_empty(),
+            "the f64 helper has an emitted native body"
+        );
         let ir = generator.module.print_to_string().to_string();
         assert!(ir.contains("[E0800] canonical MIR direct variant projection"));
+        assert!(ir.contains(&format!("define double @{helper_symbol}(")));
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::sync::{Arc, Weak};
 #[cfg(test)]
 thread_local! {
     static ORDINARY_MAP_NEW_RESULT_SIZE_FAILURE_FOR_TEST: std::cell::Cell<bool> =
-        std::cell::Cell::new(false);
+        const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -47,6 +47,18 @@ struct OrdinaryMapOwnedAnyV2I32UnpackBacking {
     owner: Weak<crate::interp::value::CanonicalManagedAnyV2>,
     type_id: crate::core::ResolvedTypeId,
     value: i32,
+    runtime_token: Option<i64>,
+}
+
+impl Drop for OrdinaryMapOwnedAnyV2I32UnpackBacking {
+    fn drop(&mut self) {
+        let Some(token) = self.runtime_token.take() else {
+            return;
+        };
+        if crate::runtime::drop_managed_any_v2_token(token) != 0 {
+            std::process::abort();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +181,28 @@ struct Frame {
     ieee_depth: usize,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct FailedCleanupRegisterProbe {
+    function: FuncIdx,
+    register: Reg,
+    captured: Option<Value>,
+    frame_seen: bool,
+}
+
+#[cfg(test)]
+fn capture_failed_cleanup_register_probe(
+    probe: &mut Option<FailedCleanupRegisterProbe>,
+    frame: &Frame,
+) {
+    if let Some(probe) = probe {
+        if frame.proto_idx == probe.function {
+            probe.frame_seen = true;
+            probe.captured = frame.regs.get(probe.register as usize).cloned();
+        }
+    }
+}
+
 /// Context captured when a flow transition frame is entered. Used to
 /// convert runtime panics inside the transition body into a Fault value
 /// (with persistent-field shadowing; @transactional removed v0.34.1).
@@ -201,6 +235,10 @@ pub struct BytecodeVM {
     /// extending the checked pair's lifetime.
     ordinary_map_owned_any_v2_i32_unpack_backings:
         HashMap<usize, OrdinaryMapOwnedAnyV2I32UnpackBacking>,
+    /// Native owned-Get V1 roots paired with their interpreter mirror Arc.
+    /// This side table lets the ResultBranchV3 bytecode call the same
+    /// fallible root helpers as native lowering without changing Value ABI.
+    ordinary_map_owned_get_v1_runtime_handles: HashMap<usize, i64>,
     #[cfg(test)]
     ordinary_map_owned_any_v2_unpack_test_observations:
         Vec<BytecodeOrdinaryMapOwnedAnyV2UnpackTestObservation>,
@@ -229,6 +267,10 @@ pub struct BytecodeVM {
     /// Reusable register buffers (frame regs Vec capacity is preserved across
     /// calls, so deep recursion does not re-malloc per frame).
     free_regs: Vec<Vec<Value>>,
+    /// Test-only observation point for values that must remain intact until
+    /// failed-subexecution cleanup starts discarding the frame registers.
+    #[cfg(test)]
+    failed_cleanup_register_probe: Option<FailedCleanupRegisterProbe>,
     /// Prepared before execution; consumed on a failed String allocation so
     /// error construction/propagation preserves ErrorContext without allocating.
     string_allocation_error: Option<InterpError>,
@@ -918,6 +960,45 @@ fn cleanup_ordinary_map_new_result_runtime_roots(value: &Value) {
     }
 }
 
+/// Retire fallible owned-Get V1 runtime handles paired with roots in one
+/// bytecode value. The VM-local side table follows the value through Moves;
+/// frame cleanup drops only handles still reachable from that frame.
+fn cleanup_ordinary_map_owned_get_v1_runtime_roots(
+    value: &Value,
+    runtime_handles: &mut HashMap<usize, i64>,
+) {
+    match value {
+        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
+            let identity = Arc::as_ptr(root) as usize;
+            if let Some(handle) = runtime_handles.remove(&identity) {
+                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(handle);
+            }
+        }
+        Value::Tuple(values)
+        | Value::Set(values)
+        | Value::Array(values)
+        | Value::Variant(_, values)
+        | Value::CanonicalVariant {
+            payload: values, ..
+        } => values.iter().for_each(|value| {
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(value, runtime_handles)
+        }),
+        Value::List(values) => values.iter().for_each(|value| {
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(value, runtime_handles)
+        }),
+        Value::Record(_, fields) => fields.values().for_each(|value| {
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(value, runtime_handles)
+        }),
+        Value::Newtype(_, inner) => {
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(inner, runtime_handles)
+        }
+        Value::DynTrait { data, .. } => {
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(data, runtime_handles)
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 fn ordinary_map_new_result_live_runtime_root_occurrences(value: &Value) -> usize {
     match value {
@@ -1130,6 +1211,7 @@ impl BytecodeVM {
             program,
             stack: Vec::with_capacity(64),
             ordinary_map_owned_any_v2_i32_unpack_backings: HashMap::new(),
+            ordinary_map_owned_get_v1_runtime_handles: HashMap::new(),
             #[cfg(test)]
             ordinary_map_owned_any_v2_unpack_test_observations: Vec::new(),
             stdout: String::new(),
@@ -1142,6 +1224,8 @@ impl BytecodeVM {
             cli_args: Vec::new(),
             exit_requested: None,
             free_regs: Vec::new(),
+            #[cfg(test)]
+            failed_cleanup_register_probe: None,
             string_allocation_error: Some(InterpError::prepare_allocation_failure(
                 OBSERVER_STRING_ALLOCATION_ERROR,
             )),
@@ -1190,6 +1274,7 @@ impl BytecodeVM {
         owner: &Arc<crate::interp::value::CanonicalManagedAnyV2>,
         type_id: crate::core::ResolvedTypeId,
         value: i32,
+        runtime_token: Option<i64>,
     ) {
         self.ordinary_map_owned_any_v2_i32_unpack_backings
             .retain(|_, backing| backing.owner.strong_count() > 0);
@@ -1199,8 +1284,94 @@ impl BytecodeVM {
                 owner: Arc::downgrade(owner),
                 type_id,
                 value,
+                runtime_token,
             },
         );
+    }
+
+    fn ordinary_map_owned_any_v2_get_any_result(
+        &mut self,
+        root_reg: Reg,
+        key: &str,
+    ) -> Result<Value, InterpError> {
+        let root = match self.get_reg(root_reg) {
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => root,
+            other => {
+                return Err(InterpError::new(format!(
+                    "ordinary Map GetAnyResult expected runtime owner-v2 root, got {other}"
+                )));
+            }
+        };
+        if !root.is_unique() || !root.is_live() {
+            return Err(InterpError::new(
+                "[E0800] ordinary Map GetAnyResult root has a stale or duplicate owner",
+            ));
+        }
+        let key_bytes = key.as_bytes();
+        let key_len = i64::try_from(key_bytes.len()).map_err(|_| {
+            InterpError::new("[E0800] ordinary Map GetAnyResult key length exceeds runtime ABI")
+        })?;
+        let type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let type_id_bytes = type_id.as_str().as_bytes();
+        let type_id_len = i64::try_from(type_id_bytes.len()).map_err(|_| {
+            InterpError::new("[E0800] canonical i32 TypeDesc id exceeds runtime ABI")
+        })?;
+        let mut found = 0_i32;
+        let mut token = 0_i64;
+        let status = root
+            .with_owner(|owner| unsafe {
+                // SAFETY: `owner.handle()` is live under `with_owner`; `key_bytes`, `type_id_bytes`,
+                // `CANONICAL_I32_TYPE_DESC_HASH`, and out-slots `found`/`token` remain valid for this call.
+                crate::runtime::mimi_ordinary_map_owned_any_v2_get(
+                    owner.handle(),
+                    key_bytes.as_ptr(),
+                    key_len,
+                    &mut found,
+                    &mut token,
+                    1,
+                    type_id_bytes.as_ptr(),
+                    type_id_len,
+                    CANONICAL_I32_TYPE_DESC_HASH.as_ptr(),
+                    std::mem::size_of::<i32>() as i64,
+                    std::mem::align_of::<i32>() as i64,
+                    Some(canonical_i32_miss_clone),
+                    Some(canonical_i32_miss_drop),
+                )
+            })
+            .ok_or_else(|| {
+                InterpError::new("[E0800] ordinary Map GetAnyResult root was already retired")
+            })?;
+        let outcome = match ordinary_map_get_any_result_raw_outcome(status, found, token) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if token > 0 {
+                    let cleanup = crate::runtime::drop_managed_any_v2_token(token);
+                    if cleanup != 0 {
+                        return Err(InterpError::new(format!(
+                            "{}; [E0800] malformed GetAnyResult token {token} cleanup returned status {cleanup}",
+                            error.message()
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        let (found, token) = match outcome {
+            OrdinaryMapGetAnyResultRawOutcome::Capacity => {
+                return Ok(ordinary_map_set_result_variant("Err", Value::Int(4)));
+            }
+            OrdinaryMapGetAnyResultRawOutcome::Success { found, token } => (found, token),
+        };
+
+        let owner = Arc::new(
+            crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(type_id.clone()),
+        );
+        self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(&owner, type_id, 0, Some(token));
+        let pair = Value::Tuple(vec![
+            Value::Bool(found),
+            Value::CanonicalManagedAnyV2(owner),
+        ]);
+        Ok(ordinary_map_set_result_variant("Ok", pair))
     }
 
     /// Build the actual runtime result of the V2 GetAny operation shared by
@@ -1222,6 +1393,34 @@ impl BytecodeVM {
             ));
         }
         let (found, owner, unpack_backing) = match self.get_reg(root_reg) {
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
+                if root.is_unique() && root.is_live() =>
+            {
+                let result = root
+                    .with_owner(|root| root.get_any_i32_token(key))
+                    .ok_or_else(|| {
+                        InterpError::new(
+                            "ordinary Map/Any owner-v2 GetAny runtime root is already retired",
+                        )
+                    })?;
+                let (found, token) = result.map_err(|message| {
+                    InterpError::new(format!(
+                        "[E0800] ordinary Map/Any owner-v2 GetAny runtime ABI failed: {message}"
+                    ))
+                })?;
+                (
+                    found,
+                    crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(
+                        expected_i32.clone(),
+                    ),
+                    Some((expected_i32.clone(), 0, Some(token))),
+                )
+            }
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
+                return Err(InterpError::new(
+                    "ordinary Map/Any owner-v2 GetAny runtime root has a stale or duplicate owner",
+                ));
+            }
             Value::CanonicalOrdinaryMapOwnedAnyV2(root) if Arc::strong_count(root) == 1 => {
                 match root.get(key) {
                     None => (
@@ -1230,7 +1429,7 @@ impl BytecodeVM {
                             expected_i32.clone(),
                             0,
                         ),
-                        Some((expected_i32.clone(), 0)),
+                        Some((expected_i32.clone(), 0, None)),
                     ),
                     Some(payload) => {
                         let type_id = match payload {
@@ -1268,7 +1467,7 @@ impl BytecodeVM {
                             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::I32 {
                                 type_id,
                                 value,
-                            } => Some((type_id.clone(), *value)),
+                            } => Some((type_id.clone(), *value, None)),
                             crate::interp::value::CanonicalOrdinaryMapOwnedAnyV2Value::Bool {
                                 ..
                             }
@@ -1299,13 +1498,208 @@ impl BytecodeVM {
             }
         };
         let owner = Arc::new(owner);
-        ordinary_map_owned_any_v2_get_any_publish_checkpoint().map_err(|_| {
-            InterpError::new("[E0800] ordinary Map/Any owner-v2 GetAny result publication failed")
-        })?;
-        if let Some((type_id, value)) =
-            unpack_backing.filter(|_| found || remember_miss_unpack_backing)
+        if ordinary_map_owned_any_v2_get_any_publish_checkpoint().is_err() {
+            if let Some((_, _, Some(token))) = unpack_backing {
+                if crate::runtime::drop_managed_any_v2_token(token) != 0 {
+                    std::process::abort();
+                }
+            }
+            return Err(InterpError::new(
+                "[E0800] ordinary Map/Any owner-v2 GetAny result publication failed",
+            ));
+        }
+        if let Some((type_id, value, runtime_token)) =
+            unpack_backing.filter(|(_, _, runtime_token)| {
+                runtime_token.is_some() || found || remember_miss_unpack_backing
+            })
         {
-            self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(&owner, type_id, value);
+            self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
+                &owner,
+                type_id,
+                value,
+                runtime_token,
+            );
+        }
+        Ok(Value::Tuple(vec![
+            Value::Bool(found),
+            Value::CanonicalManagedAnyV2(owner),
+        ]))
+    }
+
+    /// Execute DirectPrintResult's GetAny from its route-owned Set payload
+    /// binding. This profile does not consult the generic V2 selected-payload
+    /// ledger: the Checker receipt fixes the hit TypeDesc and the miss is the
+    /// canonical owned i32 zero.
+    fn ordinary_map_owned_any_v2_direct_print_result_get_any_pair(
+        &mut self,
+        root_reg: Reg,
+        key: &str,
+        binding: &CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultGetAnyBinding,
+    ) -> Result<Value, InterpError> {
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        if binding.miss_payload.type_id != i32_type
+            || binding.miss_payload.kind != CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+        {
+            return Err(InterpError::new(
+                "DirectPrintResult GetAny miss payload is not the exact canonical i32 zero",
+            ));
+        }
+        let root = match self.get_reg(root_reg) {
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
+                if root.is_unique() && root.is_live() =>
+            {
+                root
+            }
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
+                return Err(InterpError::new(
+                    "DirectPrintResult GetAny source root is stale or has a duplicate owner",
+                ));
+            }
+            other => {
+                return Err(InterpError::new(format!(
+                    "DirectPrintResult GetAny expected runtime owner-v2 root, got {other}"
+                )));
+            }
+        };
+        let (found, owner, i32_backing) = match (
+            &binding.hit_payload.type_id,
+            &binding.hit_payload.kind,
+        ) {
+            (type_id, CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32) if type_id == &i32_type => {
+                let (found, token) = root
+                    .with_owner(|root| root.get_any_i32_token(key))
+                    .ok_or_else(|| {
+                        InterpError::new("DirectPrintResult GetAny source root was already retired")
+                    })?
+                    .map_err(|message| {
+                        InterpError::new(format!(
+                            "[E0800] DirectPrintResult GetAny runtime ABI failed: {message}"
+                        ))
+                    })?;
+                (
+                    found,
+                    crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(i32_type.clone()),
+                    Some((i32_type.clone(), 0, Some(token))),
+                )
+            }
+            (type_id, CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String)
+                if type_id == &string_type =>
+            {
+                let digest_hex = &binding.hit_payload.type_desc_digest;
+                if digest_hex.len() != 64 {
+                    return Err(InterpError::new(
+                        "DirectPrintResult GetAny String TypeDesc digest is malformed",
+                    ));
+                }
+                let mut descriptor_hash = [0_u8; 32];
+                for (index, pair) in digest_hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+                    let high = ordinary_map_hex_nibble(pair[0]).ok_or_else(|| {
+                        InterpError::new(
+                            "DirectPrintResult GetAny String TypeDesc digest is noncanonical",
+                        )
+                    })?;
+                    let low = ordinary_map_hex_nibble(pair[1]).ok_or_else(|| {
+                        InterpError::new(
+                            "DirectPrintResult GetAny String TypeDesc digest is noncanonical",
+                        )
+                    })?;
+                    descriptor_hash[index] = (high << 4) | low;
+                }
+                let key_len = i64::try_from(key.len()).map_err(|_| {
+                    InterpError::new("[E0800] DirectPrintResult GetAny key exceeds runtime ABI")
+                })?;
+                let mut out_data = std::ptr::null_mut();
+                let mut out_len = 0_i64;
+                let status = root
+                    .with_owner(|root| unsafe {
+                        // SAFETY: `root.handle()` is live under `with_owner`; `key`, `type_id`,
+                        // `descriptor_hash`, and local out-slots `out_data`/`out_len` are valid for this call.
+                        crate::runtime::mimi_ordinary_map_owned_any_v2_get_string_result(
+                            root.handle(),
+                            key.as_ptr(),
+                            key_len,
+                            type_id.as_str().as_ptr(),
+                            type_id.as_str().len() as i64,
+                            descriptor_hash.as_ptr(),
+                            &mut out_data,
+                            &mut out_len,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        InterpError::new("DirectPrintResult GetAny source root was already retired")
+                    })?;
+                match ordinary_map_get_string_result_variant(status, out_data, out_len)? {
+                    Value::CanonicalVariant { tag, payload, .. } if tag == "Ok" => {
+                        let [Value::String(text)] = payload.as_slice() else {
+                            return Err(InterpError::new(
+                                "DirectPrintResult String GetAny returned a malformed hit payload",
+                            ));
+                        };
+                        (
+                            true,
+                            crate::interp::value::CanonicalManagedAnyV2::from_string(
+                                string_type.clone(),
+                                text.as_str().to_owned(),
+                            ),
+                            None,
+                        )
+                    }
+                    Value::CanonicalVariant { tag, payload, .. } if tag == "Err" => {
+                        let [Value::Int(status)] = payload.as_slice() else {
+                            return Err(InterpError::new(
+                                "DirectPrintResult String GetAny returned a malformed miss payload",
+                            ));
+                        };
+                        if *status
+                            != i64::from(
+                                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING,
+                            )
+                        {
+                            return Err(InterpError::new(format!(
+                                "[E0800] DirectPrintResult String GetAny failed with status {status}"
+                            )));
+                        }
+                        (
+                            false,
+                            crate::interp::value::CanonicalManagedAnyV2::from_i32(
+                                i32_type.clone(),
+                                0,
+                            ),
+                            Some((i32_type.clone(), 0, None)),
+                        )
+                    }
+                    _ => {
+                        return Err(InterpError::new(
+                            "DirectPrintResult String GetAny returned a malformed Result",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(InterpError::new(
+                    "DirectPrintResult GetAny hit payload disagrees with its Checker Set receipt",
+                ));
+            }
+        };
+        let owner = Arc::new(owner);
+        if ordinary_map_owned_any_v2_get_any_publish_checkpoint().is_err() {
+            if let Some((_, _, Some(token))) = i32_backing {
+                if crate::runtime::drop_managed_any_v2_token(token) != 0 {
+                    std::process::abort();
+                }
+            }
+            return Err(InterpError::new(
+                "[E0800] DirectPrintResult GetAny result publication failed",
+            ));
+        }
+        if let Some((type_id, value, runtime_token)) = i32_backing {
+            self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
+                &owner,
+                type_id,
+                value,
+                runtime_token,
+            );
         }
         Ok(Value::Tuple(vec![
             Value::Bool(found),
@@ -1342,7 +1736,15 @@ impl BytecodeVM {
                 "ordinary Map/Any owner-v2 unpack payload snapshot identity is stale or mismatched",
             ));
         }
-        Ok(backing.value)
+        if let Some(token) = backing.runtime_token {
+            crate::runtime::unpack_managed_any_v2_i32(token).map_err(|status| {
+                InterpError::new(format!(
+                    "[E0800] ordinary Map/Any owner-v2 runtime Any token i32 unpack failed with status {status}"
+                ))
+            })
+        } else {
+            Ok(backing.value)
+        }
     }
 
     /// Common checked i32 extraction used by the ordinary receipted Unpack
@@ -1360,6 +1762,9 @@ impl BytecodeVM {
             ));
         }
         let copied = self.ordinary_map_owned_any_v2_i32_unpack_payload(owner, expected_type)?;
+        if owner.is_runtime_i32_for_type_id(expected_type) {
+            return Ok(copied);
+        }
         let tagged = owner.i32_value_for_type_id(expected_type).ok_or_else(|| {
             InterpError::new(
                 "ordinary Map/Any owner-v2 unpack i32 payload tag does not exactly match its target",
@@ -2060,6 +2465,39 @@ impl BytecodeVM {
         self.free_regs.last().and_then(|regs| regs.get(r as usize))
     }
 
+    #[cfg(test)]
+    pub(crate) fn observe_failed_cleanup_register_for_test(
+        &mut self,
+        function: FuncIdx,
+        register: Reg,
+    ) {
+        self.failed_cleanup_register_probe = Some(FailedCleanupRegisterProbe {
+            function,
+            register,
+            captured: None,
+            frame_seen: false,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_failed_cleanup_register(&self) -> Option<&Value> {
+        self.failed_cleanup_register_probe
+            .as_ref()
+            .and_then(|probe| probe.captured.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_failed_cleanup_frame_seen(&self) -> bool {
+        self.failed_cleanup_register_probe
+            .as_ref()
+            .is_some_and(|probe| probe.frame_seen)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_recycled_register_buffer_count(&self) -> usize {
+        self.free_regs.len()
+    }
+
     /// Request the VM to terminate with the given exit code.
     /// Called by the `exit()` builtin.
     pub fn request_exit(&mut self, code: i64) {
@@ -2074,6 +2512,10 @@ impl BytecodeVM {
             .expect("bytecode: exec stack empty (VM invariant violated)");
         for value in &frame.regs {
             cleanup_ordinary_map_new_result_runtime_roots(value);
+            cleanup_ordinary_map_owned_get_v1_runtime_roots(
+                value,
+                &mut self.ordinary_map_owned_get_v1_runtime_handles,
+            );
         }
         if frame.regs.capacity() > 0 {
             self.free_regs.push(frame.regs);
@@ -2563,13 +3005,26 @@ impl BytecodeVM {
     /// resolving host symbols or starting execution. Fresh entries run this
     /// before opening an Actor root.
     fn preflight_canonical_program_structure(&self) -> Result<(), InterpError> {
+        if self
+            .program
+            .functions
+            .get(self.program.entry as usize)
+            .is_none()
+        {
+            return Err(InterpError::new(format!(
+                "function #{} out of range",
+                self.program.entry
+            )));
+        }
         super::actor::CanonicalActorManifest::validate_program(&self.program)?;
         self.validate_canonical_map_root_program()?;
         self.validate_canonical_map_any_owner_v1_program()?;
         self.validate_canonical_ordinary_map_owner_lifecycle_i32_string_v1_program()?;
         self.validate_canonical_ordinary_map_owner_observer_v1_program()?;
         self.validate_canonical_ordinary_map_owned_get_i32_string_v1_program()?;
+        self.validate_canonical_ordinary_map_owned_get_result_branch_v3_route_anchor()?;
         self.validate_canonical_ordinary_map_owned_any_v2_program()?;
+        self.validate_canonical_ordinary_map_set_get_any_i32_result_route_anchor()?;
         self.validate_canonical_values_field_move_route_anchor()?;
         self.validate_canonical_values_snapshot_replacement_route_anchor()?;
         self.validate_canonical_values_mixed_snapshot_route_anchor()?;
@@ -2592,14 +3047,69 @@ impl BytecodeVM {
         self.validate_canonical_is_empty_route_anchor()?;
         self.validate_canonical_record_unit_route_anchor()?;
         self.validate_canonical_map_set_drop_control_route_anchor()?;
+        self.validate_canonical_map_set_drop_control_result_branch_route_anchor()?;
         self.validate_canonical_branch_local_set_diamond_route_anchor()?;
         self.validate_canonical_clone_isolation_route_anchor()?;
         self.validate_canonical_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor()?;
         self.validate_canonical_direct_print_route_anchor()?;
-        self.validate_canonical_managed_any_cfg_program()?;
+        self.validate_canonical_direct_print_result_route_anchor()?;
         self.validate_canonical_managed_any_identity_program()?;
         self.validate_canonical_managed_any_trap_cleanup_program()?;
-        self.validate_canonical_ffi_program()
+        // Validate source-specific FFI bindings before the whole-program
+        // Checker snapshot. The latter remains the final seal, while these
+        // exact diagnostics identify which FFI field or site was forged.
+        self.validate_canonical_ffi_program()?;
+        self.validate_bytecode_call_frames()?;
+        self.validate_canonical_managed_any_cfg_program()
+    }
+
+    /// Validate direct call frames before the full-program Any/CFG seal. This
+    /// preserves precise pre-execution diagnostics for malformed call windows
+    /// while still rejecting every mutation before any VM or host side effect.
+    fn validate_bytecode_call_frames(&self) -> Result<(), InterpError> {
+        let function_count = self.program.functions.len();
+        for (caller_index, function) in self.program.functions.iter().enumerate() {
+            let register_count = function.register_count as usize;
+            for (pc, op) in function.code.iter().enumerate() {
+                let (rd, callee, args_base, argc, move_call) = match op {
+                    Op::Call {
+                        rd,
+                        func,
+                        args_base,
+                        argc,
+                    } => (*rd, *func, *args_base, *argc, false),
+                    Op::CallMove {
+                        rd,
+                        func,
+                        args_base,
+                        argc,
+                    } => (*rd, *func, *args_base, *argc, true),
+                    _ => continue,
+                };
+                if usize::from(rd) >= register_count {
+                    return Err(InterpError::new(format!(
+                        "{} destination register {rd} is outside function '{}' frame with {register_count} register(s) at pc {pc}",
+                        if move_call { "move-call" } else { "call" },
+                        function.name,
+                    )));
+                }
+                if usize::try_from(callee).map_or(true, |index| index >= function_count) {
+                    return Err(InterpError::new(format!(
+                        "function #{callee} out of range for {} in function #{} pc {pc}",
+                        if move_call { "move-call" } else { "call" },
+                        caller_index,
+                    )));
+                }
+                let args_end = usize::from(args_base).checked_add(usize::from(argc));
+                if args_end.map_or(true, |end| end > register_count) {
+                    return Err(InterpError::new(format!(
+                        "{} argument register window base {args_base} count {argc} exceeds frame with {register_count} register(s)",
+                        if move_call { "move-call" } else { "call" },
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolve host symbols only after source-dependent ownership receipts have
@@ -2725,6 +3235,30 @@ impl BytecodeVM {
                 "ordinary Map owned-Get v1 bytecode has no independent Checker receipt",
             )),
             None => Ok(()),
+        }
+    }
+
+    /// Fallible owned-Get V1 New/Set has a distinct ResultBranchV3 route
+    /// anchor. An ordinary V1 Checker snapshot cannot authorize these ops.
+    fn validate_canonical_ordinary_map_owned_get_result_branch_v3_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        let has_ops = self
+            .program
+            .functions
+            .iter()
+            .any(super::instr::function_has_ordinary_map_owned_get_result_branch_v3_ops);
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_owned_get_result_branch_v3_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if has_ops => Err(InterpError::new(
+                "ordinary Map owned-Get ResultBranchV3 bytecode has no exact route anchor",
+            )),
+            None => Ok(false),
         }
     }
 
@@ -3004,6 +3538,20 @@ impl BytecodeVM {
         }
     }
 
+    fn validate_canonical_values_result_crosscall_string_caller_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_result_crosscall_string_caller_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
     /// Validate the independent CheckedProgram-sealed Map-root producer and
     /// unique direct-caller bridge before any VM effects are allowed.
     fn validate_canonical_map_root_producer_caller_route_anchor(
@@ -3060,12 +3608,89 @@ impl BytecodeVM {
     /// Validate the recoverable ordinary Map NewResult route anchor before
     /// production execution; this narrow pending-L1 identity does not open
     /// broad owner-v2 bytecode readiness.
-    fn validate_canonical_ordinary_map_new_result_route_anchor(
+    fn validate_canonical_ordinary_map_new_result_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_new_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separate Checker/MIR-bound Map SetResult bytecode anchor
+    /// before execution. It does not reuse the NewResult-only whitelist.
+    fn validate_canonical_ordinary_map_set_result_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_set_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the source-bound Set/Get-i32 route anchor before production
+    /// execution. This identity covers the New/Set Result lineage, the typed
+    /// borrowed lookup, its exhaustive Result match, and all root drops.
+    fn validate_canonical_ordinary_map_set_get_i32_result_route_anchor(
         &self,
     ) -> Result<bool, InterpError> {
         match &self.program.canonical_map_any_owner_v1_receipt {
             Some(receipt) => receipt
-                .validate_ordinary_map_new_result_route_anchor(
+                .validate_ordinary_map_set_get_i32_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the independent New/Set/GetAny/unpack-i32 source receipt and
+    /// bytecode snapshot before ordinary Map runtime-root Moves are allowed.
+    fn validate_canonical_ordinary_map_set_get_any_i32_result_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_set_get_any_i32_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the exact Checker/MIR-bound direct tuple GetAny L1 route.
+    /// This private island authorizes only its own bytecode anchor while the
+    /// broad owner-v2 readiness gate remains closed.
+    fn validate_canonical_direct_tuple_get_l1_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_direct_tuple_get_l1_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the separately versioned String Set/Get result route before
+    /// production execution. Its Checker receipt and TypeDesc anchor are
+    /// never borrowed from the typed-i32 profile.
+    fn validate_canonical_ordinary_map_set_get_string_result_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_ordinary_map_set_get_string_result_route_anchor(
                     self.program.entry,
                     &self.program.functions,
                 )
@@ -3236,6 +3861,31 @@ impl BytecodeVM {
         }
     }
 
+    /// Validate the independent Checker-sealed Result-branch control route.
+    /// Its bytecode snapshot and replayed route manifest are distinct from
+    /// the legacy no-Result MapSetDropControl anchor.
+    fn validate_canonical_map_set_drop_control_result_branch_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_map_set_drop_control_result_branch_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Validate the independent Checker-sealed RecordUnit route before VM
     /// execution. Its private snapshot binds all five roots, typed payload
     /// operations, the borrowed Label.text output, and the exact receipt.
@@ -3335,6 +3985,29 @@ impl BytecodeVM {
             Some(receipt) => receipt
                 .validate_direct_print_route_anchor(self.program.entry, &self.program.functions)
                 .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the nested Result DirectPrint profile's independent route
+    /// receipt and full bytecode snapshot before VM execution. The flat
+    /// DirectPrint and broad owner-v2 ledgers do not authorize this profile.
+    fn validate_canonical_direct_print_result_route_anchor(&self) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_direct_print_result_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None if self
+                .program
+                .functions
+                .iter()
+                .any(super::instr::function_has_ordinary_map_owned_any_v2_ops) =>
+            {
+                Ok(false)
+            }
             None => Ok(false),
         }
     }
@@ -3509,8 +4182,14 @@ impl BytecodeVM {
             || self.validate_canonical_values_producer_caller_route_anchor()?
             || self.validate_canonical_values_crosscall_string_caller_route_anchor()?
             || self.validate_canonical_values_crosscall_string_caller_index1_route_anchor()?
+            || self.validate_canonical_values_result_crosscall_string_caller_route_anchor()?
             || self.validate_canonical_map_root_producer_caller_route_anchor()?
             || self.validate_canonical_ordinary_map_new_result_route_anchor()?
+            || self.validate_canonical_ordinary_map_set_result_route_anchor()?
+            || self.validate_canonical_ordinary_map_set_get_i32_result_route_anchor()?
+            || self.validate_canonical_ordinary_map_set_get_any_i32_result_route_anchor()?
+            || self.validate_canonical_direct_tuple_get_l1_route_anchor()?
+            || self.validate_canonical_ordinary_map_set_get_string_result_route_anchor()?
             || self.validate_canonical_computed_key_get_route_anchor()?
             || self.validate_canonical_computed_string_key_owner_chain_route_anchor()?
             || self.validate_canonical_ordinary_map_owned_any_v2_zero_miss_i32_route_anchor()?
@@ -3526,11 +4205,13 @@ impl BytecodeVM {
             || self.validate_canonical_is_empty_route_anchor()?
             || self.validate_canonical_record_unit_route_anchor()?
             || self.validate_canonical_map_set_drop_control_route_anchor()?
+            || self.validate_canonical_map_set_drop_control_result_branch_route_anchor()?
             || self.validate_canonical_branch_local_set_diamond_route_anchor()?
             || self.validate_canonical_clone_isolation_route_anchor()?
             || self
                 .validate_canonical_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor()?
-            || self.validate_canonical_direct_print_route_anchor()?;
+            || self.validate_canonical_direct_print_route_anchor()?
+            || self.validate_canonical_direct_print_result_route_anchor()?;
         if enforce_production_readiness
             && !crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
             && self
@@ -4098,7 +4779,7 @@ impl BytecodeVM {
                         }
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
                             return Err(InterpError::new(
-                                "ordinary Map owned-Get v1 values require dedicated Checker-receipted MIR operations",
+                                "ordinary Map owned-Get v1 values cannot be copied by generic Mov",
                             ));
                         }
                         Value::CanonicalManagedAnyI32StringV1(_) => {
@@ -4165,26 +4846,90 @@ impl BytecodeVM {
                                     "ordinary Map NewResult Move PC exceeds bytecode ABI",
                                 )
                             })?;
-                            let authorized = self
+                            let authorized = match self
                                 .program
                                 .canonical_map_any_owner_v1_receipt
                                 .as_ref()
-                                .map(|receipt| {
-                                    receipt.authorizes_ordinary_map_new_result_root_move(
+                            {
+                                Some(receipt) => receipt
+                                    .authorizes_ordinary_map_new_result_root_move(
                                         self.program.entry,
                                         &self.program.functions,
                                         function_index,
                                         pc,
                                         rd,
                                         rs,
-                                    )
-                                })
-                                .transpose()
-                                .map_err(InterpError::new)?
-                                .unwrap_or(false);
+                                    )?
+                                    || receipt.authorizes_ordinary_map_set_result_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )?
+                                    || receipt.authorizes_ordinary_map_set_get_i32_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )?
+                                    || receipt.authorizes_ordinary_map_set_get_any_i32_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )?
+                                    || receipt
+                                        .authorizes_ordinary_map_direct_tuple_get_l1_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
+                                    || receipt
+                                        .authorizes_ordinary_map_set_get_any_result_i32_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
+                                    || receipt.authorizes_ordinary_map_set_get_string_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )?
+                                    || receipt
+                                        .authorizes_values_local_index_i32_result_branch_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
+                                    || receipt.authorizes_direct_print_result_root_move(
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    ),
+                                None => false,
+                            };
                             if !authorized {
                                 return Err(InterpError::new(
-                                    "ordinary Map/Any owner-v2 runtime-root Move is outside the exact NewResult bytecode anchor",
+                                    "ordinary Map/Any owner-v2 runtime-root Move is outside its exact CheckedProgram-bound bytecode route anchor",
                                 ));
                             }
                         }
@@ -4198,10 +4943,45 @@ impl BytecodeVM {
                                 "ordinary Map owner lifecycle v1 values require dedicated Checker-receipted MIR operations",
                             ));
                         }
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => {
-                            return Err(InterpError::new(
-                                "ordinary Map owned-Get v1 values require dedicated Checker-receipted MIR operations",
-                            ));
+                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
+                            let (function_index, pc) = {
+                                let frame = self.cur_frame();
+                                (frame.proto_idx, frame.pc.saturating_sub(1))
+                            };
+                            let pc = u32::try_from(pc).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map owned-Get ResultBranchV3 Move PC exceeds bytecode ABI",
+                                )
+                            })?;
+                            let authorized = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .map(|receipt| {
+                                    receipt.authorizes_ordinary_map_owned_get_result_branch_v3_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(InterpError::new)?
+                                .unwrap_or(false);
+                            let identity = Arc::as_ptr(root) as usize;
+                            if !authorized
+                                || rd == rs
+                                || Arc::strong_count(root) != 1
+                                || !self
+                                    .ordinary_map_owned_get_v1_runtime_handles
+                                    .contains_key(&identity)
+                            {
+                                return Err(InterpError::new(
+                                    "ordinary Map owned-Get v1 Move is outside its exact ResultBranchV3 root-transfer receipt or has duplicate/stale ownership",
+                                ));
+                            }
                         }
                         _ => {}
                     }
@@ -4296,6 +5076,36 @@ impl BytecodeVM {
                 Op::DropAggregate { ra, arity } => {
                     self.ensure_reg(ra, "aggregate drop source")?;
                     let value = self.get_reg(ra);
+                    if contains_managed_any_v2(value) {
+                        let (function_index, pc) = {
+                            let frame = self.cur_frame();
+                            let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                                InterpError::new("Any-v2 aggregate Drop has no current bytecode PC")
+                            })?;
+                            (frame.proto_idx, u32::try_from(pc).unwrap_or(u32::MAX))
+                        };
+                        if self
+                            .program
+                            .canonical_map_any_owner_v1_receipt
+                            .as_ref()
+                            .is_some_and(|receipt| receipt.has_direct_print_result_route_anchor())
+                            && !self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .is_some_and(|receipt| {
+                                    receipt.authorizes_direct_print_result_pair_drop(
+                                        function_index,
+                                        pc,
+                                        ra,
+                                    )
+                                })
+                        {
+                            return Err(InterpError::new(
+                                "DirectPrintResult Any-bearing aggregate Drop is outside its exact pair settlement binding",
+                            ));
+                        }
+                    }
                     if contains_ordinary_map_new_result_runtime_root(value) {
                         return Err(InterpError::new(
                             "ordinary Map NewResult runtime root requires its Checker-receipted Drop",
@@ -7598,6 +8408,232 @@ impl BytecodeVM {
                         }
                     }
                 }
+                Op::MirOrdinaryMapOwnedGetI32StringV1NewResult {
+                    rd,
+                    result_type,
+                    type_desc,
+                    shapes,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map owned-Get ResultBranchV3 New destination")?;
+                    let (ok_shape, err_shape) =
+                        Self::ordinary_map_owned_get_result_branch_v3_shapes(
+                            proto,
+                            result_type,
+                            type_desc,
+                            shapes,
+                        )?;
+                    let mut runtime_root = 0_i64;
+                    let status = unsafe {
+                        // SAFETY: `runtime_root` is a writable local `i64` output slot for the runtime ABI.
+                        crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_new_result(
+                            &mut runtime_root,
+                        )
+                    };
+                    let result = match (status, runtime_root) {
+                        (0, root) if root > 0 => {
+                            let map = Arc::new(BTreeMap::new());
+                            let identity = Arc::as_ptr(&map) as usize;
+                            if self
+                                .ordinary_map_owned_get_v1_runtime_handles
+                                .contains_key(&identity)
+                            {
+                                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(
+                                    root,
+                                );
+                                return Err(InterpError::new(
+                                    "ordinary Map owned-Get ResultBranchV3 New reused a live runtime-root identity",
+                                ));
+                            }
+                            self.ordinary_map_owned_get_v1_runtime_handles
+                                .insert(identity, root);
+                            Value::CanonicalVariant {
+                                nominal: ok_shape.nominal,
+                                variant: ok_shape.variant,
+                                tag: ok_shape.tag,
+                                payload: vec![Value::CanonicalOrdinaryMapOwnedGetI32StringV1(map)],
+                            }
+                        }
+                        (3, 0) => Value::CanonicalVariant {
+                            nominal: err_shape.nominal,
+                            variant: err_shape.variant,
+                            tag: err_shape.tag,
+                            payload: vec![Value::Int(3)],
+                        },
+                        _ => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map owned-Get ResultBranchV3 New helper returned invalid status/root pair ({status}, {runtime_root})"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedGetI32StringV1SetResult {
+                    rd,
+                    ra,
+                    key,
+                    value,
+                    result_type,
+                    type_desc,
+                    shapes,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map owned-Get ResultBranchV3 Set destination")?;
+                    self.ensure_reg(ra, "ordinary Map owned-Get ResultBranchV3 Set source")?;
+                    self.ensure_reg(key, "ordinary Map owned-Get ResultBranchV3 Set key")?;
+                    self.ensure_reg(value, "ordinary Map owned-Get ResultBranchV3 Set value")?;
+                    if rd == ra || rd == key || rd == value {
+                        return Err(InterpError::new(
+                            "ordinary Map owned-Get ResultBranchV3 Set result aliases an operand register",
+                        ));
+                    }
+                    let (ok_shape, err_shape) =
+                        Self::ordinary_map_owned_get_result_branch_v3_shapes(
+                            proto,
+                            result_type,
+                            type_desc,
+                            shapes,
+                        )?;
+                    let (source_handle, mut entries) = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
+                            if Arc::strong_count(root) != 1 {
+                                return Err(InterpError::new(
+                                    "ordinary Map owned-Get ResultBranchV3 Set source has a stale or duplicate owner",
+                                ));
+                            }
+                            let identity = Arc::as_ptr(root) as usize;
+                            let handle = *self
+                                .ordinary_map_owned_get_v1_runtime_handles
+                                .get(&identity)
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map owned-Get ResultBranchV3 Set source has no native root handle",
+                                    )
+                                })?;
+                            (handle, root.as_ref().clone())
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map owned-Get ResultBranchV3 Set expected V1 root, got {other}"
+                            )));
+                        }
+                    };
+                    let key = match self.get_reg(key) {
+                        Value::String(key) => key.as_str().to_owned(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map owned-Get ResultBranchV3 Set expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let (helper_status, mirror_value, helper_string_value) =
+                        match self.get_reg(value) {
+                            Value::Int(value) => {
+                                let value = i32::try_from(*value).map_err(|_| {
+                                    InterpError::integer_overflow(
+                                        "E0802: ordinary Map owned-Get ResultBranchV3 Set value overflows i32",
+                                    )
+                                })?;
+                                (
+                                    0_i32,
+                                    crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::I32(value),
+                                    None,
+                                )
+                            }
+                            Value::String(value) => (
+                                1_i32,
+                                crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::String(
+                                    SharedString::clone(value),
+                                ),
+                                Some(value.as_str().to_owned()),
+                            ),
+                            other => {
+                                return Err(InterpError::new(format!(
+                                    "ordinary Map owned-Get ResultBranchV3 Set expected i32 or String payload, got {other}"
+                                )));
+                            }
+                        };
+                    let key_len = i64::try_from(key.len()).map_err(|_| {
+                        InterpError::new(
+                            "ordinary Map owned-Get ResultBranchV3 Set key exceeds helper ABI",
+                        )
+                    })?;
+                    let mut runtime_root = 0_i64;
+                    let status = if helper_status == 0 {
+                        let Value::Int(value) = self.get_reg(value) else {
+                            unreachable!("validated i32 value changed")
+                        };
+                        let value = i32::try_from(*value).expect("range checked above");
+                        unsafe {
+                            // SAFETY: `source_handle` is a validated live runtime handle, `key` bytes/len
+                            // match the key slice, and `runtime_root` is a writable local `i64`.
+                            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32_result(
+                                source_handle,
+                                key.as_ptr(),
+                                key_len,
+                                value,
+                                &mut runtime_root,
+                            )
+                        }
+                    } else {
+                        let string = helper_string_value
+                            .as_ref()
+                            .expect("String payload retained for helper");
+                        let value_len = i64::try_from(string.len()).map_err(|_| {
+                            InterpError::new(
+                                "ordinary Map owned-Get ResultBranchV3 Set String payload exceeds helper ABI",
+                            )
+                        })?;
+                        unsafe {
+                            // SAFETY: `source_handle` is live, `key` and `string` pointers/lengths
+                            // come from valid Rust slices, and `runtime_root` is a writable local `i64`.
+                            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string_result(
+                                source_handle,
+                                key.as_ptr(),
+                                key_len,
+                                string.as_ptr(),
+                                value_len,
+                                &mut runtime_root,
+                            )
+                        }
+                    };
+                    let result = match (status, runtime_root) {
+                        (0, root) if root > 0 => {
+                            entries.insert(key, mirror_value);
+                            let map = Arc::new(entries);
+                            let identity = Arc::as_ptr(&map) as usize;
+                            if self
+                                .ordinary_map_owned_get_v1_runtime_handles
+                                .contains_key(&identity)
+                            {
+                                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(
+                                    root,
+                                );
+                                return Err(InterpError::new(
+                                    "ordinary Map owned-Get ResultBranchV3 Set reused a live runtime-root identity",
+                                ));
+                            }
+                            self.ordinary_map_owned_get_v1_runtime_handles
+                                .insert(identity, root);
+                            Value::CanonicalVariant {
+                                nominal: ok_shape.nominal,
+                                variant: ok_shape.variant,
+                                tag: ok_shape.tag,
+                                payload: vec![Value::CanonicalOrdinaryMapOwnedGetI32StringV1(map)],
+                            }
+                        }
+                        (2, 0) => Value::CanonicalVariant {
+                            nominal: err_shape.nominal,
+                            variant: err_shape.variant,
+                            tag: err_shape.tag,
+                            payload: vec![Value::Int(2)],
+                        },
+                        _ => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map owned-Get ResultBranchV3 Set helper returned invalid status/root pair ({status}, {runtime_root})"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, result);
+                }
                 Op::MirOrdinaryMapOwnedGetI32StringV1New { rd } => {
                     self.ensure_reg(rd, "ordinary Map owned-Get v1 New destination")?;
                     self.set_reg(
@@ -8026,8 +9062,8 @@ impl BytecodeVM {
                     // cannot publish a partially initialized result list or
                     // retain an alias into the source Map.
                     let values = root
-                        .iter()
-                        .map(|(_, value)| -> Result<Value, InterpError> {
+                        .values()
+                        .map(|value| -> Result<Value, InterpError> {
                             match value {
                                 crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::I32(value) => {
                                     Ok(Value::CanonicalManagedAnyI32StringV1(
@@ -8221,12 +9257,801 @@ impl BytecodeVM {
                             "ordinary Map owned-Get v1 Drop: root has a stale or duplicate owner",
                         ));
                     }
+                    let identity = Arc::as_ptr(&root) as usize;
+                    let route_enabled = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt.has_ordinary_map_owned_get_result_branch_v3_route_anchor()
+                        });
+                    let runtime_handle = self
+                        .ordinary_map_owned_get_v1_runtime_handles
+                        .remove(&identity);
+                    if route_enabled && runtime_handle.is_none() {
+                        return Err(InterpError::new(
+                            "ordinary Map owned-Get ResultBranchV3 Drop has no native root handle",
+                        ));
+                    }
+                    if let Some(handle) = runtime_handle {
+                        crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(handle);
+                    }
                     drop(root);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2NewResult { rd } => {
                     self.ensure_reg(rd, "ordinary Map NewResult destination")?;
+                    let direct_print_result_authorized = {
+                        let frame = self.cur_frame();
+                        let pc = u32::try_from(frame.pc.saturating_sub(1)).map_err(|_| {
+                            InterpError::new("DirectPrintResult NewResult PC exceeds bytecode ABI")
+                        })?;
+                        match self.program.canonical_map_any_owner_v1_receipt.as_ref() {
+                            Some(receipt) if receipt.has_direct_print_result_route_anchor() => {
+                                receipt
+                                    .direct_print_result_new_binding_at_pc(frame.proto_idx, pc)
+                                    .is_some_and(|binding| binding.rd == rd)
+                            }
+                            _ => false,
+                        }
+                    };
+                    if self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| receipt.has_direct_print_result_route_anchor())
+                        && !direct_print_result_authorized
+                    {
+                        return Err(InterpError::new(
+                            "DirectPrintResult NewResult is outside its exact bytecode site binding",
+                        ));
+                    }
                     let value = ordinary_map_new_result_bytecode_value()?;
                     self.set_reg(rd, value);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2SetAnyResult {
+                    rd,
+                    ra,
+                    key,
+                    value,
+                    payload_type_id,
+                    payload_descriptor_hash,
+                    selection_bytes,
+                    selection_hash,
+                    payload_tag,
+                    payload_size,
+                    payload_align,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map SetAnyResult destination")?;
+                    self.ensure_reg(ra, "ordinary Map SetAnyResult source root")?;
+                    self.ensure_reg(key, "ordinary Map SetAnyResult String key")?;
+                    self.ensure_reg(value, "ordinary Map SetAnyResult selected payload")?;
+                    if rd == ra
+                        || rd == key
+                        || rd == value
+                        || ra == key
+                        || ra == value
+                        || key == value
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map SetAnyResult registers alias unsafely",
+                        ));
+                    }
+                    let (function_index, set_pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new("ordinary Map SetAnyResult has no current bytecode PC")
+                        })?;
+                        (
+                            frame.proto_idx,
+                            u32::try_from(pc).map_err(|_| {
+                                InterpError::new("ordinary Map SetAnyResult PC exceeds route ABI")
+                            })?,
+                        )
+                    };
+                    let receipt = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult has no canonical owner-v2 route receipt",
+                            )
+                        })?;
+                    let sites = receipt
+                        .ordinary_map_owned_any_v2_set_any_result_sites_at_pc(
+                            self.program.entry,
+                            &self.program.functions,
+                            function_index,
+                            set_pc,
+                        )?
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult is outside its exact Checker-bound Result-branch site",
+                            )
+                        })?;
+                    if (
+                        sites.set_pc,
+                        sites.set_rd,
+                        sites.set_ra,
+                        sites.set_key,
+                        sites.set_value,
+                    ) != (set_pc, rd, ra, key, value)
+                    {
+                        return Err(InterpError::new(
+                            "[E0800] ordinary Map SetAnyResult registers differ from the exact Checker branch binding",
+                        ));
+                    }
+                    let function = self
+                        .program
+                        .functions
+                        .get(function_index as usize)
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult active function is absent",
+                            )
+                        })?;
+                    let exact_constant = |index: ConstIdx, expected: &str| matches!(function.constants.get(index as usize), Some(ConstValue::Str(value)) if value == expected);
+                    if !exact_constant(payload_type_id, sites.payload_type_id.as_str())
+                        || !exact_constant(payload_descriptor_hash, &sites.payload_descriptor_hash)
+                        || !exact_constant(selection_bytes, &sites.selection_bytes_hex)
+                        || !exact_constant(selection_hash, &sites.selection_hash)
+                        || payload_tag != sites.payload_tag
+                        || payload_size != sites.payload_size
+                        || payload_align != sites.payload_align
+                    {
+                        return Err(InterpError::new(
+                            "[E0800] ordinary Map SetAnyResult TypeDesc or selection constants differ from the exact Checker/Core receipt",
+                        ));
+                    }
+                    let payload_binding = receipt
+                        .ordinary_map_owned_any_v2_selected_payload_binding_by_type_id_str(
+                            &sites.payload_type_id,
+                        )
+                        .filter(|binding| {
+                            sites
+                                .payload_binding
+                                .as_ref()
+                                .is_none_or(|expected| expected == *binding)
+                        })
+                        .cloned()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult payload is outside the Core-selected ManagedAny V2 table",
+                            )
+                        })?;
+                    let descriptor_hash_bytes = ordinary_map_decode_route_hex(
+                        &sites.payload_descriptor_hash,
+                        "payload descriptor hash",
+                    )?;
+                    let descriptor_hash: [u8; 32] = descriptor_hash_bytes
+                        .try_into()
+                        .map_err(|_| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult descriptor hash has the wrong length",
+                            )
+                        })?;
+                    let selection_bytes = ordinary_map_decode_route_hex(
+                        &sites.selection_bytes_hex,
+                        "payload selection frame",
+                    )?;
+                    let selection_hash_bytes = ordinary_map_decode_route_hex(
+                        &sites.selection_hash,
+                        "payload selection hash",
+                    )?;
+                    let selection_hash: [u8; 32] = selection_hash_bytes
+                        .try_into()
+                        .map_err(|_| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult selection hash has the wrong length",
+                            )
+                        })?;
+                    let key_text = match self.get_reg(key) {
+                        Value::String(key_text) if key_text.as_str() == sites.key_text => {
+                            key_text.as_str().to_owned()
+                        }
+                        Value::String(_) => {
+                            return Err(InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult computed key differs from its Checker proof",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "[E0800] ordinary Map SetAnyResult expected a computed String key, got {other}"
+                            )));
+                        }
+                    };
+                    let root = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
+                            if root.is_unique() && root.is_live() =>
+                        {
+                            root
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
+                            return Err(InterpError::new(
+                                "[E0800] ordinary Map SetAnyResult source root has a stale or duplicate owner",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "[E0800] ordinary Map SetAnyResult expected a runtime owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    let source = ordinary_map_set_any_payload_source(
+                        self.get_reg(value),
+                        &payload_binding,
+                        payload_tag,
+                        payload_size,
+                        payload_align,
+                    )?;
+                    let payload_token = OrdinaryMapOwnedAnyV2ManagedPayloadToken::new(
+                        &payload_binding,
+                        payload_tag,
+                        payload_size,
+                        payload_align,
+                        &descriptor_hash,
+                        source.as_ptr(),
+                    )?;
+                    let raw_token = payload_token.0.ok_or_else(|| {
+                        InterpError::new(
+                            "[E0800] ordinary Map SetAnyResult payload token was not published",
+                        )
+                    })?;
+                    let set_result = root.with_owner(|owner| {
+                        owner.try_set_any(&key_text, raw_token, &selection_bytes, &selection_hash)
+                    });
+                    payload_token.try_drop()?;
+                    let set_result = set_result.ok_or_else(|| {
+                        InterpError::new(
+                            "[E0800] ordinary Map SetAnyResult source root was already retired",
+                        )
+                    })?;
+                    let result = match set_result {
+                        Ok(updated) => ordinary_map_set_result_variant(
+                            "Ok",
+                            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                                CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(updated),
+                            ),
+                        ),
+                        Err(crate::runtime::OwnedAnyV2RootSetError::Capacity) => {
+                            ordinary_map_set_result_variant("Err", Value::Int(3))
+                        }
+                        Err(error) => {
+                            return Err(InterpError::new(format!(
+                                "[E0800] ordinary Map SetAnyResult invalid Set status/handle result: {error:?}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, ra, key, value } => {
+                    self.ensure_reg(rd, "ordinary Map SetResult destination")?;
+                    self.ensure_reg(ra, "ordinary Map SetResult source root")?;
+                    self.ensure_reg(key, "ordinary Map SetResult String key")?;
+                    self.ensure_reg(value, "ordinary Map SetResult i32 payload")?;
+                    if rd == ra || rd == key || rd == value {
+                        return Err(InterpError::new(
+                            "ordinary Map SetResult output aliases an input register",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new("ordinary Map SetResult has no current bytecode PC")
+                        })?;
+                        (
+                            frame.proto_idx,
+                            u32::try_from(pc).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map SetResult bytecode PC exceeds route ABI",
+                                )
+                            })?,
+                        )
+                    };
+                    let receipt = self.program.canonical_map_any_owner_v1_receipt.as_ref();
+                    let direct_print_result_route = receipt
+                        .is_some_and(|receipt| receipt.has_direct_print_result_route_anchor());
+                    let direct_print_result_key = if direct_print_result_route {
+                        let binding = receipt
+                            .and_then(|receipt| {
+                                receipt.direct_print_result_set_i32_binding_at_pc(
+                                    function_index,
+                                    pc,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult SetResult has no exact bytecode site binding",
+                                )
+                            })?;
+                        if (binding.rd, binding.ra, binding.key, binding.value)
+                            != (rd, ra, key, value)
+                        {
+                            return Err(InterpError::new(
+                                "DirectPrintResult SetResult registers disagree with their exact bytecode binding",
+                            ));
+                        }
+                        Some(binding.key_text.as_str())
+                    } else {
+                        None
+                    };
+                    let direct_tuple_get_key = if !direct_print_result_route
+                        && receipt.is_some_and(|receipt| {
+                            receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor()
+                        }) {
+                        Some(
+                            receipt
+                                .expect("route predicate checked")
+                                .ordinary_map_direct_tuple_get_l1_set_key_at_pc(
+                                    self.program.entry,
+                                    &self.program.functions,
+                                    function_index,
+                                    pc,
+                                    key,
+                                )
+                                .map_err(InterpError::new)?
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "direct tuple Get L1 SetResult has no exact key binding",
+                                    )
+                                })?,
+                        )
+                    } else {
+                        None
+                    };
+                    let expected_key = direct_print_result_key.or(direct_tuple_get_key.as_deref());
+                    let key = match self.get_reg(key) {
+                        Value::String(key)
+                            if expected_key.map_or(key.as_str() == "answer", |expected| {
+                                key.as_str() == expected
+                            }) =>
+                        {
+                            key.as_str().to_owned()
+                        }
+                        Value::String(_) => {
+                            return Err(InterpError::new(if expected_key.is_some() {
+                                "ordinary Map SetResult key differs from its exact route-bound key"
+                            } else {
+                                "ordinary Map SetResult key is outside the exact `answer` profile"
+                            }));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetResult: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let value = match self.get_reg(value) {
+                        Value::Int(value) => i32::try_from(*value).map_err(|_| {
+                            InterpError::new(
+                                "ordinary Map SetResult payload is outside the exact i32 profile",
+                            )
+                        })?,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetResult: expected i32 payload, got {other}"
+                            )));
+                        }
+                    };
+                    let result = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() || !root.is_live() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map SetResult source root has a stale or duplicate owner",
+                                ));
+                            }
+                            match root.with_owner(|owner| owner.try_set_i32(&key, value)) {
+                                Some(Ok(updated)) => ordinary_map_set_result_variant(
+                                    "Ok",
+                                    Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                                        CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(updated),
+                                    ),
+                                ),
+                                Some(Err(crate::runtime::OwnedAnyV2RootSetError::Capacity)) => {
+                                    ordinary_map_set_result_variant("Err", Value::Int(2))
+                                }
+                                Some(Err(error)) => {
+                                    return Err(InterpError::new(format!(
+                                        "[E0800] ordinary Map SetResult invalid Set status/handle result: {error:?}"
+                                    )));
+                                }
+                                None => {
+                                    return Err(InterpError::new(
+                                        "[E0800] ordinary Map SetResult source root was already retired",
+                                    ));
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetResult: expected runtime owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2SetStringResult {
+                    rd,
+                    ra,
+                    key,
+                    value,
+                    string_type_id,
+                    string_type_desc_hash,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map SetStringResult destination")?;
+                    self.ensure_reg(ra, "ordinary Map SetStringResult source root")?;
+                    self.ensure_reg(key, "ordinary Map SetStringResult String key")?;
+                    self.ensure_reg(value, "ordinary Map SetStringResult String payload")?;
+                    if rd == ra
+                        || rd == key
+                        || rd == value
+                        || ra == key
+                        || ra == value
+                        || key == value
+                    {
+                        return Err(InterpError::new(
+                            "ordinary Map SetStringResult registers alias unsafely",
+                        ));
+                    }
+                    let (function_index, set_pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map SetStringResult has no current bytecode PC",
+                            )
+                        })?;
+                        (
+                            frame.proto_idx,
+                            u32::try_from(pc).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map SetStringResult PC exceeds route ABI",
+                                )
+                            })?,
+                        )
+                    };
+                    let receipt = self.program.canonical_map_any_owner_v1_receipt.as_ref();
+                    let has_direct_print_result = receipt
+                        .is_some_and(|receipt| receipt.has_direct_print_result_route_anchor());
+                    let direct_print_result_binding = if has_direct_print_result {
+                        let binding = receipt
+                            .and_then(|receipt| {
+                                receipt.direct_print_result_set_string_binding_at_pc(
+                                    function_index,
+                                    set_pc,
+                                )
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult SetStringResult has no exact bytecode site binding",
+                                )
+                            })?;
+                        if (
+                            binding.rd,
+                            binding.ra,
+                            binding.key,
+                            binding.value,
+                            binding.string_type_id,
+                            binding.string_type_desc_hash,
+                        ) != (rd, ra, key, value, string_type_id, string_type_desc_hash)
+                        {
+                            return Err(InterpError::new(
+                                "DirectPrintResult SetStringResult registers or TypeDesc disagree with their exact bytecode binding",
+                            ));
+                        }
+                        Some(binding)
+                    } else {
+                        None
+                    };
+                    let key_text = match self.get_reg(key) {
+                        Value::String(key)
+                            if direct_print_result_binding
+                                .as_ref()
+                                .map_or(key.as_str() == "answer", |binding| {
+                                    key.as_str() == binding.key_text
+                                }) =>
+                        {
+                            key.as_str().to_owned()
+                        }
+                        Value::String(_) => {
+                            return Err(InterpError::new(
+                                if direct_print_result_binding.is_some() {
+                                    "DirectPrintResult SetStringResult key differs from its exact route-bound key"
+                                } else {
+                                    "ordinary Map SetStringResult key is outside the exact `answer` profile"
+                                },
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetStringResult: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let value_text = match self.get_reg(value) {
+                        Value::String(value)
+                            if direct_print_result_binding
+                                .as_ref()
+                                .map_or(true, |binding| value.as_str() == binding.value_text) =>
+                        {
+                            SharedString::clone(value)
+                        }
+                        Value::String(_) => {
+                            return Err(InterpError::new(
+                                "DirectPrintResult SetStringResult payload differs from its exact Checker binding",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetStringResult: expected owned String payload, got {other}"
+                            )));
+                        }
+                    };
+                    let root = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => root,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map SetStringResult: expected runtime owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    if !root.is_unique() || !root.is_live() {
+                        return Err(InterpError::new(
+                            "[E0800] ordinary Map SetStringResult source root has a stale or duplicate owner",
+                        ));
+                    }
+                    let function_index = self.cur_frame().proto_idx as usize;
+                    let function = self.program.functions.get(function_index).ok_or_else(|| {
+                        InterpError::new(
+                            "[E0800] ordinary Map SetStringResult active function is absent",
+                        )
+                    })?;
+                    let (type_id, descriptor_hash) = ordinary_map_string_result_type_identity(
+                        function,
+                        string_type_id,
+                        string_type_desc_hash,
+                    )?;
+                    let result = root
+                        .with_owner(|owner| {
+                            owner.try_set_string(
+                                &key_text,
+                                value_text.as_str(),
+                                type_id.as_bytes(),
+                                &descriptor_hash,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map SetStringResult source root was already retired",
+                            )
+                        })?;
+                    let result = match result {
+                        Ok(updated) => ordinary_map_set_result_variant(
+                            "Ok",
+                            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                                CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(updated),
+                            ),
+                        ),
+                        Err(crate::runtime::OwnedAnyV2RootSetError::Capacity) => {
+                            ordinary_map_set_result_variant(
+                                "Err",
+                                Value::Int(i64::from(
+                                    crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_CAPACITY,
+                                )),
+                            )
+                        }
+                        Err(error) => {
+                            return Err(InterpError::new(format!(
+                                "[E0800] ordinary Map SetStringResult invalid Set status/handle result: {error:?}"
+                            )));
+                        }
+                    };
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetI32Result { rd, ra, key } => {
+                    self.ensure_reg(rd, "ordinary Map GetI32Result destination")?;
+                    self.ensure_reg(ra, "ordinary Map GetI32Result root")?;
+                    self.ensure_reg(key, "ordinary Map GetI32Result String key")?;
+                    if rd == ra || rd == key || ra == key {
+                        return Err(InterpError::new(
+                            "ordinary Map GetI32Result registers alias unsafely",
+                        ));
+                    }
+                    let key = match self.get_reg(key) {
+                        Value::String(key) if key.as_str() == "answer" => key,
+                        Value::String(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map GetI32Result key is outside the exact `answer` profile",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map GetI32Result: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let root = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => root,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map GetI32Result: expected runtime owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    if !root.is_unique() || !root.is_live() {
+                        return Err(InterpError::new(
+                            "[E0800] ordinary Map GetI32Result root has a stale or duplicate owner",
+                        ));
+                    }
+                    let key_bytes = key.as_bytes();
+                    let key_len = i64::try_from(key_bytes.len()).map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map GetI32Result key length exceeds runtime ABI",
+                        )
+                    })?;
+                    let mut out_value = 0_i32;
+                    let status = root
+                        .with_owner(|owner| unsafe {
+                            // SAFETY: `owner.handle()` is live inside `with_owner`; `key_bytes` and local `out_value` are valid.
+                            crate::runtime::mimi_ordinary_map_owned_any_v2_get_i32_result(
+                                owner.handle(),
+                                key_bytes.as_ptr(),
+                                key_len,
+                                &mut out_value,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map GetI32Result root was already retired",
+                            )
+                        })?;
+                    let result = ordinary_map_get_i32_result_variant(status, out_value)?;
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { rd, ra, key } => {
+                    self.ensure_reg(rd, "ordinary Map GetAnyResult destination")?;
+                    self.ensure_reg(ra, "ordinary Map GetAnyResult root")?;
+                    self.ensure_reg(key, "ordinary Map GetAnyResult String key")?;
+                    if rd == ra || rd == key || ra == key {
+                        return Err(InterpError::new(
+                            "ordinary Map GetAnyResult registers alias unsafely",
+                        ));
+                    }
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new("ordinary Map GetAnyResult has no current bytecode PC")
+                        })?;
+                        (
+                            FuncIdx::try_from(frame.proto_idx).map_err(|_| {
+                                InterpError::new("[E0800] invalid GetAnyResult function index")
+                            })?,
+                            u32::try_from(pc).map_err(|_| {
+                                InterpError::new("[E0800] GetAnyResult PC exceeds bytecode ABI")
+                            })?,
+                        )
+                    };
+                    let functions = &self.program.functions;
+                    let receipt = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map GetAnyResult has no canonical owner receipt",
+                            )
+                        })?;
+                    receipt
+                        .validate_ordinary_map_set_get_any_result_i32_result_route_anchor(
+                            self.program.entry,
+                            functions,
+                        )
+                        .map_err(InterpError::new)?;
+                    let site = receipt
+                        .ordinary_map_set_get_any_result_i32_site_at_pc(function_index, pc)
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map GetAnyResult has no exact Result-route bytecode site",
+                            )
+                        })?;
+                    if site != (rd, ra, key) {
+                        return Err(InterpError::new(
+                            "ordinary Map GetAnyResult disagrees with its independent bytecode anchor",
+                        ));
+                    }
+                    let key_value = match self.get_reg(key) {
+                        Value::String(key_value) => key_value.as_str().to_owned(),
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map GetAnyResult expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let result = self.ordinary_map_owned_any_v2_get_any_result(ra, &key_value)?;
+                    self.set_reg(rd, result);
+                }
+                Op::MirOrdinaryMapOwnedAnyV2GetStringResult {
+                    rd,
+                    ra,
+                    key,
+                    string_type_id,
+                    string_type_desc_hash,
+                } => {
+                    self.ensure_reg(rd, "ordinary Map GetStringResult destination")?;
+                    self.ensure_reg(ra, "ordinary Map GetStringResult root")?;
+                    self.ensure_reg(key, "ordinary Map GetStringResult String key")?;
+                    if rd == ra || rd == key || ra == key {
+                        return Err(InterpError::new(
+                            "ordinary Map GetStringResult registers alias unsafely",
+                        ));
+                    }
+                    let key = match self.get_reg(key) {
+                        Value::String(key) if key.as_str() == "answer" => key.as_str().to_owned(),
+                        Value::String(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map GetStringResult key is outside the exact `answer` profile",
+                            ));
+                        }
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map GetStringResult: expected String key, got {other}"
+                            )));
+                        }
+                    };
+                    let root = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => root,
+                        other => {
+                            return Err(InterpError::new(format!(
+                                "ordinary Map GetStringResult: expected runtime owner-v2 root, got {other}"
+                            )));
+                        }
+                    };
+                    if !root.is_unique() || !root.is_live() {
+                        return Err(InterpError::new(
+                            "[E0800] ordinary Map GetStringResult root has a stale or duplicate owner",
+                        ));
+                    }
+                    let function_index = self.cur_frame().proto_idx as usize;
+                    let function = self.program.functions.get(function_index).ok_or_else(|| {
+                        InterpError::new(
+                            "[E0800] ordinary Map GetStringResult active function is absent",
+                        )
+                    })?;
+                    let (type_id, descriptor_hash) = ordinary_map_string_result_type_identity(
+                        function,
+                        string_type_id,
+                        string_type_desc_hash,
+                    )?;
+                    let key_bytes = key.as_bytes();
+                    let key_len = i64::try_from(key_bytes.len()).map_err(|_| {
+                        InterpError::new(
+                            "[E0800] ordinary Map GetStringResult key length exceeds runtime ABI",
+                        )
+                    })?;
+                    let mut out_data = std::ptr::null_mut();
+                    let mut out_len = 0_i64;
+                    let status = root
+                        .with_owner(|owner| unsafe {
+                            // SAFETY: `owner.handle()` is live under `with_owner`; `key_bytes`, `type_id`,
+                            // `descriptor_hash`, and local out-slots `out_data`/`out_len` are valid.
+                            crate::runtime::mimi_ordinary_map_owned_any_v2_get_string_result(
+                                owner.handle(),
+                                key_bytes.as_ptr(),
+                                key_len,
+                                type_id.as_ptr(),
+                                type_id.len() as i64,
+                                descriptor_hash.as_ptr(),
+                                &mut out_data,
+                                &mut out_len,
+                            )
+                        })
+                        .ok_or_else(|| {
+                            InterpError::new(
+                                "[E0800] ordinary Map GetStringResult root was already retired",
+                            )
+                        })?;
+                    let result = ordinary_map_get_string_result_variant(status, out_data, out_len)?;
+                    self.set_reg(rd, result);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2New { rd } => {
                     self.ensure_reg(rd, "ordinary Map/Any owner-v2 New destination")?;
@@ -8389,6 +10214,29 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 Size result aliases its root",
                         ));
                     }
+                    if let Some(receipt) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .filter(|receipt| receipt.has_direct_print_result_route_anchor())
+                    {
+                        let frame = self.cur_frame();
+                        let pc = u32::try_from(frame.pc.saturating_sub(1)).map_err(|_| {
+                            InterpError::new("DirectPrintResult Size PC exceeds bytecode ABI")
+                        })?;
+                        let binding = receipt
+                            .direct_print_result_size_binding_at_pc(frame.proto_idx, pc)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult Size has no exact bytecode site binding",
+                                )
+                            })?;
+                        if (binding.rd, binding.ra) != (rd, ra) {
+                            return Err(InterpError::new(
+                                "DirectPrintResult Size registers disagree with their exact bytecode binding",
+                            ));
+                        }
+                    }
                     let size = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedAnyV2(root) => i32::try_from(root.len())
                             .map_err(|_| {
@@ -8472,7 +10320,9 @@ impl BytecodeVM {
                         ));
                     }
                     let key = match self.get_reg(key_reg) {
-                        Value::String(key) => key,
+                        // Own the key snapshot before executing the direct
+                        // route, which mutates VM state while reading it.
+                        Value::String(key) => key.clone(),
                         other => {
                             return Err(InterpError::new(format!(
                                 "ordinary Map/Any owner-v2 GetAny: expected String key, got {other}"
@@ -8503,30 +10353,128 @@ impl BytecodeVM {
                             .count();
                         (frame.proto_idx, pc, ordinal)
                     };
-                    let get_binding = self
-                        .program
-                        .canonical_map_any_owner_v1_receipt
-                        .as_ref()
-                        .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_get_any_binding(
-                                function_index,
-                                get_any_ordinal,
+                    let direct_print_result_binding = {
+                        let receipt = self.program.canonical_map_any_owner_v1_receipt.as_ref();
+                        if let Some(receipt) =
+                            receipt.filter(|receipt| receipt.has_direct_print_result_route_anchor())
+                        {
+                            receipt
+                                .validate_direct_print_result_route_anchor(
+                                    self.program.entry,
+                                    &self.program.functions,
+                                )
+                                .map_err(InterpError::new)?;
+                            let pc_u32 = u32::try_from(pc).map_err(|_| {
+                                InterpError::new("DirectPrintResult GetAny PC exceeds bytecode ABI")
+                            })?;
+                            Some(
+                                receipt
+                                    .direct_print_result_get_any_binding_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    )
+                                    .ok_or_else(|| {
+                                        InterpError::new(
+                                            "DirectPrintResult GetAny has no exact bytecode site binding",
+                                        )
+                                    })?
+                                    .clone(),
                             )
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
+                        } else {
+                            None
+                        }
+                    };
+                    let direct_print_result_pair = if let Some(binding) =
+                        direct_print_result_binding.as_ref()
+                    {
+                        if (binding.rd, binding.ra, binding.key) != (rd, ra, key_reg)
+                            || key.as_str() != binding.key_text
+                        {
+                            return Err(InterpError::new(
+                                "DirectPrintResult GetAny registers or key disagree with its exact bytecode binding",
+                            ));
+                        }
+                        let key_copy = try_copy_ordinary_map_owned_get_string(&key, false)
+                            .ok_or_else(|| {
+                                InterpError::new("DirectPrintResult GetAny key snapshot failed")
+                            })?;
+                        Some(
+                            self.ordinary_map_owned_any_v2_direct_print_result_get_any_pair(
+                                ra, &key_copy, binding,
+                            )?,
+                        )
+                    } else {
+                        None
+                    };
+                    if let Some(pair) = direct_print_result_pair {
+                        self.set_reg(rd, pair);
+                    } else {
+                        if let Some(receipt) = self
+                            .program
+                            .canonical_map_any_owner_v1_receipt
+                            .as_ref()
+                            .filter(|receipt| {
+                                receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor()
+                            })
+                        {
+                            receipt
+                                .validate_ordinary_map_direct_tuple_get_l1_route_anchor(
+                                    self.program.entry,
+                                    &self.program.functions,
+                                )
+                                .map_err(InterpError::new)?;
+                        }
+                        let (get_binding, has_dedicated_route_binding) = self
+                            .program
+                            .canonical_map_any_owner_v1_receipt
+                            .as_ref()
+                            .map(|receipt| {
+                                let pc = u32::try_from(pc).unwrap_or(u32::MAX);
+                                let direct_route =
+                                    receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor();
+                                let direct_binding = receipt
+                                    .ordinary_map_direct_tuple_get_l1_get_any_binding_at_pc(
+                                        function_index,
+                                        pc,
+                                    );
+                                let route_binding = if direct_route {
+                                    direct_binding
+                                } else {
+                                    receipt.ordinary_map_set_get_any_i32_get_any_binding_at_pc(
+                                        function_index,
+                                        pc,
+                                    )
+                                };
+                                let binding = if direct_route {
+                                    route_binding
+                                } else if receipt
+                                    .has_ordinary_map_set_get_any_i32_result_route_anchor()
+                                {
+                                    route_binding
+                                } else {
+                                    route_binding.or_else(|| {
+                                        receipt.ordinary_map_owned_any_v2_get_any_binding(
+                                            function_index,
+                                            get_any_ordinal,
+                                        )
+                                    })
+                                };
+                                (binding.cloned(), route_binding.is_some() || direct_route)
+                            })
+                            .unwrap_or((None, false));
+                        let get_binding = get_binding.ok_or_else(|| {
                             InterpError::new(
                                 "ordinary Map/Any owner-v2 GetAny has no Core result-settlement binding",
                             )
                         })?;
-                    if get_binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
-                        || get_binding.rd != rd
-                        || get_binding.ra != ra
-                        || get_binding.key_reg != key_reg
-                        || match &get_binding.temporary_root {
-                            Some(temporary_root) => {
-                                let root_receipt = &temporary_root.receipt;
-                                temporary_root.get_any_pc != get_binding.pc
+                        if get_binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                            || get_binding.rd != rd
+                            || get_binding.ra != ra
+                            || get_binding.key_reg != key_reg
+                            || match &get_binding.temporary_root {
+                                Some(temporary_root) => {
+                                    let root_receipt = &temporary_root.receipt;
+                                    temporary_root.get_any_pc != get_binding.pc
                                     || temporary_root.root_reg != ra
                                     || temporary_root.drop_pc
                                         != get_binding.pc.saturating_add(1)
@@ -8537,29 +10485,46 @@ impl BytecodeVM {
                                     || root_receipt.settlement_point != get_binding.operation
                                     || root_receipt.settlement
                                         != crate::core::OrdinaryMapOwnedAnyV2RootSettlementKind::ImmediateGetAnyDrop
+                                }
+                                None => {
+                                    if self
+                                        .program
+                                        .canonical_map_any_owner_v1_receipt
+                                        .as_ref()
+                                        .is_some_and(|receipt| {
+                                            receipt
+                                                .has_ordinary_map_direct_tuple_get_l1_route_anchor()
+                                        })
+                                    {
+                                        false
+                                    } else {
+                                        !has_dedicated_route_binding
+                                            || get_binding.source_local.0 .0.starts_with(
+                                                "ordinary-map-owned-any-v2:temporary-root:",
+                                            )
+                                    }
+                                }
                             }
-                            None => get_binding
-                                .source_local
-                                .0
-                                 .0
-                                .starts_with("ordinary-map-owned-any-v2:temporary-root:"),
-                        }
-                    {
-                        return Err(InterpError::new(
+                        {
+                            return Err(InterpError::new(
                             "ordinary Map/Any owner-v2 GetAny disagrees with its exact Core site binding",
                         ));
+                        }
+                        let key = try_copy_ordinary_map_owned_get_string(&key, false).ok_or_else(
+                            || {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 GetAny key snapshot failed",
+                                )
+                            },
+                        )?;
+                        let pair = self.ordinary_map_owned_any_v2_get_any_pair(
+                            ra,
+                            &key,
+                            &get_binding.miss_payload_type,
+                            true,
+                        )?;
+                        self.set_reg(rd, pair);
                     }
-                    let key =
-                        try_copy_ordinary_map_owned_get_string(key, false).ok_or_else(|| {
-                            InterpError::new("ordinary Map/Any owner-v2 GetAny key snapshot failed")
-                        })?;
-                    let pair = self.ordinary_map_owned_any_v2_get_any_pair(
-                        ra,
-                        &key,
-                        &get_binding.miss_payload_type,
-                        true,
-                    )?;
-                    self.set_reg(rd, pair);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 {
                     rd,
@@ -8961,27 +10926,87 @@ impl BytecodeVM {
                         })?;
                         (frame.proto_idx, pc)
                     };
-                    let binding = self
-                        .program
-                        .canonical_map_any_owner_v1_receipt
-                        .as_ref()
-                        .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_println_binding_at_pc(
-                                function_index,
-                                u32::try_from(pc).unwrap_or(u32::MAX),
+                    let receipt = self.program.canonical_map_any_owner_v1_receipt.as_ref();
+                    let direct_print_result_route = receipt
+                        .is_some_and(|receipt| receipt.has_direct_print_result_route_anchor());
+                    let direct_print_result_bindings = if direct_print_result_route {
+                        let receipt = receipt.expect("route predicate checked");
+                        receipt
+                            .validate_direct_print_result_route_anchor(
+                                self.program.entry,
+                                &self.program.functions,
                             )
-                        })
-                        .cloned()
-                        .ok_or_else(|| {
-                            InterpError::new(
-                                "ordinary Map/Any owner-v2 Println has no exact dedicated V2 anchor",
-                            )
+                            .map_err(InterpError::new)?;
+                        let pc_u32 = u32::try_from(pc).map_err(|_| {
+                            InterpError::new("DirectPrintResult Println PC exceeds bytecode ABI")
                         })?;
-                    if binding.rd != rd || binding.pair != pair {
-                        return Err(InterpError::new(
-                            "ordinary Map/Any owner-v2 Println disagrees with its exact anchor site",
-                        ));
-                    }
+                        let print_binding = receipt
+                            .direct_print_result_println_binding_at_pc(function_index, pc_u32)
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult Println has no exact bytecode site binding",
+                                )
+                            })?;
+                        if (print_binding.rd, print_binding.pair) != (rd, pair) {
+                            return Err(InterpError::new(
+                                "DirectPrintResult Println registers disagree with its exact bytecode binding",
+                            ));
+                        }
+                        let proto = self
+                            .program
+                            .functions
+                            .get(function_index as usize)
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult Println function index is invalid",
+                                )
+                            })?;
+                        let get_any_pc = proto
+                            .code
+                            .iter()
+                            .position(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult Println has no exact GetAny opcode",
+                                )
+                            })?;
+                        let get_any_pc = u32::try_from(get_any_pc).map_err(|_| {
+                            InterpError::new("DirectPrintResult GetAny PC exceeds bytecode ABI")
+                        })?;
+                        let get_any_binding = receipt
+                            .direct_print_result_get_any_binding_at_pc(
+                                function_index,
+                                get_any_pc,
+                            )
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "DirectPrintResult Println cannot find its route-bound GetAny payload TypeDesc",
+                                )
+                            })?;
+                        Some(get_any_binding)
+                    } else {
+                        let binding = receipt
+                            .and_then(|receipt| {
+                                receipt.ordinary_map_owned_any_v2_println_binding_at_pc(
+                                    function_index,
+                                    u32::try_from(pc).unwrap_or(u32::MAX),
+                                )
+                            })
+                            .cloned()
+                            .ok_or_else(|| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println has no exact dedicated V2 anchor",
+                                )
+                            })?;
+                        if binding.rd != rd || binding.pair != pair {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Println disagrees with its exact anchor site",
+                            ));
+                        }
+                        None
+                    };
                     let output = {
                         let fields = match self.get_reg(pair) {
                             Value::Tuple(fields) if fields.len() == 2 => fields,
@@ -9009,37 +11034,85 @@ impl BytecodeVM {
                                 "ordinary Map/Any owner-v2 Println pair has a stale or duplicate payload owner",
                             ));
                         }
-                        let is_selected = binding
-                            .receipt
-                            .selected_types
-                            .iter()
-                            .any(|selected| selected.type_id == *owner.type_id());
+                        let direct_expected_type =
+                            direct_print_result_bindings.as_ref().map(|get_any| {
+                                if found {
+                                    &get_any.hit_payload.type_id
+                                } else {
+                                    &get_any.miss_payload.type_id
+                                }
+                            });
+                        let is_selected =
+                            if let Some(expected_type) = direct_expected_type {
+                                owner.type_id() == expected_type
+                            } else {
+                                receipt.is_some_and(|receipt| {
+                                    receipt
+                                        .ordinary_map_owned_any_v2_println_binding_at_pc(
+                                            function_index,
+                                            u32::try_from(pc).unwrap_or(u32::MAX),
+                                        )
+                                        .is_some_and(|binding| {
+                                            binding.receipt.selected_types.iter().any(|selected| {
+                                                selected.type_id == *owner.type_id()
+                                            })
+                                        })
+                                })
+                            };
                         if !is_selected {
-                            return Err(InterpError::new(
-                                "ordinary Map/Any owner-v2 Println payload TypeDesc is outside the exact selected root lineage",
-                            ));
+                            return Err(InterpError::new(if direct_print_result_route {
+                                "DirectPrintResult Println payload TypeDesc differs from its exact GetAny binding"
+                            } else {
+                                "ordinary Map/Any owner-v2 Println payload TypeDesc is outside the exact selected root lineage"
+                            }));
                         }
-                        if !found
-                            && (owner.type_id() != &binding.receipt.get_any.miss_payload_type
-                                || owner.i32_value_for_type_id(
-                                    &binding.receipt.get_any.miss_payload_type,
-                                ) != Some(0))
-                        {
-                            return Err(InterpError::new(
-                                "ordinary Map/Any owner-v2 Println GetAny miss is not the canonical i32 zero payload",
-                            ));
+                        if !found {
+                            let miss_type = direct_print_result_bindings
+                                .as_ref()
+                                .map(|binding| &binding.miss_payload.type_id)
+                                .or_else(|| {
+                                    receipt.and_then(|receipt| {
+                                        receipt
+                                            .ordinary_map_owned_any_v2_println_binding_at_pc(
+                                                function_index,
+                                                u32::try_from(pc).unwrap_or(u32::MAX),
+                                            )
+                                            .map(|binding| {
+                                                &binding.receipt.get_any.miss_payload_type
+                                            })
+                                    })
+                                })
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 Println has no miss TypeDesc binding",
+                                    )
+                                })?;
+                            let miss_is_zero = if direct_print_result_route {
+                                self.checked_ordinary_map_owned_any_v2_i32_unpack(owner, miss_type)?
+                                    == 0
+                            } else {
+                                owner.i32_value_for_type_id(miss_type) == Some(0)
+                            };
+                            if owner.type_id() != miss_type || !miss_is_zero {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Println GetAny miss is not the canonical i32 zero payload",
+                                ));
+                            }
                         }
                         let i32_type =
                             crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
                         let string_type =
                             crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
                         if owner.type_id() == &i32_type {
-                            let value =
+                            let value = if direct_print_result_route {
+                                self.checked_ordinary_map_owned_any_v2_i32_unpack(owner, &i32_type)?
+                            } else {
                                 owner.i32_value_for_type_id(&i32_type).ok_or_else(|| {
                                     InterpError::new(
                                     "ordinary Map/Any owner-v2 Println i32 payload tag is invalid",
                                 )
-                                })?;
+                                })?
+                            };
                             format!("{value}\n")
                         } else if owner.type_id() == &string_type {
                             let text = owner.string_for_type_id(&string_type).ok_or_else(|| {
@@ -9089,15 +11162,70 @@ impl BytecodeVM {
                         })?;
                         (frame.proto_idx, pc)
                     };
+                    let bytecode_pc = u32::try_from(pc).unwrap_or(u32::MAX);
+                    if let Some(receipt) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .filter(|receipt| {
+                            receipt.has_ordinary_map_set_get_any_result_i32_route_anchor()
+                        })
+                    {
+                        receipt
+                            .validate_ordinary_map_set_get_any_result_i32_result_route_anchor(
+                                self.program.entry,
+                                &self.program.functions,
+                            )
+                            .map_err(InterpError::new)?;
+                    }
+                    if let Some(receipt) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .filter(|receipt| {
+                            receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor()
+                        })
+                    {
+                        receipt
+                            .validate_ordinary_map_direct_tuple_get_l1_route_anchor(
+                                self.program.entry,
+                                &self.program.functions,
+                            )
+                            .map_err(InterpError::new)?;
+                    }
                     let binding = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
                         .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_unpack_binding_at_pc(
-                                function_index,
-                                u32::try_from(pc).unwrap_or(u32::MAX),
-                            )
+                            if receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor() {
+                                receipt.ordinary_map_direct_tuple_get_l1_unpack_binding_at_pc(
+                                    function_index,
+                                    bytecode_pc,
+                                )
+                            } else if receipt.has_ordinary_map_set_get_any_result_i32_route_anchor()
+                            {
+                                receipt.ordinary_map_set_get_any_result_i32_unpack_binding_at_pc(
+                                    function_index,
+                                    bytecode_pc,
+                                )
+                            } else {
+                                let route_binding = receipt
+                                    .ordinary_map_set_get_any_i32_unpack_binding_at_pc(
+                                        function_index,
+                                        bytecode_pc,
+                                    );
+                                if receipt.has_ordinary_map_set_get_any_i32_result_route_anchor() {
+                                    route_binding
+                                } else {
+                                    route_binding.or_else(|| {
+                                        receipt.ordinary_map_owned_any_v2_unpack_binding_at_pc(
+                                            function_index,
+                                            bytecode_pc,
+                                        )
+                                    })
+                                }
+                            }
                         })
                         .cloned()
                         .ok_or_else(|| {
@@ -9111,7 +11239,7 @@ impl BytecodeVM {
                         crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
                     let string_type =
                         crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
-                    if binding.pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                    if binding.pc != bytecode_pc
                         || binding.rd != rd
                         || binding.ra != ra
                         || binding.conversion_to != binding.target_type
@@ -9157,9 +11285,27 @@ impl BytecodeVM {
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
                         .and_then(|receipt| {
-                            receipt.ordinary_map_owned_any_v2_selected_payload_binding(
-                                &binding.target_type,
-                            )
+                            if receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor() {
+                                receipt
+                                    .ordinary_map_direct_tuple_get_l1_selected_payload_binding_at_pc(
+                                        function_index,
+                                        bytecode_pc,
+                                        &binding.target_type,
+                                    )
+                            } else if receipt.has_ordinary_map_set_get_any_result_i32_route_anchor() {
+                                receipt
+                                    .ordinary_map_set_get_any_result_i32_selected_payload_binding_at_pc(
+                                        function_index,
+                                        bytecode_pc,
+                                        &binding.target_type,
+                                    )
+                            } else {
+                                receipt.ordinary_map_set_get_any_i32_selected_payload_binding_at_pc(
+                                    function_index,
+                                    bytecode_pc,
+                                    &binding.target_type,
+                                )
+                            }
                         });
                     let source_matches = match &binding.payload_source {
                         crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload => {
@@ -9316,7 +11462,7 @@ impl BytecodeVM {
                         (frame.proto_idx, pc)
                     };
                     let current_pc = u32::try_from(pc).unwrap_or(u32::MAX);
-                    let (local_binding, crosscall_binding) = self
+                    let (local_binding, crosscall_binding, result_crosscall_binding) = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
@@ -9331,16 +11477,21 @@ impl BytecodeVM {
                                         function_index,
                                         current_pc,
                                     ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_unpack_at_pc(
+                                        function_index,
+                                        current_pc,
+                                    ),
                             )
                         })
-                        .unwrap_or((None, None));
+                        .unwrap_or((None, None, None));
                     let (
                         conversion_to,
                         payload_type_desc_digest,
                         crosscall_index,
                         index_disposition,
-                    ) = match (local_binding, crosscall_binding) {
-                        (Some(binding), None) => {
+                    ) = match (local_binding, crosscall_binding, result_crosscall_binding) {
+                        (Some(binding), None, None) => {
                             if binding.pc != current_pc
                                     || binding.rd != rd
                                     || binding.ra != ra
@@ -9364,7 +11515,7 @@ impl BytecodeVM {
                                 Some(binding.index_disposition),
                             )
                         }
-                        (None, Some((proof, site))) => {
+                        (None, Some((proof, site)), None) => {
                             if site.function != function_index
                                 || site.pc != current_pc
                                 || !matches!(
@@ -9394,16 +11545,96 @@ impl BytecodeVM {
                                     Some(match proof.checker_caller.profile_version {
                                         crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V1 => 0,
                                         crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2 => 1,
+                                        _ => {
+                                            return Err(InterpError::new(
+                                                "ordinary Map/Any owner-v2 Values straight-line cross-call anchor has a Result profile",
+                                            ));
+                                        }
                                     }),
                                     None,
                                 )
                         }
-                        (Some(_), Some(_)) => {
+                        (None, None, Some((proof, site))) => {
+                            let expected_index = match proof.checker_caller.profile_version {
+                                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => 0,
+                                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => 1,
+                                _ => {
+                                    return Err(InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values Result cross-call anchor has a non-Result profile",
+                                    ));
+                                }
+                            };
+                            let selected_string_payload = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .and_then(|receipt| {
+                                    receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                        &proof.string_type,
+                                    )
+                                })
+                                .filter(|binding| {
+                                    binding.type_id == proof.string_type
+                                        && matches!(
+                                            &binding.kind,
+                                            crate::interp::bytecode::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                                        )
+                                        && super::instr::is_canonical_digest(
+                                            &binding.type_desc_digest,
+                                        )
+                                })
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values Result caller has no exact selected String TypeDesc",
+                                    )
+                                })?;
+                            if site.function != function_index
+                                || site.pc != current_pc
+                                || !matches!(
+                                    &site.op,
+                                    Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack {
+                                        rd: site_rd,
+                                        ra: site_ra,
+                                        index: site_index,
+                                    } if (*site_rd, *site_ra, *site_index) == (rd, ra, index)
+                                )
+                                || proof.caller_owner != proof.checker_caller.caller_owner
+                                || proof.values_type
+                                    != crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                                || proof.string_type
+                                    != crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::String,
+                                    )
+                                || proof.checker_caller.index_type
+                                    != crate::core::ir::primitive_type_id(
+                                        crate::core::PrimitiveType::I32,
+                                    )
+                                || proof.caller_index_value != expected_index
+                                || proof.checker_caller.index_value != expected_index
+                                || proof.values_element_count != (expected_index as usize + 1)
+                                || proof.checker_caller.values_element_count
+                                    != proof.values_element_count
+                                || !super::instr::is_canonical_digest(
+                                    &proof.payload_selection_digest,
+                                )
+                            {
+                                return Err(InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values Result cross-call String unpack disagrees with its exact route anchor",
+                                ));
+                            }
+                            (
+                                proof.string_type.clone(),
+                                selected_string_payload.type_desc_digest.clone(),
+                                Some(expected_index),
+                                None,
+                            )
+                        }
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
                             return Err(InterpError::new(
                                     "ordinary Map/Any owner-v2 Values unpack has ambiguous local and cross-call receipts",
                                 ));
                         }
-                        (None, None) => {
+                        (None, None, None) => {
                             return Err(InterpError::new(
                                     "ordinary Map/Any owner-v2 Values unpack has no exact Core/MIR binding",
                                 ));
@@ -9446,7 +11677,7 @@ impl BytecodeVM {
                     }
 
                     let raw_index = self.get_int(index)?;
-                    if crosscall_index.is_some_and(|expected| raw_index != expected) {
+                    if crosscall_index.is_some_and(|expected| raw_index != i64::from(expected)) {
                         return Err(InterpError::new(
                             format!(
                                 "ordinary Map/Any owner-v2 Values cross-call String index is not the receipted literal {}",
@@ -9765,6 +11996,26 @@ impl BytecodeVM {
                         (frame.proto_idx, pc)
                     };
                     let pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                    let values_result_branch_site = if let Some(receipt) =
+                        self.program.canonical_map_any_owner_v1_receipt.as_ref()
+                    {
+                        receipt
+                            .values_local_index_i32_result_branch_values_site_at_pc(
+                                self.program.entry,
+                                &self.program.functions,
+                                function_index,
+                                pc_u32,
+                                rd,
+                                ra,
+                            )
+                            .map_err(|message| {
+                                InterpError::new(format!(
+                                    "[E0800] ordinary Map/Any owner-v2 Values Result-branch site is invalid: {message}"
+                                ))
+                            })?
+                    } else {
+                        None
+                    };
                     let (values_binding, route_binding, crosscall_site) = self
                         .program
                         .canonical_map_any_owner_v1_receipt
@@ -9788,7 +12039,8 @@ impl BytecodeVM {
                             )
                         })
                         .unwrap_or((None, None, None));
-                    match (values_binding, route_binding, crosscall_site) {
+                    if values_result_branch_site.is_none() {
+                        match (values_binding, route_binding, crosscall_site) {
                         (Some(binding), None, None)
                             if binding.pc == pc_u32
                                 && binding.rd == rd
@@ -9843,6 +12095,7 @@ impl BytecodeVM {
                             return Err(InterpError::new(
                                 "ordinary Map/Any owner-v2 Values has no Core result-settlement or producer-caller binding",
                             ));
+                        }
                         }
                     }
                     let (values, i32_backings) = match self.get_reg(ra) {
@@ -9911,11 +12164,65 @@ impl BytecodeVM {
                                         Arc::clone(&owner),
                                         type_id.clone(),
                                         *value,
+                                        None,
                                     ));
                                 }
                                 values.push(Value::CanonicalManagedAnyV2(owner));
                             }
                             (values, i32_backings)
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
+                            if values_result_branch_site.is_some()
+                                && root.is_unique()
+                                && root.is_live() =>
+                        {
+                            let mut values = Vec::new();
+                            let mut i32_backings = Vec::new();
+                            values.try_reserve_exact(1).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values snapshot allocation failed",
+                                )
+                            })?;
+                            i32_backings.try_reserve_exact(1).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values backing allocation failed",
+                                )
+                            })?;
+                            let (found, token) = root
+                                .with_owner(|owner| owner.get_any_i32_token("answer"))
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values Result-branch root was already retired",
+                                    )
+                                })?
+                                .map_err(|message| {
+                                    InterpError::new(format!(
+                                        "[E0800] ordinary Map/Any owner-v2 Values Result-branch lookup failed: {message}"
+                                    ))
+                                })?;
+                            if !found {
+                                if crate::runtime::drop_managed_any_v2_token(token) != 0 {
+                                    std::process::abort();
+                                }
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 Values Result-branch receipt key is absent",
+                                ));
+                            }
+                            let type_id =
+                                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                            let owner = Arc::new(
+                                crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(
+                                    type_id.clone(),
+                                ),
+                            );
+                            i32_backings.push((Arc::clone(&owner), type_id, 0, Some(token)));
+                            values.push(Value::CanonicalManagedAnyV2(owner));
+                            (values, i32_backings)
+                        }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values runtime root has a stale or duplicate owner, or lacks its exact Result-branch site",
+                            ));
                         }
                         Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                             return Err(InterpError::new(
@@ -9928,14 +12235,24 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    ordinary_map_owned_any_v2_values_publish_checkpoint().map_err(|_| {
-                        InterpError::new(
+                    if ordinary_map_owned_any_v2_values_publish_checkpoint().is_err() {
+                        for (_, _, _, runtime_token) in &i32_backings {
+                            if let Some(token) = runtime_token {
+                                if crate::runtime::drop_managed_any_v2_token(*token) != 0 {
+                                    std::process::abort();
+                                }
+                            }
+                        }
+                        return Err(InterpError::new(
                             "[E0800] ordinary Map/Any owner-v2 Values publication failed",
-                        )
-                    })?;
-                    for (owner, type_id, value) in i32_backings {
+                        ));
+                    }
+                    for (owner, type_id, value, runtime_token) in i32_backings {
                         self.remember_ordinary_map_owned_any_v2_i32_unpack_payload(
-                            &owner, type_id, value,
+                            &owner,
+                            type_id,
+                            value,
+                            runtime_token,
                         );
                     }
                     self.set_reg(rd, Value::List(Arc::new(values)));
@@ -9998,6 +12315,8 @@ impl BytecodeVM {
                             }
                         })
                         .unwrap_or((None, false));
+                    #[cfg(not(test))]
+                    let _ = source_map_reg;
                     if !clone_binding_present {
                         return Err(InterpError::new(
                             "ordinary Map/Any owner-v2 Values Clone has no exact Core temporary-owner or producer-caller binding",
@@ -10120,6 +12439,26 @@ impl BytecodeVM {
                 }
                 Op::MirOrdinaryMapOwnedAnyV2Drop { ra } => {
                     self.ensure_reg(ra, "ordinary Map/Any owner-v2 Drop source")?;
+                    if let Some(receipt) = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .filter(|receipt| receipt.has_direct_print_result_route_anchor())
+                    {
+                        let frame = self.cur_frame();
+                        let pc = u32::try_from(frame.pc.saturating_sub(1)).map_err(|_| {
+                            InterpError::new("DirectPrintResult root Drop PC exceeds bytecode ABI")
+                        })?;
+                        if !receipt.authorizes_direct_print_result_root_drop(
+                            frame.proto_idx,
+                            pc,
+                            ra,
+                        ) {
+                            return Err(InterpError::new(
+                                "DirectPrintResult root Drop is outside its exact bytecode settlement binding",
+                            ));
+                        }
+                    }
                     let root = {
                         let frame = self.cur_frame_mut();
                         std::mem::replace(&mut frame.regs[ra as usize], Value::Unit)
@@ -10205,11 +12544,23 @@ impl BytecodeVM {
                                     pc_u32,
                                 )
                         });
+                    let result_crosscall_snapshot_drop = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt
+                                .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_snapshot_drop_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                )
+                        });
                     let authorization_count = usize::from(original_binding.is_some())
                         + usize::from(borrowed_clone.is_some())
                         + usize::from(route_owner_drop.is_some())
                         + usize::from(route_len_drop.is_some())
-                        + usize::from(crosscall_snapshot_drop.is_some());
+                        + usize::from(crosscall_snapshot_drop.is_some())
+                        + usize::from(result_crosscall_snapshot_drop.is_some());
                     if authorization_count != 1 {
                         return Err(InterpError::new(
                             "ordinary Map/Any owner-v2 Values Drop has no unique exact settlement or temporary Clone binding",
@@ -10278,6 +12629,20 @@ impl BytecodeVM {
                         {
                             return Err(InterpError::new(
                                 "ordinary Map/Any owner-v2 Values cross-call snapshot Drop disagrees with its exact route anchor",
+                            ));
+                        }
+                        Some(ra)
+                    } else if let Some((_proof, site)) = result_crosscall_snapshot_drop {
+                        if site.function != function_index
+                            || site.pc != pc_u32
+                            || !matches!(
+                                &site.op,
+                                Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra: site_ra }
+                                    if *site_ra == ra
+                            )
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Result cross-call snapshot Drop disagrees with its exact route anchor",
                             ));
                         }
                         Some(ra)
@@ -12798,8 +15163,14 @@ impl BytecodeVM {
                 .stack
                 .pop()
                 .expect("stack length re-checked in loop condition");
+            #[cfg(test)]
+            capture_failed_cleanup_register_probe(&mut self.failed_cleanup_register_probe, &frame);
             for value in &frame.regs {
                 cleanup_ordinary_map_new_result_runtime_roots(value);
+                cleanup_ordinary_map_owned_get_v1_runtime_roots(
+                    value,
+                    &mut self.ordinary_map_owned_get_v1_runtime_handles,
+                );
             }
             if frame.regs.capacity() > 0 {
                 self.free_regs.push(frame.regs);
@@ -12817,9 +15188,17 @@ impl BytecodeVM {
         if error.is_allocation_failure() {
             // Dropping the frames releases the source roots immediately and
             // cannot grow the recycled-register Vec under allocation denial.
+            #[cfg(test)]
+            let probe = &mut self.failed_cleanup_register_probe;
             for frame in self.stack.iter().skip(stack_len_before) {
+                #[cfg(test)]
+                capture_failed_cleanup_register_probe(probe, frame);
                 for value in &frame.regs {
                     cleanup_ordinary_map_new_result_runtime_roots(value);
+                    cleanup_ordinary_map_owned_get_v1_runtime_roots(
+                        value,
+                        &mut self.ordinary_map_owned_get_v1_runtime_handles,
+                    );
                 }
             }
             self.stack.truncate(stack_len_before);
@@ -14123,6 +16502,35 @@ impl BytecodeVM {
         Ok(if is_ok { ok_shape } else { err_shape })
     }
 
+    fn ordinary_map_owned_get_result_branch_v3_shapes(
+        proto: &FunctionProto,
+        result_type: ConstIdx,
+        type_desc: ConstIdx,
+        shapes: ConstIdx,
+    ) -> Result<(VariantShape, VariantShape), InterpError> {
+        let expected_type =
+            crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+        match proto.constants.get(result_type as usize) {
+            Some(ConstValue::Str(type_id)) if type_id == expected_type.as_str() => {}
+            _ => {
+                return Err(InterpError::new(
+                    "owned-Get ResultBranchV3 opcode has a foreign synthetic Result type identity",
+                ));
+            }
+        }
+        match proto.constants.get(type_desc as usize) {
+            Some(ConstValue::Str(descriptor)) if !descriptor.is_empty() => {}
+            _ => {
+                return Err(InterpError::new(
+                    "owned-Get ResultBranchV3 opcode has no canonical Result TypeDesc text",
+                ));
+            }
+        }
+        let ok = Self::ordinary_map_owned_get_result_shape(proto, shapes, true)?;
+        let err = Self::ordinary_map_owned_get_result_shape(proto, shapes, false)?;
+        Ok((ok, err))
+    }
+
     /// Pop the top of the quote assembly stack.
     fn quote_pop(&mut self) -> Result<crate::interp::value::QuotedAst, InterpError> {
         self.quote_stack
@@ -14552,7 +16960,7 @@ mod ordinary_map_owned_any_v2_tests {
         CanonicalManagedAnyV2, CanonicalOrdinaryMapOwnedAnyV2Value as Payload, SharedString, Value,
     };
     use std::collections::{BTreeMap, HashMap};
-    use std::sync::{Arc, Weak};
+    use std::sync::Arc;
 
     #[test]
     fn v2_snapshot_clone_preserves_nominal_identity_and_copies_string_owners() {
@@ -14747,6 +17155,7 @@ mod ordinary_map_owned_any_v2_tests {
                 owner: Arc::downgrade(&other_owner),
                 type_id: type_id.clone(),
                 value: 7,
+                runtime_token: None,
             },
         )]);
         let aggregate = Value::Tuple(vec![
@@ -14765,6 +17174,7 @@ mod ordinary_map_owned_any_v2_tests {
                 owner: Arc::downgrade(&owner),
                 type_id,
                 value: 7,
+                runtime_token: None,
             },
         );
         forget_managed_any_v2_i32_unpack_backings_for_value(&aggregate, &mut backings);
@@ -15024,7 +17434,7 @@ mod shared_string_publication_tests {
                     SharedString::try_new(buffer).expect("fallible shared String success");
                 let original_pointer = SharedString::as_ptr(&unique);
                 let (_, observation) = test_alloc::with_one_shot_denial(|| {
-                    SharedString::make_mut(&mut unique).push_str("!");
+                    SharedString::make_mut(&mut unique).push('!');
                 });
                 assert_eq!(
                     observation.requests, 0,
@@ -15272,12 +17682,20 @@ mod shared_string_publication_tests {
 
     #[test]
     fn shared_string_concat_checkpoints_cover_both_bytecode_paths() {
-        let source = "func main() -> string { \"nul\\0\" + \"雪\" }";
+        let source = r#"
+            func concat_owner() -> string { "nul\0" + "雪" }
+            func main() -> i32 { 0 }
+        "#;
         let original = compile_compatibility_source(source);
+        let owner_index = original
+            .functions
+            .iter()
+            .position(|function| function.name == "concat_owner")
+            .expect("concat owner function");
         for use_add_int in [false, true] {
             let mut bytecode = Arc::clone(&original);
-            let main = &mut Arc::make_mut(&mut bytecode).functions[original.entry as usize];
-            let operation = main
+            let owner = &mut Arc::make_mut(&mut bytecode).functions[owner_index];
+            let operation = owner
                 .code
                 .iter_mut()
                 .find(|op| matches!(op, Op::ConcatStr { .. }))
@@ -15292,7 +17710,7 @@ mod shared_string_publication_tests {
                 let mut vm = BytecodeVM::new(Arc::clone(&bytecode));
                 let error =
                     crate::runtime::with_ordinary_map_string_concat_failure_for_test(stage, || {
-                        vm.run_value()
+                        vm.call_named("concat_owner", vec![])
                     })
                     .expect_err("both concat paths must preserve logical checkpoints");
                 assert_eq!(error.code(), "E0800");
@@ -15307,7 +17725,7 @@ mod shared_string_publication_tests {
             }
             let mut vm = BytecodeVM::new(bytecode);
             let value = vm
-                .run_value()
+                .call_named("concat_owner", vec![])
                 .expect("concatenation success preserves bytes");
             assert!(matches!(value,Value::String(text) if text.as_bytes() == "nul\0雪".as_bytes()));
         }
@@ -15321,14 +17739,22 @@ mod shared_string_publication_tests {
                 "::shared_string_concat_actual_publication_denial_returns_without_allocating"
             ),
             || {
-                let original =
-                    compile_compatibility_source("func main() -> string { \"left\" + \"right\" }");
+                let original = compile_compatibility_source(
+                    r#"
+                        func concat_owner() -> string { "left" + "right" }
+                        func main() -> i32 { 0 }
+                    "#,
+                );
+                let owner_index = original
+                    .functions
+                    .iter()
+                    .position(|function| function.name == "concat_owner")
+                    .expect("concat owner function");
                 for use_add_int in [false, true] {
                     let mut bytecode = Arc::clone(&original);
                     if use_add_int {
-                        let main =
-                            &mut Arc::make_mut(&mut bytecode).functions[original.entry as usize];
-                        let operation = main
+                        let owner = &mut Arc::make_mut(&mut bytecode).functions[owner_index];
+                        let operation = owner
                             .code
                             .iter_mut()
                             .find(|op| matches!(op, Op::ConcatStr { .. }))
@@ -15341,7 +17767,9 @@ mod shared_string_publication_tests {
                     let mut vm = BytecodeVM::new(bytecode);
                     vm.enable_stdout_capture();
                     let (result, observation) =
-                        test_alloc::with_concat_shared_continuing_denial(|| vm.run_value());
+                        test_alloc::with_concat_shared_continuing_denial(|| {
+                            vm.call_named("concat_owner", vec![])
+                        });
                     let error = result.expect_err("real concatenation shared-owner denial");
                     assert_eq!(error.code(), "E0800");
                     assert_eq!(error.message(), STRING_CONCAT_PUBLICATION_ERROR);
@@ -15401,6 +17829,675 @@ pub(crate) fn ordinary_map_new_result_bytecode_value() -> Result<Value, InterpEr
     ordinary_map_new_result_bytecode_value_from_new(crate::runtime::OwnedAnyV2Root::try_new())
 }
 
+fn ordinary_map_set_result_variant(tag: &str, payload: Value) -> Value {
+    Value::CanonicalVariant {
+        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+            .expect("Result nominal"),
+        variant: crate::core::NodeId(format!("builtin:variant:Result::{tag}")),
+        tag: tag.into(),
+        payload: vec![payload],
+    }
+}
+
+/// C-compatible payload storage used by the receipt-bound ManagedAny V2
+/// SetResult adapter. It matches the physical String TypeDesc representation;
+/// Label's sole `text: String` field has the same layout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct OrdinaryMapOwnedAnyV2StringBox {
+    data: *mut std::ffi::c_char,
+    length: i64,
+}
+
+// SAFETY: C ABI clone callback invoked synchronously by managed Any runtime with aligned `i32` slots.
+unsafe extern "C" fn ordinary_map_owned_any_v2_clone_i32(
+    destination: *mut u8,
+    source: *const u8,
+) -> i32 {
+    if destination.is_null() || source.is_null() {
+        return 1;
+    }
+    // SAFETY: the selected i32 TypeDesc fixes both pointers to aligned i32
+    // storage, and the runtime calls this only during a synchronous clone.
+    unsafe { std::ptr::copy_nonoverlapping(source, destination, std::mem::size_of::<i32>()) };
+    0
+}
+
+// SAFETY: C ABI clone callback invoked synchronously by managed Any runtime with 1-byte `Bool` slots.
+unsafe extern "C" fn ordinary_map_owned_any_v2_clone_bool(
+    destination: *mut u8,
+    source: *const u8,
+) -> i32 {
+    if destination.is_null() || source.is_null() {
+        return 1;
+    }
+    // SAFETY: the selected Bool TypeDesc has one-byte scalar storage.
+    let value = unsafe { source.read() };
+    if value > 1 {
+        return 1;
+    }
+    unsafe {
+        // SAFETY: `destination` was checked non-null and holds one writable Bool byte.
+        destination.write(value);
+    }
+    0
+}
+
+// SAFETY: C ABI no-op drop callback for trivial scalar Any payloads.
+unsafe extern "C" fn ordinary_map_owned_any_v2_drop_noop(_payload: *mut u8) {}
+
+// SAFETY: C ABI clone callback for managed Any `StringBox` / one-field Label payloads.
+unsafe extern "C" fn ordinary_map_owned_any_v2_clone_string_box(
+    destination: *mut u8,
+    source: *const u8,
+) -> i32 {
+    if destination.is_null() || source.is_null() {
+        return 1;
+    }
+    // SAFETY: the selected String or one-field Label TypeDesc fixes source
+    // and destination to the same C-compatible StringBox layout.
+    let source = unsafe { source.cast::<OrdinaryMapOwnedAnyV2StringBox>().read() };
+    let Ok(length) = usize::try_from(source.length) else {
+        return 1;
+    };
+    if length > isize::MAX as usize || (length > 0 && source.data.is_null()) {
+        return 1;
+    }
+    if length == 0 {
+        unsafe {
+            // SAFETY: `destination` was checked non-null and points to writable `StringBox` storage.
+            destination.cast::<OrdinaryMapOwnedAnyV2StringBox>().write(
+                OrdinaryMapOwnedAnyV2StringBox {
+                    data: std::ptr::null_mut(),
+                    length: 0,
+                },
+            );
+        }
+        return 0;
+    }
+    // SAFETY: nonempty source storage and its length were checked above.
+    let bytes = unsafe { std::slice::from_raw_parts(source.data.cast::<u8>(), length) };
+    if std::str::from_utf8(bytes).is_err() {
+        return 1;
+    }
+    let Some(allocation_size) = length.checked_add(1) else {
+        return 1;
+    };
+    // SAFETY: malloc returns storage suitable for any C payload alignment.
+    let allocation = unsafe { libc::malloc(allocation_size) }.cast::<u8>();
+    if allocation.is_null() {
+        return 1;
+    }
+    // SAFETY: allocation_size bytes were allocated and source has `length`
+    // readable bytes. The trailing NUL is compatibility-only; length is exact.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), allocation, length);
+        allocation.add(length).write(0);
+        destination.cast::<OrdinaryMapOwnedAnyV2StringBox>().write(
+            OrdinaryMapOwnedAnyV2StringBox {
+                data: allocation.cast(),
+                length: source.length,
+            },
+        );
+    }
+    0
+}
+
+// SAFETY: C ABI drop callback releasing one `StringBox` allocated by `ordinary_map_owned_any_v2_clone_string_box`.
+unsafe extern "C" fn ordinary_map_owned_any_v2_drop_string_box(payload: *mut u8) {
+    if payload.is_null() {
+        return;
+    }
+    // SAFETY: the descriptor-pinned callback receives initialized StringBox
+    // storage and this callback owns its C allocation exactly once.
+    let payload = unsafe { payload.cast::<OrdinaryMapOwnedAnyV2StringBox>().read() };
+    if !payload.data.is_null() {
+        // SAFETY: the matching clone callback allocated this pointer with
+        // libc::malloc and retained it in the StringBox.
+        unsafe { libc::free(payload.data.cast()) };
+    }
+}
+
+struct OrdinaryMapOwnedAnyV2ManagedPayloadToken(Option<i64>);
+
+impl OrdinaryMapOwnedAnyV2ManagedPayloadToken {
+    fn new(
+        binding: &super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+        payload_tag: i32,
+        payload_size: u32,
+        payload_align: u32,
+        descriptor_hash: &[u8; 32],
+        payload: *const u8,
+    ) -> Result<Self, InterpError> {
+        let type_id = binding.type_id.as_str().as_bytes();
+        let type_id_len = i64::try_from(type_id.len()).map_err(|_| {
+            InterpError::new("[E0800] ordinary Map SetAnyResult TypeId exceeds runtime ABI")
+        })?;
+        let payload_size_i64 = i64::from(payload_size);
+        let payload_align_i64 = i64::from(payload_align);
+        if type_id.is_empty()
+            || payload.is_null()
+            || payload_size_i64 <= 0
+            || payload_align_i64 <= 0
+        {
+            return Err(InterpError::new(
+                "[E0800] ordinary Map SetAnyResult has an invalid selected payload ABI",
+            ));
+        }
+        let (clone_fn, drop_fn): (
+            // SAFETY: every branch selects a monomorphic callback matching the C ABI below.
+            unsafe extern "C" fn(*mut u8, *const u8) -> i32,
+            unsafe extern "C" fn(*mut u8),
+        ) = match &binding.kind {
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32 => (
+                ordinary_map_owned_any_v2_clone_i32,
+                ordinary_map_owned_any_v2_drop_noop,
+            ),
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Bool => (
+                ordinary_map_owned_any_v2_clone_bool,
+                ordinary_map_owned_any_v2_drop_noop,
+            ),
+            super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+            | super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { .. } => (
+                ordinary_map_owned_any_v2_clone_string_box,
+                ordinary_map_owned_any_v2_drop_string_box,
+            ),
+        };
+        let mut token = 0_i64;
+        // SAFETY: the Core receipt fixes the TypeId, closure hash, tag, size,
+        // alignment, and callback pair. `payload` points to a live local
+        // source value for this synchronous clone; `token` is writable.
+        let status = unsafe {
+            crate::runtime::mimi_any_payload_v2_new(
+                payload_tag,
+                type_id.as_ptr(),
+                type_id_len,
+                descriptor_hash.as_ptr(),
+                payload,
+                payload_size_i64,
+                payload_align_i64,
+                Some(clone_fn),
+                Some(drop_fn),
+                &mut token,
+            )
+        };
+        if status == 0 && token != 0 {
+            return Ok(Self(Some(token)));
+        }
+        let token_published = token != 0;
+        if token != 0 {
+            let drop_status = crate::runtime::mimi_any_payload_v2_drop(token);
+            if drop_status != 0 {
+                return Err(InterpError::new(format!(
+                    "[E0800] ordinary Map SetAnyResult malformed token cleanup failed (new status={status}, drop status={drop_status})"
+                )));
+            }
+        }
+        Err(InterpError::new(format!(
+            "[E0800] ordinary Map SetAnyResult ManagedAny V2 token creation failed (status={status}, token_published={})",
+            token_published
+        )))
+    }
+
+    fn try_drop(mut self) -> Result<(), InterpError> {
+        let Some(token) = self.0.take() else {
+            return Err(InterpError::new(
+                "[E0800] ordinary Map SetAnyResult payload token was already retired",
+            ));
+        };
+        let status = crate::runtime::mimi_any_payload_v2_drop(token);
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(InterpError::new(format!(
+                "[E0800] ordinary Map SetAnyResult payload token Drop returned status {status}"
+            )))
+        }
+    }
+}
+
+impl Drop for OrdinaryMapOwnedAnyV2ManagedPayloadToken {
+    fn drop(&mut self) {
+        let Some(token) = self.0.take() else {
+            return;
+        };
+        if crate::runtime::mimi_any_payload_v2_drop(token) != 0 {
+            std::process::abort();
+        }
+    }
+}
+
+enum OrdinaryMapOwnedAnyV2PayloadSource<'a> {
+    Bool(&'a bool),
+    I32(Box<i32>),
+    StringBox(Box<OrdinaryMapOwnedAnyV2StringBox>, &'a Value),
+}
+
+impl<'a> OrdinaryMapOwnedAnyV2PayloadSource<'a> {
+    fn as_ptr(&self) -> *const u8 {
+        match self {
+            Self::Bool(value) => *value as *const bool as *const u8,
+            Self::I32(value) => (&**value as *const i32).cast::<u8>(),
+            Self::StringBox(value, _keepalive) => {
+                (&**value as *const OrdinaryMapOwnedAnyV2StringBox).cast::<u8>()
+            }
+        }
+    }
+}
+
+fn ordinary_map_set_any_payload_source<'a>(
+    value: &'a Value,
+    binding: &super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+    payload_tag: i32,
+    payload_size: u32,
+    payload_align: u32,
+) -> Result<OrdinaryMapOwnedAnyV2PayloadSource<'a>, InterpError> {
+    use super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind as Kind;
+    let (expected_tag, expected_size, expected_align) = match &binding.kind {
+        Kind::I32 => (1, std::mem::size_of::<i32>(), std::mem::align_of::<i32>()),
+        Kind::String => (
+            2,
+            std::mem::size_of::<OrdinaryMapOwnedAnyV2StringBox>(),
+            std::mem::align_of::<OrdinaryMapOwnedAnyV2StringBox>(),
+        ),
+        Kind::Bool => (3, std::mem::size_of::<bool>(), std::mem::align_of::<bool>()),
+        Kind::Record { .. } => (
+            5,
+            std::mem::size_of::<OrdinaryMapOwnedAnyV2StringBox>(),
+            std::mem::align_of::<OrdinaryMapOwnedAnyV2StringBox>(),
+        ),
+    };
+    if payload_tag != expected_tag
+        || usize::try_from(payload_size).ok() != Some(expected_size)
+        || usize::try_from(payload_align).ok() != Some(expected_align)
+    {
+        return Err(InterpError::new(
+            "[E0800] ordinary Map SetAnyResult payload TypeDesc tag or layout differs from its selected Checker kind",
+        ));
+    }
+    match (&binding.kind, value) {
+        (Kind::I32, Value::Int(value)) => i32::try_from(*value)
+            .map(|value| OrdinaryMapOwnedAnyV2PayloadSource::I32(Box::new(value)))
+            .map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map SetAnyResult selected i32 payload is out of range",
+                )
+            }),
+        (Kind::Bool, Value::Bool(value)) => Ok(OrdinaryMapOwnedAnyV2PayloadSource::Bool(value)),
+        (Kind::String, Value::String(text)) => {
+            let text = text.as_str();
+            let length = i64::try_from(text.len()).map_err(|_| {
+                InterpError::new(
+                    "[E0800] ordinary Map SetAnyResult String payload exceeds runtime ABI",
+                )
+            })?;
+            let source_box = OrdinaryMapOwnedAnyV2StringBox {
+                data: if text.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    text.as_ptr().cast_mut().cast::<std::ffi::c_char>()
+                },
+                length,
+            };
+            Ok(OrdinaryMapOwnedAnyV2PayloadSource::StringBox(
+                Box::new(source_box),
+                value,
+            ))
+        }
+        (Kind::Record { nominal }, Value::Record(Some(actual), fields))
+            if actual == nominal && fields.len() == 1 =>
+        {
+            let Some(Value::String(text)) = fields.get("text") else {
+                return Err(InterpError::new(
+                    "[E0800] ordinary Map SetAnyResult Label payload has no exact String text field",
+                ));
+            };
+            let text = text.as_str();
+            let source_box = OrdinaryMapOwnedAnyV2StringBox {
+                data: if text.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    text.as_ptr().cast_mut().cast::<std::ffi::c_char>()
+                },
+                length: i64::try_from(text.len()).map_err(|_| {
+                    InterpError::new(
+                        "[E0800] ordinary Map SetAnyResult Label text exceeds runtime ABI",
+                    )
+                })?,
+            };
+            Ok(OrdinaryMapOwnedAnyV2PayloadSource::StringBox(
+                Box::new(source_box),
+                value,
+            ))
+        }
+        _ => Err(InterpError::new(format!(
+            "[E0800] ordinary Map SetAnyResult value does not match selected Checker TypeDesc '{}'",
+            binding.type_id.as_str()
+        ))),
+    }
+}
+
+fn ordinary_map_decode_route_hex(text: &str, role: &str) -> Result<Vec<u8>, InterpError> {
+    if !text.len().is_multiple_of(2) {
+        return Err(InterpError::new(format!(
+            "[E0800] ordinary Map SetAnyResult {role} is not canonical hexadecimal"
+        )));
+    }
+    text.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let high = ordinary_map_hex_nibble(pair[0]).ok_or_else(|| {
+                InterpError::new(format!(
+                    "[E0800] ordinary Map SetAnyResult {role} is not canonical hexadecimal"
+                ))
+            })?;
+            let low = ordinary_map_hex_nibble(pair[1]).ok_or_else(|| {
+                InterpError::new(format!(
+                    "[E0800] ordinary Map SetAnyResult {role} is not canonical hexadecimal"
+                ))
+            })?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn ordinary_map_get_i32_result_variant(status: i32, out_value: i32) -> Result<Value, InterpError> {
+    match status {
+        0 => Ok(ordinary_map_set_result_variant(
+            "Ok",
+            Value::Int(i64::from(out_value)),
+        )),
+        1..=3 if out_value == 0 => Ok(ordinary_map_set_result_variant(
+            "Err",
+            Value::Int(i64::from(status)),
+        )),
+        1..=3 => Err(InterpError::new(format!(
+            "[E0800] ordinary Map GetI32Result error status {status} wrote nonzero output {out_value}"
+        ))),
+        _ => Err(InterpError::new(format!(
+            "[E0800] ordinary Map GetI32Result invalid status {status}"
+        ))),
+    }
+}
+
+const CANONICAL_I32_TYPE_DESC_HASH: [u8; 32] = [
+    0xf2, 0x7c, 0x00, 0x72, 0x7c, 0x62, 0x5b, 0x72, 0xf9, 0xe7, 0x8b, 0x51, 0x7a, 0x2e, 0xe5, 0x73,
+    0x1d, 0xf2, 0xec, 0x6d, 0x17, 0xdd, 0xb4, 0xc1, 0xd6, 0xe2, 0xcf, 0x87, 0x5e, 0x40, 0x17, 0x5b,
+];
+
+// SAFETY: C ABI clone callback matching the canonical `i32` TypeDesc miss-handler signature.
+unsafe extern "C" fn canonical_i32_miss_clone(destination: *mut u8, source: *const u8) -> i32 {
+    if destination.is_null() || source.is_null() {
+        return 1;
+    }
+    // SAFETY: this glue is supplied only for the canonical i32 descriptor,
+    // whose ABI is exactly one aligned i32 scalar.
+    unsafe {
+        std::ptr::copy_nonoverlapping(source, destination, std::mem::size_of::<i32>());
+    }
+    0
+}
+
+// SAFETY: C ABI no-op drop callback for canonical `i32` miss payloads.
+unsafe extern "C" fn canonical_i32_miss_drop(_payload: *mut u8) {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrdinaryMapGetAnyResultRawOutcome {
+    Success { found: bool, token: i64 },
+    Capacity,
+}
+
+fn ordinary_map_get_any_result_raw_outcome(
+    status: i32,
+    found: i32,
+    token: i64,
+) -> Result<OrdinaryMapGetAnyResultRawOutcome, InterpError> {
+    if status == 0 {
+        return match (found, token) {
+            (0, token) if token > 0 => Ok(OrdinaryMapGetAnyResultRawOutcome::Success {
+                found: false,
+                token,
+            }),
+            (1, token) if token > 0 => Ok(OrdinaryMapGetAnyResultRawOutcome::Success {
+                found: true,
+                token,
+            }),
+            _ => Err(InterpError::new(format!(
+                "[E0800] ordinary Map GetAnyResult invalid success outputs: found={found}, token={token}"
+            ))),
+        };
+    }
+    if status == crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_CAPACITY {
+        if found == 0 && token == 0 {
+            return Ok(OrdinaryMapGetAnyResultRawOutcome::Capacity);
+        }
+        return Err(InterpError::new(format!(
+            "[E0800] ordinary Map GetAnyResult Capacity status wrote outputs: found={found}, token={token}"
+        )));
+    }
+    if found != 0 || token != 0 {
+        return Err(InterpError::new(format!(
+            "[E0800] ordinary Map GetAnyResult error status {status} wrote outputs: found={found}, token={token}"
+        )));
+    }
+    Err(InterpError::new(format!(
+        "[E0800] ordinary Map GetAnyResult invalid raw status {status}"
+    )))
+}
+
+#[cfg(test)]
+mod ordinary_map_get_any_result_raw_status_tests {
+    use super::{ordinary_map_get_any_result_raw_outcome, OrdinaryMapGetAnyResultRawOutcome};
+    use crate::interp::error::InterpError;
+
+    #[test]
+    fn capacity_is_the_only_recoverable_raw_get_any_error() {
+        let capacity = crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_CAPACITY;
+        assert_eq!(capacity, 3);
+        assert_eq!(
+            ordinary_map_get_any_result_raw_outcome(capacity, 0, 0)
+                .expect("exact owner-publication Capacity is source Err"),
+            OrdinaryMapGetAnyResultRawOutcome::Capacity
+        );
+        for status in [
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_SET_CAPACITY,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_MISSING,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_TYPE_MISMATCH,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_INTERNAL_ERROR,
+            i32::MIN,
+            -1,
+            i32::MAX,
+        ] {
+            let error = ordinary_map_get_any_result_raw_outcome(status, 0, 0)
+                .expect_err("every non-capacity raw error fails closed");
+            assert!(InterpError::message(&error).contains("invalid raw status"));
+        }
+    }
+
+    #[test]
+    fn success_and_capacity_outputs_are_validated_exactly() {
+        assert_eq!(
+            ordinary_map_get_any_result_raw_outcome(0, 0, 17).expect("valid miss token"),
+            OrdinaryMapGetAnyResultRawOutcome::Success {
+                found: false,
+                token: 17
+            }
+        );
+        assert_eq!(
+            ordinary_map_get_any_result_raw_outcome(0, 1, 18).expect("valid hit token"),
+            OrdinaryMapGetAnyResultRawOutcome::Success {
+                found: true,
+                token: 18
+            }
+        );
+        for (status, found, token) in [
+            (0, -1, 19),
+            (0, 2, 19),
+            (0, 1, 0),
+            (0, 0, -19),
+            (
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_CAPACITY,
+                1,
+                0,
+            ),
+            (
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_CAPACITY,
+                0,
+                19,
+            ),
+            (
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_I32_INTERNAL_ERROR,
+                0,
+                19,
+            ),
+        ] {
+            ordinary_map_get_any_result_raw_outcome(status, found, token)
+                .expect_err("malformed raw ABI outputs fail closed");
+        }
+    }
+}
+
+fn ordinary_map_string_result_type_identity(
+    function: &FunctionProto,
+    type_id_index: ConstIdx,
+    descriptor_hash_index: ConstIdx,
+) -> Result<(String, [u8; 32]), InterpError> {
+    let expected_type_id = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let type_id = match function.constants.get(type_id_index as usize) {
+        Some(ConstValue::Str(value)) if value == expected_type_id.as_str() => value.clone(),
+        _ => {
+            return Err(InterpError::new(
+                "[E0800] ordinary Map GetStringResult has an invalid String TypeDesc identity",
+            ));
+        }
+    };
+    let descriptor_hash_hex = match function.constants.get(descriptor_hash_index as usize) {
+        Some(ConstValue::Str(value)) if value.len() == 64 => value,
+        _ => {
+            return Err(InterpError::new(
+                "[E0800] ordinary Map GetStringResult has an invalid String TypeDesc digest",
+            ));
+        }
+    };
+    let mut descriptor_hash = [0_u8; 32];
+    for (index, pair) in descriptor_hash_hex
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .enumerate()
+    {
+        let high = ordinary_map_hex_nibble(pair[0]).ok_or_else(|| {
+            InterpError::new(
+                "[E0800] ordinary Map GetStringResult has a noncanonical String TypeDesc digest",
+            )
+        })?;
+        let low = ordinary_map_hex_nibble(pair[1]).ok_or_else(|| {
+            InterpError::new(
+                "[E0800] ordinary Map GetStringResult has a noncanonical String TypeDesc digest",
+            )
+        })?;
+        descriptor_hash[index] = (high << 4) | low;
+    }
+    Ok((type_id, descriptor_hash))
+}
+
+fn ordinary_map_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn ordinary_map_get_string_result_variant(
+    status: i32,
+    out_data: *mut std::ffi::c_char,
+    out_len: i64,
+) -> Result<Value, InterpError> {
+    match status {
+        crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_OK => {
+            if out_data.is_null() || out_len < 0 {
+                if !out_data.is_null() {
+                    crate::runtime::mimi_free(out_data.cast());
+                }
+                return Err(InterpError::new(format!(
+                    "[E0800] ordinary Map GetStringResult success has invalid output pointer/length ({out_data:p}, {out_len})"
+                )));
+            }
+            let Ok(length) = usize::try_from(out_len) else {
+                crate::runtime::mimi_free(out_data.cast());
+                return Err(InterpError::new(
+                    "[E0800] ordinary Map GetStringResult output length exceeds address space",
+                ));
+            };
+            if length > isize::MAX as usize {
+                crate::runtime::mimi_free(out_data.cast());
+                return Err(InterpError::new(
+                    "[E0800] ordinary Map GetStringResult output length exceeds address space",
+                ));
+            }
+            // SAFETY: status 0 returns a registered owned String allocation;
+            // the runtime ABI supplies exactly `out_len` readable UTF-8 bytes.
+            let bytes = unsafe { std::slice::from_raw_parts(out_data.cast::<u8>(), length) };
+            let text = match std::str::from_utf8(bytes) {
+                Ok(text) => text.to_owned(),
+                Err(_) => {
+                    crate::runtime::mimi_free(out_data.cast());
+                    return Err(InterpError::new(
+                        "[E0800] ordinary Map GetStringResult returned non-UTF-8 String bytes",
+                    ));
+                }
+            };
+            crate::runtime::mimi_free(out_data.cast());
+            Ok(ordinary_map_set_result_variant(
+                "Ok",
+                Value::String(SharedString::new(text)),
+            ))
+        }
+        status
+            if [
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_TYPE_MISMATCH,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_CAPACITY,
+            ]
+            .contains(&status)
+                && out_data.is_null()
+                && out_len == 0 =>
+        {
+            Ok(ordinary_map_set_result_variant(
+                "Err",
+                Value::Int(i64::from(status)),
+            ))
+        }
+        status
+            if [
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_TYPE_MISMATCH,
+                crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_CAPACITY,
+            ]
+            .contains(&status) =>
+        {
+            if !out_data.is_null() {
+                crate::runtime::mimi_free(out_data.cast());
+            }
+            Err(InterpError::new(format!(
+                "[E0800] ordinary Map GetStringResult error status {status} wrote output ({out_data:p}, {out_len})"
+            )))
+        }
+        _ => {
+            if !out_data.is_null() {
+                crate::runtime::mimi_free(out_data.cast());
+            }
+            Err(InterpError::new(format!(
+                "[E0800] ordinary Map GetStringResult invalid status {status}"
+            )))
+        }
+    }
+}
+
 fn ordinary_map_new_result_bytecode_value_from_new(
     root: Result<crate::runtime::OwnedAnyV2Root, crate::runtime::OwnedAnyV2RootError>,
 ) -> Result<Value, InterpError> {
@@ -15419,7 +18516,8 @@ fn ordinary_map_new_result_bytecode_value_from_new(
         }
     };
     Ok(Value::CanonicalVariant {
-        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result").unwrap(),
+        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+            .expect("Result nominal"),
         variant: crate::core::NodeId(format!("builtin:variant:Result::{tag}")),
         tag: tag.into(),
         payload: vec![payload],
@@ -15600,5 +18698,137 @@ mod ordinary_map_new_result_runtime_tests {
                 baseline
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod ordinary_map_set_get_i32_result_status_tests {
+    use super::ordinary_map_get_i32_result_variant;
+    use crate::interp::value::Value;
+
+    fn assert_result(value: Value, expected_tag: &str, expected_payload: i64) {
+        let Value::CanonicalVariant { tag, payload, .. } = value else {
+            panic!("typed Get status must materialize a canonical Result variant")
+        };
+        assert_eq!(tag, expected_tag);
+        assert!(matches!(payload.as_slice(), [Value::Int(actual)] if *actual == expected_payload));
+    }
+
+    #[test]
+    fn typed_get_statuses_preserve_exact_result_errors_and_fail_closed() {
+        assert_result(
+            ordinary_map_get_i32_result_variant(0, -42).expect("status 0 is an i32 hit"),
+            "Ok",
+            -42,
+        );
+        for status in [
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_TYPE_MISMATCH,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_CAPACITY,
+        ] {
+            assert_result(
+                ordinary_map_get_i32_result_variant(status, 0)
+                    .expect("documented lookup errors are Result::Err"),
+                "Err",
+                i64::from(status),
+            );
+            let bad_output = ordinary_map_get_i32_result_variant(status, 1)
+                .expect_err("runtime error statuses must leave output zero");
+            assert!(bad_output.message().contains("wrote nonzero output"));
+        }
+        for status in [
+            i32::MIN,
+            -1,
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_INTERNAL_ERROR,
+            i32::MAX,
+        ] {
+            let error = ordinary_map_get_i32_result_variant(status, 0)
+                .expect_err("unknown/internal statuses are invariant failures");
+            assert!(error.message().contains("invalid status"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod ordinary_map_set_get_string_result_status_tests {
+    use super::ordinary_map_get_string_result_variant;
+    use crate::interp::value::Value;
+
+    fn registered_output(bytes: &[u8]) -> *mut std::ffi::c_char {
+        let pointer =
+            crate::runtime::mimi_alloc(bytes.len().saturating_add(1)).cast::<std::ffi::c_char>();
+        assert!(!pointer.is_null(), "test output allocation");
+        // SAFETY: `pointer` is a fresh allocation of `bytes.len() + 1` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast::<u8>(), bytes.len());
+            pointer.add(bytes.len()).write(0);
+        }
+        pointer
+    }
+
+    fn assert_result_string(value: Value, expected_tag: &str, expected_payload: Result<&str, i64>) {
+        let Value::CanonicalVariant {
+            nominal,
+            variant,
+            tag,
+            payload,
+        } = value
+        else {
+            panic!("typed String Get status must materialize a canonical Result variant")
+        };
+        assert_eq!(nominal.as_str(), "builtin:type:Result");
+        assert_eq!(variant.0, format!("builtin:variant:Result::{expected_tag}"));
+        assert_eq!(tag, expected_tag);
+        match (payload.as_slice(), expected_payload) {
+            ([Value::String(text)], Ok(expected)) => assert_eq!(text.as_str(), expected),
+            ([Value::Int(status)], Err(expected)) => assert_eq!(*status, expected),
+            other => panic!("unexpected String Result payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_string_get_copies_success_and_preserves_documented_error_statuses() {
+        let data = registered_output("detached\0雪".as_bytes());
+        assert_result_string(
+            ordinary_map_get_string_result_variant(0, data, "detached\0雪".len() as i64)
+                .expect("success is an owned String Result::Ok"),
+            "Ok",
+            Ok("detached\0雪"),
+        );
+
+        for status in 1..=3 {
+            assert_result_string(
+                ordinary_map_get_string_result_variant(status, std::ptr::null_mut(), 0)
+                    .expect("missing/type/capacity statuses are Result::Err"),
+                "Err",
+                Err(i64::from(status)),
+            );
+        }
+        for status in [i32::MIN, -1, 4, i32::MAX] {
+            let error = ordinary_map_get_string_result_variant(status, std::ptr::null_mut(), 0)
+                .expect_err("internal and unknown statuses fail closed");
+            assert!(error.message().contains("invalid status"));
+        }
+    }
+
+    #[test]
+    fn typed_string_get_rejects_noncanonical_status_outputs_and_invalid_utf8() {
+        let unexpected = registered_output(b"must be absent");
+        let error = ordinary_map_get_string_result_variant(
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING,
+            unexpected,
+            14,
+        )
+        .expect_err("Err status cannot publish an output String");
+        assert!(error.message().contains("wrote output"));
+
+        let invalid_utf8 = registered_output(&[0xff]);
+        let error = ordinary_map_get_string_result_variant(
+            crate::runtime::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_OK,
+            invalid_utf8,
+            1,
+        )
+        .expect_err("owned String output must be valid UTF-8");
+        assert!(error.message().contains("non-UTF-8"));
     }
 }

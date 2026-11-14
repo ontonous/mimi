@@ -109,3 +109,56 @@ func main() -> i32 {
         )
     });
 }
+
+#[test]
+fn narrow_rejects_borrow_hidden_in_named_record() {
+    assert_err_code(
+        r#"
+type Borrowed { value: &i32 }
+func take(value: Borrowed) -> i32 { 0 }
+func main() -> i32 {
+    let value = 7
+    let borrowed = Borrowed { value: &value }
+    let task = spawn take(borrowed)
+    let _ = await task
+    0
+}
+"#,
+        crate::diagnostic::codes::E0442,
+    );
+}
+
+#[test]
+fn narrow_rejects_borrow_hidden_in_generic_record() {
+    assert_err_code(
+        r#"
+type Box<T> { value: T }
+func take(value: Box<&i32>) -> i32 { 0 }
+func main() -> i32 {
+    let value = 7
+    let borrowed = Box { value: &value }
+    let task = spawn take(borrowed)
+    let _ = await task
+    0
+}
+"#,
+        crate::diagnostic::codes::E0442,
+    );
+}
+
+#[test]
+fn narrow_rejects_thread_affine_guard_across_spawn() {
+    assert_err_code(
+        r#"
+func take(value: MutexGuard<i32>) -> i32 { mutex_unlock(value); 0 }
+func main() -> i32 {
+    let mutex = mutex_new(7)
+    let guard = mutex_lock(mutex)
+    let task = spawn take(guard)
+    let _ = await task
+    0
+}
+"#,
+        crate::diagnostic::codes::E0442,
+    );
+}

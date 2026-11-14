@@ -1,5 +1,70 @@
 use super::*;
 
+fn cast_primitive_type(ty: &Type) -> Option<crate::core::ir::PrimitiveType> {
+    let Type::Name(name, arguments) = ty.unlocated() else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    crate::core::ir::PrimitiveType::from_language_name(name)
+}
+
+fn is_contract_numeric_cast_pair(
+    source: crate::core::ir::PrimitiveType,
+    target: crate::core::ir::PrimitiveType,
+) -> bool {
+    use crate::core::ir::PrimitiveType::{F32, F64, I32, I64};
+    matches!(
+        (source, target),
+        (I32 | I64 | F32 | F64, I32 | I64 | F32 | F64)
+    )
+}
+
+fn is_dynamic_any_type(ty: &Type) -> bool {
+    matches!(ty.unlocated(), Type::Name(name, arguments) if name == "Any" && arguments.is_empty())
+}
+
+fn is_bool_type(ty: &Type) -> bool {
+    matches!(ty.unlocated(), Type::Name(name, arguments) if name == "bool" && arguments.is_empty())
+}
+
+fn is_dynamic_any_list_type(ty: &Type) -> bool {
+    matches!(
+        ty.unlocated(),
+        Type::Name(name, arguments)
+            if name == "List"
+                && arguments.len() == 1
+                && is_dynamic_any_type(&arguments[0])
+    )
+}
+
+fn is_direct_local_dynamic_any_list(base: &Expr, scopes: &[HashMap<String, Type>]) -> bool {
+    let Expr::Ident(name) = base.unlocated() else {
+        return false;
+    };
+    scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(name))
+        .is_some_and(is_dynamic_any_list_type)
+}
+
+fn is_receiptable_values_index(index: &Expr, scopes: &[HashMap<String, Type>]) -> bool {
+    match index.unlocated() {
+        Expr::Literal(Lit::Int(_)) => true,
+        Expr::Unary(UnOp::Neg, value) => {
+            matches!(value.unlocated(), Expr::Literal(Lit::Int(value)) if value.checked_neg().is_some())
+        }
+        Expr::Ident(name) => scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .is_some_and(crate::core::helpers::is_int),
+        _ => false,
+    }
+}
+
 impl<'a> Checker<'a> {
     /// C3: Bidirectional type checking — check an expression against an expected type.
     ///
@@ -399,8 +464,190 @@ impl<'a> Checker<'a> {
             Expr::SetLiteral(elems) => self.infer_set_literal(elems, scopes),
             Expr::NamedArg(_, value) => self.infer_expr(value, scopes),
             Expr::Cast(inner, target_type) => {
-                let _ = self.infer_expr(inner, scopes);
-                self.resolve_type(target_type)
+                // A public `-> List` signature erases the element type. Keep
+                // one direct `bare_list[0] as string` source form provisional
+                // so the whole-program Values producer/caller receipt can
+                // restore the producer's DynamicAny element identity. The
+                // scoped flag affects only this cast's immediate Index child;
+                // finalization rejects it unless the exact cross-call proof
+                // is attached to the producer.
+                let provisional_values_crosscall_string_index = matches!(
+                    inner.unlocated(),
+                    Expr::Index(_, _)
+                ) && matches!(
+                    target_type.unlocated(),
+                    Type::Name(name, arguments)
+                        if arguments.is_empty() && matches!(name.as_str(), "string" | "String")
+                );
+                let previous_allow = std::mem::replace(
+                    &mut self.allow_bare_list_crosscall_string_index,
+                    provisional_values_crosscall_string_index,
+                );
+                let previous_seen =
+                    std::mem::replace(&mut self.saw_bare_list_crosscall_string_index, false);
+                let inferred_source = self.infer_expr(inner, scopes);
+                let saw_bare_list_index = self.saw_bare_list_crosscall_string_index;
+                self.allow_bare_list_crosscall_string_index = previous_allow;
+                self.saw_bare_list_crosscall_string_index = previous_seen || saw_bare_list_index;
+                // Casts provide an explicit type context for otherwise
+                // unconstrained expressions such as `[] as List<string>`.
+                // Resolve already-known bindings first, but keep pending
+                // inference variables until they can be unified with the
+                // cast target. A shape mismatch is a user type error; do not
+                // let an unresolved variable slip past cast validation.
+                let inferred_source = self.unification.zonk_or_unknown(&inferred_source);
+                let mut source_type = self.resolve_type(&inferred_source);
+                let target_type = self.resolve_type(target_type);
+                let has_pending_inference = !matches!(source_type.unlocated(), Type::ForAll(_, _))
+                    && crate::core::type_folder::type_any(&source_type, &|ty| {
+                        matches!(ty, Type::TypeVar(_))
+                    });
+                if has_pending_inference {
+                    if let Err(error) = self.unification.unify(&source_type, &target_type) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0200,
+                            format!(
+                                "cannot infer explicit cast source type '{}' from target '{}': {}",
+                                crate::core::fmt_type(&source_type),
+                                crate::core::fmt_type(&target_type),
+                                error
+                            ),
+                        );
+                        return target_type;
+                    }
+                    let zonked_source = self.unification.zonk_or_unknown(&source_type);
+                    source_type = self.resolve_type(&zonked_source);
+                }
+                let checked_values_crosscall_string_candidate =
+                    provisional_values_crosscall_string_index
+                        && saw_bare_list_index
+                        && is_dynamic_any_type(&source_type)
+                        && matches!(
+                            target_type.unlocated(),
+                            Type::Name(name, arguments)
+                                if arguments.is_empty() && matches!(name.as_str(), "string" | "String")
+                        );
+                // A local Values snapshot has the internal type List<Any>.
+                // Permit only its direct indexed Any -> i32/String spelling
+                // provisionally; source finalization must match the exact
+                // cast, owner, target and explicit snapshot Drop to one
+                // Checker-generated Values unpack receipt. Bare List
+                // cross-call casts stay on their separate String profiles.
+                let checked_values_local_index_candidate = matches!(
+                    inner.unlocated(),
+                    Expr::Index(base, index)
+                        if is_direct_local_dynamic_any_list(base, scopes)
+                            && is_receiptable_values_index(index, scopes)
+                ) && !saw_bare_list_index
+                    && is_dynamic_any_type(&source_type)
+                    && matches!(
+                        cast_primitive_type(&target_type),
+                        Some(
+                            crate::core::ir::PrimitiveType::I32
+                                | crate::core::ir::PrimitiveType::String
+                        )
+                    );
+                if checked_values_crosscall_string_candidate {
+                    if let Some(owner) = self.current_callable_owner.as_ref() {
+                        self.ordinary_map_owned_any_v2_values_crosscall_string_candidates
+                            .entry(owner.clone())
+                            .or_default()
+                            .insert(super::resolved::expression_type_key(expr));
+                    }
+                }
+                let identity = source_type == target_type;
+                let source_primitive = cast_primitive_type(&source_type);
+                let target_primitive = cast_primitive_type(&target_type);
+                let involves_primitive = source_primitive.is_some() || target_primitive.is_some();
+                // Any -> Bool is not part of the ordinary explicit-cast
+                // contract. Keep one provisional source form open so the
+                // resolved Checker can require the exact GetAny/Bool-Set
+                // ownership receipt before accepting the program. The
+                // syntactic `.1` projection alone never grants the cast.
+                let checked_get_bool_candidate = is_dynamic_any_type(&source_type)
+                    && is_bool_type(&target_type)
+                    && matches!(inner.unlocated(), Expr::TupleIndex(_, 1))
+                    && expr.meta().is_some()
+                    && self.current_callable_owner.is_some();
+                if checked_get_bool_candidate {
+                    let owner = self
+                        .current_callable_owner
+                        .as_ref()
+                        .expect("candidate requires a current callable")
+                        .clone();
+                    self.ordinary_map_owned_any_v2_bool_cast_candidates
+                        .entry(owner)
+                        .or_default()
+                        .insert(super::resolved::expression_type_key(expr));
+                }
+                let checked_values_nonprimitive_index_shape = is_dynamic_any_type(&source_type)
+                    && cast_primitive_type(&target_type).is_none()
+                    && matches!(
+                        inner.unlocated(),
+                        Expr::Index(base, index)
+                            if is_direct_local_dynamic_any_list(base, scopes)
+                                && is_receiptable_values_index(index, scopes)
+                    );
+                // DynamicAny to a non-primitive type has no general cast
+                // contract. Keep every such source form provisional when it
+                // has a stable owner and expression identity; CheckedProgram
+                // must prove the exact Map/Any or Values receipt. This also
+                // makes parameter casts and projections from unbound calls
+                // fail closed at the same boundary as direct `.1 as T`.
+                // Local List<Any> indexing stays on its separate Values path.
+                let checked_dynamic_any_nonprimitive_candidate = is_dynamic_any_type(&source_type)
+                    && cast_primitive_type(&target_type).is_none()
+                    && !identity
+                    && !checked_values_nonprimitive_index_shape
+                    && expr.meta().is_some()
+                    && self.current_callable_owner.is_some();
+                if checked_dynamic_any_nonprimitive_candidate {
+                    let owner = self
+                        .current_callable_owner
+                        .as_ref()
+                        .expect("candidate requires a current callable")
+                        .clone();
+                    self.ordinary_map_owned_any_v2_nonprimitive_cast_candidates
+                        .entry(owner)
+                        .or_default()
+                        .insert(super::resolved::expression_type_key(expr));
+                }
+                let supported_numeric_pair = matches!(
+                    (source_primitive, target_primitive),
+                    (Some(source), Some(target)) if is_contract_numeric_cast_pair(source, target)
+                );
+                let unsupported_dynamic_any_nonprimitive_shape = is_dynamic_any_type(&source_type)
+                    && cast_primitive_type(&target_type).is_none()
+                    && !identity
+                    && !checked_dynamic_any_nonprimitive_candidate
+                    && !checked_values_nonprimitive_index_shape;
+                if unsupported_dynamic_any_nonprimitive_shape {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0200,
+                        format!(
+                            "explicit cast from '{}' to '{}' requires a direct receiptable Map/Any or Values source",
+                            crate::core::fmt_type(&source_type),
+                            crate::core::fmt_type(&target_type),
+                        ),
+                    );
+                }
+                if involves_primitive
+                    && !identity
+                    && !supported_numeric_pair
+                    && !checked_get_bool_candidate
+                    && !checked_values_crosscall_string_candidate
+                    && !checked_values_local_index_candidate
+                {
+                    self.emit_code(
+                        crate::diagnostic::codes::E0200,
+                        format!(
+                            "explicit cast from '{}' to '{}' is outside the defined Mimi cast contract; non-identity primitive casts are supported only among i32, i64, f32, and f64",
+                            crate::core::fmt_type(&source_type),
+                            crate::core::fmt_type(&target_type),
+                        ),
+                    );
+                }
+                target_type
             }
             Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
         }

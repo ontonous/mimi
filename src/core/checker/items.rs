@@ -24,21 +24,26 @@ impl<'a> Checker<'a> {
     }
 
     pub(crate) fn collect_decls(&mut self) {
-        // Keep merged bare lookup while retaining explicit module identities
-        // for source-ordered imported alias predeclaration.
+        // Process imports: add module names to use_imports. Keep the bare
+        // merge directory for compatibility, and also retain the explicit
+        // alias -> canonical path map for qualified access.
         for import in &self.file.imports {
             let canonical_path = import.path.join("::");
             let module_name = import
                 .alias
                 .as_deref()
                 .or_else(|| import.path.first().map(|s| s.as_str()))
-                .map(str::to_owned);
+                .map(|s| s.to_string());
             if let Some(name) = module_name {
                 if !self.use_imports.contains(&name) {
                     self.use_imports.push(name.clone());
                 }
                 self.module_aliases.insert(name, canonical_path.clone());
             }
+            // The canonical spelling itself is accepted as a qualified path
+            // even when an alias is present. This makes diagnostics and
+            // migration tooling able to name the source module while users
+            // may choose the shorter alias.
             self.module_aliases
                 .entry(canonical_path.clone())
                 .or_insert(canonical_path);
@@ -51,6 +56,12 @@ impl<'a> Checker<'a> {
         }
         // Check for type alias cycles
         self.check_alias_cycles();
+        // Executable entry signatures are a source contract, independent of
+        // whichever runtime/native route consumes the checked program.
+        self.check_main_entry_signatures();
+        self.check_actor_method_field_writes();
+        self.check_actor_root_flow_initialization();
+        self.check_safe_reference_operators();
         // E-01..E-03: infer the finite effect summary after every callable
         // declaration is visible.  The pass is conservative for extern and
         // dynamic calls (they carry `unknown`) and therefore never turns an
@@ -70,6 +81,391 @@ impl<'a> Checker<'a> {
         }
         self.effect_summaries = analysis.summaries.into_iter().collect();
         self.effect_summaries.extend(analysis.owner_summaries);
+    }
+
+    /// Validate the source-level process entry before any backend or route
+    /// selection sees the program. Ordinary helpers may use generic
+    /// parameters and return arbitrary Mimi values; the executable `main`
+    /// cannot because its result crosses the host process boundary directly.
+    fn check_main_entry_signatures(&mut self) {
+        let entries: Vec<FuncDef> = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Func(function) if function.name == "main" => Some(function.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for function in entries {
+            if !function.params.is_empty() || !function.generics.is_empty() {
+                let span = function
+                    .params
+                    .first()
+                    .map(|parameter| parameter.meta.span)
+                    .or_else(|| function.generics.first().map(|generic| generic.meta.span))
+                    .unwrap_or(function.meta.span);
+                self.errors.push(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0447,
+                        format!(
+                            "executable `main` cannot declare Mimi source parameters or generic parameters (found {} parameter(s) and {} generic parameter(s))",
+                            function.params.len(),
+                            function.generics.len()
+                        ),
+                        span,
+                    )
+                    .with_help(
+                        "move reusable parameters and generic behavior to an ordinary helper; the host supplies process arguments outside Mimi's `main` signature",
+                    ),
+                );
+            }
+
+            let source_return = function.ret.as_ref();
+            let resolved_return = source_return
+                .map(|ty| self.resolve_type(ty))
+                .unwrap_or_else(|| Type::Name("unit".to_string(), Vec::new()));
+            let allowed_return = matches!(
+                resolved_return.unlocated(),
+                Type::Name(name, arguments)
+                    if arguments.is_empty()
+                        && matches!(name.as_str(), "unit" | "bool" | "i32" | "i64")
+            );
+
+            if !allowed_return {
+                let return_name = crate::core::fmt_type(&resolved_return);
+                let span = source_return
+                    .and_then(Type::meta)
+                    .map(|meta| meta.span)
+                    .unwrap_or(function.meta.span);
+                self.errors.push(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0447,
+                        format!(
+                            "executable `main` must return unit, bool, i32, or i64; found {return_name}"
+                        ),
+                        span,
+                    )
+                    .with_help(
+                        "handle Result, Option, and aggregate values inside `main`, then return an explicit scalar status or call `exit(code)`",
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Actor methods are mailbox helpers, not a second persistent state
+    /// machine. A write through `self.<field>` survives a method call and
+    /// therefore bypasses the Flow transition boundary, regardless of
+    /// whether the Actor declares `runs Flow`. Field initializers and reads
+    /// remain legal for immutable configuration/metadata.
+    fn check_actor_method_field_writes(&mut self) {
+        let actors: Vec<ActorDef> = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Actor(actor) => Some(actor.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for actor in actors {
+            let fields: std::collections::HashSet<String> = actor
+                .fields
+                .iter()
+                .map(|field| field.name.clone())
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let builtin_mutators: std::collections::HashSet<String> = ["push", "pop"]
+                .into_iter()
+                .filter(|name| {
+                    crate::core::builtins::is_builtin_callable(name)
+                        && !self.funcs.contains_key(*name)
+                })
+                .map(str::to_string)
+                .collect();
+
+            let mut writes = Vec::new();
+            let impl_methods: Vec<FuncDef> = self
+                .file
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Impl(implementation) if implementation.type_name == actor.name => {
+                        Some(implementation.methods.clone())
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            for method in actor.methods.iter().chain(impl_methods.iter()) {
+                let mut context = ActorFieldWriteContext {
+                    fields: fields.clone(),
+                    aliases: HashMap::new(),
+                    builtin_mutators: builtin_mutators.clone(),
+                };
+                for parameter in &method.params {
+                    context.aliases.remove(&parameter.name);
+                    context.builtin_mutators.remove(&parameter.name);
+                }
+                collect_actor_field_writes(
+                    &method.body,
+                    &method.name,
+                    &context,
+                    method.meta.span,
+                    &mut writes,
+                );
+            }
+
+            for (method_name, field_name, span) in writes {
+                self.errors.push(
+                    Diagnostic::error_code(
+                        crate::diagnostic::codes::E0448,
+                        format!(
+                            "actor method '{}::{}' cannot write instance field '{}'; persistent state changes must be returned by a Flow transition",
+                            actor.name, method_name, field_name
+                        ),
+                        span,
+                    )
+                    .with_help(
+                        "keep per-instance configuration/metadata read-only in Actor methods and move business-state updates into a Flow transition",
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Reject raw reference/pointer types and operators in ordinary safe
+    /// source. The explicit low-level contexts are lexical `unsafe { ... }`
+    /// blocks and `extern "C" func` wrapper signatures/bodies. Extern import
+    /// declarations do not create an unsafe source context.
+    fn check_safe_reference_operators(&mut self) {
+        let items = self.file.items.clone();
+        let mut violations = Vec::new();
+        for item in &items {
+            match item {
+                Item::Func(function) => {
+                    collect_callable_signature_types(
+                        &function.params,
+                        function.ret.as_ref(),
+                        function.extern_abi.as_deref() == Some("C"),
+                        &mut violations,
+                    );
+                    collect_safe_reference_operators(
+                        &function.body,
+                        function.extern_abi.as_deref() == Some("C"),
+                        &mut violations,
+                    );
+                }
+                Item::Actor(actor) => {
+                    for field in &actor.fields {
+                        collect_safe_type_operators(&field.ty, false, &mut violations);
+                    }
+                    for method in &actor.methods {
+                        collect_callable_signature_types(
+                            &method.params,
+                            method.ret.as_ref(),
+                            false,
+                            &mut violations,
+                        );
+                        collect_safe_reference_operators(&method.body, false, &mut violations);
+                    }
+                }
+                Item::Impl(implementation) => {
+                    for ty in implementation
+                        .trait_args
+                        .iter()
+                        .chain(&implementation.type_args)
+                    {
+                        collect_safe_type_operators(ty, false, &mut violations);
+                    }
+                    for method in &implementation.methods {
+                        collect_callable_signature_types(
+                            &method.params,
+                            method.ret.as_ref(),
+                            false,
+                            &mut violations,
+                        );
+                        collect_safe_reference_operators(&method.body, false, &mut violations);
+                    }
+                }
+                Item::Type(definition) => match &definition.kind {
+                    TypeDefKind::Alias(ty) | TypeDefKind::Newtype(ty) => {
+                        collect_safe_type_operators(ty, false, &mut violations)
+                    }
+                    TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {
+                        collect_field_types(fields, false, &mut violations)
+                    }
+                    TypeDefKind::Enum(variants) => {
+                        for variant in variants {
+                            match &variant.payload {
+                                Some(VariantPayload::Tuple(types)) => {
+                                    for ty in types {
+                                        collect_safe_type_operators(ty, false, &mut violations);
+                                    }
+                                }
+                                Some(VariantPayload::Record(fields)) => {
+                                    collect_field_types(fields, false, &mut violations);
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                },
+                Item::Trait(trait_def) => {
+                    for method in &trait_def.methods {
+                        collect_callable_signature_types(
+                            &method.params,
+                            method.ret.as_ref(),
+                            false,
+                            &mut violations,
+                        );
+                    }
+                }
+                Item::Flow(flow) => {
+                    for state in &flow.states {
+                        if let Some(fields) = &state.payload {
+                            collect_field_types(fields, false, &mut violations);
+                        }
+                    }
+                    if let Some(fault_type) = &flow.fault_type {
+                        collect_safe_type_operators(fault_type, false, &mut violations);
+                    }
+                    for transition in &flow.transitions {
+                        collect_callable_signature_types(
+                            &transition.params,
+                            None,
+                            false,
+                            &mut violations,
+                        );
+                        if let Some(fails) = &transition.fails {
+                            collect_safe_type_operators(fails, false, &mut violations);
+                        }
+                        if let Some(body) = &transition.body {
+                            collect_safe_reference_operators(body, false, &mut violations);
+                        }
+                    }
+                }
+                Item::ExternBlock(extern_block) => {
+                    // An extern declaration is not a wrapper body and does
+                    // not create a source-level unsafe context.
+                    for function in &extern_block.funcs {
+                        for parameter in &function.params {
+                            collect_safe_type_operators(&parameter.ty, false, &mut violations);
+                        }
+                        if let Some(ret) = &function.ret {
+                            collect_safe_type_operators(ret, false, &mut violations);
+                        }
+                        if let Some(requires) = &function.requires {
+                            collect_safe_reference_operators_in_expr(
+                                requires,
+                                false,
+                                &mut violations,
+                            );
+                        }
+                        if let Some(ensures) = &function.ensures {
+                            collect_safe_reference_operators_in_expr(
+                                ensures,
+                                false,
+                                &mut violations,
+                            );
+                        }
+                    }
+                }
+                Item::Const { ty, value, .. } => {
+                    if let Some(ty) = ty {
+                        collect_safe_type_operators(ty, false, &mut violations);
+                    }
+                    collect_safe_reference_operators_in_expr(value, false, &mut violations);
+                }
+                Item::Session(session) => {
+                    collect_session_type_operators(&session.body, &mut violations);
+                }
+                Item::Cap(_) => {}
+            }
+        }
+
+        for (operator, span) in violations {
+            self.errors.push(
+                Diagnostic::error_code(
+                    crate::diagnostic::codes::E0449,
+                    format!(
+                        "raw reference/pointer type or operator `{operator}` is forbidden in ordinary safe source"
+                    ),
+                    span,
+                )
+                .with_help(
+                    "place the type or operation inside an explicit `unsafe { ... }` block or use it in the signature/body of an explicit `extern \"C\" func` wrapper; an `extern \"C\" { ... }` import declaration does not grant this permission",
+                ),
+            );
+        }
+    }
+
+    /// The implicit root state used by an Actor spawn has no source value
+    /// from which to initialize heap-shaped or non-integer payload fields.
+    /// The current canonical profile defines zero initialization only for
+    /// `i32`; require an explicit later transition for every other payload.
+    fn check_actor_root_flow_initialization(&mut self) {
+        let actors: Vec<ActorDef> = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Actor(actor) => Some(actor.clone()),
+                _ => None,
+            })
+            .collect();
+        let flows: HashMap<String, FlowDef> = self
+            .file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Flow(flow) => Some((flow.name.clone(), flow.clone())),
+                _ => None,
+            })
+            .collect();
+
+        for actor in actors {
+            let Some(flow_name) = actor.runs_flow.as_deref() else {
+                continue;
+            };
+            let Some(flow) = flows.get(flow_name) else {
+                continue;
+            };
+            let Some(root_state) = flow.states.first() else {
+                continue;
+            };
+            let Some(payload) = root_state.payload.as_ref() else {
+                continue;
+            };
+            for field in payload {
+                let resolved = self.resolve_type(&field.ty);
+                let is_zero_initialized_i32 = matches!(
+                    resolved.unlocated(),
+                    Type::Name(name, arguments) if name == "i32" && arguments.is_empty()
+                );
+                if !is_zero_initialized_i32 {
+                    let field_type = crate::core::fmt_type(&resolved);
+                    self.errors.push(
+                        Diagnostic::error_code(
+                            crate::diagnostic::codes::E0450,
+                            format!(
+                                "Actor '{}' implicitly starts in Flow '{}' root state '{}', but payload field '{}' has type '{}' and no implicit initializer",
+                                actor.name, flow.name, root_state.name, field.name, field_type
+                            ),
+                            field.meta.span,
+                        )
+                        .with_help(
+                            "make the first Flow state empty and initialize this payload through a transition before exposing the business state",
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     fn register_builtin_types(&mut self) {
@@ -355,13 +751,70 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Add qualified aliases for a declaration that came from an imported
+    /// source. The merged AST deliberately keeps the original declaration
+    /// name so old bare calls and recursive bodies continue to work; alias
+    /// entries are extra checker directory keys only.
+    fn register_imported_function_aliases(
+        &mut self,
+        span: Span,
+        name: &str,
+        signature: (Vec<Type>, Type),
+        generics: &[GenericParam],
+    ) {
+        let Some(source_key) = self.source_registry.key(span.source_id) else {
+            return;
+        };
+        let Some(module_path) = crate::module_system::module_path_from_source_key(source_key)
+        else {
+            return;
+        };
+        let aliases = self
+            .module_aliases
+            .iter()
+            .filter(|(_, target)| {
+                crate::module_system::module_path_matches_import_path(&module_path, target)
+            })
+            .map(|(alias, _)| alias.clone())
+            .collect::<Vec<_>>();
+        for alias in aliases {
+            let key = format!("{alias}::{name}");
+            // A duplicate qualified key can only arise from a malformed merge
+            // (two declarations with the same module identity). Keep the first
+            // deterministic entry and let the ordinary duplicate diagnostic
+            // report the source-level conflict.
+            self.funcs
+                .entry(key.clone())
+                .or_insert_with(|| signature.clone());
+            if !generics.is_empty() {
+                self.func_generics
+                    .entry(key)
+                    .or_insert_with(|| generics.to_vec());
+            }
+        }
+    }
+
+    fn source_is_explicitly_imported(&self, span: Span) -> bool {
+        let Some(source_key) = self.source_registry.key(span.source_id) else {
+            return false;
+        };
+        let Some(module_path) = crate::module_system::module_path_from_source_key(source_key)
+        else {
+            return false;
+        };
+        self.module_aliases
+            .values()
+            .any(|path| crate::module_system::module_path_matches_import_path(&module_path, path))
+    }
+
     pub(crate) fn collect_item_decls(&mut self, item: &Item) {
         self.set_span(Self::item_span(item));
         match item {
             Item::Func(f) => {
                 self.set_span(f.meta.span);
                 let qualified_name = f.name.clone();
-                if self.funcs.contains_key(&qualified_name) {
+                let duplicate_bare = self.funcs.contains_key(&qualified_name);
+                if duplicate_bare && !self.source_is_explicitly_imported(f.meta.span) {
                     self.emit_code(
                         crate::diagnostic::codes::E0402,
                         format!("duplicate function definition '{}'", qualified_name),
@@ -468,13 +921,24 @@ impl<'a> Checker<'a> {
                 } else {
                     ret
                 };
-                self.funcs
-                    .insert(qualified_name.clone(), (params, func_sig_ret));
+                if !duplicate_bare {
+                    self.funcs.insert(
+                        qualified_name.clone(),
+                        (params.clone(), func_sig_ret.clone()),
+                    );
+                }
+                let imported_signature = (params.clone(), func_sig_ret.clone());
                 // Store generic parameters if present
                 if !f.generics.is_empty() {
                     self.func_generics
                         .insert(qualified_name.clone(), f.generics.clone());
                 }
+                self.register_imported_function_aliases(
+                    f.meta.span,
+                    &qualified_name,
+                    imported_signature,
+                    f.generics.as_slice(),
+                );
                 // Store where clause if present.
                 // CK-H6: accumulate ALL type-param bounds (do not overwrite).
                 if !f.where_clause.is_empty() {
@@ -996,14 +1460,23 @@ impl<'a> Checker<'a> {
                         if !self.is_valid_extern_type(&resolved, false) {
                             let type_str = fmt_type(&resolved);
                             let help = if type_str.contains("List") || type_str.starts_with('[') {
-                                format!("type '{}' is a Mimi list/array and cannot cross the C ABI boundary directly. \
-                                    Use a pointer (*T / *mut T) to pass array data, or serialize to JSON via the builtin JSON module.", type_str)
+                                format!(
+                                    "type '{}' is a Mimi list/array and cannot cross the C ABI boundary directly. \
+                                    Use a pointer (*T / *mut T) to pass array data, or serialize to JSON via the builtin JSON module.",
+                                    type_str
+                                )
                             } else if type_str.contains("Option") || type_str.contains("Result") {
-                                format!("type '{}' is an algebraic data type and cannot cross the C ABI boundary. \
-                                    Use a plain type or a pointer (*T).", type_str)
+                                format!(
+                                    "type '{}' is an algebraic data type and cannot cross the C ABI boundary. \
+                                    Use a plain type or a pointer (*T).",
+                                    type_str
+                                )
                             } else {
-                                format!("type '{}' is not allowed across the C ABI boundary. \
-                                    Use scalar types (i32, i64, f32, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.", type_str)
+                                format!(
+                                    "type '{}' is not allowed across the C ABI boundary. \
+                                    Use scalar types (i32, i64, f32, f64, bool, string), or *T, *mut T, c_shared T, c_borrow T, c_borrow_mut T, cap, #[repr(C)] records.",
+                                    type_str
+                                )
                             };
                             self.emit_code(crate::diagnostic::codes::E0231, format!(
                                 "extern function parameter '{}' has type '{}', which is not allowed to cross the C ABI boundary. {}",
@@ -1469,6 +1942,18 @@ impl<'a> Checker<'a> {
     /// Deferred boundary rather than silently discarding the obligation.
     /// The isolated unification/capture state cannot pollute executable bodies.
     fn capture_extern_contract_types(&mut self, block: &ExternBlock) {
+        // Extern contracts are separate declaration roots, not callable-body
+        // blocks. Reject contract statements nested inside expression blocks
+        // before the isolated type-capture checker can discard its diagnostics.
+        for func in &block.funcs {
+            let callable = format!("extern function '{}'", func.name);
+            for condition in [func.requires.as_ref(), func.ensures.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                self.reject_nested_contracts_in_expr(condition, &callable);
+            }
+        }
         if !block
             .funcs
             .iter()
@@ -1560,6 +2045,10 @@ impl<'a> Checker<'a> {
                     );
                     // Check field initialization if present
                     if let Some(init) = &field.init {
+                        self.reject_nested_contracts_in_expr(
+                            init,
+                            &format!("actor '{}' field '{}' initializer", actor.name, field.name),
+                        );
                         let init_ty = self.infer_expr(init, &mut vec![HashMap::new()]);
                         // CK-H3: unify so TypeVars / Option payloads resolve.
                         if self.unification.unify(&field_ty, &init_ty).is_err() {
@@ -1579,8 +2068,18 @@ impl<'a> Checker<'a> {
                 // Check actor methods
                 for method in &actor.methods {
                     self.set_span(method.meta.span);
+                    self.reject_nested_requires_ensures(
+                        &method.body,
+                        &format!("{}::{}", actor.name, method.name),
+                    );
                     self.reject_narrow_mailbox_params(&method.params, &actor.name, &method.name);
                     for p in &method.params {
+                        if let Some(default) = &p.default_value {
+                            self.reject_nested_contracts_in_expr(
+                                default,
+                                &format!("{}::{}", actor.name, method.name),
+                            );
+                        }
                         if p.name == "self" {
                             continue;
                         }
@@ -1732,12 +2231,63 @@ impl<'a> Checker<'a> {
                         method.generics.iter().map(|g| g.name.clone()).collect();
                     self.generic_scope
                         .extend(method_generic_names.iter().cloned());
+                    let has_defaults = method
+                        .params
+                        .iter()
+                        .any(|parameter| parameter.default_value.is_some());
+                    let method_owner = if has_defaults {
+                        let signature = crate::core::resolved::method_signature_key(
+                            &method.name,
+                            &method.params,
+                            method.ret.as_ref(),
+                        );
+                        Some(crate::core::NodeId(format!(
+                            "trait:{}/method:{}:{:016x}",
+                            trait_def.name,
+                            crate::core::resolved::stable_id_fragment(&method.name),
+                            crate::core::resolved::stable_text_hash(&signature)
+                        )))
+                    } else {
+                        None
+                    };
+                    let previous_owner = method_owner.as_ref().map(|owner| {
+                        self.unification.reset();
+                        let previous = self.begin_callable(owner.clone());
+                        self.begin_expression_type_capture(owner.clone());
+                        previous
+                    });
+                    let mut scopes = vec![HashMap::new()];
                     for param in &method.params {
                         let resolved = self.resolve_type(&param.ty);
                         self.check_type_well_formed(
                             &resolved,
                             &format!("trait '{}' method '{}'", trait_def.name, method.name),
                         );
+                        if let Some(default) = &param.default_value {
+                            self.reject_nested_contracts_in_expr(
+                                default,
+                                &format!("{}::{}", trait_def.name, method.name),
+                            );
+                            let expected = resolved.clone();
+                            let actual = self.check_expr(&expected, default, &mut scopes);
+                            if self.unification.unify(&actual, &expected).is_err()
+                                && !is_numeric_coercion(&expected, &actual)
+                            {
+                                self.errors.push(Diagnostic::error_code(
+                                    crate::diagnostic::codes::E0211,
+                                    format!(
+                                        "default for parameter '{}' expected {}, found {}",
+                                        param.name,
+                                        fmt_type(&expected),
+                                        fmt_type(&actual)
+                                    ),
+                                    param.meta.span,
+                                ));
+                            }
+                        }
+                        // A declaration default is checked at its parameter
+                        // position: only earlier parameters are in scope.
+                        scopes[0].insert(param.name.clone(), resolved);
                     }
                     if let Some(ret) = &method.ret {
                         let resolved = self.resolve_type(ret);
@@ -1745,6 +2295,10 @@ impl<'a> Checker<'a> {
                             &resolved,
                             &format!("trait '{}' method '{}' return", trait_def.name, method.name),
                         );
+                    }
+                    if let Some(previous_owner) = previous_owner {
+                        self.finish_expression_type_capture();
+                        self.end_callable(previous_owner);
                     }
                     self.generic_scope
                         .truncate(self.generic_scope.len() - method_generic_names.len());
@@ -1950,6 +2504,12 @@ impl<'a> Checker<'a> {
                         Type::Name(impl_def.type_name.clone(), impl_def.type_args.clone()),
                     );
                     for p in &method.params {
+                        if let Some(default) = &p.default_value {
+                            self.reject_nested_contracts_in_expr(
+                                default,
+                                &format!("{}::{}", impl_def.type_name, method.name),
+                            );
+                        }
                         let ty = self.resolve_type(&p.ty);
                         // SessionChan<S> / SessionChan<dual S> params: seed
                         // residual (mirrors check_func).
@@ -1973,6 +2533,10 @@ impl<'a> Checker<'a> {
                         &impl_def.trait_name,
                         &impl_def.trait_args,
                         &impl_generic_names,
+                    );
+                    self.reject_nested_requires_ensures(
+                        &method.body,
+                        &format!("{}::{}", impl_def.type_name, method.name),
                     );
                     self.check_linear_kind_param_bodies(&method_key, &method.params, &method.body);
                     self.unification.reset();
@@ -2069,16 +2633,43 @@ impl<'a> Checker<'a> {
                 name,
                 ty,
                 value,
+                extern_abi,
                 ..
             } => {
                 self.set_span(meta.span);
+                self.reject_nested_contracts_in_expr(value, &format!("constant '{name}'"));
                 self.begin_expression_type_capture(crate::core::NodeId(format!("constant:{name}")));
                 let mut scopes: Vec<HashMap<String, Type>> = vec![HashMap::new()];
                 let value_ty = self.infer_expr(value, &mut scopes);
                 let const_ty = if let Some(declared_ty) = ty {
                     let resolved = self.resolve_type(declared_ty);
+                    // A floating literal is inferred as f64. For the narrow
+                    // extern-C scalar data surface, accept only a declaration
+                    // explicitly typed f32 with a float literal (optionally
+                    // negated); the checked export descriptor performs the
+                    // binary32 range check and MIR performs canonical
+                    // rounding. This does not introduce general implicit
+                    // f64-to-f32 conversion for constants or expressions.
+                    let f32_literal_value = match value.unlocated() {
+                        Expr::Literal(Lit::Float(value)) => Some(*value),
+                        Expr::Unary(UnOp::Neg, inner) => match inner.unlocated() {
+                            Expr::Literal(Lit::Float(value)) => Some(-*value),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let f32_data_export_literal = extern_abi.as_deref() == Some("C")
+                        && matches!(
+                        resolved.unlocated(),
+                        Type::Name(name, arguments)
+                            if name == "f32" && arguments.is_empty()
+                        )
+                        && f32_literal_value
+                            .is_some_and(|value| value.is_finite() && (value as f32).is_finite());
                     // CK-H10: unify (not same_type) for TypeVar resolution.
-                    if self.unification.unify(&resolved, &value_ty).is_err() {
+                    if !f32_data_export_literal
+                        && self.unification.unify(&resolved, &value_ty).is_err()
+                    {
                         self.emit_code(
                             crate::diagnostic::codes::E0209,
                             format!(
@@ -2298,7 +2889,19 @@ impl<'a> Checker<'a> {
                     // (pre-0.34.15) was inverted; runtime dispatch uses the
                     // state tag, never layout reinterpretation.
                     // Type-check transition body with self in scope
+                    for parameter in &t.params {
+                        if let Some(default) = &parameter.default_value {
+                            self.reject_nested_contracts_in_expr(
+                                default,
+                                &format!("{}::{}", f.name, t.name),
+                            );
+                        }
+                    }
                     if let Some(body) = &t.body {
+                        self.reject_nested_requires_ensures(
+                            body,
+                            &format!("{}::{}", f.name, t.name),
+                        );
                         if !t.is_fallback && !self.block_returns_on_all_paths(body) {
                             self.emit_code(
                                 crate::diagnostic::codes::E0255,
@@ -2534,6 +3137,947 @@ impl<'a> Checker<'a> {
                 unreachable!("SessionType::unlocated returned Located")
             }
         }
+    }
+}
+
+#[derive(Clone)]
+struct ActorFieldWriteContext {
+    fields: std::collections::HashSet<String>,
+    /// Local values or references that originate in an Actor-owned field.
+    aliases: HashMap<String, String>,
+    /// Builtins whose names are not shadowed in the current lexical scope.
+    builtin_mutators: std::collections::HashSet<String>,
+}
+
+fn collect_actor_field_writes(
+    block: &Block,
+    method_name: &str,
+    context: &ActorFieldWriteContext,
+    fallback_span: Span,
+    output: &mut Vec<(String, String, Span)>,
+) {
+    let mut local_context = context.clone();
+    for statement in block {
+        let span = statement.meta().map_or(fallback_span, |meta| meta.span);
+        match statement.unlocated() {
+            Stmt::Let { pat, init, .. } => {
+                if let Some(expression) = init {
+                    collect_actor_field_writes_in_expr(
+                        expression,
+                        method_name,
+                        &local_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+                let field_alias = init
+                    .as_ref()
+                    .and_then(|expression| actor_field_root(expression, &local_context))
+                    .map(str::to_string);
+                let mut bound_names = Vec::new();
+                collect_actor_pattern_names(pat, &mut bound_names);
+                for name in bound_names {
+                    local_context.builtin_mutators.remove(&name);
+                    local_context.aliases.remove(&name);
+                }
+                if let (Some(name), Some(field_name)) = (pat.single_var_name(), field_alias) {
+                    local_context.aliases.insert(name.to_string(), field_name);
+                }
+            }
+            Stmt::Return(value) | Stmt::Break(value) => {
+                if let Some(expression) = value {
+                    collect_actor_field_writes_in_expr(
+                        expression,
+                        method_name,
+                        &local_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+            Stmt::Expr(expression) | Stmt::Drop(expression) => {
+                collect_actor_field_writes_in_expr(
+                    expression,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+            }
+            Stmt::If { cond, then_, else_ } => {
+                collect_actor_field_writes_in_expr(
+                    cond,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                collect_actor_field_writes(
+                    then_,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                if let Some(else_) = else_ {
+                    collect_actor_field_writes(
+                        else_,
+                        method_name,
+                        &local_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+            Stmt::IfLet {
+                pat,
+                init,
+                then_,
+                else_,
+            } => {
+                collect_actor_field_writes_in_expr(
+                    init,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                let mut then_context = local_context.clone();
+                let mut then_names = Vec::new();
+                collect_actor_pattern_names(pat, &mut then_names);
+                for name in then_names {
+                    then_context.builtin_mutators.remove(&name);
+                    then_context.aliases.remove(&name);
+                }
+                collect_actor_field_writes(
+                    then_,
+                    method_name,
+                    &then_context,
+                    fallback_span,
+                    output,
+                );
+                if let Some(else_) = else_ {
+                    collect_actor_field_writes(
+                        else_,
+                        method_name,
+                        &local_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_actor_field_writes_in_expr(
+                    cond,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                collect_actor_field_writes(
+                    body,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+            }
+            Stmt::WhileLet { pat, init, body } => {
+                collect_actor_field_writes_in_expr(
+                    init,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                let mut body_context = local_context.clone();
+                let mut names = Vec::new();
+                collect_actor_pattern_names(pat, &mut names);
+                for name in names {
+                    body_context.builtin_mutators.remove(&name);
+                    body_context.aliases.remove(&name);
+                }
+                collect_actor_field_writes(body, method_name, &body_context, fallback_span, output);
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
+            | Stmt::Defer(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Parasteps(body) => {
+                collect_actor_field_writes(body, method_name, &local_context, fallback_span, output)
+            }
+            Stmt::For {
+                var,
+                iterable,
+                body,
+            } => {
+                collect_actor_field_writes_in_expr(
+                    iterable,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                let mut body_context = local_context.clone();
+                let mut names = Vec::new();
+                collect_actor_pattern_names(var, &mut names);
+                for name in names {
+                    body_context.builtin_mutators.remove(&name);
+                    body_context.aliases.remove(&name);
+                }
+                collect_actor_field_writes(body, method_name, &body_context, fallback_span, output);
+            }
+            Stmt::Requires(expression, _)
+            | Stmt::Ensures(expression, _)
+            | Stmt::Invariant(expression, _) => collect_actor_field_writes_in_expr(
+                expression,
+                method_name,
+                &local_context,
+                fallback_span,
+                output,
+            ),
+            Stmt::Math(expressions) => {
+                for expression in expressions {
+                    collect_actor_field_writes_in_expr(
+                        expression,
+                        method_name,
+                        &local_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+            Stmt::Assign { target, value } => {
+                if !matches!(target.unlocated(), Expr::Ident(_)) {
+                    if let Some(field_name) = actor_field_root(target, &local_context) {
+                        if local_context.fields.contains(field_name) {
+                            record_actor_field_write(method_name, field_name, span, output);
+                        }
+                    }
+                }
+                collect_actor_field_writes_in_expr(
+                    target,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                collect_actor_field_writes_in_expr(
+                    value,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                if let Expr::Ident(name) = target.unlocated() {
+                    let field_alias = actor_field_root(value, &local_context).map(str::to_string);
+                    local_context.aliases.remove(name);
+                    if let Some(field_name) = field_alias {
+                        local_context.aliases.insert(name.clone(), field_name);
+                    }
+                }
+            }
+            Stmt::SharedLet { name, init, .. } => {
+                collect_actor_field_writes_in_expr(
+                    init,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                let field_alias = actor_field_root(init, &local_context).map(str::to_string);
+                local_context.aliases.remove(name);
+                local_context.builtin_mutators.remove(name);
+                if let Some(field_name) = field_alias {
+                    local_context.aliases.insert(name.clone(), field_name);
+                }
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                collect_actor_field_writes_in_expr(
+                    expr,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+                collect_actor_field_writes(
+                    body,
+                    method_name,
+                    &local_context,
+                    fallback_span,
+                    output,
+                );
+            }
+            Stmt::Func(function) => {
+                local_context.builtin_mutators.remove(&function.name);
+                let mut nested_context = local_context.clone();
+                for parameter in &function.params {
+                    nested_context.aliases.remove(&parameter.name);
+                    nested_context.builtin_mutators.remove(&parameter.name);
+                }
+                collect_actor_field_writes(
+                    &function.body,
+                    method_name,
+                    &nested_context,
+                    fallback_span,
+                    output,
+                );
+            }
+            Stmt::Continue | Stmt::Located { .. } | Stmt::Ellipsis => {}
+        }
+    }
+}
+
+fn collect_actor_pattern_names(pattern: &Pattern, output: &mut Vec<String>) {
+    match &pattern.kind {
+        PatternKind::Variable(name) => output.push(name.clone()),
+        PatternKind::Constructor(_, fields) => {
+            for (_, pattern) in fields {
+                collect_actor_pattern_names(pattern, output);
+            }
+        }
+        PatternKind::Tuple(patterns) | PatternKind::Array(patterns) => {
+            for pattern in patterns {
+                collect_actor_pattern_names(pattern, output);
+            }
+        }
+        PatternKind::Slice(patterns, rest) => {
+            for pattern in patterns {
+                collect_actor_pattern_names(pattern, output);
+            }
+            if let Some(rest) = rest {
+                collect_actor_pattern_names(rest, output);
+            }
+        }
+        PatternKind::Wildcard | PatternKind::Literal(_) => {}
+    }
+}
+
+fn actor_field_root<'a>(
+    expression: &'a Expr,
+    context: &'a ActorFieldWriteContext,
+) -> Option<&'a str> {
+    match expression.unlocated() {
+        Expr::Field(receiver, field) => {
+            if matches!(receiver.unlocated(), Expr::Ident(name) if name == "self")
+                && context.fields.contains(field)
+            {
+                Some(field)
+            } else {
+                actor_field_root(receiver, context)
+            }
+        }
+        Expr::Index(receiver, _) | Expr::TupleIndex(receiver, _) => {
+            actor_field_root(receiver, context)
+        }
+        Expr::Unary(UnOp::Ref | UnOp::RefMut | UnOp::Deref, inner) => {
+            actor_field_root(inner, context)
+        }
+        Expr::Ident(name) => context.aliases.get(name).map(String::as_str),
+        _ => None,
+    }
+}
+
+fn collect_actor_field_writes_in_expr(
+    expression: &Expr,
+    method_name: &str,
+    context: &ActorFieldWriteContext,
+    fallback_span: Span,
+    output: &mut Vec<(String, String, Span)>,
+) {
+    match expression.unlocated() {
+        Expr::Binary(_, left, right) => {
+            collect_actor_field_writes_in_expr(left, method_name, context, fallback_span, output);
+            collect_actor_field_writes_in_expr(right, method_name, context, fallback_span, output);
+        }
+        Expr::Unary(_, inner)
+        | Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::Cast(inner, _) => {
+            collect_actor_field_writes_in_expr(inner, method_name, context, fallback_span, output)
+        }
+        Expr::Call(callee, arguments) => {
+            let call_span = expression.meta().map_or(fallback_span, |meta| meta.span);
+            // `push` and `pop` are the language's explicit in-place List
+            // builtins. Passing an Actor field to either is a persistent
+            // field write even though the surface syntax is a call.
+            if matches!(callee.unlocated(), Expr::Ident(name) if context.builtin_mutators.contains(name))
+            {
+                if let Some(field_name) = arguments
+                    .first()
+                    .and_then(|argument| actor_field_root(argument, context))
+                {
+                    if context.fields.contains(field_name) {
+                        record_actor_field_write(method_name, field_name, call_span, output);
+                    }
+                }
+            }
+            collect_actor_field_writes_in_expr(callee, method_name, context, fallback_span, output);
+            for argument in arguments {
+                collect_actor_field_writes_in_expr(
+                    argument,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Field(value, _) | Expr::TupleIndex(value, _) => {
+            collect_actor_field_writes_in_expr(value, method_name, context, fallback_span, output)
+        }
+        Expr::Index(value, index) => {
+            collect_actor_field_writes_in_expr(value, method_name, context, fallback_span, output);
+            collect_actor_field_writes_in_expr(index, method_name, context, fallback_span, output);
+        }
+        Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
+            for value in values {
+                collect_actor_field_writes_in_expr(
+                    value,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Comprehension {
+            expr,
+            var,
+            iter,
+            guard,
+        } => {
+            let mut comprehension_context = context.clone();
+            comprehension_context.aliases.remove(var);
+            comprehension_context.builtin_mutators.remove(var);
+            collect_actor_field_writes_in_expr(iter, method_name, context, fallback_span, output);
+            collect_actor_field_writes_in_expr(
+                expr,
+                method_name,
+                &comprehension_context,
+                fallback_span,
+                output,
+            );
+            if let Some(guard) = guard {
+                collect_actor_field_writes_in_expr(
+                    guard,
+                    method_name,
+                    &comprehension_context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_actor_field_writes_in_expr(
+                scrutinee,
+                method_name,
+                context,
+                fallback_span,
+                output,
+            );
+            for arm in arms {
+                let mut arm_context = context.clone();
+                let mut bound_names = Vec::new();
+                collect_actor_pattern_names(&arm.pat, &mut bound_names);
+                for name in bound_names {
+                    arm_context.aliases.remove(&name);
+                    arm_context.builtin_mutators.remove(&name);
+                }
+                if let Some(guard) = &arm.guard {
+                    collect_actor_field_writes_in_expr(
+                        guard,
+                        method_name,
+                        &arm_context,
+                        fallback_span,
+                        output,
+                    );
+                }
+                collect_actor_field_writes_in_expr(
+                    &arm.body,
+                    method_name,
+                    &arm_context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Record { fields, rest, .. } => {
+            for field in fields {
+                collect_actor_field_writes_in_expr(
+                    &field.value,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+            if let Some(rest) = rest {
+                collect_actor_field_writes_in_expr(
+                    rest,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Block(block) | Expr::Arena(block) | Expr::Comptime(block) | Expr::Quote(block) => {
+            collect_actor_field_writes(block, method_name, context, fallback_span, output)
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_actor_field_writes_in_expr(cond, method_name, context, fallback_span, output);
+            collect_actor_field_writes(then_, method_name, context, fallback_span, output);
+            if let Some(else_) = else_ {
+                collect_actor_field_writes(else_, method_name, context, fallback_span, output);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            let mut lambda_context = context.clone();
+            for parameter in params {
+                lambda_context.aliases.remove(&parameter.name);
+                lambda_context.builtin_mutators.remove(&parameter.name);
+                if let Some(default) = &parameter.default_value {
+                    collect_actor_field_writes_in_expr(
+                        default,
+                        method_name,
+                        context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+            collect_actor_field_writes(body, method_name, &lambda_context, fallback_span, output);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_actor_field_writes_in_expr(target, method_name, context, fallback_span, output);
+            if let Some(start) = start {
+                collect_actor_field_writes_in_expr(
+                    start,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+            if let Some(end) = end {
+                collect_actor_field_writes_in_expr(
+                    end,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::Turbofish(_, _, arguments) => {
+            for argument in arguments {
+                collect_actor_field_writes_in_expr(
+                    argument,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_actor_field_writes_in_expr(
+                    key,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+                collect_actor_field_writes_in_expr(
+                    value,
+                    method_name,
+                    context,
+                    fallback_span,
+                    output,
+                );
+            }
+        }
+        Expr::NamedArg(_, value) => {
+            collect_actor_field_writes_in_expr(value, method_name, context, fallback_span, output)
+        }
+        Expr::Literal(Lit::FString(parts)) => {
+            for part in parts {
+                if let FStringPart::Interp(inner) = part {
+                    collect_actor_field_writes_in_expr(
+                        inner,
+                        method_name,
+                        context,
+                        fallback_span,
+                        output,
+                    );
+                }
+            }
+        }
+        Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+fn collect_safe_reference_operators(
+    block: &Block,
+    unsafe_context: bool,
+    output: &mut Vec<(&'static str, Span)>,
+) {
+    for statement in block {
+        match statement.unlocated() {
+            Stmt::Let { ty, init, .. } => {
+                if let Some(ty) = ty {
+                    collect_safe_type_operators(ty, unsafe_context, output);
+                }
+                if let Some(expression) = init {
+                    collect_safe_reference_operators_in_expr(expression, unsafe_context, output);
+                }
+            }
+            Stmt::Return(value) | Stmt::Break(value) => {
+                if let Some(expression) = value {
+                    collect_safe_reference_operators_in_expr(expression, unsafe_context, output);
+                }
+            }
+            Stmt::Expr(expression) | Stmt::Drop(expression) => {
+                collect_safe_reference_operators_in_expr(expression, unsafe_context, output)
+            }
+            Stmt::If { cond, then_, else_ } => {
+                collect_safe_reference_operators_in_expr(cond, unsafe_context, output);
+                collect_safe_reference_operators(then_, unsafe_context, output);
+                if let Some(else_) = else_ {
+                    collect_safe_reference_operators(else_, unsafe_context, output);
+                }
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                collect_safe_reference_operators_in_expr(init, unsafe_context, output);
+                collect_safe_reference_operators(then_, unsafe_context, output);
+                if let Some(else_) = else_ {
+                    collect_safe_reference_operators(else_, unsafe_context, output);
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_safe_reference_operators_in_expr(cond, unsafe_context, output);
+                collect_safe_reference_operators(body, unsafe_context, output);
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                collect_safe_reference_operators_in_expr(init, unsafe_context, output);
+                collect_safe_reference_operators(body, unsafe_context, output);
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::IeeeFloat(body)
+            | Stmt::Defer(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Parasteps(body) => {
+                collect_safe_reference_operators(body, unsafe_context, output)
+            }
+            Stmt::Unsafe(body) => collect_safe_reference_operators(body, true, output),
+            Stmt::For { iterable, body, .. } => {
+                collect_safe_reference_operators_in_expr(iterable, unsafe_context, output);
+                collect_safe_reference_operators(body, unsafe_context, output);
+            }
+            Stmt::Requires(expression, _)
+            | Stmt::Ensures(expression, _)
+            | Stmt::Invariant(expression, _) => {
+                collect_safe_reference_operators_in_expr(expression, unsafe_context, output)
+            }
+            Stmt::Math(expressions) => {
+                for expression in expressions {
+                    collect_safe_reference_operators_in_expr(expression, unsafe_context, output);
+                }
+            }
+            Stmt::Assign { target, value } => {
+                collect_safe_reference_operators_in_expr(target, unsafe_context, output);
+                collect_safe_reference_operators_in_expr(value, unsafe_context, output);
+            }
+            Stmt::SharedLet { ty, init, .. } => {
+                if let Some(ty) = ty {
+                    collect_safe_type_operators(ty, unsafe_context, output);
+                }
+                collect_safe_reference_operators_in_expr(init, unsafe_context, output)
+            }
+            Stmt::Pinned { expr, body, .. } => {
+                collect_safe_reference_operators_in_expr(expr, unsafe_context, output);
+                collect_safe_reference_operators(body, unsafe_context, output);
+            }
+            Stmt::Func(function) => {
+                collect_callable_signature_types(
+                    &function.params,
+                    function.ret.as_ref(),
+                    function.extern_abi.as_deref() == Some("C"),
+                    output,
+                );
+                collect_safe_reference_operators(
+                    &function.body,
+                    function.extern_abi.as_deref() == Some("C"),
+                    output,
+                );
+            }
+            Stmt::Continue | Stmt::Located { .. } | Stmt::Ellipsis => {}
+        }
+    }
+}
+
+fn collect_callable_signature_types(
+    params: &[Param],
+    ret: Option<&Type>,
+    allow_ffi_wrapper: bool,
+    output: &mut Vec<(&'static str, Span)>,
+) {
+    for parameter in params {
+        collect_safe_type_operators(&parameter.ty, allow_ffi_wrapper, output);
+        if let Some(default) = &parameter.default_value {
+            collect_safe_reference_operators_in_expr(default, false, output);
+        }
+    }
+    if let Some(ret) = ret {
+        collect_safe_type_operators(ret, allow_ffi_wrapper, output);
+    }
+}
+
+fn collect_field_types(
+    fields: &[Field],
+    unsafe_context: bool,
+    output: &mut Vec<(&'static str, Span)>,
+) {
+    for field in fields {
+        collect_safe_type_operators(&field.ty, unsafe_context, output);
+    }
+}
+
+fn collect_session_type_operators(session: &SessionType, output: &mut Vec<(&'static str, Span)>) {
+    match session.unlocated() {
+        SessionType::Send(ty, continuation) | SessionType::Recv(ty, continuation) => {
+            collect_safe_type_operators(ty, false, output);
+            collect_session_type_operators(continuation, output);
+        }
+        SessionType::Dual(inner) => collect_session_type_operators(inner, output),
+        SessionType::Located { .. } => unreachable!("SessionType::unlocated returned Located"),
+        SessionType::Name(_) | SessionType::End => {}
+    }
+}
+
+fn collect_safe_type_operators(
+    ty: &Type,
+    unsafe_context: bool,
+    output: &mut Vec<(&'static str, Span)>,
+) {
+    let operator = match ty.unlocated() {
+        Type::Ref(_, _) | Type::Slice(_) => Some("&"),
+        Type::RefMut(_, _) => Some("&mut"),
+        Type::RawPtr(_) => Some("*"),
+        Type::RawPtrMut(_) => Some("*mut"),
+        _ => None,
+    };
+    if !unsafe_context {
+        if let Some(operator) = operator {
+            output.push((operator, ty.meta().map_or(Span::UNKNOWN, |meta| meta.span)));
+        }
+    }
+
+    match ty.unlocated() {
+        Type::Name(_, arguments) | Type::Tuple(arguments) => {
+            for argument in arguments {
+                collect_safe_type_operators(argument, unsafe_context, output);
+            }
+        }
+        Type::Ref(_, inner)
+        | Type::RefMut(_, inner)
+        | Type::Option(inner)
+        | Type::CBuffer(inner)
+        | Type::Shared(inner)
+        | Type::Weak(inner)
+        | Type::Newtype(_, inner)
+        | Type::Slice(inner)
+        | Type::RawPtr(inner)
+        | Type::RawPtrMut(inner) => collect_safe_type_operators(inner, unsafe_context, output),
+        Type::Result(ok, error) => {
+            collect_safe_type_operators(ok, unsafe_context, output);
+            collect_safe_type_operators(error, unsafe_context, output);
+        }
+        Type::Func(parameters, result) | Type::ExternFunc(parameters, result) => {
+            for parameter in parameters {
+                collect_safe_type_operators(parameter, unsafe_context, output);
+            }
+            collect_safe_type_operators(result, unsafe_context, output);
+        }
+        Type::Array(inner, _) => collect_safe_type_operators(inner, unsafe_context, output),
+        Type::ForAll(_, body) => collect_safe_type_operators(body, unsafe_context, output),
+        Type::ImplTrait(_)
+        | Type::DynTrait(_)
+        | Type::Cap(_)
+        | Type::CapAtom(_)
+        | Type::Nothing
+        | Type::Infer
+        | Type::TypeVar(_)
+        | Type::TyErr => {}
+        Type::Located { .. } => unreachable!("Type::unlocated returned Located"),
+    }
+}
+
+fn collect_safe_reference_operators_in_expr(
+    expression: &Expr,
+    unsafe_context: bool,
+    output: &mut Vec<(&'static str, Span)>,
+) {
+    match expression.unlocated() {
+        Expr::Unary(operator, inner) => {
+            let restricted_operator = match operator {
+                UnOp::Ref => Some("&"),
+                UnOp::RefMut => Some("&mut"),
+                UnOp::Deref => Some("*"),
+                UnOp::Neg | UnOp::Not => None,
+            };
+            if !unsafe_context {
+                if let Some(operator) = restricted_operator {
+                    let span = expression.meta().map_or(Span::UNKNOWN, |meta| meta.span);
+                    output.push((operator, span));
+                }
+            }
+            collect_safe_reference_operators_in_expr(inner, unsafe_context, output);
+        }
+        Expr::Binary(_, left, right) => {
+            collect_safe_reference_operators_in_expr(left, unsafe_context, output);
+            collect_safe_reference_operators_in_expr(right, unsafe_context, output);
+        }
+        Expr::Call(callee, arguments) => {
+            collect_safe_reference_operators_in_expr(callee, unsafe_context, output);
+            for argument in arguments {
+                collect_safe_reference_operators_in_expr(argument, unsafe_context, output);
+            }
+        }
+        Expr::Field(value, _) | Expr::TupleIndex(value, _) => {
+            collect_safe_reference_operators_in_expr(value, unsafe_context, output)
+        }
+        Expr::Index(value, index) => {
+            collect_safe_reference_operators_in_expr(value, unsafe_context, output);
+            collect_safe_reference_operators_in_expr(index, unsafe_context, output);
+        }
+        Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
+            for value in values {
+                collect_safe_reference_operators_in_expr(value, unsafe_context, output);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_safe_reference_operators_in_expr(iter, unsafe_context, output);
+            collect_safe_reference_operators_in_expr(expr, unsafe_context, output);
+            if let Some(guard) = guard {
+                collect_safe_reference_operators_in_expr(guard, unsafe_context, output);
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_safe_reference_operators_in_expr(scrutinee, unsafe_context, output);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_safe_reference_operators_in_expr(guard, unsafe_context, output);
+                }
+                collect_safe_reference_operators_in_expr(&arm.body, unsafe_context, output);
+            }
+        }
+        Expr::Record { fields, rest, .. } => {
+            for field in fields {
+                collect_safe_reference_operators_in_expr(&field.value, unsafe_context, output);
+            }
+            if let Some(rest) = rest {
+                collect_safe_reference_operators_in_expr(rest, unsafe_context, output);
+            }
+        }
+        Expr::Block(block) | Expr::Arena(block) | Expr::Comptime(block) | Expr::Quote(block) => {
+            collect_safe_reference_operators(block, unsafe_context, output)
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_safe_reference_operators_in_expr(cond, unsafe_context, output);
+            collect_safe_reference_operators(then_, unsafe_context, output);
+            if let Some(else_) = else_ {
+                collect_safe_reference_operators(else_, unsafe_context, output);
+            }
+        }
+        Expr::Lambda { params, ret, body } => {
+            collect_callable_signature_types(params, ret.as_ref(), false, output);
+            // Unsafe lexical context does not extend into a deferred closure
+            // body; the closure must declare its own unsafe block.
+            collect_safe_reference_operators(body, false, output);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_safe_reference_operators_in_expr(target, unsafe_context, output);
+            if let Some(start) = start {
+                collect_safe_reference_operators_in_expr(start, unsafe_context, output);
+            }
+            if let Some(end) = end {
+                collect_safe_reference_operators_in_expr(end, unsafe_context, output);
+            }
+        }
+        Expr::Turbofish(_, type_arguments, arguments) => {
+            for ty in type_arguments {
+                collect_safe_type_operators(ty, unsafe_context, output);
+            }
+            for argument in arguments {
+                collect_safe_reference_operators_in_expr(argument, unsafe_context, output);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_safe_reference_operators_in_expr(key, unsafe_context, output);
+                collect_safe_reference_operators_in_expr(value, unsafe_context, output);
+            }
+        }
+        Expr::NamedArg(_, value) => {
+            collect_safe_reference_operators_in_expr(value, unsafe_context, output)
+        }
+        Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner) => {
+            collect_safe_reference_operators_in_expr(inner, unsafe_context, output)
+        }
+        Expr::Cast(inner, ty) => {
+            collect_safe_reference_operators_in_expr(inner, unsafe_context, output);
+            collect_safe_type_operators(ty, unsafe_context, output);
+        }
+        Expr::TypeInfo(ty) => collect_safe_type_operators(ty, unsafe_context, output),
+        Expr::Literal(Lit::FString(parts)) => {
+            for part in parts {
+                if let FStringPart::Interp(expression) = part {
+                    collect_safe_reference_operators_in_expr(expression, unsafe_context, output);
+                }
+            }
+        }
+        Expr::Literal(_) | Expr::Ident(_) => {}
+        Expr::Located { .. } => unreachable!("Expr::unlocated returned Located"),
+    }
+}
+
+fn record_actor_field_write(
+    method_name: &str,
+    field_name: &str,
+    span: Span,
+    output: &mut Vec<(String, String, Span)>,
+) {
+    if !output
+        .iter()
+        .any(|(existing_method, existing_field, existing_span)| {
+            existing_method == method_name && existing_field == field_name && *existing_span == span
+        })
+    {
+        output.push((method_name.to_string(), field_name.to_string(), span));
     }
 }
 

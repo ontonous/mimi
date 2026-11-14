@@ -71,24 +71,24 @@ fn boundary_walk_dir_recursive() {
 
 #[test]
 fn boundary_sha256_empty() {
-    let v = run_source("func main() -> string { sha256(\"\") }");
-    assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
-        ))
-    );
+    let src = r#"
+func observed_sha256_empty() -> string { sha256("") }
+func main() -> i32 {
+    if observed_sha256_empty() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_sha256_known_vector() {
-    let v = run_source("func main() -> string { sha256(\"abc\") }");
-    assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new(
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string()
-        ))
-    );
+    let src = r#"
+func observed_sha256_abc() -> string { sha256("abc") }
+func main() -> i32 {
+    if observed_sha256_abc() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -99,21 +99,31 @@ fn boundary_sha256_length() {
 
 #[test]
 fn boundary_base64_encode_empty() {
-    let v = run_source("func main() -> string { base64_encode(\"\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
+    let src = r#"
+func observed_base64_encode_empty() -> string { base64_encode("") }
+func main() -> i32 {
+    if observed_base64_encode_empty() == "" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_base64_encode_known() {
-    let v = run_source("func main() -> string { base64_encode(\"Hello\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("SGVsbG8=".to_string())));
+    let src = r#"
+func observed_base64_encode_hello() -> string { base64_encode("Hello") }
+func main() -> i32 {
+    if observed_base64_encode_hello() == "SGVsbG8=" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_base64_roundtrip() {
     let v = run_source(
         r#"
-func main() -> string {
+func observed_base64_roundtrip() -> string {
     let original = "Hello, Mimi!"
     let encoded = base64_encode(original)
     let decoded = base64_decode(encoded)
@@ -122,42 +132,55 @@ func main() -> string {
         Err(e) => "error"
     }
 }
+func main() -> i32 {
+    if observed_base64_roundtrip() == "Hello, Mimi!" { 0 } else { 1 }
+}
 "#,
     );
-    assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new("Hello, Mimi!".to_string()))
-    );
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_base64_decode_invalid() {
     let v = run_source(
         r#"
-func main() -> string {
+func observed_base64_decode_invalid() -> string {
     let decoded = base64_decode("not!valid!!!")
     match decoded {
         Ok(s) => "ok",
         Err(e) => "err"
     }
 }
+func main() -> i32 {
+    if observed_base64_decode_invalid() == "err" { 0 } else { 1 }
+}
 "#,
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("err".to_string())));
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 // ====== Path Join Tests ======
 
 #[test]
 fn boundary_path_join_empty() {
-    let v = run_source("func main() -> string { path_join(\"\", \"b\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("b".to_string())));
+    let src = r#"
+func observed_path_join_empty() -> string { path_join("", "b") }
+func main() -> i32 {
+    if observed_path_join_empty() == "b" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_path_join_triple() {
-    let v = run_source("func main() -> string { path_join(path_join(\"a\", \"b\"), \"c\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("a/b/c".to_string())));
+    let src = r#"
+func observed_path_join_triple() -> string { path_join(path_join("a", "b"), "c") }
+func main() -> i32 {
+    if observed_path_join_triple() == "a/b/c" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -168,32 +191,57 @@ fn boundary_path_ext_no_ext() {
 
 #[test]
 fn boundary_path_ext_has_ext() {
-    let v = run_source("func main() -> string { path_ext(\"file.txt\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("txt".to_string())));
+    let src = r#"
+func observed_path_ext_has_ext() -> string { path_ext("file.txt") }
+func main() -> i32 {
+    if observed_path_ext_has_ext() == "txt" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_path_basename_root() {
-    let v = run_source("func main() -> string { path_basename(\"/\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
+    let src = r#"
+func observed_path_basename_root() -> string { path_basename("/") }
+func main() -> i32 {
+    if observed_path_basename_root() == "" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_path_dirname_root() {
-    let v = run_source("func main() -> string { path_dirname(\"/\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("".to_string())));
+    let src = r#"
+func observed_path_dirname_root() -> string { path_dirname("/") }
+func main() -> i32 {
+    if observed_path_dirname_root() == "" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_path_basename_simple() {
-    let v = run_source("func main() -> string { path_basename(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("c.txt".to_string())));
+    let src = r#"
+func observed_path_basename_simple() -> string { path_basename("/a/b/c.txt") }
+func main() -> i32 {
+    if observed_path_basename_simple() == "c.txt" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn boundary_path_dirname_simple() {
-    let v = run_source("func main() -> string { path_dirname(\"/a/b/c.txt\") }");
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("/a/b".to_string())));
+    let src = r#"
+func observed_path_dirname_simple() -> string { path_dirname("/a/b/c.txt") }
+func main() -> i32 {
+    if observed_path_dirname_simple() == "/a/b" { 0 } else { 1 }
+}
+"#;
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 // ====== Codegen boundary tests ======

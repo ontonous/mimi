@@ -55,6 +55,39 @@ pub(super) fn validate_managed_any_operation(
 
 impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
     pub(super) fn declare_managed_any_helpers(&self) {
+        use crate::core::mir::MirInstructionKind as I;
+
+        let legacy_any_type = crate::core::mir::types::managed_any_i32_string_v1_type_id();
+        let legacy_operations_are_used = self.program.functions().values().any(|function| {
+            function
+                .values
+                .values()
+                .any(|value| value.ty == legacy_any_type)
+                || function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .any(|instruction| {
+                        matches!(
+                            &instruction.kind,
+                            I::OrdinaryMapOwnedGetI32StringV1New { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Set { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Remove { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Size { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Contains { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1GetString { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1GetAny { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Values { .. }
+                                | I::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+                                | I::ManagedAny { .. }
+                        )
+                    })
+        });
+        if !legacy_operations_are_used {
+            return;
+        }
+
         let c = self.generator.context;
         let i64 = c.i64_type();
         let i32 = c.i32_type();
@@ -88,18 +121,11 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 i32.fn_type(&[i, k, k, p, p], false),
             ),
         ];
-        if self
-            .program
-            .type_catalog()
-            .get(&crate::core::mir::types::managed_any_i32_string_v1_type_id())
-            .is_some()
-        {
-            for (name, ty) in helpers {
-                if self.generator.module.get_function(name).is_none() {
-                    self.generator
-                        .module
-                        .add_function(name, ty, Some(Linkage::External));
-                }
+        for (name, ty) in helpers {
+            if self.generator.module.get_function(name).is_none() {
+                self.generator
+                    .module
+                    .add_function(name, ty, Some(Linkage::External));
             }
         }
     }
@@ -614,9 +640,14 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let value = self.value(source, subject)?;
         let source_ty = self.value_type(source, subject)?;
         match operation {
-            MirManagedAnyOperation::PackI32 => unreachable!("PackI32 handled before owner lookup"),
+            MirManagedAnyOperation::PackI32 => {
+                return Err(NativeMirError::new(
+                    subject,
+                    "ManagedAny PackI32 unexpectedly reached owner lookup after the pack fast path",
+                ));
+            }
             MirManagedAnyOperation::Drop => {
-                return self.emit_managed_any_drop_value(value, &source_ty, subject)
+                return self.emit_managed_any_drop_value(value, &source_ty, subject);
             }
             MirManagedAnyOperation::Clone => {
                 let clone = self.emit_managed_any_clone_value(value, &source_ty, subject)?;
@@ -769,120 +800,216 @@ mod tests {
     const SNAPSHOT_SOURCE: &str = r#"
     func pass<T>(value: T) -> T { value }
     func main() -> i32 {
-        let empty = map_new()
-        let root = map_set(empty, "k\0🧪", "detached")
-        let snapshot = map_get(root, "k\0🧪")
-        drop(empty)
-        drop(root)
-    let found = snapshot.0
-    let payload = snapshot.1
-    let transferred = pass(payload)
-    drop(snapshot)
-    println(found)
-    println(transferred)
-    drop(transferred)
-    let second_empty = map_new()
-    let zero = map_set(second_empty, "zero", 0)
-    let empty_text = map_set(zero, "empty", "")
-    let missing = map_get(empty_text, "missing")
-    let present_zero = map_get(empty_text, "zero")
-    let present_empty = map_get(empty_text, "empty")
-    drop(second_empty)
-    drop(zero)
-    drop(empty_text)
-    let missing_found = missing.0
-    let missing_any = missing.1
-    let missing_zero = if missing_found { missing_any } else { 0 }
-    println(missing_found)
-    drop(missing_any)
-    drop(missing)
-    println(missing_zero)
-    let zero_found = present_zero.0
-    let zero_any = present_zero.1
-    let present_zero_value = if zero_found { zero_any } else { 0 }
-    println(zero_found)
-    drop(zero_any)
-    drop(present_zero)
-    println(present_zero_value)
-    let empty_found = present_empty.0
-    let empty_any = present_empty.1
-    println(empty_found)
-    println(empty_any)
-    drop(empty_any)
-    drop(present_empty)
-    0
-}
+        match map_new() {
+            Ok(empty) => {
+                match map_set(empty, "k\0🧪", "detached") {
+                    Ok(root) => {
+                        let snapshot = map_get(root, "k\0🧪")
+                        drop(empty)
+                        drop(root)
+                        let found = snapshot.0
+                        let payload = snapshot.1
+                        let transferred = pass(payload)
+                        drop(snapshot)
+                        println(found)
+                        println(transferred)
+                        drop(transferred)
+                        match map_new() {
+                            Ok(second_empty) => {
+                                match map_set(second_empty, "zero", 0) {
+                                    Ok(zero) => {
+                                        match map_set(zero, "empty", "") {
+                                            Ok(empty_text) => {
+                                                let missing = map_get(empty_text, "missing")
+                                                let present_zero = map_get(empty_text, "zero")
+                                                let present_empty = map_get(empty_text, "empty")
+                                                drop(second_empty)
+                                                drop(zero)
+                                                drop(empty_text)
+                                                let missing_found = missing.0
+                                                let missing_any = missing.1
+                                                let missing_zero = if missing_found { missing_any } else { 0 }
+                                                println(missing_found)
+                                                drop(missing_any)
+                                                drop(missing)
+                                                println(missing_zero)
+                                                let zero_found = present_zero.0
+                                                let zero_any = present_zero.1
+                                                let present_zero_value = if zero_found { zero_any } else { 0 }
+                                                println(zero_found)
+                                                drop(zero_any)
+                                                drop(present_zero)
+                                                println(present_zero_value)
+                                                let empty_found = present_empty.0
+                                                let empty_any = present_empty.1
+                                                println(empty_found)
+                                                println(empty_any)
+                                                drop(empty_any)
+                                                drop(present_empty)
+                                                0
+                                            },
+                                            Err(status) => {
+                                                drop(second_empty)
+                                                drop(zero)
+                                                status
+                                            },
+                                        }
+                                    },
+                                    Err(status) => {
+                                        drop(second_empty)
+                                        status
+                                    },
+                                }
+                            },
+                            Err(status) => { status },
+                        }
+                    },
+                    Err(status) => {
+                        drop(empty)
+                        status
+                    },
+                }
+            },
+            Err(status) => { status },
+        }
+    }
 "#;
 
     const ANY_STRING_EQUALITY_SOURCE: &str = r#"
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key\0🧪", "owned\0🧪值")
-    let pair = map_get(root, "key\0🧪")
-    let payload = pair.1
-    let equal_left = payload == "owned\0🧪值"
-    let equal_right = "owned\0🧪值" == payload
-    let unequal_left = payload != "owned\0🧪值x"
-    let unequal_right = "owned\0🧪值x" != payload
-    println(equal_left)
-    println(equal_right)
-    println(unequal_left)
-    println(unequal_right)
-    drop(pair)
-    drop(payload)
-    drop(empty)
-    drop(root)
-
-    let number_empty = map_new()
-    let number_root = map_set(number_empty, "number", 7)
-    let number_pair = map_get(number_root, "number")
-    let number_payload = number_pair.1
-    let wrong_equal = number_payload == "7"
-    let wrong_unequal = "7" != number_payload
-    println(wrong_equal)
-    println(wrong_unequal)
-    drop(number_pair)
-    drop(number_payload)
-    drop(number_empty)
-    drop(number_root)
-    0
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key\0🧪", "owned\0🧪值") {
+                Ok(root) => {
+                    let pair = map_get(root, "key\0🧪")
+                    let payload = pair.1
+                    let equal_left = payload == "owned\0🧪值"
+                    let equal_right = "owned\0🧪值" == payload
+                    let unequal_left = payload != "owned\0🧪值x"
+                    let unequal_right = "owned\0🧪值x" != payload
+                    println(equal_left)
+                    println(equal_right)
+                    println(unequal_left)
+                    println(unequal_right)
+                    drop(pair)
+                    drop(payload)
+                    drop(empty)
+                    drop(root)
+                    match map_new() {
+                        Ok(number_empty) => {
+                            match map_set(number_empty, "number", 7) {
+                                Ok(number_root) => {
+                                    let number_pair = map_get(number_root, "number")
+                                    let number_payload = number_pair.1
+                                    let wrong_equal = number_payload == "7"
+                                    let wrong_unequal = "7" != number_payload
+                                    println(wrong_equal)
+                                    println(wrong_unequal)
+                                    drop(number_pair)
+                                    drop(number_payload)
+                                    drop(number_empty)
+                                    drop(number_root)
+                                    0
+                                },
+                                Err(status) => {
+                                    drop(number_empty)
+                                    status
+                                },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 "#;
 
     const MANAGED_ANY_PRINTLN_SOURCE: &str = r#"
 func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "k\0🧪", "owned\0🧪值")
-    let pair = map_get(root, "k\0🧪")
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = pair.1
-    let carried = carry(payload)
-    let equal = if found { carried == "owned\0🧪值" } else { false }
-    println(found)
-    println(equal)
-    println(carried)
-    drop(pair)
-    drop(payload)
-    drop(carried)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "k\0🧪", "owned\0🧪值") {
+                Ok(root) => {
+                    let pair = map_get(root, "k\0🧪")
+                    drop(empty)
+                    drop(root)
+                    let found = pair.0
+                    let payload = pair.1
+                    let carried = carry(payload)
+                    let equal = if found { carried == "owned\0🧪值" } else { false }
+                    println(found)
+                    println(equal)
+                    println(carried)
+                    drop(pair)
+                    drop(payload)
+                    drop(carried)
+                    match map_new() {
+                        Ok(number_empty) => {
+                            match map_set(number_empty, "zero", 0) {
+                                Ok(number_root) => {
+                                    let number_pair = map_get(number_root, "zero")
+                                    drop(number_empty)
+                                    drop(number_root)
+                                    let number_found = number_pair.0
+                                    let zero_payload = number_pair.1
+                                    let zero_carried = carry(zero_payload)
+                                    let zero = if number_found { zero_carried } else { 0 }
+                                    println(number_found)
+                                    println(zero)
+                                    drop(number_pair)
+                                    drop(zero_payload)
+                                    drop(zero_carried)
+                                    0
+                                },
+                                Err(status) => {
+                                    drop(number_empty)
+                                    status
+                                },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
+}
+"#;
 
-    let number_empty = map_new()
-    let number_root = map_set(number_empty, "zero", 0)
-    let number_pair = map_get(number_root, "zero")
-    drop(number_empty)
-    drop(number_root)
-    let number_found = number_pair.0
-    let zero_payload = number_pair.1
-    let zero_carried = carry(zero_payload)
-    let zero = if number_found { zero_carried } else { 0 }
-    println(number_found)
-    println(zero)
-    drop(number_pair)
-    drop(zero_payload)
-    drop(zero_carried)
-    0
+    const MANAGED_ANY_PRINTLN_I32_SOURCE: &str = r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "zero", 42) {
+                Ok(root) => {
+                    let pair = map_get(root, "zero")
+                    drop(empty)
+                    drop(root)
+                    println(pair.1)
+                    drop(pair)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 "#;
 
@@ -1041,9 +1168,9 @@ func main() -> i32 {
 
     #[test]
     fn managed_any_println_checks_tag_then_preserves_exact_payload_bytes() {
+        let expected = "true\ntrue\nowned\0🧪值\ntrue\n0\n";
         let program = program(MANAGED_ANY_PRINTLN_SOURCE);
         super::super::validate_mir_native(&program).expect("exact Any println native preflight");
-        let expected = "true\ntrue\nowned\0🧪值\ntrue\n0\n";
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "managed_any_println");
         generator
@@ -1053,7 +1180,13 @@ func main() -> i32 {
             .module
             .verify()
             .expect("ManagedAny println module verifies");
-        let ir = generator.module.print_to_string().to_string();
+        let emitted_ir = generator.module.print_to_string().to_string();
+        let native = crate::tests::link_and_observe_canonical_mir(&generator)
+            .expect("same MIR native Any println process");
+        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
+        assert_eq!(native.stdout.as_bytes(), expected.as_bytes());
+        assert_eq!(native.stderr, "");
+        strict_memcheck(&generator, 0, expected);
         for helper in [
             "mimi_mir_managed_any_i32_string_v1_read_i32",
             "mimi_mir_managed_any_i32_string_v1_copy_string",
@@ -1062,20 +1195,40 @@ func main() -> i32 {
             "printf",
         ] {
             assert!(
-                ir.contains(&format!("@{helper}")),
+                emitted_ir.contains(&format!("@{helper}")),
                 "missing checked Any println helper {helper}"
             );
         }
-        assert!(ir.contains("mir_any_println_probe_string"));
-        assert!(ir.contains("ManagedAny println failed"));
-        assert!(ir.contains("mir_any_println_string_length_valid"));
+        assert!(emitted_ir.contains("mir_any_println_probe_string"));
+        assert!(emitted_ir.contains("ManagedAny println failed"));
+        assert!(emitted_ir.contains("mir_any_println_string_length_valid"));
+    }
 
-        let native = crate::tests::link_and_observe_canonical_mir(&generator)
-            .expect("same MIR native Any println process");
-        assert_eq!(native.exit_code, Some(0), "{}", native.stderr);
-        assert_eq!(native.stdout.as_bytes(), expected.as_bytes());
-        assert_eq!(native.stderr, "");
-        strict_memcheck(&generator, 0, expected);
+    #[test]
+    fn managed_any_println_i32_owner_v2_requires_production_readiness_before_llvm() {
+        const {
+            assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+        let program = program(MANAGED_ANY_PRINTLN_I32_SOURCE);
+        super::super::validate_mir_native(&program)
+            .expect("structurally valid owner-v2 i32 println MIR");
+        let context = Context::create();
+        let mut generator = CodeGenerator::new(&context, "managed_any_println_i32_readiness");
+        let before_compile = generator.module.print_to_string().to_string();
+        let errors = generator
+            .compile_mir_native(&program)
+            .expect_err("owner-v2 i32 println cannot bypass closed production readiness");
+        assert!(errors.iter().any(|error| {
+            error.code.as_deref() == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+                && error.message.contains(
+                    "ordinary Map/Any owner-v2 native emission is diagnostic-only while V2 production readiness is disabled",
+                )
+        }), "{errors:?}");
+        assert_eq!(
+            generator.module.print_to_string().to_string(),
+            before_compile,
+            "closed readiness must reject before adding LLVM declarations or definitions"
+        );
     }
 
     #[test]
@@ -1352,14 +1505,25 @@ func main() -> i32 {
 {helper}
 func pass<T>(value: T) -> T {{ value }}
 func main() -> i32 {{
-    let empty = map_new()
-    let root = map_set(empty, "key", "caller-owned")
-    let pair = map_get(root, "key")
-    let transferred = pass(pair.1)
-    drop(empty)
-    drop(root)
-    println(77)
-    {main_tail}
+    match map_new() {{
+        Ok(empty) => {{
+            match map_set(empty, "key", "caller-owned") {{
+                Ok(root) => {{
+                    let pair = map_get(root, "key")
+                    let transferred = pass(pair.1)
+                    drop(empty)
+                    drop(root)
+                    println(77)
+                    {main_tail}
+                }},
+                Err(status) => {{
+                    drop(empty)
+                    status
+                }},
+            }}
+        }},
+        Err(status) => {{ status }},
+    }}
 }}
 "#
             );
@@ -1416,11 +1580,15 @@ func get_or_default<T>(m: Record, key: string, default: T) -> T {
 }
 
 func main() -> i32 {
-    let root = map_new()
-    let wrong = get_or_default(root, "key", 0)
-    drop(wrong)
-    drop(root)
-    0
+    match map_new() {
+        Ok(root) => {
+            let wrong = get_or_default(root, "key", 0)
+            drop(wrong)
+            drop(root)
+            0
+        },
+        Err(status) => { status },
+    }
 }
 "#,
         );

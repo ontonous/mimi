@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::ast::{File, Item};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -182,13 +180,21 @@ pub struct Counterexample {
 /// v0.31.25: Proof artifact — binds a verification result to its semantic
 /// context for replay and tamper detection.
 ///
-/// Cache key: `(semantics_version, solver_version, integer_model, engine,
-/// program_identity)` where MIR artifacts use `mir_hash`.
+/// Cache key: `(semantics_version, proof_profile, obligation_scope,
+/// solver_version, integer_model, float_model, engine, program_identity)`
+/// where MIR artifacts use `mir_hash`.
 /// A proof is only valid if the artifact matches the current compilation.
 #[derive(Debug, Clone)]
 pub struct ProofArtifact {
     /// Semantic model version (bumped on any verification semantics change).
     pub semantics_version: u32,
+    /// Versioned proof semantics profile. This is intentionally separate from
+    /// the execution engine: one engine can expose stable and experimental
+    /// proof profiles without making them cache-compatible.
+    pub proof_profile: String,
+    /// The exact obligations discharged by this artifact (for example,
+    /// FFI Requires-only or FFI Requires+Ensures).
+    pub obligation_scope: String,
     /// Integer model: "checked" (overflow/div-zero definedness) or "unbounded".
     pub integer_model: String,
     /// Float model: "opaque" (uninterpreted sort, no arithmetic proofs).
@@ -226,7 +232,46 @@ fn same_optional_source_provenance(left: &str, right: &str) -> bool {
 
 impl ProofArtifact {
     /// Current semantics version. Bump when verification semantics change.
-    pub const SEMANTICS_VERSION: u32 = 1;
+    /// Version 3 binds the proof profile and exact obligation scope into both
+    /// compatibility and cache identity.
+    pub const SEMANTICS_VERSION: u32 = 3;
+
+    /// Stable scalar verification profile. This does not include MIR FFI,
+    /// loops, aggregates, or full-IEEE FFI inputs.
+    pub const PROFILE_VERIFIED_CORE_1: &'static str = "mimi-verified-core-1";
+    /// Canonical MIR contract verification outside the Verified Core 1
+    /// profile. The MIR engine's own model/version fields further refine it.
+    pub const PROFILE_MIR_V1: &'static str = "mimi-mir-verifier-v1";
+    /// Experimental MIR-only FFI proof profile with complete IEEE-754
+    /// binary64 boundary values and path-sensitive call-site checks.
+    pub const PROFILE_MIR_FFI_EXPERIMENTAL_V1: &'static str =
+        "mimi-mir-ffi-ieee754-experimental-v1";
+    /// Retained Flow/VIR compatibility path; never a Verified Core artifact.
+    pub const PROFILE_FLOW_AST_EXPERIMENTAL_V1: &'static str = "mimi-flow-ast-experimental-v1";
+    /// Checker-owned Resolved FFI proof path, separate from the MIR FFI
+    /// experimental profile.
+    pub const PROFILE_RESOLVED_FFI_EXPERIMENTAL_V1: &'static str =
+        "mimi-resolved-ffi-experimental-v1";
+    /// Checker-owned Resolved Flow transition contracts use source-state
+    /// invariants as entry facts, which is a distinct proof profile from
+    /// ordinary function contracts.
+    pub const PROFILE_RESOLVED_FLOW_TRANSITION_V1: &'static str =
+        "mimi-resolved-flow-transition-v1";
+    /// Honest fallback for direct/manual artifact construction that has not
+    /// been assigned a production proof profile.
+    pub const PROFILE_UNCLASSIFIED_V1: &'static str = "mimi-unclassified-verifier-v1";
+
+    pub const SCOPE_FUNCTION_CONTRACTS_V1: &'static str = "function-contracts-v1";
+    pub const SCOPE_MIR_FUNCTION_CONTRACTS_V1: &'static str = "mir-function-contracts-v1";
+    pub const SCOPE_MIR_DEFAULT_ROOT_V1: &'static str = "mir-default-root-v1";
+    pub const SCOPE_FFI_REQUIRES_ONLY_V1: &'static str = "ffi-requires-only-v1";
+    pub const SCOPE_FFI_REQUIRES_ENSURES_V1: &'static str = "ffi-requires-ensures-v1";
+    pub const SCOPE_RESOLVED_FFI_REQUIRES_V1: &'static str = "resolved-ffi-requires-v1";
+    pub const SCOPE_RESOLVED_FFI_ENSURES_V1: &'static str = "resolved-ffi-ensures-v1";
+    pub const SCOPE_RESOLVED_FFI_DEFAULT_ROOT_V1: &'static str = "resolved-ffi-default-root-v1";
+    pub const SCOPE_LITERAL_FFI_DECLARATION_V1: &'static str = "literal-ffi-declaration-v1";
+    pub const SCOPE_FLOW_TRANSITION_CONTRACTS_V1: &'static str = "flow-transition-contracts-v1";
+    pub const SCOPE_UNCLASSIFIED_V1: &'static str = "unclassified-scope-v1";
 
     /// Test-only engine identity for the retained Flow/VIR oracle. Production
     /// proof artifacts use the Resolved or canonical MIR engines.
@@ -243,6 +288,8 @@ impl ProofArtifact {
     pub fn new(solver_version: String, source_hash: String) -> Self {
         Self {
             semantics_version: Self::SEMANTICS_VERSION,
+            proof_profile: Self::PROFILE_UNCLASSIFIED_V1.to_string(),
+            obligation_scope: Self::SCOPE_UNCLASSIFIED_V1.to_string(),
             // P0-9: i32 has checked overflow/div-zero definedness; i64 is
             // modeled as unbounded integers with NO definedness checks.
             // "checked" was a lie for i64 — use "checked_i32" to be precise.
@@ -276,6 +323,8 @@ impl ProofArtifact {
             _ => &current.vir_hash,
         };
         self.semantics_version == current.semantics_version
+            && self.proof_profile == current.proof_profile
+            && self.obligation_scope == current.obligation_scope
             && self.integer_model == current.integer_model
             && self.float_model == current.float_model
             && self.solver_version == current.solver_version
@@ -293,9 +342,18 @@ impl ProofArtifact {
             && self.vir_hash == current.vir_hash
     }
 
-    /// Proof cache key: `(semantics_version, solver_version, integer_model,
-    /// engine, program_identity)` plus the MIR route identity when the proof
-    /// comes from the canonical MIR engine.
+    /// Human-readable proof identity for CLI and evidence displays.
+    pub fn identity_label(&self) -> String {
+        format!(
+            "profile={}, scope={}",
+            self.proof_profile, self.obligation_scope
+        )
+    }
+
+    /// Proof cache key: `(semantics_version, proof_profile, obligation_scope,
+    /// solver_version, integer_model, float_model, engine, program_identity)`
+    /// plus the MIR route identity when the proof comes from the canonical
+    /// MIR engine.
     ///
     /// 0.34.44 (ADR-008 §2): the key carries the ENGINE identity and a
     /// program hash. The resolved engine binds `resolved_ir_hash` (its
@@ -310,10 +368,13 @@ impl ProofArtifact {
             _ => &self.vir_hash,
         };
         let base = format!(
-            "v{}:{}:{}:{}:{}",
+            "v{}:{}:{}:{}:{}:{}:{}:{}",
             self.semantics_version,
+            self.proof_profile,
+            self.obligation_scope,
             self.solver_version,
             self.integer_model,
+            self.float_model,
             self.engine,
             program_identity
         );
@@ -327,19 +388,6 @@ impl ProofArtifact {
             .unwrap_or_else(|| "missing".to_string());
         format!("{base}:mir-route-v1:{route_identity}")
     }
-}
-
-/// v0.31.25: Compute a semantic hash for proof caching.
-///
-/// 0.31.28: Uses BLAKE3 for cryptographic tamper detection.
-/// BLAKE3 is deterministic across Rust versions and platforms,
-/// unlike SipHash (DefaultHasher) which is randomized per-process.
-///
-/// The input should be a span-free, variable-normalized string representation
-/// of the VIR (Verification IR). Variable normalization ensures that
-/// renaming local variables does not invalidate the cache.
-pub fn compute_semantic_hash(normalized_vir: &str) -> String {
-    blake3::hash(normalized_vir.as_bytes()).to_hex().to_string()
 }
 
 /// P1-24: Compute a deterministic BLAKE3 hash of the Resolved IR from
@@ -385,8 +433,7 @@ fn is_stdlib_prelude_callable(
     })
 }
 
-/// Mock verification from CheckedProgram (Z3-unavailable fallback).
-/// Replaces the AST-based `mock_verify_file` with a CheckedProgram-based path.
+/// Mock verification from CheckedProgram when Z3 is unavailable.
 /// Used by verify_checked when Z3 is unavailable (C4 partial, 0.32.27+).
 pub(crate) fn mock_verify_checked(
     program: &crate::core::CheckedProgram,
@@ -421,20 +468,26 @@ pub(crate) fn mock_verify_checked(
         });
     }
     // Extern blocks with contracts (not included in callables).
-    for block in program.extern_blocks_sorted() {
-        for signature in crate::core::CheckedProgram::extern_signatures_sorted(block) {
-            if signature.requires.is_some() || signature.ensures.is_some() {
-                results.push(VerificationResult {
-                    func_name: format!("extern {}", signature.name),
-                    status: VerifStatus::InfrastructureError,
-                    message: "Z3 solver not available".into(),
-                    diagnostic: None,
-                    duration_us: 0,
-                    constraint_count: 0,
-                    artifact: None,
-                    trusted_subset_domain: None,
-                });
-            }
+    let mut declarations = program.ffi_declarations().values().collect::<Vec<_>>();
+    declarations.sort_by(|left, right| {
+        (&left.block.0, &left.declaration.0, &left.symbol).cmp(&(
+            &right.block.0,
+            &right.declaration.0,
+            &right.symbol,
+        ))
+    });
+    for declaration in declarations {
+        if declaration.has_declared_contract() {
+            results.push(VerificationResult {
+                func_name: format!("extern {}", declaration.symbol),
+                status: VerifStatus::InfrastructureError,
+                message: "Z3 solver not available".into(),
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: None,
+            });
         }
     }
     results
@@ -562,11 +615,13 @@ impl Z3VarMap {
         self.real_vars.get(name)
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_string_nonempty(&self, name: &str) -> Option<&Z3Bool> {
         self.string_nonempty.get(name)
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_string_len(&self, name: &str) -> Option<&Z3Int> {
         self.string_len.get(name)
@@ -587,11 +642,13 @@ impl Z3VarMap {
         self.string_vars.insert(name.into(), var);
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn get_string_var(&self, name: &str) -> Option<&Z3String> {
         self.string_vars.get(name)
     }
 
+    #[cfg(test)]
     #[inline]
     pub(crate) fn is_real(&self, name: &str) -> bool {
         self.real_vars.contains_key(name)
@@ -857,6 +914,7 @@ impl SolverSession {
     /// so the violation question is UNSAT. (The previous `(Sat, None)` return
     /// was semantically inverted: callers interpreting Sat as "a violation is
     /// satisfiable" would reject obligations that were never generated.)
+    #[cfg(test)]
     pub fn check_scope_multi<T: std::borrow::Borrow<z3::ast::Bool>>(
         &mut self,
         constraints: Vec<T>,
@@ -888,18 +946,10 @@ impl SolverSession {
     }
 }
 
-/// Context for the test-only surface-AST verifier lookup tables
-/// (`func_defs`, `func_status`). Production verification uses checker-owned
-/// callable directories and canonical MIR; the two legacy maps are compiled
-/// only with the Flow/VIR equivalence harness.
+/// Context for contract verification. Production verification uses
+/// checker-owned callable directories and canonical MIR.
 #[derive(Default)]
 pub struct VerifierCtx {
-    #[cfg(test)]
-    pub(crate) func_defs: HashMap<String, crate::ast::FuncDef>,
-    /// V-C4: status of each verified function. Callee ensures are only
-    /// admitted as axioms when the callee status is `Verified`.
-    #[cfg(test)]
-    pub(crate) func_status: HashMap<String, VerifStatus>,
     /// P1-24: BLAKE3 hash of the source file (tamper detection).
     /// Computed at the verify_source / verify_checked entry point.
     /// Empty when source text is unavailable (e.g. LSP path).
@@ -1065,7 +1115,35 @@ impl Verifier {
         &mut self,
         program: &crate::core::CheckedProgram,
     ) -> Vec<VerificationResult> {
-        let mut results = self.verify_checked_without_actor_ffi(program);
+        self.verify_checked_excluding_owners(program, &std::collections::BTreeSet::new())
+    }
+
+    /// Compatibility adapter for a production MIR slice.  Only exact
+    /// Checker owner identities may be removed from this Resolved-body loop;
+    /// direct callers of `verify_checked` continue to retain the historical
+    /// complete compatibility behavior.
+    pub(crate) fn verify_checked_excluding_owners(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+        excluded_owners: &std::collections::BTreeSet<crate::core::NodeId>,
+    ) -> Vec<VerificationResult> {
+        if let Some(message) = program.dynamic_protocol_method_boundary_reason() {
+            return vec![VerificationResult {
+                func_name: "dynamic-protocol-method-boundary-v1".into(),
+                status: VerifStatus::NotInTrustedSubset,
+                diagnostic: Some(crate::diagnostic::mir_route_error_diagnostic(
+                    message.clone(),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )),
+                message,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+            }];
+        }
+        let mut results =
+            self.verify_checked_without_actor_ffi_excluding_owners(program, excluded_owners);
         if crate::core::mir::scalar_actor_contract_boundary_reason(program).is_some() {
             // Foreign postconditions are owned by the dedicated FFI adapter.
             // The Resolved body pass can also discover those call-site
@@ -1095,6 +1173,17 @@ impl Verifier {
     pub(crate) fn verify_checked_without_actor_ffi(
         &mut self,
         program: &crate::core::CheckedProgram,
+    ) -> Vec<VerificationResult> {
+        self.verify_checked_without_actor_ffi_excluding_owners(
+            program,
+            &std::collections::BTreeSet::new(),
+        )
+    }
+
+    pub(crate) fn verify_checked_without_actor_ffi_excluding_owners(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+        excluded_owners: &std::collections::BTreeSet<crate::core::NodeId>,
     ) -> Vec<VerificationResult> {
         self.install_checked_actor_metadata(program);
         match super::verify_scalar_actor_checked(program, self.ctx.source_hash.clone()) {
@@ -1559,8 +1648,8 @@ impl Verifier {
         self.ctx.checked_transitions_by_event = transitions_by_event;
         // P1-24: compute Resolved IR hash from CheckedProgram signatures.
         self.ctx.resolved_ir_hash = compute_resolved_ir_hash(program);
-        // v0.32.27: use Resolved IR path instead of AST-based verify_file.
-        self.verify_checked_contracts(program)
+        // v0.32.27: verify the checker-owned Resolved IR contracts.
+        self.verify_checked_contracts_excluding_owners(program, excluded_owners)
     }
 
     pub(crate) fn has_checked_function(&self, name: &str) -> bool {
@@ -1887,16 +1976,8 @@ impl Verifier {
             .cloned()
     }
 
-    #[cfg(test)]
-    pub(crate) fn verify_file(&mut self, file: &File) -> Vec<VerificationResult> {
-        let mut results = Vec::new();
-        VerifierCtx::verify_items(&mut self.ctx, &mut self.session, &file.items, &mut results);
-        results
-    }
-
     /// 0.32.27: Verify contracts from Resolved IR (CheckedProgram.callables).
     ///
-    /// Replaces the AST-based `verify_file` path for function contracts.
     /// Iterates `program.callables()` and uses `verify_contracts_from_resolved`
     /// from `resolved_expr.rs` to encode requires/ensures/math as Z3 constraints.
     ///
@@ -1914,15 +1995,26 @@ impl Verifier {
     /// left over from earlier requests on a long-lived session (LSP keeps one
     /// `Verifier` across requests, lsp/state.rs), so no separate per-request
     /// reset hook is needed: the first contract-bearing callable of every
-    /// request starts from a clean solver. Mirrors the per-function
-    /// `session.reset()` already used by the AST engines (func.rs
-    /// `verify_items_collect`, flow.rs `FlowEvent::Step`).
+    /// request starts from a clean solver.
     pub(crate) fn verify_checked_contracts(
         &mut self,
         program: &crate::core::CheckedProgram,
     ) -> Vec<VerificationResult> {
+        self.verify_checked_contracts_excluding_owners(program, &std::collections::BTreeSet::new())
+    }
+
+    pub(crate) fn verify_checked_contracts_excluding_owners(
+        &mut self,
+        program: &crate::core::CheckedProgram,
+        excluded_owners: &std::collections::BTreeSet<crate::core::NodeId>,
+    ) -> Vec<VerificationResult> {
         let mut results = Vec::new();
+        let flow_state_fields =
+            crate::verifier::resolved_expr::resolved_flow_state_field_catalog(program);
         for (node_id, callable) in program.callables() {
+            if excluded_owners.contains(node_id) {
+                continue;
+            }
             if is_stdlib_prelude_callable(program, node_id) {
                 continue;
             }
@@ -1947,6 +2039,10 @@ impl Verifier {
                     })
                 })
                 .unwrap_or_else(|| format!("{:?}", node_id));
+            let is_flow_transition = program
+                .transitions()
+                .values()
+                .any(|transition| transition.node_id == *node_id);
 
             // AU-V1: per-callable isolation — see doc comment above.
             // `reset()` clears all assertions, returns the solver to Z3 depth
@@ -1971,11 +2067,13 @@ impl Verifier {
             }
             let start = std::time::Instant::now();
             let outcome =
-                crate::verifier::resolved_expr::verify_contracts_from_resolved_with_catalog(
+                crate::verifier::resolved_expr::verify_contracts_from_resolved_with_flow_state_catalog(
                     callable,
                     program.resolved_types(),
                     program.callables(),
                     program.resolved_variants(),
+                    flow_state_fields.as_ref(),
+                    is_flow_transition,
                     &mut self.session,
                 );
             let duration_us = start.elapsed().as_micros() as u64;
@@ -2016,6 +2114,16 @@ impl Verifier {
             // tamper detection degrades to `resolved_ir_hash` identity only.
             let artifact = (status != VerifStatus::NotInTrustedSubset).then(|| ProofArtifact {
                 semantics_version: ProofArtifact::SEMANTICS_VERSION,
+                proof_profile: if is_flow_transition {
+                    ProofArtifact::PROFILE_RESOLVED_FLOW_TRANSITION_V1.to_string()
+                } else {
+                    ProofArtifact::PROFILE_VERIFIED_CORE_1.to_string()
+                },
+                obligation_scope: if is_flow_transition {
+                    ProofArtifact::SCOPE_FLOW_TRANSITION_CONTRACTS_V1.to_string()
+                } else {
+                    ProofArtifact::SCOPE_FUNCTION_CONTRACTS_V1.to_string()
+                },
                 // Resolved definedness checks both i32 and i64 arithmetic at
                 // each expression's typed width. Power additionally follows
                 // the phase-local checked-i64 then i32-wrap compatibility
@@ -2035,11 +2143,35 @@ impl Verifier {
                 engine: ProofArtifact::ENGINE_RESOLVED.to_string(),
             });
 
+            // Keep definitive contract failures source-routed after retiring
+            // the AST verifier. The Resolved verifier returns a callable-level
+            // verdict, so attribute a counterexample to the corresponding
+            // checker-owned contract root (Requires for an inconsistent
+            // precondition set, Invariant for a transition invariant, and
+            // Ensures for the usual postcondition failure).
+            let diagnostic = if status == VerifStatus::Disproven {
+                let contract_kind = if message.contains("preconditions are unsatisfiable") {
+                    crate::core::ir::ContractKind::Requires
+                } else if message.contains("invariant") {
+                    crate::core::ir::ContractKind::Invariant
+                } else {
+                    crate::core::ir::ContractKind::Ensures
+                };
+                callable
+                    .contracts
+                    .iter()
+                    .find(|contract| contract.kind == contract_kind)
+                    .or_else(|| callable.contracts.first())
+                    .map(|contract| Diagnostic::error(message.clone(), contract.origin.user_span()))
+            } else {
+                None
+            };
+
             results.push(VerificationResult {
                 func_name,
                 status,
                 message,
-                diagnostic: None,
+                diagnostic,
                 duration_us,
                 constraint_count: 1,
                 artifact,
@@ -2106,98 +2238,52 @@ impl Verifier {
     }
 }
 
-/// V-3 (audit 2026-08-05): join a module prefix and an item name into the
-/// qualified name used as the `func_defs` / `func_status` key.
-#[cfg(test)]
-fn qualified_item_name(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_string()
-    } else {
-        format!("{}::{}", prefix, name)
-    }
-}
-
-impl VerifierCtx {
-    #[cfg(test)]
-    pub fn collect_func_defs(&mut self, items: &[Item]) {
-        self.collect_func_defs_prefixed(items, "");
-    }
-
-    /// V-3 (audit 2026-08-05): functions are keyed by QUALIFIED name
-    /// (`module::…::func`). The checker rejects duplicate definitions per
-    /// qualified name, so keying by bare name let two same-named functions
-    /// in different modules (or a module function and a top-level function)
-    /// silently overwrite each other — a call to the top-level function then
-    /// picked up the unrelated module function's ensures as axioms and
-    /// produced fake Proven. Module-nested callees are not reachable through
-    /// bare identifiers anyway; qualified keys keep their axioms inert until
-    /// a qualified call mechanism exists.
-    #[cfg(test)]
-    fn collect_func_defs_prefixed(&mut self, items: &[Item], prefix: &str) {
-        let _ = prefix;
-        for item in items {
-            match item {
-                Item::Func(f) => {
-                    self.func_defs.insert(f.name.clone(), f.clone());
-                }
-                // V-H6: register actor/impl/flow methods for call-site ensures
-                // lookup. V-3: qualified keys only — the previous bare-name
-                // insertion let same-named methods across actors pollute each
-                // other identically to the old module case.
-                Item::Actor(a) => {
-                    for m in &a.methods {
-                        let mut f = m.clone();
-                        f.name = format!("{}::{}", a.name, m.name);
-                        self.func_defs.insert(f.name.clone(), f);
-                    }
-                }
-                Item::Impl(i) => {
-                    for m in &i.methods {
-                        let mut f = m.clone();
-                        f.name = format!("{}::{}::{}", i.type_name, i.trait_name, m.name);
-                        let qualified = qualified_item_name(prefix, &f.name);
-                        self.func_defs.insert(qualified, f);
-                    }
-                }
-                Item::Flow(flow) => {
-                    for t in &flow.transitions {
-                        if let Some(body) = &t.body {
-                            let f = crate::ast::FuncDef {
-                                meta: crate::ast::AstNodeMeta::inherited(
-                                    t.meta.span,
-                                    crate::ast::AstOrigin::RuntimeSystem(
-                                        "verifier.transition_function",
-                                    ),
-                                ),
-                                name: format!("{}::{}", flow.name, t.name),
-                                pub_: false,
-                                params: t.params.clone(),
-                                ret: None,
-                                body: body.clone(),
-                                where_clause: vec![],
-                                generics: vec![],
-                                effects: vec![],
-                                is_comptime: false,
-                                is_async: false,
-                                extern_abi: None,
-                                has_requires: false,
-                                has_ensures: false,
-                                has_mutate_params: false,
-                            };
-                            let qualified = qualified_item_name(prefix, &f.name);
-                            self.func_defs.insert(qualified, f);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proof_artifact_cache_identity_separates_float_profiles_and_old_semantics() {
+        let mut ordinary_mir = ProofArtifact::new("z3 test".into(), "source".into());
+        ordinary_mir.engine = ProofArtifact::ENGINE_MIR.into();
+        ordinary_mir.proof_profile = ProofArtifact::PROFILE_MIR_V1.into();
+        ordinary_mir.obligation_scope = ProofArtifact::SCOPE_MIR_FUNCTION_CONTRACTS_V1.into();
+        ordinary_mir.mir_hash = "canonical-mir".into();
+        ordinary_mir.float_model = crate::core::mir::types::MIR_VERIFIER_FLOAT_MODEL.into();
+        assert_eq!(
+            ordinary_mir.semantics_version,
+            ProofArtifact::SEMANTICS_VERSION
+        );
+
+        let mut ffi_full_ieee = ordinary_mir.clone();
+        ffi_full_ieee.proof_profile = ProofArtifact::PROFILE_MIR_FFI_EXPERIMENTAL_V1.into();
+        ffi_full_ieee.obligation_scope = ProofArtifact::SCOPE_FFI_REQUIRES_ENSURES_V1.into();
+        ffi_full_ieee.float_model =
+            crate::core::mir::types::MIR_FFI_VERIFIER_FLOAT_MODEL.to_string();
+        assert!(!ordinary_mir.is_compatible(&ffi_full_ieee));
+        assert_ne!(ordinary_mir.cache_key(), ffi_full_ieee.cache_key());
+
+        let mut vcore1_rejected_f64 = ffi_full_ieee.clone();
+        vcore1_rejected_f64.proof_profile = ProofArtifact::PROFILE_VERIFIED_CORE_1.into();
+        vcore1_rejected_f64.float_model = "f64_rejected".into();
+        assert!(!vcore1_rejected_f64.is_compatible(&ffi_full_ieee));
+        assert_ne!(vcore1_rejected_f64.cache_key(), ffi_full_ieee.cache_key());
+
+        let mut old = ffi_full_ieee.clone();
+        old.semantics_version = 2;
+        assert!(!old.is_compatible(&ffi_full_ieee));
+        assert_ne!(old.cache_key(), ffi_full_ieee.cache_key());
+
+        let mut requires_only = ffi_full_ieee.clone();
+        requires_only.obligation_scope = ProofArtifact::SCOPE_FFI_REQUIRES_ONLY_V1.into();
+        assert!(!requires_only.is_compatible(&ffi_full_ieee));
+        assert_ne!(requires_only.cache_key(), ffi_full_ieee.cache_key());
+
+        assert_eq!(
+            ffi_full_ieee.identity_label(),
+            "profile=mimi-mir-ffi-ieee754-experimental-v1, scope=ffi-requires-ensures-v1"
+        );
+    }
 
     // ── 0.31.42: Z3 error translation tests ──
 

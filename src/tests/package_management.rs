@@ -274,9 +274,10 @@ fn codegen_multi_file_with_deps() {
         func main() -> i32 { helper() }
     "#;
     let file = parse(src);
+    let checked = crate::core::check_program(&file).expect("check");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "multi");
-    let result = codegen.compile_file(&file);
+    let result = codegen.compile_checked(&checked);
     assert!(
         result.is_ok(),
         "multi-file codegen should succeed: {:?}",
@@ -300,10 +301,11 @@ fn codegen_multi_file_build() {
         }
     "#;
     let file = parse(src);
+    let checked = crate::core::check_program(&file).expect("check");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     codegen
-        .compile_file(&file)
+        .compile_checked(&checked)
         .expect("src/tests/package_management.rs:230 unwrap failed");
     let ir = codegen.emit_ir();
     assert!(ir.contains("add"), "IR should contain add function");

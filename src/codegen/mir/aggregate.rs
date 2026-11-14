@@ -24,7 +24,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     return Err(NativeMirError::new(
                         subject,
                         "tuple construction result has no canonical tuple layout",
-                    ))
+                    ));
                 }
             };
             if elements.len() != fields.len() {
@@ -471,7 +471,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     return Err(NativeMirError::new(
                         subject,
                         "List index is outside signed integer native storage",
-                    ))
+                    ));
                 }
             };
             if receipt.mode == crate::core::mir::types::MirListIndexProjectionMode::CloneNestedList

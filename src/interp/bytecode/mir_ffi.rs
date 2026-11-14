@@ -614,7 +614,7 @@ impl CanonicalMirFfiRuntime {
                 .variadic_arguments
                 .iter()
                 .find(|tail| tail.argument_index == index)
-                .is_some_and(|tail| valid_default_promotion(tail));
+                .is_some_and(valid_default_promotion);
             if !conversion.is_supported_argument() && !default_promotion {
                 return Err(format!(
                     "canonical FFI argument {index} ABI conversion from {:?} to {:?} is unsupported",
@@ -827,7 +827,7 @@ fn zero_value_for_abi(abi: crate::core::mir::types::MirAbiClass) -> Result<Value
         other => {
             return Err(format!(
                 "canonical FFI preflight cannot synthesize an argument for ABI {other:?}"
-            ))
+            ));
         }
     })
 }

@@ -1,13 +1,7 @@
 use super::*;
 
 fn compile_to_ir(src: &str) -> String {
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    codegen
-        .compile_file(&file)
-        .expect("src/tests/codegen_control.rs:7 unwrap failed");
-    codegen.emit_ir()
+    checked_codegen_compile_to_ir_for_test(src).expect("checked codegen control IR path failed")
 }
 
 fn assert_compiles(src: &str) {
@@ -1836,10 +1830,12 @@ fn codegen_stdlib_loader_roundtrip() {
         .expect("should load mymath.mimi");
 
     let merged = loader.merge_all().expect("merge_all should succeed");
+    let checked = crate::core::check_program(&merged)
+        .expect("mymath.mimi should pass checked native compilation");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "stdlib_test");
-    if let Err(ref e) = codegen.compile_file(&merged) {
-        panic!("mymath.mimi compile error: {}", e);
+    if let Err(ref diagnostics) = codegen.compile_checked(&checked) {
+        panic!("mymath.mimi checked codegen error: {diagnostics:?}");
     }
 }
 

@@ -125,36 +125,78 @@ pub(crate) fn test(path: Option<&Path>, filter: Option<&str>, verbose: bool) -> 
     // entered an island.  Once the selector recognizes a candidate, a
     // rejected preflight is a hard error and cannot fall through here.
     use mimi::interp::bytecode::{BytecodeCompiler, BytecodeVM};
-    let (prog, canonical_function_names) =
-        match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
-            crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                let receipt = canonical.route_receipt("test-canonical-v1");
-                let prog = mimi::interp::bytecode::compile_mir_program_with_route_receipt(
-                    &canonical, &receipt,
+    let (prog, canonical_function_names) = match crate::canonical_dispatch::select_default_route(
+        &checked_program,
+        &merged_file,
+    ) {
+        crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
+            let profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+                &checked_program,
+                "test-canonical-v1",
+            );
+            let receipt = canonical.route_receipt(profile);
+            let has_owned_get_result_branch_v3 = checked_program
+                .resource_analyses()
+                .values()
+                .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt());
+            let bytecode = if profile
+                == mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+                && has_owned_get_result_branch_v3
+            {
+                mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                    &checked_program,
+                    &canonical,
                 )
-                .map_err(|errors| {
-                    let details = errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    format!("canonical MIR bytecode is not eligible:\n{details}")
-                })?;
-                (prog, true)
-            }
-            crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
-                crate::canonical_dispatch::report_legacy_route(_reason);
-                let mut compiler = BytecodeCompiler::new();
-                compiler.install_checked_program(&checked_program);
-                let prog = compiler
-                    .compile_file(&merged_file)
-                    .map_err(|e| format!("bytecode compile error: {}", e))?;
-                (prog, false)
-            }
-            crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
-                return Err(format!("default Canonical MIR route rejected: {reason}"));
-            }
-        };
+            } else if profile
+                == mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+            {
+                mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                )
+            } else if profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE
+            {
+                mimi::interp::bytecode::compile_mir_program_with_dynamic_keys_get_route(
+                    &checked_program,
+                    &canonical,
+                )
+            } else {
+                mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            };
+            let prog = bytecode.map_err(|errors| {
+                let details = errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("canonical MIR bytecode is not eligible:\n{details}")
+            })?;
+            (prog, true)
+        }
+        crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
+            crate::canonical_dispatch::report_legacy_route(_reason);
+            let mut compiler = BytecodeCompiler::new();
+            compiler.install_checked_program(&checked_program);
+            let prog = compiler
+                .compile_file(&merged_file)
+                .map_err(|e| format!("bytecode compile error: {}", e))?;
+            (prog, false)
+        }
+        crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+            return Err(format!("default Canonical MIR route rejected: {reason}"));
+        }
+        crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+            return Err(
+                "verifier-only FFI owner slice cannot be used by the test bytecode route".into(),
+            );
+        }
+        crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+            return Err(
+                    "VerifierOnly direct tuple Get L2 semantic projection cannot be used by the test bytecode route".into(),
+                );
+        }
+    };
 
     for func_name in &test_funcs {
         let mut vm = BytecodeVM::new(prog.clone());

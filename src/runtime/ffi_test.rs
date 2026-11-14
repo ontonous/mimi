@@ -99,6 +99,74 @@ pub unsafe extern "C" fn __mimi_extern_test_strlen(s: *const std::ffi::c_char) -
     str.to_bytes().len() as i32
 }
 
+/// Mutate a C string argument in place. The native FFI regression test uses
+/// this to prove that Mimi passes a temporary copy instead of its String
+/// buffer, which may be immutable storage or shared by aliases.
+///
+/// # Safety
+/// `s` must point to one writable byte followed by a valid C string.
+#[no_mangle]
+pub unsafe extern "C" fn __mimi_extern_test_mutate_string(s: *mut std::ffi::c_char) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    // SAFETY: the test caller passes a writable NUL-terminated C string.
+    unsafe { *s = b'X' as std::ffi::c_char };
+    1
+}
+
+/// Return the borrowed C string argument unchanged, exercising wrapper copy order.
+///
+/// # Safety
+/// `s` must be a readable, NUL-terminated C string valid for this call.
+#[no_mangle]
+pub unsafe extern "C" fn __mimi_extern_test_echo_string(
+    s: *const std::ffi::c_char,
+) -> *const std::ffi::c_char {
+    s
+}
+
+/// Return a static, valid UTF-8 C string for native FFI ingress tests.
+#[no_mangle]
+pub extern "C" fn __mimi_extern_test_unicode_string() -> *const std::ffi::c_char {
+    c"\xE9\x9B\xAA".as_ptr()
+}
+
+/// Return a static C string containing an invalid UTF-8 byte for ingress tests.
+#[no_mangle]
+pub extern "C" fn __mimi_extern_test_invalid_utf8_string() -> *const std::ffi::c_char {
+    c"\x80".as_ptr()
+}
+
+static mut EXTERN_TEST_RETURN_STRING: [u8; 9] = *b"original\0";
+
+/// Return a pointer to mutable static storage for the FFI ownership test.
+///
+/// # Safety
+/// The test must validate/copy the pointer before calling the mutation helper.
+#[no_mangle]
+pub unsafe extern "C" fn __mimi_extern_test_mutable_string() -> *const std::ffi::c_char {
+    // The pointer is consumed synchronously by the FFI wrapper, which
+    // validates and copies it before this test mutates the static buffer.
+    std::ptr::addr_of_mut!(EXTERN_TEST_RETURN_STRING).cast()
+}
+
+/// Change the first byte of the static C string after it has been returned.
+///
+/// # Safety
+/// Must be called only by the serialized regression test that owns this fixture.
+#[no_mangle]
+pub unsafe extern "C" fn __mimi_extern_test_mutate_return_string() {
+    // SAFETY: this test-only mutation is serialized by the E2E test that uses
+    // the helper; raw-pointer access avoids creating a reference to the static.
+    unsafe {
+        std::ptr::write(
+            std::ptr::addr_of_mut!(EXTERN_TEST_RETURN_STRING).cast::<std::ffi::c_char>(),
+            b'X' as std::ffi::c_char,
+        );
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn __mimi_extern_test_nop() {}
 

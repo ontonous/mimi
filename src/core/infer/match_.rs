@@ -4,6 +4,19 @@ use crate::core::helpers::{fmt_type, is_bool};
 use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 
+/// A block-valued match arm with an explicit terminator does not reach the
+/// post-match continuation, so its consumption facts must not poison that
+/// continuation's alternative paths.
+fn match_arm_diverges(body: &Expr) -> bool {
+    let Expr::Block(block) = body.unlocated() else {
+        return false;
+    };
+    matches!(
+        block.last().map(|stmt| stmt.unlocated()),
+        Some(Stmt::Return(_) | Stmt::Break(_) | Stmt::Continue)
+    )
+}
+
 impl<'a> Checker<'a> {
     pub(in crate::core) fn infer_match_expr(
         &mut self,
@@ -74,9 +87,25 @@ impl<'a> Checker<'a> {
         // are arm-local and are excluded from the merge.
         let pre_match_residuals = self.session_residuals.clone();
         let mut arm_residuals: Vec<HashMap<String, crate::ast::SessionType>> = Vec::new();
+        let pre_flow_consumptions = self.flow_consumption_snapshot();
+        let mut flow_fallthrough = pre_flow_consumptions.clone();
+        let mut flow_fallthrough_possible = true;
+        let mut arm_flow_consumptions = Vec::new();
         for arm in arms {
             let (pattern_covered, is_catchall) =
                 self.pattern_covers_variants(&arm.pat, &subject_ty);
+            let arm_matches_remaining = if effective_variants.is_empty() {
+                true
+            } else if is_catchall {
+                effective_variants
+                    .iter()
+                    .any(|variant| !covered_variants.contains(variant))
+            } else {
+                pattern_covered.iter().any(|variant| {
+                    effective_variants.contains(variant) && !covered_variants.contains(variant)
+                })
+            };
+            let arm_reachable = flow_fallthrough_possible && arm_matches_remaining;
             // Audit 2026-08-05 fix 9: a guarded arm can fail at runtime (the
             // guard evaluates false), leaving its variants unmatched — guarded
             // arms must NOT count toward coverage. A variant stays covered only
@@ -94,6 +123,16 @@ impl<'a> Checker<'a> {
             }
 
             self.session_residuals = pre_match_residuals.clone();
+            // An arm body is an alternative path and starts from the state
+            // reaching its pattern/guard. A failed pattern falls through
+            // unchanged; a failed guard also falls through, carrying any
+            // consumption performed while evaluating that guard.
+            let arm_entry_flow = if arm_reachable {
+                flow_fallthrough.clone()
+            } else {
+                pre_flow_consumptions.clone()
+            };
+            self.restore_flow_consumption_snapshot(&arm_entry_flow);
             scopes.push(HashMap::new());
             self.check_pattern(&arm.pat, &subject_ty, scopes);
             // 0.36.41: seed residuals for SessionChan bindings introduced by
@@ -110,9 +149,24 @@ impl<'a> Checker<'a> {
                     );
                 }
             }
+            let post_guard_flow = self.flow_consumption_snapshot();
             let body_ty = self.infer_expr(&arm.body, scopes);
             scopes.pop();
             arm_residuals.push(self.session_residuals.clone());
+            if arm_reachable && !match_arm_diverges(&arm.body) {
+                arm_flow_consumptions.push(self.flow_consumption_snapshot());
+            }
+            if arm_reachable {
+                if arm.guard.is_some() {
+                    // Both a pattern mismatch and a false guard can reach the
+                    // next arm. Keep their may-consumed union so later arms
+                    // cannot reuse an input consumed while testing a guard.
+                    self.merge_flow_consumption_snapshots(arm_entry_flow, [post_guard_flow]);
+                    flow_fallthrough = self.flow_consumption_snapshot();
+                } else if is_catchall {
+                    flow_fallthrough_possible = false;
+                }
+            }
 
             match &result_ty {
                 None => result_ty = Some(body_ty),
@@ -131,6 +185,19 @@ impl<'a> Checker<'a> {
                 }
             }
         }
+
+        let match_is_exhaustive = has_catchall
+            || (!effective_variants.is_empty()
+                && effective_variants
+                    .iter()
+                    .all(|variant| covered_variants.contains(variant)));
+        if !match_is_exhaustive && flow_fallthrough_possible {
+            // Non-exhaustive matches have a runtime fallthrough path. The
+            // checker reports E0215 below, and this path's ownership facts
+            // remain part of the conservative join as well.
+            arm_flow_consumptions.push(flow_fallthrough);
+        }
+        self.merge_flow_consumption_snapshots(pre_flow_consumptions, arm_flow_consumptions);
 
         // 0.36.41: match-arm residual merge — arms are alternatives, so the
         // post-match continuation may only assume residuals every arm agrees

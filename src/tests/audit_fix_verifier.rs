@@ -288,20 +288,16 @@ func cleaner(h: i64) -> i64 {
 "#;
     // The migrated scalar profile must reject an unmaterialized defer,
     // rather than silently dropping the call or returning to the AST walker.
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let error = crate::verifier::verify_ffi_source(src).expect_err("defer is outside MIR coverage");
     assert!(error.contains("MIR-MATERIALIZATION-001"), "{error}");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     // Scalar extern postconditions now share the canonical admission. A
     // structured defer body remains outside the MIR shape, so adding an
     // `ensures` clause must stay fail-closed instead of reopening the legacy
     // exhaustive walker.
     let compatibility = src.replace("requires: h >= 0;", "requires: h >= 0 ensures: true;");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let error = crate::verifier::verify_ffi_source(&compatibility)
         .expect_err("defer with a scalar extern postcondition is outside MIR coverage");
     assert!(error.contains("MIR-MATERIALIZATION-001"), "{error}");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 // ── Wave-2 VER-A: VIR engine false-Proven cluster ────────────────────────

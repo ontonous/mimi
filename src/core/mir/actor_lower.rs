@@ -21,7 +21,8 @@ use super::reference::{MirProgram, MirProgramBuildError};
 use super::types::{MirBuiltinKind, MirTypeCatalog};
 use super::{
     MirBlock, MirBlockId, MirBlockParameter, MirEdgeId, MirFunction, MirInstruction,
-    MirInstructionId, MirInstructionKind, MirOwnershipSummary, MirTerminator, MirValue, MirValueId,
+    MirInstructionId, MirInstructionKind, MirOwnershipSummary, MirProjection, MirTerminator,
+    MirValue, MirValueId,
 };
 
 fn selected_actor_ids(
@@ -33,10 +34,17 @@ fn selected_actor_ids(
         .iter()
         .filter(|(_, descriptor)| {
             descriptor.methods.iter().any(|method| {
-                program.callable(&method.owner).is_some_and(|callable| {
-                    excluded.is_none_or(|sources| {
-                        !sources.contains(&callable.body.root.origin.user_span().source_id)
-                    })
+                let source_id = program
+                    .callable(&method.owner)
+                    .map(|callable| callable.body.root.origin.user_span().source_id)
+                    .or_else(|| {
+                        program
+                            .functions()
+                            .get(&method.owner)
+                            .map(|function| function.origin.user_span().source_id)
+                    });
+                source_id.is_some_and(|source_id| {
+                    excluded.is_none_or(|sources| !sources.contains(&source_id))
                 })
             })
         })
@@ -66,13 +74,34 @@ pub(crate) fn has_nested_callable_candidate(
             .get(actor)
             .is_some_and(|descriptor| {
                 descriptor.methods.iter().any(|method| {
-                    program.callable(&method.owner).is_some_and(|callable| {
-                        callable.body.root.statements.iter().any(|statement| {
-                            matches!(
-                                statement.kind,
-                                crate::core::ir::ResolvedStmtKind::NestedCallable(_)
-                            )
+                    let transition = descriptor.flow.as_ref().and_then(|flow| {
+                        flow.transitions.iter().find(|transition| {
+                            !transition.is_fallback && transition.method_owner == method.owner
                         })
+                    });
+                    let body_owner = transition
+                        .map(|transition| &transition.body_owner)
+                        .unwrap_or(&method.owner);
+                    let Some(callable) = program.callable(body_owner) else {
+                        return false;
+                    };
+                    let source_id = callable.body.root.origin.user_span().source_id;
+                    if excluded.is_some_and(|sources| sources.contains(&source_id))
+                        || callable.owner != *body_owner
+                        || callable.body.owner != *body_owner
+                        || callable.signature.owner != *body_owner
+                        || transition.is_some_and(|transition| {
+                            transition.body_signature != callable.signature
+                                || transition.body_owner != callable.owner
+                        })
+                    {
+                        return false;
+                    }
+                    callable.body.root.statements.iter().any(|statement| {
+                        matches!(
+                            statement.kind,
+                            crate::core::ir::ResolvedStmtKind::NestedCallable(_)
+                        )
                     })
                 })
             })
@@ -152,7 +181,7 @@ pub(crate) fn materialize(
     selected.extend(
         actors
             .iter()
-            .flat_map(|(_, actor)| actor.methods.iter().map(|method| method.owner.clone())),
+            .flat_map(|(_, actor)| actor.methods.iter().map(|method| method.body_owner.clone())),
     );
     selected.extend(environments.helpers().cloned());
     let mut pending = selected.iter().cloned().collect::<Vec<_>>();
@@ -173,6 +202,12 @@ pub(crate) fn materialize(
         }) {
             return Err(validation(vec![format!(
                 "Actor graph reaches excluded function '{}'",
+                owner.0
+            )]));
+        }
+        if super::lower::is_comptime_callable(program, &owner) {
+            return Err(validation(vec![format!(
+                "Actor execution graph reaches compile-time-only callable '{}'",
                 owner.0
             )]));
         }
@@ -268,7 +303,12 @@ impl<'a> ActorLowerer<'a> {
                     parameter.has_default || {
                         if index == 0 {
                             if let Some((_, method)) = actors.method(&callable.owner) {
-                                parameter.permission != method.source_receiver_permission
+                                let expected_permission = if method.flow_transition.is_some() {
+                                    Some(crate::core::ir::Permission::Consume)
+                                } else {
+                                    method.source_receiver_permission
+                                };
+                                parameter.permission != expected_permission
                             } else {
                                 parameter.permission.is_some()
                             }
@@ -287,11 +327,15 @@ impl<'a> ActorLowerer<'a> {
             )]);
         }
         let entry = MirBlockId::new("bb.entry").map_err(|e| vec![e.to_string()])?;
+        let execution_result = actors
+            .method(&callable.owner)
+            .map(|(_, method)| method.execution_result_type.clone())
+            .unwrap_or_else(|| callable.signature.result.clone());
         let function = MirFunction {
             owner: callable.owner.clone(),
             parameters: Vec::new(),
             parameter_permissions: Some(Vec::new()),
-            result: callable.signature.result.clone(),
+            result: execution_result,
             entry: entry.clone(),
             values: BTreeMap::new(),
             blocks: BTreeMap::from([(
@@ -332,11 +376,15 @@ impl<'a> ActorLowerer<'a> {
             }
             let mut ty = parameter.ty.clone();
             if index == 0 {
-                if let Some((actor, method)) = actors.method(&callable.owner) {
+                if let Some((_actor, method)) = actors.method(&callable.owner) {
                     if &method.self_local != local {
                         return Err(this.error("Actor self parameter identity differs"));
                     }
-                    ty = actor.state_type.clone();
+                    ty = method
+                        .execution_parameter_types
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| this.error("Actor execution receiver TypeDesc is absent"))?;
                 }
             }
             let value = value_id(format!("local:{}", local.0 .0))?;
@@ -606,6 +654,50 @@ impl<'a> ActorLowerer<'a> {
         Ok((actor.actor.clone(), field.clone(), state))
     }
 
+    fn flow_payload_field(
+        &self,
+        place: &ResolvedPlace,
+    ) -> Option<(ResolvedTypeId, NodeId, ResolvedTypeId)> {
+        let [ResolvedProjection::Field { field, ty, .. }] = place.projections.as_slice() else {
+            return None;
+        };
+        let local_type = self.callable.body.locals.get(&place.base)?.ty.clone();
+        self.actors.iter().find_map(|(_, actor)| {
+            let flow = actor.flow.as_ref()?;
+            if flow.root_state_type != local_type {
+                return None;
+            }
+            flow.payload
+                .iter()
+                .find(|payload| payload.field == *field && payload.ty == *ty)
+                .map(|payload| {
+                    (
+                        flow.root_state_type.clone(),
+                        payload.field.clone(),
+                        payload.ty.clone(),
+                    )
+                })
+        })
+    }
+
+    fn flow_transition_self_field(&self, place: &ResolvedPlace) -> Option<MirValueId> {
+        let (actor, method) = self.actors.method(&self.callable.owner)?;
+        let transition = method.flow_transition.as_ref()?;
+        let flow = actor.flow.as_ref()?;
+        let [ResolvedProjection::Field { field, ty, .. }] = place.projections.as_slice() else {
+            return None;
+        };
+        if place.base != method.self_local
+            || flow.payload.len() != 1
+            || flow.payload[0].field != *field
+            || flow.payload[0].ty != *ty
+            || transition.body_owner != self.callable.owner
+        {
+            return None;
+        }
+        self.locals.get(&place.base).cloned()
+    }
+
     fn expr(&mut self, expression: &ResolvedExpr) -> Result<MirValueId, Vec<String>> {
         let effectful_call_is_owned = match &expression.kind {
             ResolvedExprKind::Call(call) => match &call.callee {
@@ -642,6 +734,36 @@ impl<'a> ActorLowerer<'a> {
                 self.local(&place.base)
             }
             ResolvedExprKind::Load(place) => {
+                if let Some(value) = self.flow_transition_self_field(place) {
+                    return Ok(value);
+                }
+                if let Some((base_ty, field, result_ty)) = self.flow_payload_field(place) {
+                    let base = self.local(&place.base)?;
+                    if self
+                        .actors
+                        .method(&self.callable.owner)
+                        .is_some_and(|(_, method)| method.flow_transition.is_some())
+                    {
+                        return Err(self.error(
+                            "Flow transition state projection is outside the one-field receiver contract",
+                        ));
+                    }
+                    let result = self.value(&result_ty, "flow_state_project")?;
+                    if self.function.values[&base].ty != base_ty {
+                        return Err(self.error("Flow state projection base TypeDesc disagrees"));
+                    }
+                    self.emit(
+                        &expression.node_id,
+                        "flow_state_project",
+                        MirInstructionKind::Project {
+                            result: result.clone(),
+                            base,
+                            projection: MirProjection::Field(field),
+                            list_index_contract: None,
+                        },
+                    )?;
+                    return Ok(result);
+                }
                 let (actor, field, state) = self.field(place)?;
                 let result = self.value(&expression.ty, "field")?;
                 self.emit(
@@ -654,6 +776,77 @@ impl<'a> ActorLowerer<'a> {
                             field,
                             state,
                         },
+                    },
+                )?;
+                Ok(result)
+            }
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                let Some((actor, method)) = self.actors.method(&self.callable.owner) else {
+                    return Err(
+                        self.error("record expression has no Actor Flow transition receipt")
+                    );
+                };
+                let transition = method
+                    .flow_transition
+                    .as_ref()
+                    .ok_or_else(|| self.error("record expression is outside a Flow transition"))?;
+                let flow = actor
+                    .flow
+                    .as_ref()
+                    .ok_or_else(|| self.error("Flow transition has no root-state descriptor"))?;
+                if transition.body_owner != self.callable.owner
+                    || expression.ty != flow.root_state_type
+                    || fields.len() != 1
+                    || rest.is_some()
+                    || flow.payload.len() != 1
+                    || fields[0].field != flow.payload[0].field
+                    || fields[0].conversion.kind != CheckedConversionKind::Identity
+                    || fields[0].conversion.from != flow.payload[0].ty
+                    || fields[0].conversion.to != flow.payload[0].ty
+                    || fields[0].value.ty != flow.payload[0].ty
+                {
+                    return Err(self.error(
+                        "Flow state construction is outside the checked one-field i32 record contract",
+                    ));
+                }
+                self.expr(&fields[0].value)
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                let crate::core::ir::ResolvedValueProjection::Field(field) = projection else {
+                    return Err(
+                        self.error("Flow projection is outside the checked record field contract")
+                    );
+                };
+                let base = self.expr(value)?;
+                let flow = self
+                    .actors
+                    .iter()
+                    .find_map(|(_, actor)| {
+                        actor
+                            .flow
+                            .as_ref()
+                            .filter(|flow| flow.root_state_type == value.ty)
+                            .cloned()
+                    })
+                    .ok_or_else(|| {
+                        self.error("record projection base has no Actor Flow receipt")
+                    })?;
+                let payload = flow
+                    .payload
+                    .iter()
+                    .find(|payload| payload.field == *field && payload.ty == expression.ty)
+                    .ok_or_else(|| {
+                        self.error("record projection field is absent from Flow receipt")
+                    })?;
+                let result = self.value(&payload.ty, "flow_state_project")?;
+                self.emit(
+                    &expression.node_id,
+                    "flow_state_project",
+                    MirInstructionKind::Project {
+                        result: result.clone(),
+                        base,
+                        projection: MirProjection::Field(payload.field.clone()),
+                        list_index_contract: None,
                     },
                 )?;
                 Ok(result)

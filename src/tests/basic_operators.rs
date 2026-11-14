@@ -65,11 +65,13 @@ func main() -> i32 {
 #[test]
 fn interp_builtin_sqrt() {
     let src = r#"
-func main() -> f64 {
+func builtin_sqrt_result() -> f64 {
     sqrt(16.0) + sqrt(9.0)
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v =
+        bytecode_call_named(src, "builtin_sqrt_result", vec![]).expect("sqrt helper should run");
     assert!(matches!(v, interp::Value::Float(f) if (f - 7.0).abs() < 0.001));
 }
 
@@ -115,13 +117,15 @@ func main() -> i32 {
 #[test]
 fn interp_float_arithmetic() {
     let src = r#"
-func main() -> f64 {
+func float_arithmetic_result() -> f64 {
     let x = 3.14;
     let y = 2.0;
     x * y + 1.0
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "float_arithmetic_result", vec![])
+        .expect("float arithmetic helper should run");
     assert!(matches!(v, interp::Value::Float(f) if (f - 7.28).abs() < 0.001));
 }
 

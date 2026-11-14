@@ -25,6 +25,11 @@ pub(crate) struct Checker<'a> {
     /// still spell heterogeneous map/set values with `Any`; those signatures
     /// are loader-internal (not user syntax) and must keep type-checking.
     pub(crate) source_registry: &'a SourceRegistry,
+    /// Canonical top-level function identity shared with the Resolved
+    /// catalog. This is normally the surface name; same-named declarations
+    /// from separately imported modules receive a source-qualified owner so
+    /// their checker-finalized expression facts do not collide.
+    pub(crate) function_qualified_names: HashMap<(String, String), String>,
     pub(crate) errors: Vec<Diagnostic>,
     pub(crate) warnings: Vec<Diagnostic>,
     pub(crate) funcs: HashMap<String, (Vec<Type>, Type)>,
@@ -117,7 +122,10 @@ pub(crate) struct Checker<'a> {
     pub(crate) trait_method_generics: HashMap<(String, String), Vec<String>>,
     /// Track imported module names (from `use` statements)
     pub(crate) use_imports: Vec<String>,
-    /// Explicit aliases and canonical paths of imported modules.
+    /// Explicit aliases and canonical import paths used by qualified calls
+    /// (`use fs as files; files.read(...)`). The historical file-merge lookup
+    /// remains available through `use_imports`; this directory only adds the
+    /// qualified spelling and never changes Flow `Flow::event` resolution.
     pub(crate) module_aliases: HashMap<String, String>,
     /// Track current module path for qualified names
     /// Track loop nesting depth for break/continue validation
@@ -239,6 +247,45 @@ pub(crate) struct Checker<'a> {
         super::NodeId,
         HashMap<super::resolved::ExpressionTypeKey, Type>,
     )>,
+    /// Provisional source-exact Any-to-Bool casts. Inference admits only a
+    /// direct `.1 as bool` projection; `CheckedProgram` later requires every
+    /// candidate to match the same callable's Checker-owned Map/Any GetAny
+    /// unpack receipt before the type can cross the checked boundary.
+    pub(crate) ordinary_map_owned_any_v2_bool_cast_candidates: std::collections::BTreeMap<
+        super::NodeId,
+        std::collections::BTreeSet<super::resolved::ExpressionTypeKey>,
+    >,
+    /// DynamicAny casts with non-primitive targets are provisional until
+    /// CheckedProgram joins each exact cast to a supported Map/Any receipt.
+    /// The Resolved finalizer rejects all other sources and targets before
+    /// they cross the checked boundary.
+    pub(crate) ordinary_map_owned_any_v2_nonprimitive_cast_candidates: std::collections::BTreeMap<
+        super::NodeId,
+        std::collections::BTreeSet<super::resolved::ExpressionTypeKey>,
+    >,
+    /// Provisional source calls to the narrow `unpack_i32` / `unpack_string`
+    /// Map/Any API. The resolved finalizer joins each call identity to one
+    /// same-owner GetAny unpack receipt and a complete CheckedGet or
+    /// ComputedKeyGet source admission before it can cross the checked boundary.
+    pub(crate) ordinary_map_owned_any_v2_checked_unpack_candidates: std::collections::BTreeMap<
+        super::NodeId,
+        std::collections::BTreeSet<super::resolved::ExpressionTypeKey>,
+    >,
+    /// Provisional `bare_list[index] as string` source expressions. Bare
+    /// List indexing is admitted only while inferring this exact cast form;
+    /// CheckedProgram finalization must join each candidate to the dedicated
+    /// cross-call Values producer/caller ownership receipt.
+    pub(crate) ordinary_map_owned_any_v2_values_crosscall_string_candidates:
+        std::collections::BTreeMap<
+            super::NodeId,
+            std::collections::BTreeSet<super::resolved::ExpressionTypeKey>,
+        >,
+    /// Scoped inference context used only around the direct index child of
+    /// an `as string` cast. It never changes the type of a bare List elsewhere.
+    pub(crate) allow_bare_list_crosscall_string_index: bool,
+    /// Set by `infer_index` only when that scoped cast context actually sees
+    /// a zero-argument List type; the enclosing cast consumes and restores it.
+    pub(crate) saw_bare_list_crosscall_string_index: bool,
     /// Final checker expression types, keyed temporarily by clone-stable source
     /// identity. The resolved walker replaces keys with stable NodeIds before
     /// ownership leaves `check_program`.
@@ -306,6 +353,10 @@ impl<'a> Checker<'a> {
         Self {
             file,
             source_registry: &file.sources,
+            function_qualified_names: crate::core::resolved::top_level_function_qualified_names(
+                &file.items,
+                &file.sources,
+            ),
             errors: Vec::new(),
             warnings: Vec::new(),
             funcs: HashMap::new(),
@@ -375,6 +426,14 @@ impl<'a> Checker<'a> {
             zonked_func_types: HashMap::new(),
             zonked_nested_func_types: HashMap::new(),
             current_expr_types: None,
+            ordinary_map_owned_any_v2_bool_cast_candidates: std::collections::BTreeMap::new(),
+            ordinary_map_owned_any_v2_nonprimitive_cast_candidates: std::collections::BTreeMap::new(
+            ),
+            ordinary_map_owned_any_v2_checked_unpack_candidates: std::collections::BTreeMap::new(),
+            ordinary_map_owned_any_v2_values_crosscall_string_candidates:
+                std::collections::BTreeMap::new(),
+            allow_bare_list_crosscall_string_index: false,
+            saw_bare_list_crosscall_string_index: false,
             zonked_expr_types: std::collections::BTreeMap::new(),
             effect_summaries: std::collections::HashMap::new(),
         }

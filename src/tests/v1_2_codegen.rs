@@ -1,17 +1,37 @@
 use super::*;
 
 fn compile_to_ir(src: &str) -> String {
+    compile_checked_to_ir(src)
+}
+
+fn compile_checked_to_ir(src: &str) -> String {
     let file = parse(src);
+    let checked = crate::core::check_program(&file).expect("scalar source should check");
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+
     let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "checked_scalar_test");
     codegen
-        .compile_file(&file)
-        .expect("src/tests/v1_2_codegen.rs:7 unwrap failed");
+        .compile_checked(&checked)
+        .expect("checked scalar source should compile");
+
+    assert!(
+        crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+        "canonical scalar codegen must not invoke the legacy function emitter"
+    );
     codegen.emit_ir()
 }
 
 fn assert_compiles(src: &str) {
     let ir = compile_to_ir(src);
+    assert!(
+        ir.contains("define"),
+        "IR should contain function definitions"
+    );
+}
+
+fn assert_checked_compiles(src: &str) {
+    let ir = compile_checked_to_ir(src);
     assert!(
         ir.contains("define"),
         "IR should contain function definitions"
@@ -30,42 +50,42 @@ fn assert_ir_contains(src: &str, pattern: &str) {
 
 #[test]
 fn codegen_simple_return() {
-    assert_compiles("func main() -> i32 { 42 }");
+    assert_checked_compiles("func main() -> i32 { 42 }");
 }
 
 #[test]
 fn codegen_return_zero() {
-    assert_compiles("func main() -> i32 { 0 }");
+    assert_checked_compiles("func main() -> i32 { 0 }");
 }
 
 #[test]
 fn codegen_add() {
-    assert_compiles("func main() -> i32 { 1 + 2 }");
+    assert_checked_compiles("func main() -> i32 { 1 + 2 }");
 }
 
 #[test]
 fn codegen_sub() {
-    assert_compiles("func main() -> i32 { 10 - 3 }");
+    assert_checked_compiles("func main() -> i32 { 10 - 3 }");
 }
 
 #[test]
 fn codegen_mul() {
-    assert_compiles("func main() -> i32 { 6 * 7 }");
+    assert_checked_compiles("func main() -> i32 { 6 * 7 }");
 }
 
 #[test]
 fn codegen_div() {
-    assert_compiles("func main() -> i32 { 12 / 4 }");
+    assert_checked_compiles("func main() -> i32 { 12 / 4 }");
 }
 
 #[test]
 fn codegen_mod() {
-    assert_compiles("func main() -> i32 { 10 % 3 }");
+    assert_checked_compiles("func main() -> i32 { 10 % 3 }");
 }
 
 #[test]
 fn codegen_negation() {
-    assert_compiles("func main() -> i32 { -5 }");
+    assert_checked_compiles("func main() -> i32 { -5 }");
 }
 
 #[test]
@@ -125,17 +145,17 @@ fn codegen_two_params() {
 
 #[test]
 fn codegen_let_binding() {
-    assert_compiles("func main() -> i32 { let x = 10; x }");
+    assert_checked_compiles("func main() -> i32 { let x = 10; x }");
 }
 
 #[test]
 fn codegen_assign() {
-    assert_compiles("func main() -> i32 { let mut x = 0; x = 5; x }");
+    assert_checked_compiles("func main() -> i32 { let mut x = 0; x = 5; x }");
 }
 
 #[test]
 fn codegen_multiple_stmts() {
-    assert_compiles("func main() -> i32 { let x = 1; let y = 2; x + y }");
+    assert_checked_compiles("func main() -> i32 { let x = 1; let y = 2; x + y }");
 }
 
 #[test]
@@ -155,12 +175,12 @@ fn codegen_float_literal() {
 
 #[test]
 fn codegen_nested_expr() {
-    assert_compiles("func main() -> i32 { (1 + 2) * 3 }");
+    assert_checked_compiles("func main() -> i32 { (1 + 2) * 3 }");
 }
 
 #[test]
 fn codegen_function_call() {
-    assert_compiles(
+    assert_checked_compiles(
         r#"
 func inc(x: i32) -> i32 { x + 1 }
 func main() -> i32 { inc(41) }
@@ -170,7 +190,7 @@ func main() -> i32 { inc(41) }
 
 #[test]
 fn codegen_chained_calls() {
-    assert_compiles(
+    assert_checked_compiles(
         r#"
 func inc(x: i32) -> i32 { x + 1 }
 func main() -> i32 { inc(inc(40)) }
@@ -185,7 +205,7 @@ fn codegen_with_return() {
 
 #[test]
 fn codegen_multiple_functions() {
-    assert_compiles(
+    assert_checked_compiles(
         r#"
 func a() -> i32 { 1 }
 func b() -> i32 { 2 }
@@ -196,7 +216,7 @@ func main() -> i32 { a() + b() }
 
 #[test]
 fn codegen_ir_has_main() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(
         ir.contains("define i32 @main(i32"),
         "i32 returns i32 (A1 restoration); main carries the C (argc, argv) pair since 0.35.23"
@@ -214,25 +234,25 @@ fn codegen_ir_has_add() {
 
 #[test]
 fn codegen_emit_ir() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(ir.starts_with("; ModuleID"));
 }
 
 #[test]
 fn codegen_entry_block() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(ir.contains("entry:"));
 }
 
 #[test]
 fn codegen_alloca() {
-    let ir = compile_to_ir("func main() -> i32 { let x = 10; x }");
+    let ir = compile_checked_to_ir("func main() -> i32 { let x = 10; x }");
     assert!(ir.contains("alloca"));
 }
 
 #[test]
 fn codegen_store_load() {
-    let ir = compile_to_ir("func main() -> i32 { let x = 10; x }");
+    let ir = compile_checked_to_ir("func main() -> i32 { let x = 10; x }");
     assert!(ir.contains("store"));
     assert!(ir.contains("load"));
 }
@@ -307,7 +327,7 @@ fn codegen_or_instruction() {
 
 #[test]
 fn codegen_ret_instruction() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(ir.contains("ret"));
 }
 
@@ -318,10 +338,10 @@ fn codegen_void_return() {
 
 #[test]
 fn codegen_large_literal() {
-    assert_compiles("func main() -> i32 { 999999 }");
+    assert_checked_compiles("func main() -> i32 { 999999 }");
 }
 
 #[test]
 fn codegen_complex_expr() {
-    assert_compiles("func main() -> i32 { 1 + 2 * 3 - 4 / 2 }");
+    assert_checked_compiles("func main() -> i32 { 1 + 2 * 3 - 4 / 2 }");
 }

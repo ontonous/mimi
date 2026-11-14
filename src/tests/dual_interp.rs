@@ -6,10 +6,21 @@
 // ============================================================
 
 use super::*;
+use crate::interp::SharedString;
 
 /// Run source via bytecode VM and return the result.
 fn dual_interp(src: &str) -> interp::Value {
     run_source(src)
+}
+
+fn dual_interp_non_scalar_helper(src: &str, helper: &str) -> interp::Value {
+    assert_eq!(
+        dual_interp(src),
+        interp::Value::Int(0),
+        "valid main must invoke {helper} before returning its process status"
+    );
+    bytecode_call_named(src, helper, Vec::new())
+        .unwrap_or_else(|error| panic!("named helper {helper} failed: {error}"))
 }
 
 // ============================================================
@@ -136,13 +147,18 @@ func main() -> bool {
 #[test]
 fn dual_interp_tuple() {
     let src = r#"
-func main() -> (i32, i32) {
+func tuple_value() -> (i32, i32) {
     let t = (1, 2)
     return (t.0 + t.1, t.0 * t.1)
 }
+
+func main() -> i32 {
+    tuple_value()
+    0
+}
 "#;
     assert_eq!(
-        dual_interp(src),
+        dual_interp_non_scalar_helper(src, "tuple_value"),
         interp::Value::Tuple(vec![interp::Value::Int(3), interp::Value::Int(2)])
     );
 }
@@ -315,29 +331,39 @@ func main() -> i32 {
 #[test]
 fn dual_interp_string_concat() {
     let src = r#"
-func main() -> string {
+func string_concat_value() -> string {
     let a = "hello"
     let b = "world"
     return a + " " + b
 }
+
+func main() -> i32 {
+    string_concat_value()
+    0
+}
 "#;
     assert_eq!(
-        dual_interp(src),
-        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
+        dual_interp_non_scalar_helper(src, "string_concat_value"),
+        interp::Value::String(SharedString::new("hello world".to_string()))
     );
 }
 
 #[test]
 fn dual_interp_fstring() {
     let src = r#"
-func main() -> string {
+func fstring_value() -> string {
     let x = 42
     return f"value is {x}"
 }
+
+func main() -> i32 {
+    fstring_value()
+    0
+}
 "#;
     assert_eq!(
-        dual_interp(src),
-        interp::Value::String(crate::interp::SharedString::new("value is 42".to_string()))
+        dual_interp_non_scalar_helper(src, "fstring_value"),
+        interp::Value::String(SharedString::new("value is 42".to_string()))
     );
 }
 

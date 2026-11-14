@@ -45,6 +45,588 @@ fn node_meta_ids(program: &CheckedProgram) -> std::collections::BTreeSet<String>
 }
 
 #[test]
+fn direct_values_any_index_casts_need_exact_checker_receipts() {
+    let valid = crate::core::check_program(&parse(include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_values_unpack.mimi"
+    )))
+    .expect("direct Values snapshot casts are finalized by their Checker receipts");
+    let owner = NodeId("function:main".into());
+    let receipt = valid
+        .resource_analysis(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        .expect("main Values Checker receipt")
+        .values_unpack_receipts
+        .as_slice();
+    assert_eq!(receipt.len(), 4);
+
+    let body = valid.resolved_body(&owner).expect("main resolved body");
+    let index_local = body
+        .locals
+        .values()
+        .find(|local| local.display_name == "index")
+        .expect("direct dynamic index local");
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let i32_receipts = receipt
+        .iter()
+        .filter(|unpack| unpack.conversion_to == i32_type)
+        .collect::<Vec<_>>();
+    assert_eq!(i32_receipts.len(), 2);
+    assert!(i32_receipts
+        .iter()
+        .any(|unpack| unpack.index_local.is_none()));
+    assert!(i32_receipts
+        .iter()
+        .any(|unpack| unpack.index_local.as_ref() == Some(&index_local.id)));
+
+    fn assert_e0200(source: &str, reason: &str) {
+        let diagnostics = crate::core::check_program(&parse(source)).expect_err(reason);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some(crate::diagnostic::codes::E0200)),
+            "{reason}: {diagnostics:?}"
+        );
+    }
+
+    fn assert_rejected(source: &str, reason: &str) {
+        let diagnostics = crate::core::check_program(&parse(source)).expect_err(reason);
+        assert!(!diagnostics.is_empty(), "{reason}");
+    }
+
+    let wrong_payload = parse(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let with_number = map_set(empty, "a-number", 41)
+    let root = map_set(with_number, "b-text", "x")
+    let snapshot = values(root)
+    let item = snapshot[0] as string
+    drop(snapshot)
+    drop(empty)
+    drop(with_number)
+    drop(root)
+    0
+}
+"#,
+    );
+    let diagnostics = crate::core::check_program(&wrong_payload)
+        .expect_err("a String Set at index one cannot authorize the i32 payload at index zero");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)));
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let with_text = map_set(empty, "a-text", "x")
+    let root = map_set(with_text, "b-number", 41)
+    let snapshot = values(root)
+    let item = snapshot[1] as string
+    drop(snapshot)
+    drop(empty)
+    drop(with_text)
+    drop(root)
+    0
+}
+"#,
+        "a String payload at another sorted position cannot authorize an i32 payload",
+    );
+
+    crate::core::check_program(&parse(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let old = map_set(empty, "same", "old")
+    let root = map_set(old, "same", 41)
+    let snapshot = values(root)
+    let item = snapshot[0] as i32
+    drop(snapshot)
+    drop(empty)
+    drop(old)
+    drop(root)
+    item
+}
+"#,
+    ))
+    .expect("same-key overwrite selects the last persistent Set payload");
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let with_number = map_set(empty, "a-number", 41)
+    let root = map_set(with_number, "b-text", "x")
+    let snapshot = values(root)
+    let index = 0
+    let item = snapshot[index] as string
+    drop(snapshot)
+    drop(empty)
+    drop(with_number)
+    drop(root)
+    0
+}
+"#,
+        "a direct local index is evaluated before checking its key-sorted payload type",
+    );
+
+    assert_e0200(
+        r#"
+func read_at(index: i32) -> i32 {
+    let empty = map_new()
+    let with_number = map_set(empty, "a-number", 41)
+    let root = map_set(with_number, "b-text", "x")
+    let snapshot = values(root)
+    let item = snapshot[index] as string
+    drop(snapshot)
+    drop(empty)
+    drop(with_number)
+    drop(root)
+    0
+}
+func main() -> i32 { read_at(0) }
+"#,
+        "an unconstrained function-parameter index cannot choose a payload TypeDesc",
+    );
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let key = "a-number"
+    let root = map_set(empty, key, 41)
+    let snapshot = values(root)
+    let item = snapshot[0] as i32
+    drop(snapshot)
+    drop(empty)
+    drop(root)
+    0
+}
+"#,
+        "a local or otherwise unknown Map key cannot certify Values ordering",
+    );
+
+    let get_any_cast = parse(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let pair = map_get(root, "answer")
+    let item = pair.1 as i32
+    drop(pair)
+    drop(empty)
+    drop(root)
+    item
+}
+"#,
+    );
+    let diagnostics = crate::core::check_program(&get_any_cast)
+        .expect_err("the Values receipt exception must not authorize GetAny casts");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)));
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let selected = map_set(empty, "answer", 41)
+    let unrelated = map_new()
+    let snapshot = values(unrelated)
+    let item = snapshot[0] as i32
+    drop(snapshot)
+    drop(empty)
+    drop(selected)
+    drop(unrelated)
+    item
+}
+"#,
+        "a Set on a different Map root cannot authorize the Values cast",
+    );
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let snapshot = values(root)
+    let indexes = [0]
+    let item = snapshot[indexes[0]] as i32
+    drop(snapshot)
+    drop(indexes)
+    drop(empty)
+    drop(root)
+    item
+}
+"#,
+        "a projected index does not match the direct literal or local-index receipt shape",
+    );
+
+    assert_e0200(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let snapshot = values(root)
+    let item = snapshot[0] as i32
+    drop(empty)
+    drop(root)
+    item
+}
+"#,
+        "a Values snapshot without an explicit Drop has no ownership receipt",
+    );
+
+    assert_rejected(
+        r#"
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let snapshot = values(root)
+    drop(snapshot)
+    let item = snapshot[0] as i32
+    drop(empty)
+    drop(root)
+    item
+}
+"#,
+        "settling the snapshot before its unpack must fail",
+    );
+}
+
+#[test]
+fn dynamic_any_nonprimitive_casts_require_exact_supported_receipts() {
+    fn parse_stdlib_source(source: &str) -> File {
+        let mut sources = crate::span::SourceRegistry::default();
+        let source_id = sources
+            .register_key(
+                "stdlib:any-unpack-boundary-test.mimi",
+                crate::span::SourceTextOrigin::Builtin,
+            )
+            .expect("stdlib source key");
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex stdlib source");
+        crate::parser::Parser::new_with_source_registry(tokens, source_id, sources)
+            .parse_file()
+            .expect("parse stdlib source")
+    }
+
+    fn assert_e0200(source: &str, reason: &str) {
+        let diagnostics = crate::core::check_program(&parse(source)).expect_err(reason);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.as_deref()
+                    == Some(crate::diagnostic::codes::E0200)),
+            "{reason}: {diagnostics:?}"
+        );
+    }
+
+    let any_parameter = crate::core::check_program(&parse_stdlib_source(
+        r#"
+func unpack_any(value: Any) -> i32 {
+    let unpacked = value as Option<i32>
+    drop(unpacked)
+    0
+}
+func main() -> i32 { 0 }
+"#,
+    ))
+    .expect_err("an Any parameter cannot be unpacked without a source owner receipt");
+    assert!(
+        any_parameter.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+        }),
+        "Any parameter cast must fail at the checked boundary: {any_parameter:?}"
+    );
+
+    let generic_any_parameter = crate::core::check_program(&parse_stdlib_source(
+        r#"
+func unpack_any<T>(value: Any) -> T {
+    value as T
+}
+func main() -> i32 { 0 }
+"#,
+    ))
+    .expect_err("an arbitrary Any parameter cannot use the generic template exception");
+    assert!(
+        generic_any_parameter.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)
+        }),
+        "generic Any parameter casts must remain fail-closed: {generic_any_parameter:?}"
+    );
+
+    assert_e0200(
+        r#"
+func user_get<T>(m: Record, key: string, fallback: T) -> T {
+    let result = map_get(m, key)
+    if result.0 { result.1 } else { fallback }
+}
+func main() -> i32 {
+    let empty = map_new()
+    let text = map_set(empty, "x", "not an i32")
+    let value: i32 = user_get(text, "x", 0)
+    drop(text)
+    value
+}
+"#,
+        "a user generic Map.Get helper cannot borrow the std::maps template exception",
+    );
+
+    for (target, cleanup, reason) in [
+        (
+            "Option<i32>",
+            "drop(unpacked)",
+            "Map.Get cannot authorize an Option payload without a receipt",
+        ),
+        (
+            "(i32, string)",
+            "drop(unpacked)",
+            "Map.Get cannot authorize a tuple payload without a receipt",
+        ),
+        (
+            "Record",
+            "drop(unpacked)",
+            "Map.Get cannot authorize builtin Record without a receipt",
+        ),
+    ] {
+        let source = format!(
+            r#"
+func main() -> i32 {{
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let pair = map_get(root, "answer")
+    let unpacked = pair.1 as {target}
+    drop(pair)
+    drop(empty)
+    drop(root)
+    {cleanup}
+    0
+}}
+"#
+        );
+        assert_e0200(&source, reason);
+    }
+
+    let valid = crate::core::check_program(&parse(
+        r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "receipted" }
+    let empty = map_new()
+    let root = map_set(empty, "answer", label)
+    let pair = map_get(root, "answer")
+    let unpacked = pair.1 as Label
+    drop(pair)
+    drop(empty)
+    drop(root)
+    drop(label)
+    drop(unpacked)
+    0
+}
+"#,
+    ))
+    .expect("the exact same-root Map.Get Label receipt remains supported");
+    let owner = NodeId("function:main".into());
+    let receipts = valid
+        .resource_analysis(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        .expect("Map.Get Checker receipt")
+        .unpack_receipts
+        .as_slice();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].conversion_to,
+        valid
+            .resolved_body(&owner)
+            .unwrap()
+            .locals
+            .values()
+            .find(|local| local.display_name == "unpacked")
+            .expect("Label binding")
+            .ty
+    );
+
+    assert_e0200(
+        r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "unrelated" }
+    let selected_empty = map_new()
+    let selected = map_set(selected_empty, "answer", label)
+    let empty = map_new()
+    let pair = map_get(empty, "missing")
+    let unpacked = pair.1 as Label
+    drop(pair)
+    drop(selected_empty)
+    drop(selected)
+    drop(empty)
+    drop(label)
+    drop(unpacked)
+    0
+}
+"#,
+        "a canonical Label shape still needs a matching same-root GetAny receipt",
+    );
+}
+
+#[test]
+fn computed_string_key_owner_chain_authorizes_only_its_exact_label_unpack() {
+    fn checked_fixture() -> CheckedProgram {
+        crate::core::check_program(&parse(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+        )))
+        .expect("the exact computed String-key owner-chain Label unpack is supported")
+    }
+
+    fn cast_candidate(program: &CheckedProgram) -> (NodeId, NodeId) {
+        let owner = NodeId("function:main".into());
+        let cfg = program
+            .resource_analysis(&owner)
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .expect("main owner-v2 receipt");
+        let cast = cfg
+            .result_receipts
+            .iter()
+            .find_map(|result| {
+                result
+                    .computed_string_key_owner_chain
+                    .as_deref()
+                    .map(|chain| chain.pair_snapshot_observation.snapshot_unpack.clone())
+            })
+            .expect("computed owner-chain cast receipt");
+        (owner, cast)
+    }
+
+    fn candidates(owner: NodeId, cast: NodeId) -> BTreeMap<NodeId, BTreeSet<NodeId>> {
+        BTreeMap::from([(owner, BTreeSet::from([cast]))])
+    }
+
+    let valid = checked_fixture();
+    let (owner, cast) = cast_candidate(&valid);
+    let candidate_set = candidates(owner.clone(), cast.clone());
+    validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(&valid, &candidate_set)
+        .expect("only the exact main GetAny owner-chain receipt authorizes the Label cast");
+
+    let mut missing_chain = checked_fixture();
+    let cfg = missing_chain
+        .resource_analyses
+        .get_mut(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+        .expect("main owner-v2 receipt");
+    cfg.result_receipts
+        .iter_mut()
+        .find(|result| result.operation == cfg.unpack_receipts[0].operation)
+        .expect("GetAny result")
+        .computed_string_key_owner_chain = None;
+    assert!(
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &missing_chain,
+            &candidate_set,
+        )
+        .is_err(),
+        "a missing computed owner-chain receipt cannot authorize a nominal Any cast"
+    );
+
+    let mut wrong_payload_type = checked_fixture();
+    let cfg = wrong_payload_type
+        .resource_analyses
+        .get_mut(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+        .expect("main owner-v2 receipt");
+    cfg.result_receipts
+        .iter_mut()
+        .find_map(|result| result.computed_string_key_owner_chain.as_deref_mut())
+        .expect("computed owner-chain receipt")
+        .payload
+        .set_value_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    assert!(
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &wrong_payload_type,
+            &candidate_set,
+        )
+        .is_err(),
+        "a Label cast cannot borrow a receipt whose selected Set payload TypeDesc changed"
+    );
+
+    let mut mismatched_key_dag = checked_fixture();
+    let cfg = mismatched_key_dag
+        .resource_analyses
+        .get_mut(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+        .expect("main owner-v2 receipt");
+    let key_use = cfg
+        .result_receipts
+        .iter_mut()
+        .find_map(|result| result.computed_string_key_owner_chain.as_deref_mut())
+        .expect("computed owner-chain receipt")
+        .key_uses
+        .iter_mut()
+        .find(|usage| usage.action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny)
+        .expect("GetAny key DAG");
+    key_use.value_proof.bytes[0] ^= 1;
+    assert!(
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &mismatched_key_dag,
+            &candidate_set,
+        )
+        .is_err(),
+        "a GetAny whose exact key DAG bytes differ from the selected Set cannot authorize the cast"
+    );
+
+    let mut mismatched_unpack = checked_fixture();
+    let cfg = mismatched_unpack
+        .resource_analyses
+        .get_mut(&owner)
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_mut())
+        .expect("main owner-v2 receipt");
+    cfg.unpack_receipts[0].cast = NodeId("forged-unpack-cast".into());
+    assert!(
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &mismatched_unpack,
+            &candidate_set,
+        )
+        .is_err(),
+        "the candidate cast must match the exact Checker unpack identity"
+    );
+
+    let multiple_candidates = candidates(owner.clone(), cast.clone())
+        .into_iter()
+        .chain([(
+            NodeId("function:helper".into()),
+            BTreeSet::from([cast.clone()]),
+        )])
+        .collect::<BTreeMap<_, _>>();
+    assert!(
+        validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
+            &valid,
+            &multiple_candidates,
+        )
+        .is_err(),
+        "a second callable candidate cannot share the main owner-chain receipt"
+    );
+
+    let source = include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi"
+    )
+    .replace(
+        "type Label { text: string }",
+        "type Label { text: string }\ntype Other { text: string }",
+    )
+    .replace("pair.1 as Label", "pair.1 as Other");
+    let diagnostics = crate::core::check_program(&parse(&source))
+        .expect_err("the selected Label payload cannot authorize an unrelated record cast");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0200)),
+        "an unrelated one-String-field record retains E0200: {diagnostics:?}"
+    );
+}
+
+#[test]
 fn native_declaration_catalog_owns_typed_edges_and_abi_recipes() {
     let source = r#"
 type InnerText = string
@@ -471,14 +1053,23 @@ fn checked_program_owns_its_migration_body_input() {
 
 #[test]
 fn resolved_lowering_reads_source_provenance_from_checker_registry() {
-    let file = parse("func main() -> i32 { 42 }");
-    let mut program = crate::core::check_program(&file).expect("check");
-
-    // The checker-owned registry is retained independently from the legacy
-    // surface File. Poisoning the legacy copy must not affect Resolved/MIR
-    // lowering's stable NodeId construction.
-    std::sync::Arc::make_mut(&mut program.legacy_file).sources =
-        crate::span::SourceRegistry::default();
+    let source = "func main() -> i32 { 42 }";
+    let key = crate::span::SourceKey::new("workspace:src/main.mimi").expect("stable source key");
+    let mut sources = crate::span::SourceRegistry::default();
+    let source_id = sources
+        .register(crate::span::SourceRecord::new(
+            key.clone(),
+            crate::span::SourceTextOrigin::Memory,
+        ))
+        .expect("register source provenance");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new_with_source_registry(tokens, source_id, sources)
+        .parse_file()
+        .expect("parse registered source");
+    let program = crate::core::check_program(&file).expect("check");
+    let main = program.function("main").expect("checked main");
+    assert_eq!(main.origin.user_span().source_id, source_id);
+    assert_eq!(program.source_registry().key(source_id), Some(&key));
 
     let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
         .expect("MIR lowering uses CheckedProgram source provenance");
@@ -488,8 +1079,20 @@ fn resolved_lowering_reads_source_provenance_from_checker_registry() {
 }
 
 #[test]
-fn checked_program_keeps_import_route_fact_without_legacy_import_ast() {
-    let file = parse("use std::io\nfunc main() -> i32 { 42 }");
+fn checked_program_keeps_import_route_fact_without_surface_snapshot() {
+    let source = "use std::io\nfunc main() -> i32 { 42 }";
+    let key = crate::span::SourceKey::new("workspace:src/imported.mimi").expect("stable key");
+    let mut sources = crate::span::SourceRegistry::default();
+    let source_id = sources
+        .register(crate::span::SourceRecord::new(
+            key.clone(),
+            crate::span::SourceTextOrigin::Memory,
+        ))
+        .expect("register imported source");
+    let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+    let file = crate::parser::Parser::new_with_source_registry(tokens, source_id, sources)
+        .parse_file()
+        .expect("parse imported source");
     assert_eq!(
         file.imports.len(),
         1,
@@ -498,82 +1101,62 @@ fn checked_program_keeps_import_route_fact_without_legacy_import_ast() {
 
     let program = crate::core::check_program(&file).expect("check imported source");
     assert!(program.has_imports(), "route fact remains Checker-owned");
-    assert!(
-        program.legacy_file.imports.is_empty(),
-        "legacy body snapshot must not retain import directives"
-    );
-    assert!(program.function("main").is_some());
-    assert!(program.legacy_file.items.iter().any(|item| matches!(
-        item,
-        crate::ast::Item::Func(function) if function.name == "main"
-    )));
+    let main = program
+        .function("main")
+        .expect("checked function directory");
+    assert_eq!(main.origin.user_span().source_id, source_id);
+    assert_eq!(program.source_registry().key(source_id), Some(&key));
+    assert_eq!(main.qualified_name, "main");
 }
 
 #[test]
-fn legacy_body_access_is_explicitly_owned_by_a_closed_consumer_set() {
+fn checked_program_owns_callable_and_source_directory_facts() {
     let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
 
-    let consumers = [
-        LegacyBodyConsumer::CodegenLegacyRemainder,
-        LegacyBodyConsumer::FlowVerifierCompatibility,
-        LegacyBodyConsumer::FfiVerifierCompatibility,
-        LegacyBodyConsumer::DualVerifierCompatibility,
-    ];
-    let names = consumers
-        .iter()
-        .map(|consumer| consumer.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        vec![
-            "codegen-legacy-remainder",
-            "flow-verifier-compatibility",
-            "ffi-verifier-compatibility",
-            "dual-verifier-compatibility",
-        ]
-    );
-
-    CheckedProgram::reset_test_legacy_body_access();
-    for consumer in consumers {
-        assert!(!program.legacy_body_file(consumer).items.is_empty());
-    }
-    assert_eq!(CheckedProgram::test_legacy_body_access(), consumers);
+    let main = program
+        .function("main")
+        .expect("checked function directory");
+    assert_eq!(main.qualified_name, "main");
+    assert!(main.params.is_empty());
+    assert_eq!(crate::core::fmt_type(&main.ret), "i32");
+    assert!(!program.has_imports());
 }
 
 #[test]
-fn resolved_native_scalar_codegen_ignores_poisoned_legacy_body() {
+fn resolved_native_scalar_codegen_emits_checked_body() {
     let file = parse("func main() -> i32 { 42 }");
-    let mut program = crate::core::check_program(&file).expect("check");
-    std::sync::Arc::make_mut(&mut program.legacy_file)
-        .items
-        .clear();
-    assert!(program.legacy_file.items.is_empty());
-
-    CheckedProgram::reset_test_legacy_body_access();
+    let program = crate::core::check_program(&file).expect("check");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "resolved_poison");
     codegen
         .compile_checked(&program)
-        .expect("production typed cohort must not inspect legacy body");
+        .expect("production typed cohort must emit the checked body");
     let ir = codegen.module.print_to_string().to_string();
     assert!(ir.contains("define i32 @main(i32"), "{ir}");
     assert!(ir.contains("ret i32 42"), "{ir}");
-    // A fully admitted scalar MIR island must not touch the retained legacy
-    // body at all.  The compatibility boundary is exercised by separate
-    // legacy-path tests below, so this tripwire is intentionally empty.
-    assert!(CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
-fn checked_directory_constructor_does_not_access_legacy_body() {
-    let mut program =
-        crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
-    std::sync::Arc::make_mut(&mut program.legacy_file)
-        .items
-        .clear();
-    CheckedProgram::reset_test_legacy_body_access();
-    let _interpreter = crate::interp::Interpreter::from_checked(&program);
-    assert!(CheckedProgram::test_legacy_body_access().is_empty());
+fn checked_directory_constructor_installs_callable_facts() {
+    let program = crate::core::check_program(&parse("func main() -> i32 { 42 }")).expect("check");
+    let interpreter = crate::interp::Interpreter::from_checked(&program);
+    assert_eq!(interpreter.resolved_function_arity("main"), Some(0));
+    let main = program
+        .function("main")
+        .expect("checked callable directory");
+    let signature = program
+        .resolved_signature(&main.node_id)
+        .expect("checker-owned callable signature");
+    assert_eq!(crate::core::fmt_type(&main.ret), "i32");
+    assert_eq!(signature.parameters.len(), 0);
+    assert_eq!(
+        signature.result,
+        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    );
+
+    let mir = crate::core::mir::reference::MirProgram::from_checked_program(&program)
+        .expect("callable directory must lower to canonical MIR");
+    assert!(mir.functions().contains_key(&main.node_id));
 }
 
 #[test]
@@ -616,8 +1199,8 @@ fn canonical_generic_signature_uses_binder_identity() {
 #[test]
 fn canonical_impl_method_signature_inherits_impl_binder() {
     let file = parse(
-            "trait Head<T> { func head() -> T }\nimpl<T> Head<T> for List<T> { func head() -> T { self[0] } }\nfunc first<T>(values: List<T>) -> T { values.head() }",
-        );
+        "trait Head<T> { func head() -> T }\nimpl<T> Head<T> for List<T> { func head() -> T { self[0] } }\nfunc first<T>(values: List<T>) -> T { values.head() }",
+    );
     let program = crate::core::check_program(&file).expect("check generic impl");
     let method = program
         .functions()
@@ -1395,13 +1978,25 @@ fn ownership_summary_flags_maybe_consumed_branch_merge() {
         ordinary_map_owner_lifecycle_v1_actions: Vec::new(),
         ordinary_map_owner_lifecycle_v1_new_attempts: BTreeSet::new(),
         ordinary_map_owner_lifecycle_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owner_observer_v1_attempts: BTreeSet::new(),
+        ordinary_map_owner_observer_v1_receipts: Vec::new(),
         ordinary_map_owned_get_i32_string_v1_actions: Vec::new(),
         ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_operation_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_cfg_receipt: None,
+        ordinary_map_owned_get_any_tuple_result_v1_receipt: None,
         ordinary_map_owned_any_v2_actions: Vec::new(),
         ordinary_map_owned_any_v2_operation_attempts: BTreeSet::new(),
         ordinary_map_owned_any_v2_cfg_receipt: None,
+        ordinary_map_owned_any_v2_new_result_receipt: None,
+        ordinary_map_owned_any_v2_set_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_string_lineage_receipt: None,
+        ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt: None,
+        ordinary_map_owned_any_v2_direct_print_result_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_string_lineage_receipt: None,
         managed_any_cfg_receipt: None,
         in_states: std::collections::BTreeMap::new(),
         out_states: std::collections::BTreeMap::new(),
@@ -1909,6 +2504,307 @@ func main() -> i32 { MAX }
 }
 
 #[test]
+fn native_data_export_validator_rejects_forged_or_incomplete_checked_descriptors() {
+    use crate::core::native_data_export::{
+        validate_checked_native_data_exports, NativeDataExportType, NativeDataExportValue,
+        NATIVE_DATA_EXPORT_ERROR_CODE,
+    };
+
+    let checked_export = || {
+        crate::core::check_program(&parse(
+            r#"
+extern "C" const DATA_I32: i32 = 42
+func main() -> i32 { DATA_I32 }
+"#,
+        ))
+        .expect("check scalar data export")
+    };
+    let assert_rejected = |program: &CheckedProgram, reason: &str| {
+        let errors = validate_checked_native_data_exports(program)
+            .expect_err("malformed checked data export must fail validation");
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref() == Some(NATIVE_DATA_EXPORT_ERROR_CODE)
+                    && error.message.contains(reason)
+            }),
+            "expected {NATIVE_DATA_EXPORT_ERROR_CODE} containing {reason:?}; got {errors:#?}"
+        );
+    };
+
+    let valid = checked_export();
+    validate_checked_native_data_exports(&valid).expect("valid descriptor");
+    let source_receipt_error =
+        crate::core::native_data_export::checked_native_data_export_table_receipt(&valid)
+            .expect_err("a route receipt must reject an unregistered source identity");
+    assert!(source_receipt_error.iter().any(|error| {
+        error.code.as_deref() == Some(NATIVE_DATA_EXPORT_ERROR_CODE)
+            && error.message.contains("no registered stable source key")
+    }));
+
+    let mut missing = checked_export();
+    missing
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .expect("checked constant")
+        .native_data_export = None;
+    assert_rejected(&missing, "descriptor for extern 'C' constant");
+
+    let mut wrong_type = checked_export();
+    wrong_type
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("data export descriptor")
+        .ty = NativeDataExportType::I64;
+    assert_rejected(&wrong_type, "does not match its constant");
+
+    let mut wrong_value = checked_export();
+    wrong_value
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("data export descriptor")
+        .value = NativeDataExportValue::I32(43);
+    assert_rejected(&wrong_value, "does not match its constant");
+
+    let mut wrong_value_variant = checked_export();
+    wrong_value_variant
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("data export descriptor")
+        .value = NativeDataExportValue::I64(42);
+    assert_rejected(
+        &wrong_value_variant,
+        "value variant must match its declared type",
+    );
+
+    let mut wrong_span = checked_export();
+    wrong_span
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("data export descriptor")
+        .span
+        .start_col += 1;
+    assert_rejected(&wrong_span, "does not match its source span");
+
+    let mut signed_zero = crate::core::check_program(&parse(
+        r#"
+extern "C" const DATA_F64: f64 = -0.0
+func main() -> i32 { 0 }
+"#,
+    ))
+    .expect("check signed-zero data export");
+    signed_zero
+        .constants
+        .get_mut(&NodeId("constant:DATA_F64".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("signed-zero data export descriptor")
+        .value = NativeDataExportValue::F64(0.0);
+    assert_rejected(&signed_zero, "does not match its constant");
+
+    let mut wrong_owner = checked_export();
+    wrong_owner
+        .constants
+        .get_mut(&NodeId("constant:DATA_I32".into()))
+        .and_then(|constant| constant.native_data_export.as_mut())
+        .expect("data export descriptor")
+        .owner = NodeId("constant:forged-owner".into());
+    assert_rejected(&wrong_owner, "does not match its constant");
+
+    let mut duplicate = checked_export();
+    let source_owner = NodeId("constant:DATA_I32".into());
+    let duplicate_owner = NodeId("constant:DATA_I32_DUPLICATE".into());
+    let mut duplicate_constant = duplicate
+        .constants
+        .get(&source_owner)
+        .expect("source constant")
+        .clone();
+    duplicate_constant.node_id = duplicate_owner.clone();
+    duplicate_constant.qualified_name = "DATA_I32".into();
+    duplicate_constant.extern_abi = Some("C".into());
+    duplicate_constant
+        .native_data_export
+        .as_mut()
+        .expect("source descriptor")
+        .owner = duplicate_owner.clone();
+    duplicate
+        .constants
+        .insert(duplicate_owner, duplicate_constant);
+    assert_rejected(&duplicate, "duplicate exported data symbol 'DATA_I32'");
+}
+
+#[test]
+fn native_data_export_resolves_transparent_primitive_aliases_and_rejects_nominal_or_generic_types()
+{
+    fn check_registered_source(
+        source: &str,
+        source_key: &str,
+    ) -> Result<CheckedProgram, Vec<crate::diagnostic::Diagnostic>> {
+        let mut sources = crate::span::SourceRegistry::default();
+        let source_id = sources
+            .register_key(source_key, crate::span::SourceTextOrigin::Memory)
+            .expect("register stable in-memory source key");
+        let context =
+            crate::span::SourceContext::registered(source_id, sources).expect("source context");
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex data-export alias source");
+        let file = crate::parser::Parser::new_with_source_context(tokens, context)
+            .parse_file()
+            .expect("parse data-export alias source");
+        crate::core::check_program(&file)
+    }
+
+    let source = r#"
+type Id = i32
+extern "C" const DATA_ID: Id = 42
+func main() -> i32 { DATA_ID }
+"#;
+    let program =
+        check_registered_source(source, "native-data-export-tests/transparent-alias.mimi")
+            .expect("a transparent primitive alias has the same C data ABI as its target");
+    let constant = program
+        .constants()
+        .get(&NodeId("constant:DATA_ID".into()))
+        .expect("checked aliased constant");
+    assert_eq!(constant.ty.as_deref(), Some("Id"));
+    let export = constant
+        .native_data_export
+        .as_ref()
+        .expect("canonical native data-export descriptor");
+    assert_eq!(export.owner, NodeId("constant:DATA_ID".into()));
+    assert_eq!(export.symbol, "DATA_ID");
+    assert_eq!(
+        export.ty,
+        crate::core::native_data_export::NativeDataExportType::I32
+    );
+    assert_eq!(
+        export.value,
+        crate::core::native_data_export::NativeDataExportValue::I32(42)
+    );
+    let receipt =
+        crate::core::native_data_export::checked_native_data_export_table_receipt(&program)
+            .expect("transparent alias export has a checked receipt");
+    assert_eq!(receipt.schema, "mimi-native-data-export-table-receipt-v1");
+    assert_eq!(receipt.export_count, 1);
+    assert_eq!(receipt.table_digest.len(), 64);
+    let repeated_receipt =
+        crate::core::native_data_export::checked_native_data_export_table_receipt(&program)
+            .expect("repeat receipt validation");
+    assert_eq!(
+        receipt, repeated_receipt,
+        "receipt encoding must be deterministic"
+    );
+    let alternate_source = check_registered_source(
+        source,
+        "native-data-export-tests/transparent-alias-copy.mimi",
+    )
+    .expect("the same declaration under a different registered source key");
+    let alternate_receipt =
+        crate::core::native_data_export::checked_native_data_export_table_receipt(
+            &alternate_source,
+        )
+        .expect("alternate source identity has a checked receipt");
+    assert_ne!(
+        receipt.table_digest, alternate_receipt.table_digest,
+        "the receipt must bind the registered source identity"
+    );
+
+    for (source, source_key, surface_type) in [
+        (
+            r#"
+type Scalar<T> = i32
+extern "C" const DATA_GENERIC: Scalar<i32> = 42
+func main() -> i32 { 0 }
+"#,
+            "native-data-export-tests/generic-alias.mimi",
+            "Scalar<i32>",
+        ),
+        (
+            r#"
+newtype UserId = i32
+extern "C" const DATA_NEWTYPE: UserId = UserId(42)
+func main() -> i32 { 0 }
+"#,
+            "native-data-export-tests/newtype.mimi",
+            "UserId",
+        ),
+    ] {
+        let errors = check_registered_source(source, source_key)
+            .expect_err("generic aliases and newtypes must fail closed at the C data ABI");
+        assert!(
+            errors.iter().any(|error| {
+                error.code.as_deref()
+                    == Some(crate::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE)
+                    && error.message.contains(surface_type)
+            }),
+            "expected a native data-export rejection for {surface_type}; got {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn native_data_export_table_receipt_changes_when_an_unreferenced_export_changes() {
+    use crate::core::native_data_export::checked_native_data_export_table_receipt;
+
+    let checked_with_value = |value: i32| {
+        let source = format!(
+            r#"
+extern "C" const DATA: i32 = {value}
+func main() -> i32 {{ 0 }}
+"#
+        );
+        let mut sources = crate::span::SourceRegistry::default();
+        let source_id = sources
+            .register_key(
+                "native-data-export-tests/table-receipt.mimi",
+                crate::span::SourceTextOrigin::Memory,
+            )
+            .expect("register stable in-memory source key");
+        let context =
+            crate::span::SourceContext::registered(source_id, sources).expect("source context");
+        let tokens = crate::lexer::Lexer::new(&source)
+            .tokenize()
+            .expect("lex source");
+        let file = crate::parser::Parser::new_with_source_context(tokens, context)
+            .parse_file()
+            .expect("parse source");
+        crate::core::check_program(&file).expect("check one scalar data export")
+    };
+
+    let first = checked_with_value(41);
+    let second = checked_with_value(42);
+    let first_table = checked_native_data_export_table_receipt(&first)
+        .expect("build first native data-export receipt");
+    let second_table = checked_native_data_export_table_receipt(&second)
+        .expect("build second native data-export receipt");
+    let first_mir = crate::core::mir::reference::MirProgram::from_checked_program(&first)
+        .expect("lower first unchanged executable graph");
+    let second_mir = crate::core::mir::reference::MirProgram::from_checked_program(&second)
+        .expect("lower second unchanged executable graph");
+    let first_mir_receipt = first_mir.route_receipt("native-data-export-v1");
+    let second_mir_receipt = second_mir.route_receipt("native-data-export-v1");
+
+    assert_eq!(first_table.export_count, 1);
+    assert_eq!(second_table.export_count, 1);
+    assert_eq!(
+        first_mir_receipt.mir_digest, second_mir_receipt.mir_digest,
+        "an unreferenced data symbol must not change executable MIR"
+    );
+    assert_ne!(
+        first_table.table_digest, second_table.table_digest,
+        "the checked native data-export table must bind each exported value"
+    );
+    assert_ne!(
+        first_table.route_identity_digest(&first_mir_receipt.route_identity_digest()),
+        second_table.route_identity_digest(&second_mir_receipt.route_identity_digest()),
+        "the combined native route identity must bind both the MIR graph and data table"
+    );
+}
+
+#[test]
 fn call_sites_resolve_function_and_extern_callees() {
     let file = parse(
         r#"
@@ -2006,7 +2902,490 @@ func main() -> i32 { c_abs(1, 2) }
     let error = crate::verifier::verify_ffi_checked(&program)
         .expect_err("resolved arity mismatch must fail closed");
     assert!(error.contains("TOOL-RESOLUTION-001"));
-    assert!(error.contains("expects 1 arguments, got 2"));
+    assert!(error.contains("inconsistent call-site arity metadata: expected 1, got 2"));
+}
+
+#[test]
+fn checker_ffi_source_roots_separate_actor_fields_and_inventory_unused_defaults() {
+    use crate::core::ir::lower::{
+        ResolvedDeclarationExpressionKind as RootKind,
+        ResolvedDeclarationRootIdentity as RootIdentity,
+    };
+
+    let file = parse(
+        r#"
+extern "C" { func foreign(value: i32) -> i32 }
+actor Holder {
+    first: i32 = foreign(1);
+    second: i32 = foreign(2);
+}
+trait Defaults {
+    func choose(seed: i32, value: i32 = foreign(seed)) -> i32;
+}
+func unused(value: i32 = foreign(4)) -> i32 { value }
+func main() -> i32 { 0 }
+"#,
+    );
+    let program = crate::core::check_program(&file).expect("checked root fixture");
+    let actor_roots = program
+        .checked_ffi_source_roots()
+        .iter()
+        .filter(|root| root.kind() == RootKind::ActorFieldInitializer)
+        .collect::<Vec<_>>();
+    assert_eq!(actor_roots.len(), 2, "each initialized field gets a root");
+    assert_eq!(actor_roots[0].owner(), actor_roots[1].owner());
+    assert_ne!(actor_roots[0].root_node(), actor_roots[1].root_node());
+    let actor_fields = actor_roots
+        .iter()
+        .map(
+            |root| match root.identity().expect("field declaration identity") {
+                RootIdentity::ActorField { actor, field } => {
+                    assert_eq!(actor, root.owner());
+                    field.clone()
+                }
+                other => panic!("unexpected root identity: {other:?}"),
+            },
+        )
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actor_fields.len(), 2, "same Actor fields stay distinct");
+    for root in &actor_roots {
+        assert_eq!(root.calls().len(), 1);
+        let context = program
+            .checked_ffi_source_call_context(root, &root.calls()[0])
+            .expect("root, body, call, and extern declaration join");
+        assert_eq!(context.call.node_id, *root.calls()[0].call_node());
+        assert_eq!(
+            context.declaration.declaration,
+            *root.calls()[0].external_declaration()
+        );
+        assert_eq!(context.body.owner, *root.owner());
+        assert_eq!(
+            program
+                .call_sites()
+                .get(root.calls()[0].call_node())
+                .and_then(|site| site.resolved_callee.as_ref()),
+            Some(&crate::core::ir::ResolvedCallee::Extern(
+                root.calls()[0].external_declaration().clone(),
+            )),
+            "Actor source-root callsite carries the same Checker-issued extern identity"
+        );
+    }
+    assert!(
+        program
+            .checked_ffi_source_call_context(actor_roots[0], &actor_roots[1].calls()[0])
+            .is_err(),
+        "a call handle from another field root cannot be joined here"
+    );
+
+    let defaults = program
+        .checked_ffi_source_roots()
+        .iter()
+        .filter(|root| root.kind() == RootKind::TraitParameterDefault)
+        .collect::<Vec<_>>();
+    assert_eq!(defaults.len(), 1);
+    let default_root = defaults[0];
+    assert_eq!(default_root.calls().len(), 1);
+    assert!(matches!(
+        default_root.identity(),
+        Some(RootIdentity::TraitParameterDefault { method, parameter })
+            if method == default_root.owner()
+                && program.resolved_trait_signature(method).is_some_and(|signature| {
+                    signature.parameters.iter().any(|candidate| {
+                        candidate.id == *parameter && candidate.has_default
+                    })
+                })
+    ));
+    let default_body = program
+        .checked_ffi_source_root_body(default_root)
+        .expect("trait default body is typed with its prior parameter scope");
+    assert_eq!(default_body.parameters.len(), 1);
+    assert_eq!(
+        default_body.locals[&default_body.parameters[0]].display_name,
+        "seed"
+    );
+    assert!(program
+        .callables()
+        .values()
+        .all(|callable| callable.owner.0 != default_root.owner().0));
+    program
+        .checked_ffi_source_call_context(default_root, &default_root.calls()[0])
+        .expect("unused declaration default remains independently inventoried");
+    assert_eq!(
+        program
+            .call_sites()
+            .get(default_root.calls()[0].call_node())
+            .and_then(|site| site.resolved_callee.as_ref()),
+        Some(&crate::core::ir::ResolvedCallee::Extern(
+            default_root.calls()[0].external_declaration().clone(),
+        )),
+        "trait default's exact declaration call is installed despite having no executable use"
+    );
+
+    let callable_default = program
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.kind() == RootKind::CallableParameterDefault)
+        .expect("ordinary callable parameter default root");
+    assert_eq!(callable_default.calls().len(), 1);
+    assert!(matches!(
+        callable_default.identity(),
+        Some(RootIdentity::CallableParameterDefault { callable, parameter })
+            if callable == callable_default.owner()
+                && program.resolved_signature(callable).is_some_and(|signature| {
+                    signature.parameters.iter().any(|candidate| {
+                        candidate.id == *parameter && candidate.has_default
+                    })
+                })
+    ));
+    assert!(!program
+        .call_sites_sorted()
+        .iter()
+        .any(|site| site.callee == "unused"));
+    program
+        .checked_ffi_source_call_context(callable_default, &callable_default.calls()[0])
+        .expect("unused callable default is still an inventoried source obligation");
+    assert_eq!(
+        program
+            .call_sites()
+            .get(callable_default.calls()[0].call_node())
+            .and_then(|site| site.resolved_callee.as_ref()),
+        Some(&crate::core::ir::ResolvedCallee::Extern(
+            callable_default.calls()[0].external_declaration().clone(),
+        )),
+        "dormant callable default keeps its Checker-issued extern identity"
+    );
+}
+
+#[test]
+fn checked_ffi_source_call_site_identity_is_installed_and_tampering_fails_closed() {
+    let source = r#"
+extern "C" { func foreign(value: i32) -> i32 }
+const SEED: i32 = foreign(7);
+func main() -> i32 { 0 }
+"#;
+    let make_program = || crate::core::check_program(&parse(source)).expect("checked FFI root");
+    let root_and_call = |program: &CheckedProgram| {
+        let root = program
+            .checked_ffi_source_roots()
+            .iter()
+            .find(|root| {
+                root.kind()
+                    == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer
+            })
+            .expect("constant initializer root");
+        let call = root.calls().first().expect("one checked root call");
+        (
+            root.root_node().clone(),
+            call.call_node().clone(),
+            call.external_declaration().clone(),
+        )
+    };
+
+    let mut missing_identity_cache = make_program();
+    let (root_node, call_node, declaration) = root_and_call(&missing_identity_cache);
+    assert!(missing_identity_cache
+        .call_sites
+        .get(&call_node)
+        .is_some_and(|site| site.resolved_callee.is_some()));
+    missing_identity_cache
+        .call_sites
+        .get_mut(&call_node)
+        .expect("syntax call-site entry")
+        .resolved_callee = None;
+    assert!(bind_checked_ffi_source_call_sites(&mut missing_identity_cache).is_empty());
+    assert_eq!(
+        missing_identity_cache.call_sites[&call_node]
+            .resolved_callee
+            .as_ref(),
+        Some(&crate::core::ir::ResolvedCallee::Extern(
+            declaration.clone()
+        )),
+        "the exact typed root context repairs the syntax-only None without guessing by symbol"
+    );
+    let root = missing_identity_cache
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.root_node() == &root_node)
+        .unwrap();
+    let call = &root.calls()[0];
+    let context = missing_identity_cache
+        .checked_ffi_source_call_context(root, call)
+        .expect("repaired callsite remains bound to the Checker-issued source handle");
+    assert!(matches!(
+        &context.call.kind,
+        crate::core::ir::ResolvedExprKind::Call(resolved_call)
+            if resolved_call.callee == crate::core::ir::ResolvedCallee::Extern(declaration.clone())
+    ));
+
+    let mut tampered_identity = make_program();
+    let (_, call_node, _) = root_and_call(&tampered_identity);
+    tampered_identity
+        .call_sites
+        .get_mut(&call_node)
+        .expect("syntax call-site entry")
+        .resolved_callee = Some(crate::core::ir::ResolvedCallee::Extern(NodeId(
+        "extern:forged-declaration".into(),
+    )));
+    let errors = bind_checked_ffi_source_call_sites(&mut tampered_identity);
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("preexisting typed callee")
+                && error.message.contains(&call_node.0)
+        }),
+        "forged declaration identity must be rejected: {errors:#?}"
+    );
+
+    let mut omitted_site = make_program();
+    let (_, call_node, _) = root_and_call(&omitted_site);
+    omitted_site.call_sites.remove(&call_node);
+    let errors = bind_checked_ffi_source_call_sites(&mut omitted_site);
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("0 call-site records") && error.message.contains(&call_node.0)
+        }),
+        "an omitted call-site entry cannot be reconstructed from the symbol alone: {errors:#?}"
+    );
+
+    let mut duplicate_site = make_program();
+    let (_, call_node, _) = root_and_call(&duplicate_site);
+    let duplicate = duplicate_site.call_sites[&call_node].clone();
+    duplicate_site
+        .call_sites
+        .insert(NodeId("forged:duplicate-key".into()), duplicate);
+    let errors = bind_checked_ffi_source_call_sites(&mut duplicate_site);
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("2 call-site records") && error.message.contains(&call_node.0)
+        }),
+        "duplicate call-site identities cannot be hidden behind a second map key: {errors:#?}"
+    );
+}
+
+#[test]
+fn checked_ffi_source_variadic_arity_is_declaration_bound_and_fails_closed() {
+    let variadic_source = r#"
+extern "C" { func foreign(head: i32 ...) -> i32 }
+const ZERO_TAIL: i32 = foreign(7);
+const ONE_TAIL: i32 = foreign(7, 8);
+const MANY_TAILS: i32 = foreign(7, 8, 9, 10);
+func main() -> i32 { 0 }
+"#;
+    let make_variadic_program =
+        || crate::core::check_program(&parse(variadic_source)).expect("checked variadic roots");
+
+    let program = make_variadic_program();
+    let mut arities = std::collections::BTreeMap::new();
+    for root in program.checked_ffi_source_roots().iter().filter(|root| {
+        root.kind()
+            == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer
+    }) {
+        let [call] = root.calls() else {
+            panic!("each variadic constant root has one direct call");
+        };
+        let context = program
+            .checked_ffi_source_call_context(root, call)
+            .expect("exact Checker root/call/declaration binding");
+        let crate::core::ir::ResolvedExprKind::Call(resolved_call) = &context.call.kind else {
+            panic!("source handle resolves to an exact typed Call");
+        };
+        let site = program
+            .call_sites()
+            .get(call.call_node())
+            .expect("call-site entry");
+        assert_eq!(
+            context.declaration.declaration,
+            *call.external_declaration()
+        );
+        assert!(context.declaration.invocation.variadic);
+        assert_eq!(site.expected_argc, Some(1));
+        assert_eq!(site.argc, resolved_call.arguments.len());
+        assert!(site
+            .checked_ffi_source_arity_matches(resolved_call.arguments.len(), context.declaration));
+        arities.insert(site.owner.clone(), site.argc);
+    }
+    assert_eq!(
+        arities,
+        std::collections::BTreeMap::from([
+            ("constant:MANY_TAILS".to_string(), 4),
+            ("constant:ONE_TAIL".to_string(), 2),
+            ("constant:ZERO_TAIL".to_string(), 1),
+        ]),
+        "zero, one, and multiple variadic actuals retain their exact source counts"
+    );
+
+    let mut forged_callsite_metadata = make_variadic_program();
+    let root = forged_callsite_metadata
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.owner().0 == "constant:ONE_TAIL")
+        .expect("one-tail constant root");
+    let call_node = root.calls()[0].call_node().clone();
+    forged_callsite_metadata
+        .call_sites
+        .get_mut(&call_node)
+        .expect("call-site entry")
+        .expected_argc = Some(2);
+    let errors = bind_checked_ffi_source_call_sites(&mut forged_callsite_metadata);
+    assert!(errors.iter().any(|error| {
+        error.message.contains("argument count/arity") && error.message.contains(&call_node.0)
+    }));
+
+    let mut forged_variadic_declaration = make_variadic_program();
+    let declaration_id = forged_variadic_declaration
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.owner().0 == "constant:MANY_TAILS")
+        .expect("multi-tail constant root")
+        .calls()[0]
+        .external_declaration()
+        .clone();
+    forged_variadic_declaration
+        .ffi_declarations
+        .get_mut(&declaration_id)
+        .expect("Checker extern declaration")
+        .invocation
+        .variadic = false;
+    let errors = bind_checked_ffi_source_call_sites(&mut forged_variadic_declaration);
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("private checker witness")
+                || error.message.contains("checker-owned roots disagree")
+        }),
+        "forged variadic metadata must not authorize a source root: {errors:#?}"
+    );
+
+    let non_variadic_source = r#"
+extern "C" { func fixed(head: i32) -> i32 }
+const SEED: i32 = fixed(7);
+func main() -> i32 { 0 }
+"#;
+    let mut non_variadic_mismatch =
+        crate::core::check_program(&parse(non_variadic_source)).expect("checked fixed root");
+    let call_node = non_variadic_mismatch
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| {
+            root.kind()
+                == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer
+        })
+        .expect("fixed constant root")
+        .calls()[0]
+        .call_node()
+        .clone();
+    non_variadic_mismatch
+        .call_sites
+        .get_mut(&call_node)
+        .expect("call-site entry")
+        .argc = 2;
+    let errors = bind_checked_ffi_source_call_sites(&mut non_variadic_mismatch);
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("argument count/arity") && error.message.contains(&call_node.0)
+        }),
+        "non-variadic arity remains exact and fail-closed: {errors:#?}"
+    );
+}
+
+#[test]
+fn checker_rejects_ill_typed_trait_parameter_default() {
+    let file = parse(
+        r#"
+trait Defaults {
+    func choose(value: i32 = "not an integer") -> i32;
+}
+func main() -> i32 { 0 }
+"#,
+    );
+    let diagnostics = crate::core::check_program(&file)
+        .expect_err("trait parameter defaults are checked against their declared types");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0211)
+                && diagnostic.message.contains("default for parameter 'value'")
+                && diagnostic.message.contains("expected i32, found string")
+        }),
+        "the Checker reports the declared-type mismatch: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn checker_ffi_source_root_lookup_rejects_missing_wrong_and_duplicate_bodies() {
+    use crate::core::ir::lower::ResolvedDeclarationExpressionKind as RootKind;
+
+    let file = parse(
+        r#"
+extern "C" { func foreign(value: i32) -> i32 }
+actor Holder {
+    first: i32 = foreign(1);
+    second: i32 = foreign(2);
+}
+func main() -> i32 { 0 }
+"#,
+    );
+    let mut missing = crate::core::check_program(&file).expect("checked root fixture");
+    let missing_handle = missing
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.kind() == RootKind::ActorFieldInitializer)
+        .expect("field root")
+        .clone();
+    missing
+        .declaration_expression_bodies
+        .remove(missing_handle.root_node());
+    assert!(missing
+        .checked_ffi_source_root_body(&missing_handle)
+        .is_err());
+
+    let mut wrong = crate::core::check_program(&file).expect("checked root fixture");
+    let wrong_handle = wrong
+        .checked_ffi_source_roots()
+        .iter()
+        .find(|root| root.kind() == RootKind::ActorFieldInitializer)
+        .expect("field root")
+        .clone();
+    wrong
+        .declaration_expression_bodies
+        .get_mut(wrong_handle.root_node())
+        .expect("root body")
+        .display_name
+        .push_str(" (tampered)");
+    assert!(wrong.checked_ffi_source_root_body(&wrong_handle).is_err());
+
+    let mut duplicate = crate::core::check_program(&file).expect("checked root fixture");
+    let (first, second) = {
+        let roots = duplicate
+            .checked_ffi_source_roots()
+            .iter()
+            .filter(|root| root.kind() == RootKind::ActorFieldInitializer)
+            .collect::<Vec<_>>();
+        (roots[0].clone(), roots[1].clone())
+    };
+    duplicate
+        .ffi_source_roots
+        .push(second.test_clone_with_root_node(first.root_node().clone()));
+    assert!(
+        duplicate.checked_ffi_source_root_body(&first).is_err(),
+        "a NodeId duplicated from another declaration root is ambiguous"
+    );
+
+    let mut missing_extern = crate::core::check_program(&file).expect("checked root fixture");
+    let (root, call) = {
+        let root = missing_extern
+            .checked_ffi_source_roots()
+            .iter()
+            .find(|root| root.kind() == RootKind::ActorFieldInitializer)
+            .expect("field root");
+        (root.clone(), root.calls()[0].clone())
+    };
+    missing_extern
+        .ffi_declarations
+        .remove(call.external_declaration());
+    assert!(
+        missing_extern
+            .checked_ffi_source_call_context(&root, &call)
+            .is_err(),
+        "a source call cannot resolve after its canonical extern declaration is removed"
+    );
 }
 
 #[test]
@@ -2088,9 +3467,11 @@ func main() -> i32 { c_abs(1) }
     assert!(verifier_error.contains("ambiguous checker-owned declaration identity"));
     let lowering_errors = crate::core::ir::lower::lower_checked_function_bodies(&file, &program)
         .expect_err("semantic lowering must reject same-named merged declarations");
-    assert!(lowering_errors.iter().any(|error| error
-        .message
-        .contains("ambiguous checker-owned declaration identity")));
+    assert!(lowering_errors.iter().any(|error| {
+        error
+            .message
+            .contains("ambiguous checker-owned declaration identity")
+    }));
 }
 
 #[test]
@@ -2543,8 +3924,8 @@ fn enum_schema_validator_rejects_missing_canonical_variant() {
 #[test]
 fn typed_body_lowering_does_not_consult_retained_type_declaration() {
     let file = parse(
-            "type Choice { Value(i32), Empty }\nfunc read(choice: Choice) -> i32 { match choice { Value(value) => value, Empty => 0 } }",
-        );
+        "type Choice { Value(i32), Empty }\nfunc read(choice: Choice) -> i32 { match choice { Value(value) => value, Empty => 0 } }",
+    );
     let mut program = crate::core::check_program(&file).expect("check");
     let definition = program
         .type_defs
@@ -2579,13 +3960,6 @@ func main() -> i32 { 0 }
     let _ = verifier.verify_checked(&program);
     assert_eq!(
         verifier.checked_capability_combined_with("Combined"),
-        Some("A + B")
-    );
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "cap");
-    codegen.compile_checked(&program).expect("compile");
-    assert_eq!(
-        codegen.resolved_capability_combined_with("Combined"),
         Some("A + B")
     );
 }
@@ -4808,17 +6182,52 @@ fn canonical_actor_unused_empty_declaration_still_owns_a_handle_type() {
 
 #[test]
 fn canonical_actor_nested_regressions_have_scalar_declaration_receipts() {
-    for source in [
-        include_str!("../../../tests/real_world/actor_nested_func_capture.mimi"),
-        include_str!("../../../tests/real_world/actor_nested_func_shadow.mimi"),
+    for (source, event) in [
+        (
+            include_str!("../../../tests/real_world/actor_nested_func_capture.mimi"),
+            "record",
+        ),
+        (
+            include_str!("../../../tests/real_world/actor_nested_func_shadow.mimi"),
+            "record",
+        ),
     ] {
         let file = parse(source);
         let program = crate::core::check_program(&file).expect("actor nested regression check");
         assert_eq!(program.actor_descriptors().len(), 1);
+        let transition = program
+            .transitions()
+            .values()
+            .find(|transition| transition.id.event == event)
+            .expect("Flow transition is checker-owned");
+        assert!(
+            program.resolved_bodies().contains_key(&transition.node_id),
+            "transition {:?} must have a canonical body; available bodies: {:?}",
+            transition.node_id,
+            program.resolved_bodies().keys().collect::<Vec<_>>()
+        );
+        assert!(
+            program.callable(&transition.node_id).is_some(),
+            "transition {:?} must assemble a canonical callable",
+            transition.node_id
+        );
         for descriptor in program.actor_descriptors().values() {
-            descriptor
+            let _flow = descriptor.flow.as_ref().expect("Flow Actor descriptor");
+            let receipt = descriptor
                 .scalar_i32_receipt(&program)
                 .expect("real regression declaration contract");
+            let flow = receipt
+                .descriptor()
+                .flow
+                .as_ref()
+                .expect("Flow Actor root is canonically materialized");
+            for field in &flow.payload {
+                assert_eq!(
+                    program.resolved_state_field_types().get(&field.field),
+                    Some(&field.ty),
+                    "Actor root payload field type must remain checker-owned"
+                );
+            }
         }
     }
 }

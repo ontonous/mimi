@@ -1,8 +1,13 @@
-func main() -> string {
+func matched_greeting_label() -> string {
     let s = "hi";
     match s {
         "hello" => "greeting",
         "hi" => "casual",
         _ => "unknown",
     }
+}
+
+func main() -> i32 {
+    println(matched_greeting_label());
+    0
 }

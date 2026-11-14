@@ -87,6 +87,7 @@ pub mod macros;
 pub mod ast;
 pub mod codegen;
 pub mod component;
+pub mod cost;
 pub mod flow_matrix;
 pub mod progressive;
 pub mod session;
@@ -104,6 +105,7 @@ pub mod loader;
 pub mod lockfile;
 pub mod lsp;
 pub mod manifest;
+pub mod module_system;
 pub mod parser;
 pub mod span;
 pub mod verifier;
@@ -113,10 +115,14 @@ pub mod doc_core;
 pub mod path_safety;
 pub mod pkg_registry;
 pub mod pkg_resolve;
+/// Versioned checker/MIR-backed semantic query service shared by CLI and LSP.
+pub mod query;
 #[allow(clippy::not_unsafe_ptr_arg_deref, clippy::unwrap_used, dead_code)]
 pub mod runtime;
 pub mod runtime_cache;
 pub mod source_scan;
+/// Versioned machine-readable audit for V0.2 D-01..D-14 semantics.
+pub mod v02_decisions;
 
 #[cfg(test)]
 pub mod tests;

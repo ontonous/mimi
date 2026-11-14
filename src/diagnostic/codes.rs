@@ -145,11 +145,16 @@ pub const E0443: &str = "E0443"; // bare Flow record cannot cross Channel/FFI/ma
 pub const E0444: &str = "E0444"; // session protocol payload must be an integer scalar (i32/i64)
 pub const E0445: &str = "E0445"; // inline `module` blocks are not part of the language (spec §6.14); use file modules with `use`
 pub const E0446: &str = "E0446"; // multi-target union payload outside the promoted tagged-union contract (R6-1039 fail-close ruling)
+pub const E0447: &str = "E0447"; // executable main has no Mimi params/generics and returns only unit/bool/i32/i64
+pub const E0448: &str = "E0448"; // Actor methods cannot write instance fields; persistent updates belong in Flow transitions
+pub const E0449: &str = "E0449"; // raw reference/pointer types and operators require unsafe or an explicit FFI wrapper
+pub const E0450: &str = "E0450"; // Actor Flow root payload fields need an explicit initializer unless they are i32
 
 /// Contract/intention error codes (E05xx)
 pub const E0500: &str = "E0500"; // cannot modify $-locked fragment
 pub const E0501: &str = "E0501"; // strict mode: contract modifications not allowed
 pub const E0502: &str = "E0502"; // contracts on shared-param functions not verifiable by Z3
+pub const E0503: &str = "E0503"; // requires/ensures are only valid at callable-body root
 
 /// Warning codes (W0xxx)
 pub const W001: &str = "W001"; // standalone desc/rule has no implementation
@@ -472,10 +477,15 @@ pub fn describe(code: &str) -> &'static str {
         E0444 => "session protocol payload must be an integer scalar (i32 or i64): the endpoint runtime transports values in i64 handle slots. Wider or heap-shaped payloads (f64/string/bool/records) cannot cross a send/recv; pack them out-of-band (e.g. via Channel) or encode as integers",
         E0445 => "inline `module` blocks are not part of the language (spec §6.14): the only module form is a file whose `pub` items merge into scope via `use`. Move the block's pub items into their own .mimi file and add `use <name>;`",
         E0446 => "multi-target union target violates the promoted tagged-union contract (R6-1039 fail-close ruling): every checker-legal `-> A | B` transition must close the canonical union face, so each target state carries at least one payload field and every payload field is i32/i64/bool/string. Aggregate (List/record/Option/tuple), float, and payload-less union variants keep the legacy union route reachable and are rejected at the declaration site; the compiler-owned Fault sink stays exempt (0.36.9 verdict 6: absorption requires a DECLARED Fault target)",
+        E0447 => "executable `main` must have no Mimi source parameters or generic parameters and return only unit, bool, i32, or i64; handle Result, Option, and aggregate values inside `main` before returning a process status",
+        E0448 => "Actor methods cannot write Actor instance fields; persistent business-state changes must be returned by a Flow transition",
+        E0449 => "raw reference/pointer types and operators (`&T`, `&mut T`, `&[T]`, `*T`, `*mut T`, `&`, `&mut`, `*`) are forbidden in ordinary safe source; use an explicit `unsafe` block or an explicit `extern \"C\" func` wrapper",
+        E0450 => "an implicitly selected Actor Flow root state may only have i32 payload fields, which start at zero; initialize other payloads through a Flow transition",
 
         E0500 => "cannot modify $-locked fragment",
         E0501 => "strict mode: contract modifications not allowed",
         E0502 => "contract on function with shared parameter is not verifiable by Z3",
+        E0503 => "requires/ensures are only valid at the top level of a callable body",
 
         E0600 => "variable shadows outer variable",
         E0601 => "unused variable",
@@ -775,10 +785,15 @@ mod tests {
             super::E0444,
             super::E0445,
             super::E0446,
+            super::E0447,
+            super::E0448,
+            super::E0449,
+            super::E0450,
             // Contract/intention errors (E05xx)
             super::E0500,
             super::E0501,
             super::E0502,
+            super::E0503,
             // Warnings (legacy E06xx)
             super::E0600,
             super::E0601,

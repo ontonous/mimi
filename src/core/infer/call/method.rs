@@ -201,8 +201,21 @@ impl<'a> Checker<'a> {
         // name is registered in self.funcs. Route csv::parse() to
         // check_call("parse", ...) when csv is a known module name.
         if let Expr::Ident(module_name) = obj.unlocated() {
-            if self.use_imports.contains(module_name) {
-                return self.check_call(method_name, args, scopes);
+            if self.module_aliases.contains_key(module_name) {
+                // Explicit alias-qualified access is resolved against the
+                // checker directory key. The merged bare-name path remains
+                // available for old callers, while this key preserves the
+                // selected module identity and prevents same-name exports
+                // from being guessed by import order.
+                let qualified = format!("{}::{}", module_name, method_name);
+                if self.funcs.contains_key(&qualified) {
+                    return self.check_call(&qualified, args, scopes);
+                }
+                self.emit_code(
+                    crate::diagnostic::codes::E0401,
+                    format!("module '{}' does not export '{}'", module_name, method_name),
+                );
+                return Type::TyErr;
             }
             // Handle flow transition call: FlowName::transition(args)
             // Prefer overload key that includes from_state of the first arg.
@@ -522,7 +535,7 @@ impl<'a> Checker<'a> {
             if type_name == "SessionChan" && type_args.len() == 1 {
                 match method_name {
                     "send" | "recv" | "close" => {
-                        return self.check_session_method(obj, &obj_ty, method_name, args, scopes)
+                        return self.check_session_method(obj, &obj_ty, method_name, args, scopes);
                     }
                     _ => {}
                 }
@@ -1127,8 +1140,29 @@ impl<'a> Checker<'a> {
                 return self.check_string_method(method_name, args, scopes);
             }
             // Check list methods
-            if type_name == "List" && matches!(method_name, "len" | "reverse" | "concat") {
-                return self.check_list_method(method_name, &type_args[0], args, scopes);
+            if type_name == "List" {
+                match method_name {
+                    "len" if type_args.is_empty() => {
+                        if !args.is_empty() {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                "List.len expects no arguments",
+                            );
+                        }
+                        return Type::Name("i32".into(), vec![]);
+                    }
+                    "reverse" | "concat" if type_args.is_empty() => {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            format!("List.{} requires a known element type", method_name),
+                        );
+                        return Type::TyErr;
+                    }
+                    "len" | "reverse" | "concat" => {
+                        return self.check_list_method(method_name, &type_args[0], args, scopes);
+                    }
+                    _ => {}
+                }
             }
             let mut method_candidates: Vec<String> = self
                 .type_methods

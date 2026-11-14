@@ -7,8 +7,6 @@
 //!   cosmetic renames do not invalidate the semantic hash.
 //! - Only trusted-subset types are representable: bool, checked i32,
 //!   unbounded i64 (no definedness checks), f64 as an opaque uninterpreted sort.
-//! - `typestate_context` carries Flow transition axioms (source invariants,
-//!   transition guards, target invariants).
 //!
 //! Lowering path: `FuncDef` (raw AST) → trusted-subset gate → `VFunction`.
 //! The gate rejects unsupported constructs *before* any SMT encoding.
@@ -258,27 +256,6 @@ impl fmt::Display for VStmt {
     }
 }
 
-// ── Typestate axioms ───────────────────────────────────────────────────
-
-/// Typestate context for Flow transition VIR.
-///
-/// Injected during lowering:
-/// - `source_invariants` → Z3 axioms (assert)
-/// - `transition_guards` → Z3 preconditions
-/// - `target_invariants` → Z3 obligations (prove)
-///
-/// All axioms must originate from Checker-verified typestate information.
-/// No unverified assumptions may be injected.
-#[derive(Debug, Clone, Default)]
-pub struct TypestateAxioms {
-    /// Source state invariants — asserted as axioms.
-    pub source_invariants: Vec<VExpr>,
-    /// Transition guards — assumed as preconditions.
-    pub transition_guards: Vec<VExpr>,
-    /// Target state invariants — must be proved.
-    pub target_invariants: Vec<VExpr>,
-}
-
 // ── Function ───────────────────────────────────────────────────────────
 
 /// VIR function — the unit of verification.
@@ -296,8 +273,6 @@ pub struct VFunction {
     pub postconditions: Vec<VExpr>,
     /// Semantic hash for proof caching (span-free, variable-normalized).
     pub semantics_hash: String,
-    /// Flow transition typestate context (None for plain functions).
-    pub typestate_context: Option<TypestateAxioms>,
     /// Whether this function is marked `#[verified]` (Unknown is also an error).
     pub is_verified_attr: bool,
 }
@@ -320,9 +295,8 @@ impl VFunction {
     /// Variable names are already canonical (%N), so this is just
     /// the structural representation without spans.
     ///
-    /// 0.31.29 audit P2-7/P2-14: includes `typestate_context` and
-    /// `is_verified_attr` so that functions differing only in these
-    /// fields produce different hashes.
+    /// 0.31.29 audit P2-7/P2-14: includes `is_verified_attr` so functions
+    /// differing only in verification status produce different hashes.
     pub fn normalized_repr(&self) -> String {
         let mut s = String::new();
         if self.is_verified_attr {
@@ -341,26 +315,6 @@ impl VFunction {
         }
         for post in &self.postconditions {
             s.push_str(&format!("  ensures {}\n", post));
-        }
-        // Include typestate context in the hash so that functions with
-        // different Flow transition axioms produce different hashes.
-        if let Some(ref ts) = self.typestate_context {
-            if !ts.source_invariants.is_empty()
-                || !ts.transition_guards.is_empty()
-                || !ts.target_invariants.is_empty()
-            {
-                s.push_str("  typestate {\n");
-                for inv in &ts.source_invariants {
-                    s.push_str(&format!("    source_inv {}\n", inv));
-                }
-                for guard in &ts.transition_guards {
-                    s.push_str(&format!("    guard {}\n", guard));
-                }
-                for inv in &ts.target_invariants {
-                    s.push_str(&format!("    target_inv {}\n", inv));
-                }
-                s.push_str("  }\n");
-            }
         }
         s.push('}');
         s
@@ -571,14 +525,24 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
         // Binary operations: only arithmetic + comparison + boolean
         Expr::Binary(op, lhs, rhs) => {
             match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod
-                | BinOp::EqCmp | BinOp::NeCmp | BinOp::Lt | BinOp::Gt
-                | BinOp::Le | BinOp::Ge | BinOp::And | BinOp::Or => {}
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::EqCmp
+                | BinOp::NeCmp
+                | BinOp::Lt
+                | BinOp::Gt
+                | BinOp::Le
+                | BinOp::Ge
+                | BinOp::And
+                | BinOp::Or => {}
                 _ => {
                     return Err(format!(
                         "operator {:?} is not in the trusted subset (v1: arithmetic/comparison/boolean only)",
                         op
-                    ))
+                    ));
                 }
             }
             check_expr_trusted(lhs)?;
@@ -592,7 +556,7 @@ fn check_expr_trusted(expr: &crate::ast::Expr) -> TrustedSubsetResult {
                     return Err(format!(
                         "unary operator {:?} is not in the trusted subset (v1: negation/not only)",
                         op
-                    ))
+                    ));
                 }
             }
             check_expr_trusted(inner)
@@ -1101,7 +1065,6 @@ pub fn lower_func_to_vir(func: &crate::ast::FuncDef) -> Result<(VFunction, VirSp
             body: body_stmts,
             postconditions,
             semantics_hash,
-            typestate_context: None,
             is_verified_attr: false,
         },
         span_table,
@@ -1552,144 +1515,6 @@ fn substitute_lets(expr: &VExpr, lets: &[(VarId, VExpr)]) -> VExpr {
 /// Extract the span from a statement.
 fn stmt_span(stmt: &crate::ast::Stmt) -> Span {
     stmt.meta().map(|m| m.span).unwrap_or(Span::UNKNOWN)
-}
-
-// ── Flow transition → VIR with typestate axioms ───────────────────────
-
-/// Synthesize a `FuncDef` from a Flow transition (shared by the lowering and
-/// the trusted-subset gate). `body` controls which statements are carried over
-/// — the typestate lowering uses the full body for contract extraction, while
-/// the gate uses an empty body (only params/ret are gated).
-pub fn synthesize_transition_func(
-    flow_name: &str,
-    transition: &crate::ast::TransitionDef,
-    body: crate::ast::Block,
-) -> crate::ast::FuncDef {
-    crate::ast::FuncDef {
-        meta: crate::ast::AstNodeMeta::inherited(
-            transition.meta.span,
-            crate::ast::AstOrigin::RuntimeSystem("verifier.transition_vir"),
-        ),
-        name: format!("{}::{}", flow_name, transition.name),
-        pub_: false,
-        params: transition.params.clone(),
-        ret: None,
-        body,
-        where_clause: vec![],
-        generics: vec![],
-        effects: vec![],
-        is_comptime: false,
-        is_async: false,
-        extern_abi: None,
-        has_requires: false,
-        has_ensures: false,
-        has_mutate_params: false,
-    }
-}
-
-/// Lower a Flow transition to a VFunction with typestate context.
-///
-/// The typestate context carries:
-/// - Source state invariants → Z3 axioms (assert)
-/// - Transition guards → Z3 preconditions (assume)
-/// - Target state invariants → Z3 obligations (prove)
-///
-/// The typestate context is populated from the transition body's own
-/// checker-verified contract statements (all of which the checker has
-/// type-checked before the verifier runs):
-/// - `invariant:` clauses → `source_invariants` (assumed to hold on entry)
-/// - `requires:` clauses → `transition_guards` (guard that must hold)
-/// - `ensures:` clauses → `target_invariants` (obligations to prove)
-///
-/// State-level invariants (declared on `state { ... invariant ... }`) do not
-/// exist in the language yet — that is the 0.1.6 Flow typestate pillar.
-/// Until then `source_invariants` is only populated by a transition's own
-/// `invariant:` clauses, and is otherwise empty. The transition's executable
-/// body (record construction, `self` field access) is out of the Z3 trusted
-/// subset and is verified by the checker, not encoded here.
-///
-/// The returned `VFunction.body` is empty: the typestate proof is a pure
-/// contract-level obligation `(source_invariants ∧ transition_guards) ⊢
-/// target_invariants`, consumed by `verify_transition_vir`.
-pub fn lower_transition_to_vir(
-    flow_name: &str,
-    transition: &crate::ast::TransitionDef,
-) -> Result<(VFunction, VirSpanTable), String> {
-    // Synthesize a FuncDef from the transition (used only for parameter
-    // registration and the stable VIR function identity).
-    let func = synthesize_transition_func(flow_name, transition, vec![]);
-
-    // Register parameters (params share the same canonical VarId numbering
-    // the Z3 encoding expects) and lower the contract expressions.
-    let mut ctx = LoweringCtx::new(&func);
-    let mut source_invariants: Vec<VExpr> = Vec::new();
-    let mut transition_guards: Vec<VExpr> = Vec::new();
-    let mut target_invariants: Vec<VExpr> = Vec::new();
-    let body = transition.body.clone().unwrap_or_default();
-    for stmt in &body {
-        match stmt.unlocated() {
-            crate::ast::Stmt::Invariant(expr, _) => {
-                if let Some(v) = lower_expr_to_vir(expr, &mut ctx) {
-                    source_invariants.push(v);
-                } else {
-                    return Err(
-                        "transition invariant contains unsupported expression (cannot lower to VIR)"
-                            .to_string(),
-                    );
-                }
-            }
-            crate::ast::Stmt::Requires(expr, _) => {
-                if let Some(v) = lower_expr_to_vir(expr, &mut ctx) {
-                    transition_guards.push(v);
-                } else {
-                    return Err(
-                        "transition guard contains unsupported expression (cannot lower to VIR)"
-                            .to_string(),
-                    );
-                }
-            }
-            crate::ast::Stmt::Ensures(expr, _) => {
-                if let Some(v) = lower_expr_to_vir(expr, &mut ctx) {
-                    target_invariants.push(v);
-                } else {
-                    return Err(
-                        "transition ensures contains unsupported expression (cannot lower to VIR)"
-                            .to_string(),
-                    );
-                }
-            }
-            // The executable body (record construction, self access) is not in
-            // the trusted subset and is verified by the checker — skip it here.
-            _ => {}
-        }
-    }
-
-    // Params list mirrors LoweringCtx registration order (%0, %1, ...).
-    let mut vfunc_params = Vec::new();
-    for (i, p) in func.params.iter().enumerate() {
-        vfunc_params.push((VarId(i), surface_type_to_vtype(&p.ty), p.name.clone()));
-    }
-
-    let mut span_table = VirSpanTable::new();
-    span_table.record_func(&func.name, transition.meta.span);
-
-    let vfunc = VFunction {
-        id: func.name.clone(),
-        params: vfunc_params,
-        body: vec![],
-        postconditions: vec![],
-        // Computed by the caller from `normalized_repr` (which includes the
-        // typestate context), matching lower_func_to_vir.
-        semantics_hash: String::new(),
-        typestate_context: Some(TypestateAxioms {
-            source_invariants,
-            transition_guards,
-            target_invariants,
-        }),
-        is_verified_attr: false,
-    };
-
-    Ok((vfunc, span_table))
 }
 
 // ── VIR → Z3 encoding ─────────────────────────────────────────────────
@@ -2169,26 +1994,6 @@ mod tests {
         panic!("no function found in source");
     }
 
-    /// Parse a Flow and return its first user-written (non-fallback) transition.
-    fn parse_flow_transition(source: &str) -> (String, crate::ast::TransitionDef) {
-        let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
-        let file = crate::parser::Parser::new_memory(tokens, "test", "test", source)
-            .unwrap()
-            .parse_file()
-            .unwrap();
-        for item in &file.items {
-            if let crate::ast::Item::Flow(flow) = item {
-                for t in &flow.transitions {
-                    if !t.is_fallback {
-                        return (flow.name.clone(), t.clone());
-                    }
-                }
-                panic!("no user transition found in flow");
-            }
-        }
-        panic!("no flow found in source");
-    }
-
     #[test]
     fn test_trusted_subset_accepts_scalar() {
         let func = parse_func(
@@ -2275,51 +2080,6 @@ mod tests {
         assert!(vfunc.body.iter().any(|s| matches!(s, VStmt::Return(_))));
         // Span table should have function span
         assert!(span_table.func_span("add").is_some());
-    }
-
-    #[test]
-    fn test_lower_transition_populates_typestate_context() {
-        let (flow_name, transition) = parse_flow_transition(
-            "flow Counter {
-                state Zero { count: i32 }
-                state Positive { count: i32 }
-                transition inc(Zero, n: i32) -> Positive {
-                    requires: n > 0
-                    ensures: n > 0
-                    return Positive { count: n }
-                }
-            }",
-        );
-        assert_eq!(flow_name, "Counter");
-        let (vfunc, _) = lower_transition_to_vir(&flow_name, &transition).unwrap();
-        assert_eq!(vfunc.id, "Counter::inc");
-        assert_eq!(vfunc.params.len(), 1);
-        assert_eq!(vfunc.params[0].2, "n");
-        assert!(vfunc.body.is_empty(), "typestate proof is contract-only");
-        let ts = vfunc
-            .typestate_context
-            .as_ref()
-            .expect("typestate context present");
-        assert!(
-            ts.source_invariants.is_empty(),
-            "no state-level invariants in the language yet"
-        );
-        assert_eq!(ts.transition_guards.len(), 1, "requires → transition guard");
-        assert_eq!(ts.target_invariants.len(), 1, "ensures → target invariant");
-        // The context participates in the semantic hash (normalized_repr).
-        let repr = vfunc.normalized_repr();
-        assert!(
-            repr.contains("typestate {"),
-            "hash must include typestate context"
-        );
-        assert!(
-            repr.contains("guard"),
-            "hash must include transition guards"
-        );
-        assert!(
-            repr.contains("target_inv"),
-            "hash must include target invariants"
-        );
     }
 
     #[test]

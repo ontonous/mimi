@@ -18,36 +18,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             Lit::Bool(b) => Ok(self.context.bool_type().const_int(*b as u64, false).into()),
             Lit::Unit => Ok(self.context.i64_type().const_int(0, false).into()),
             Lit::String(s) => {
-                // String ABI: a string value is the canonical {ptr, i64} struct
-                // (ptr to null-terminated data, byte length) — the same layout
-                // used by concatenation, `to_string`, f-strings, etc. (see
-                // CodeGenerator::build_string_struct).
-                //
-                // 0.1.8 fat-ABI fix (BUG E): `build_global_string_ptr` truncates
-                // the constant at the FIRST embedded NUL (it lowers through a
-                // NUL-terminated C string), so a literal like "a\0b" produced a
-                // `[2 x i8] c"a\00"` global while the struct still recorded
-                // `len = 3`. Every length-carrying consumer then read past the
-                // short buffer (or, for `.len()`, counted a truncated/garbage
-                // prefix) — and a string-heavy entry point could even SIGSEGV
-                // when a boxed handle was later mis-read as a C-string. Build an
-                // explicit `[N+1 x i8]` byte-array global that preserves every
-                // byte (trailing NUL kept for C-string consumers).
-                let i8_ty = self.context.i8_type();
-                let bytes = s.as_bytes();
-                let mut elems: Vec<inkwell::values::IntValue<'ctx>> =
-                    Vec::with_capacity(bytes.len() + 1);
-                for &b in bytes {
-                    elems.push(i8_ty.const_int(b as u64, false));
-                }
-                elems.push(i8_ty.const_int(0, false));
-                let arr_ty = i8_ty.array_type(elems.len() as u32);
-                let arr_val = i8_ty.const_array(&elems);
-                let gv = self.module.add_global(arr_ty, None, "str");
-                gv.set_initializer(&arr_val);
-                gv.set_constant(true);
-                gv.set_alignment(1);
-                let ptr = gv.as_pointer_value();
+                // Mimi String is length-based, so embedded NUL bytes must be
+                // retained in the backing storage rather than truncated by
+                // LLVM's C-string convenience builder.
+                let ptr = self.build_global_string_bytes(s, "str")?;
                 let len = self.context.i64_type().const_int(s.len() as u64, false);
                 self.build_string_struct(ptr, len)
             }
@@ -82,11 +56,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             })
             .collect();
         if let Some(text) = all_text {
-            let global = self
-                .builder
-                .build_global_string_ptr(&text, "fstr_literal")
-                .map_err(|e| CompileError::LlvmError(format!("string error: {}", e)))?;
-            let ptr = global.as_pointer_value();
+            let ptr = self.build_global_string_bytes(&text, "fstr_literal")?;
             let len = self.context.i64_type().const_int(text.len() as u64, false);
             return self.build_string_struct(ptr, len);
         }

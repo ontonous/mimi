@@ -36,23 +36,27 @@ func main() -> i32 {
 #[test]
 fn builtin_to_string_int() {
     let src = r#"
-func main() -> string {
+func observed_to_string_int() -> string {
     to_string(42)
 }
+func main() -> i32 {
+    if observed_to_string_int() == "42" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("42".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_to_string_bool() {
     let src = r#"
-func main() -> string {
+func observed_to_string_bool() -> string {
     to_string(true)
 }
+func main() -> i32 {
+    if observed_to_string_bool() == "true" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("true".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -69,12 +73,15 @@ func main() -> i32 {
 #[test]
 fn builtin_abs_float() {
     let src = r#"
-func main() -> f64 {
+func observed_abs_float() -> f64 {
     abs(-2.5)
+}
+func main() -> i32 {
+    if observed_abs_float() == 2.5 { 0 } else { 1 }
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::Float(2.5));
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
@@ -141,12 +148,15 @@ func main() -> i32 {
 #[test]
 fn builtin_min_float() {
     let src = r#"
-func main() -> f64 {
+func observed_min_float() -> f64 {
     min(3.14, 2.71)
+}
+func main() -> i32 {
+    if observed_min_float() == 2.71 { 0 } else { 1 }
 }
 "#;
     let v = run_source(src);
-    assert_eq!(v, interp::Value::Float(2.71));
+    assert_eq!(v, interp::Value::Int(0));
 }
 
 #[test]
@@ -246,24 +256,28 @@ func main() -> i32 {
 #[test]
 fn builtin_str_join() {
     let src = r#"
-func main() -> string {
+func observed_str_join() -> string {
     let parts = ["a", "b", "c"]
     str_join(parts, ",")
 }
+func main() -> i32 {
+    if observed_str_join() == "a,b,c" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("a,b,c".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_trim() {
     let src = r#"
-func main() -> string {
+func observed_str_trim() -> string {
     str_trim("  hello  ")
 }
+func main() -> i32 {
+    if observed_str_trim() == "hello" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -291,45 +305,53 @@ func main() -> bool {
 #[test]
 fn builtin_str_replace() {
     let src = r#"
-func main() -> string {
+func observed_str_replace() -> string {
     str_replace("hello world", "world", "mimi")
 }
+func main() -> i32 {
+    if observed_str_replace() == "hello mimi" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello mimi".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_to_upper() {
     let src = r#"
-func main() -> string {
+func observed_str_to_upper() -> string {
     str_to_upper("hello")
 }
+func main() -> i32 {
+    if observed_str_to_upper() == "HELLO" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("HELLO".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_to_lower() {
     let src = r#"
-func main() -> string {
+func observed_str_to_lower() -> string {
     str_to_lower("HELLO")
 }
+func main() -> i32 {
+    if observed_str_to_lower() == "hello" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
 fn builtin_str_repeat() {
     let src = r#"
-func main() -> string {
+func observed_str_repeat() -> string {
     str_repeat("ab", 3)
 }
+func main() -> i32 {
+    if observed_str_repeat() == "ababab" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("ababab".to_string())));
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -363,9 +385,19 @@ func main() -> i32 {
 #[test]
 fn builtin_map_new() {
     let src = r#"
+func report_map_failure(status: i32) -> i32 {
+    println("unexpected Map error: " + to_string(status))
+    1000000 + status
+}
 func main() -> i32 {
-    let m = map_new()
-    map_size(m)
+    match map_new() {
+        Ok(m) => {
+            let size = map_size(m)
+            drop(m)
+            size
+        },
+        Err(status) => report_map_failure(status),
+    }
 }
 "#;
     let v = run_source(src);
@@ -375,10 +407,29 @@ func main() -> i32 {
 #[test]
 fn builtin_map_set_get() {
     let src = r#"
+func report_map_failure(status: i32) -> i32 {
+    println("unexpected Map error: " + to_string(status))
+    1000000 + status
+}
 func main() -> i32 {
-    let m = map_new()
-    let m = map_set(m, "name", "mimi")
-    let (found, val) = map_get(m, "name")
+    let m = match map_new() {
+        Ok(value) => value,
+        Err(status) => return report_map_failure(status),
+    }
+    let updated = match map_set(m, "name", "mimi") {
+        Ok(value) => {
+            drop(m)
+            value
+        },
+        Err(status) => {
+            drop(m)
+            return report_map_failure(status)
+        },
+    }
+    let pair = map_get(updated, "name")
+    let found = pair.0
+    drop(pair)
+    drop(updated)
     if found { 1 } else { 0 }
 }
 "#;
@@ -389,11 +440,38 @@ func main() -> i32 {
 #[test]
 fn builtin_map_size() {
     let src = r#"
+func report_map_failure(status: i32) -> i32 {
+    println("unexpected Map error: " + to_string(status))
+    1000000 + status
+}
 func main() -> i32 {
-    let m = map_new()
-    let m = map_set(m, "a", 1)
-    let m = map_set(m, "b", 2)
-    map_size(m)
+    let m0 = match map_new() {
+        Ok(value) => value,
+        Err(status) => return report_map_failure(status),
+    }
+    let m1 = match map_set(m0, "a", 1) {
+        Ok(value) => {
+            drop(m0)
+            value
+        },
+        Err(status) => {
+            drop(m0)
+            return report_map_failure(status)
+        },
+    }
+    let m2 = match map_set(m1, "b", 2) {
+        Ok(value) => {
+            drop(m1)
+            value
+        },
+        Err(status) => {
+            drop(m1)
+            return report_map_failure(status)
+        },
+    }
+    let size = map_size(m2)
+    drop(m2)
+    size
 }
 "#;
     let v = run_source(src);
@@ -403,11 +481,30 @@ func main() -> i32 {
 #[test]
 fn builtin_map_remove() {
     let src = r#"
+func report_map_failure(status: i32) -> i32 {
+    println("unexpected Map error: " + to_string(status))
+    1000000 + status
+}
 func main() -> i32 {
-    let m = map_new()
-    let m = map_set(m, "x", 1)
-    let m = map_remove(m, "x")
-    map_size(m)
+    let m0 = match map_new() {
+        Ok(value) => value,
+        Err(status) => return report_map_failure(status),
+    }
+    let m1 = match map_set(m0, "x", 1) {
+        Ok(value) => {
+            drop(m0)
+            value
+        },
+        Err(status) => {
+            drop(m0)
+            return report_map_failure(status)
+        },
+    }
+    let removed = map_remove(m1, "x")
+    drop(m1)
+    let size = map_size(removed)
+    drop(removed)
+    size
 }
 "#;
     let v = run_source(src);
@@ -420,8 +517,14 @@ fn builtin_map_from_list() {
 func main() -> i32 {
     let pairs = [("a", 1), ("b", 2)]
     let m = map_from_list(pairs)
-    let (found, val) = map_get(m, "b")
-    if found { val } else { 0 }
+    let pair = map_get(m, "b")
+    let found = pair.0
+    let val = pair.1
+    let result = if found { val } else { 0 }
+    drop(pair)
+    drop(pairs)
+    drop(m)
+    result
 }
 "#;
     let v = run_source(src);
@@ -490,41 +593,38 @@ func main() -> i32 {
 
 #[test]
 fn builtin_getenv_exists() {
-    let result = run_source_result(
-        r#"
-func main() -> string {
+    let src = r#"
+func observed_getenv_path() -> Result<string, string> {
     getenv("PATH")
 }
-"#,
-    );
-    assert!(
-        result.is_ok(),
-        "getenv(\"PATH\") should succeed: {:?}",
-        result
-    );
-    let val = result.unwrap();
-    match &val {
-        interp::Value::Variant(tag, items) if tag == "Ok" && items.len() == 1 => match &items[0] {
-            interp::Value::String(s) => assert!(!s.is_empty(), "PATH should not be empty"),
-            _ => panic!("expected Ok(string), got Ok({:?})", items[0]),
-        },
-        _ => panic!("expected Ok(string), got {:?}", val),
+func main() -> i32 {
+    match observed_getenv_path() {
+        Ok(path) => if len(path) > 0 { 0 } else { 1 },
+        Err(_) => 2,
     }
+}
+"#;
+    assert_eq!(
+        run_source(src),
+        interp::Value::Int(0),
+        "getenv(\"PATH\") should return a non-empty Ok(string)"
+    );
 }
 
 #[test]
 fn builtin_getenv_missing() {
     let src = r#"
-func main() -> string {
+func observed_getenv_missing() -> Result<string, string> {
     getenv("MIMI_NONEXISTENT_VAR_ZZZ")
 }
+func main() -> i32 {
+    match observed_getenv_missing() {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
 "#;
-    let v = run_source(src);
-    assert!(
-        matches!(&v, interp::Value::Variant(tag, items) if tag == "Err"),
-        "missing env var should return Err, got {:?}",
-        v
-    );
+    assert_eq!(run_source(src), interp::Value::Int(0));
 }
 
 #[test]
@@ -610,14 +710,16 @@ func main() -> i32 {
 #[test]
 fn builtin_type_name_int() {
     let src = r#"
-func main() -> string {
+func observed_type_name_int() -> string {
     type_name(42)
 }
+func main() -> i32 {
+    if observed_type_name_int() == "i32" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
     assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new("i32".into())),
+        run_source(src),
+        interp::Value::Int(0),
         "type_name(42) should return i32"
     );
 }
@@ -625,14 +727,16 @@ func main() -> string {
 #[test]
 fn builtin_type_name_string() {
     let src = r#"
-func main() -> string {
+func observed_type_name_string() -> string {
     type_name("hello")
 }
+func main() -> i32 {
+    if observed_type_name_string() == "string" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
     assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new("string".into())),
+        run_source(src),
+        interp::Value::Int(0),
         "type_name(\"hello\") should return string"
     );
 }
@@ -640,14 +744,16 @@ func main() -> string {
 #[test]
 fn builtin_type_name_bool() {
     let src = r#"
-func main() -> string {
+func observed_type_name_bool() -> string {
     type_name(true)
 }
+func main() -> i32 {
+    if observed_type_name_bool() == "bool" { 0 } else { 1 }
+}
 "#;
-    let v = run_source(src);
     assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new("bool".into())),
+        run_source(src),
+        interp::Value::Int(0),
         "type_name(true) should return bool"
     );
 }

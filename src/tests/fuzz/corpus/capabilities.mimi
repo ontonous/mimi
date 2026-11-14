@@ -2,4 +2,8 @@ cap FileReadCap
 func read_file(path: string) -> string @FileReadCap {
     path
 }
-func main() -> string { read_file("test.txt") }
+func capability_result() -> string { read_file("test.txt") }
+func main() -> i32 {
+    let content = capability_result();
+    if content == "" { 1 } else { 0 }
+}

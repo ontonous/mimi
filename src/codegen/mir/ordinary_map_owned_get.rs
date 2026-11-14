@@ -428,6 +428,191 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
     }
 
+    fn emit_ordinary_map_owned_get_capacity_result(
+        &mut self,
+        result: &MirValueId,
+        status: inkwell::values::IntValue<'ctx>,
+        out_root: inkwell::values::PointerValue<'ctx>,
+        source: Option<&MirValueId>,
+        capacity_status: u64,
+        operation: &str,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let result_ty = self.value_type(result, subject)?;
+        if result_ty
+            != crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map owned-Get ResultBranchV3 operation has a noncanonical Result TypeDesc",
+            ));
+        }
+        let catalog = self.program.type_catalog();
+        let result_llvm_ty = native_basic_type(self.generator.context, catalog, &result_ty)?;
+        let result_slot = self
+            .generator
+            .builder
+            .build_alloca(result_llvm_ty, "mir_owned_get_capacity_result_slot")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let ok_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_owned_get_capacity_ok");
+        let non_ok_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_owned_get_capacity_non_ok");
+        let err_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_owned_get_capacity_err");
+        let invalid_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_owned_get_capacity_invalid");
+        let merge_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_owned_get_capacity_merge");
+        let is_ok = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.generator.context.i32_type().const_zero(),
+                "mir_owned_get_capacity_is_ok",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_conditional_branch(is_ok, ok_block, non_ok_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        let ok_id = crate::core::NodeId("builtin:variant:Result::Ok".into());
+        let err_id = crate::core::NodeId("builtin:variant:Result::Err".into());
+        let root_ty = crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id();
+        let i32_ty =
+            self.ordinary_map_owned_get_primitive_type(crate::core::PrimitiveType::I32, subject)?;
+
+        self.generator.builder.position_at_end(ok_block);
+        let handle = self
+            .generator
+            .builder
+            .build_load(
+                self.generator.context.i64_type(),
+                out_root,
+                "mir_owned_get_capacity_root",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let root = if let Some(source) = source {
+            self.emit_ordinary_map_owned_get_result_root(handle, source, subject, operation)?
+        } else {
+            let nonzero = self
+                .generator
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    handle,
+                    self.generator.context.i64_type().const_zero(),
+                    "mir_owned_get_capacity_root_nonzero",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_ordinary_map_owned_get_root_guard(
+                nonzero,
+                "[E0800] ordinary Map owned-Get NewResult returned an invalid root",
+                subject,
+            )?;
+            handle.into()
+        };
+        let ok = self
+            .ordinary_map_owned_get_result_variant(&result_ty, &ok_id, root, &root_ty, subject)?;
+        self.generator
+            .builder
+            .build_store(result_slot, ok)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(non_ok_block);
+        let expected_capacity = self
+            .generator
+            .context
+            .i32_type()
+            .const_int(capacity_status, false);
+        let is_capacity = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                expected_capacity,
+                "mir_owned_get_capacity_is_expected_failure",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_conditional_branch(is_capacity, err_block, invalid_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(err_block);
+        let error_root = self
+            .generator
+            .builder
+            .build_load(
+                self.generator.context.i64_type(),
+                out_root,
+                "mir_owned_get_capacity_error_root",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
+        let error_root_is_zero = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                error_root,
+                self.generator.context.i64_type().const_zero(),
+                "mir_owned_get_capacity_error_root_is_zero",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_owned_get_root_guard(
+            error_root_is_zero,
+            "[E0800] ordinary Map owned-Get recoverable failure published a root",
+            subject,
+        )?;
+        let err = self.ordinary_map_owned_get_result_variant(
+            &result_ty,
+            &err_id,
+            status.into(),
+            &i32_ty,
+            subject,
+        )?;
+        self.generator
+            .builder
+            .build_store(result_slot, err)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(invalid_block);
+        self.emit_abort_with_message(
+            "[E0800] ordinary Map owned-Get ResultBranchV3 returned an invalid status",
+            subject,
+        )?;
+
+        self.generator.builder.position_at_end(merge_block);
+        self.generator
+            .builder
+            .build_load(result_llvm_ty, result_slot, "mir_owned_get_capacity_result")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))
+    }
+
     fn emit_ordinary_map_owned_get_result_root(
         &mut self,
         handle: inkwell::values::IntValue<'ctx>,
@@ -506,6 +691,47 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             subject,
         )?;
         Ok(handle.into())
+    }
+
+    pub(super) fn emit_ordinary_map_owned_get_new_result(
+        &mut self,
+        result: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let out_root = self
+            .generator
+            .builder
+            .build_alloca(
+                self.generator.context.i64_type(),
+                "mir_owned_get_new_result_root",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(out_root, self.generator.context.i64_type().const_zero())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let new_fn = self
+            .generator
+            .get_runtime_fn(&format!("{OWNED_GET_PREFIX}new_result"))
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    new_fn,
+                    &[BasicMetadataValueEnum::from(out_root)],
+                    "mir_owned_get_new_result_status",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| {
+            NativeMirError::new(subject, "ordinary Map owned-Get NewResult returned void")
+        })?
+        .into_int_value();
+        self.emit_ordinary_map_owned_get_capacity_result(
+            result, status, out_root, None, 3, "New", subject,
+        )
     }
 
     pub(super) fn emit_ordinary_map_owned_get_clone(
@@ -605,6 +831,103 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         .ok_or_else(|| NativeMirError::new(subject, "ordinary Map owned-Get Set returned void"))?
         .into_int_value();
         self.emit_ordinary_map_owned_get_result_root(updated, source, subject, "Set")
+    }
+
+    pub(super) fn emit_ordinary_map_owned_get_set_result(
+        &mut self,
+        result: &MirValueId,
+        source: &MirValueId,
+        key: &MirValueId,
+        value: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let source_handle = self.emit_live_ordinary_map_owned_get_root(source, subject)?;
+        let (key_data, key_len) =
+            self.ordinary_map_owned_get_string_parts(key, "SetResult key", subject)?;
+        let value_ty = self.value_type(value, subject)?;
+        let value_desc = self.program.type_catalog().get(&value_ty).ok_or_else(|| {
+            NativeMirError::new(
+                subject,
+                "ordinary Map owned-Get SetResult value TypeDesc is absent",
+            )
+        })?;
+        let is_i32 = value_desc.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32);
+        let is_string =
+            value_desc.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::String);
+        let (function_suffix, value_arguments) = if is_i32 {
+            self.program
+                .type_catalog()
+                .validate_copy_scalar(&value_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            (
+                "set_i32_result",
+                vec![BasicMetadataValueEnum::from(
+                    self.value(value, subject)?.into_int_value(),
+                )],
+            )
+        } else if is_string {
+            self.program
+                .type_catalog()
+                .validate_owned_string(&value_ty)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let (value_data, value_len) =
+                self.ordinary_map_owned_get_string_parts(value, "SetResult value", subject)?;
+            (
+                "set_string_result",
+                vec![
+                    BasicMetadataValueEnum::from(value_data),
+                    BasicMetadataValueEnum::from(value_len),
+                ],
+            )
+        } else {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map owned-Get SetResult payload is outside its i32/String profile",
+            ));
+        };
+        let out_root = self
+            .generator
+            .builder
+            .build_alloca(
+                self.generator.context.i64_type(),
+                "mir_owned_get_set_result_root",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_store(out_root, self.generator.context.i64_type().const_zero())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let mut arguments = vec![
+            BasicMetadataValueEnum::from(source_handle),
+            BasicMetadataValueEnum::from(key_data),
+            BasicMetadataValueEnum::from(key_len),
+        ];
+        arguments.extend(value_arguments);
+        arguments.push(BasicMetadataValueEnum::from(out_root));
+        let set_fn = self
+            .generator
+            .get_runtime_fn(&format!("{OWNED_GET_PREFIX}{function_suffix}"))
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let status = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(set_fn, &arguments, "mir_owned_get_set_result_status")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| {
+            NativeMirError::new(subject, "ordinary Map owned-Get SetResult returned void")
+        })?
+        .into_int_value();
+        self.emit_ordinary_map_owned_get_capacity_result(
+            result,
+            status,
+            out_root,
+            Some(source),
+            2,
+            "Set",
+            subject,
+        )
     }
 
     pub(super) fn emit_ordinary_map_owned_get_remove(

@@ -258,7 +258,15 @@ fn span_columns(span: &Span) -> String {
 
 /// Format a simple legacy error message (without full span/source info).
 pub fn format_simple_error(message: &str) -> String {
-    format!("{}error{}: {}", colors::RED, colors::RESET, message)
+    format_simple_error_with_color(message, colors_enabled())
+}
+
+fn format_simple_error_with_color(message: &str, use_color: bool) -> String {
+    if use_color {
+        format!("{}error{}: {}", colors::RED, colors::RESET, message)
+    } else {
+        format!("error: {}", message)
+    }
 }
 
 /// Format a parse error with span information.
@@ -300,11 +308,26 @@ pub fn strip_ansi(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_diagnostic, format_diagnostic_with_registry, strip_ansi};
+    use super::{
+        format_diagnostic, format_diagnostic_with_registry, format_simple_error_with_color,
+        strip_ansi,
+    };
     use crate::diagnostic::codes::{MIR_ROUTE_MANIFEST_ERROR_CODE, MIR_ROUTE_RECEIPT_ERROR_CODE};
     use crate::diagnostic::Diagnostic;
     use crate::span::{SourceKey, SourceRecord, SourceRegistry, SourceTextOrigin, Span};
     use std::fs;
+
+    #[test]
+    fn simple_error_formatter_has_an_exact_plain_text_mode() {
+        assert_eq!(
+            format_simple_error_with_color("type checking failed", false),
+            "error: type checking failed"
+        );
+        assert_eq!(
+            format_simple_error_with_color("type checking failed", true),
+            "\x1b[31merror\x1b[0m: type checking failed"
+        );
+    }
 
     #[test]
     fn registry_formatter_routes_primary_and_note_sources() {

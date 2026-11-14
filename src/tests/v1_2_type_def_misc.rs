@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 #[test]
 fn comptime_block_basic() {
     let src = r#"
@@ -16,15 +17,22 @@ func main() -> i32 {
 #[test]
 fn comptime_block_with_string() {
     let src = r#"
-func main() -> string {
+func comptime_string_value() -> string {
     comptime {
         "hello"
     }
 }
+
+func main() -> i32 {
+    let _value = comptime_string_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
+        bytecode_call_named(src, "comptime_string_value", vec![]),
+        Ok(interp::Value::String(SharedString::new(
+            "hello".to_string()
+        )))
     );
 }
 
@@ -46,56 +54,78 @@ func main() -> i32 {
 #[test]
 fn type_of_int() {
     let src = r#"
-func main() -> string {
+func type_of_int_value() -> string {
     let x = 42;
     type_name(x)
 }
+
+func main() -> i32 {
+    let _value = type_of_int_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("i32".to_string())))
+        bytecode_call_named(src, "type_of_int_value", vec![]),
+        Ok(interp::Value::String(SharedString::new("i32".to_string())))
     );
 }
 
 #[test]
 fn type_of_bool() {
     let src = r#"
-func main() -> string {
+func type_of_bool_value() -> string {
     let x = true;
     type_name(x)
 }
+
+func main() -> i32 {
+    let _value = type_of_bool_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("bool".to_string())))
+        bytecode_call_named(src, "type_of_bool_value", vec![]),
+        Ok(interp::Value::String(SharedString::new("bool".to_string())))
     );
 }
 
 #[test]
 fn type_of_string() {
     let src = r#"
-func main() -> string {
+func type_of_string_value() -> string {
     let x = "hello";
     type_name(x)
 }
+
+func main() -> i32 {
+    let _value = type_of_string_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("string".to_string())))
+        bytecode_call_named(src, "type_of_string_value", vec![]),
+        Ok(interp::Value::String(SharedString::new(
+            "string".to_string()
+        )))
     );
 }
 
 #[test]
 fn type_of_list() {
     let src = r#"
-func main() -> string {
+func type_of_list_value() -> string {
     let x = [1, 2, 3];
     type_name(x)
 }
+
+func main() -> i32 {
+    let _value = type_of_list_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("list".to_string())))
+        bytecode_call_named(src, "type_of_list_value", vec![]),
+        Ok(interp::Value::String(SharedString::new("list".to_string())))
     );
 }
 
@@ -104,14 +134,19 @@ fn type_of_variant() {
     let src = r#"
 type Color { Red | Green | Blue }
 
-func main() -> string {
+func type_of_variant_value() -> string {
     let x = Red();
     type_name(x)
 }
+
+func main() -> i32 {
+    let _value = type_of_variant_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("Red".to_string())))
+        bytecode_call_named(src, "type_of_variant_value", vec![]),
+        Ok(interp::Value::String(SharedString::new("Red".to_string())))
     );
 }
 
@@ -123,14 +158,21 @@ type Point {
     y: i32
 }
 
-func main() -> string {
+func type_of_record_value() -> string {
     let p = Point { x: 1, y: 2 };
     type_name(p)
 }
+
+func main() -> i32 {
+    let _value = type_of_record_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("Point".to_string())))
+        bytecode_call_named(src, "type_of_record_value", vec![]),
+        Ok(interp::Value::String(SharedString::new(
+            "Point".to_string()
+        )))
     );
 }
 
@@ -196,16 +238,21 @@ func main() -> i32 {
 #[test]
 fn comptime_func_with_type_of() {
     let src = r#"
-func main() -> string {
+func comptime_type_name_value() -> string {
     comptime {
         let x = 42;
         type_name(x)
     }
 }
+
+func main() -> i32 {
+    let _value = comptime_type_name_value()
+    0
+}
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("i32".to_string())))
+        bytecode_call_named(src, "comptime_type_name_value", vec![]),
+        Ok(interp::Value::String(SharedString::new("i32".to_string())))
     );
 }
 
@@ -250,12 +297,16 @@ comptime func half() -> f64 {
     0.5
 }
 
-func main() -> f64 {
+func comptime_half_value() -> f64 {
     half()
+}
+func main() -> i32 {
+    let _value = comptime_half_value()
+    0
 }
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
+        bytecode_call_named(src, "comptime_half_value", vec![]),
         Ok(interp::Value::Float(0.5))
     );
 }
@@ -316,13 +367,19 @@ comptime func greeting() -> string {
     "hello"
 }
 
-func main() -> string {
+func comptime_greeting_value() -> string {
     greeting()
+}
+func main() -> i32 {
+    let _value = comptime_greeting_value()
+    0
 }
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
+        bytecode_call_named(src, "comptime_greeting_value", vec![]),
+        Ok(interp::Value::String(SharedString::new(
+            "hello".to_string()
+        )))
     );
 }
 

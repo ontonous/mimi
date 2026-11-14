@@ -15,7 +15,6 @@ use super::types::{MirAbiClass, MirBuiltinKind, MirTypeCatalog, MirTypeKind};
 use super::{MirFunction, MirInstructionKind, MirTerminator};
 
 pub const MIR_ACTOR_STATUS_ABI_SCHEMA: &str = "mimi-mir-actor-status-abi-v1";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MirActorNativeCallableAbi {
     Ordinary,
@@ -48,7 +47,7 @@ impl MirActorExecutionPlan {
         let mut errors = Vec::new();
         let worker_roots = actors
             .iter()
-            .flat_map(|(_, actor)| actor.methods.iter().map(|method| method.owner.clone()))
+            .flat_map(|(_, actor)| actor.methods.iter().map(|method| method.body_owner.clone()))
             .collect::<BTreeSet<_>>();
         if worker_roots.is_empty() {
             return Err(vec![
@@ -57,10 +56,10 @@ impl MirActorExecutionPlan {
         }
         for (_, actor) in actors.iter() {
             for method in &actor.methods {
-                let Some(function) = functions.get(&method.owner) else {
+                let Some(function) = functions.get(&method.body_owner) else {
                     errors.push(format!(
-                        "Actor method '{}' is absent from the executable MIR table",
-                        method.owner.0
+                        "Actor body '{}' is absent from the executable MIR table",
+                        method.body_owner.0
                     ));
                     continue;
                 };
@@ -72,7 +71,7 @@ impl MirActorExecutionPlan {
                 if function.parameters.first() != Some(&method.self_value)
                     || parameter_types != method.execution_parameter_types
                     || function.parameters.len() != method.execution_parameter_types.len()
-                    || function.result != method.result_type
+                    || function.result != method.execution_result_type
                     || function
                         .parameter_permissions
                         .as_ref()
@@ -81,7 +80,7 @@ impl MirActorExecutionPlan {
                                 || permissions.iter().any(Option::is_some)
                         })
                 {
-                    errors.push(format!("Actor method '{}' internal receiver/parameter/result ABI disagrees with its checker contract", method.owner.0));
+                    errors.push(format!("Actor body '{}' internal receiver/parameter/result ABI disagrees with its checker contract", method.body_owner.0));
                 }
             }
         }
@@ -92,6 +91,11 @@ impl MirActorExecutionPlan {
         for owner in &tagged {
             let Some(function) = functions.get(owner) else {
                 continue;
+            };
+            let root_flow_state_values = if owner == root {
+                checked_flow_state_values(function, actors, root)
+            } else {
+                BTreeSet::new()
             };
             if let Err(validation) = function.validate() {
                 errors.extend(validation.into_iter().map(|error| error.to_string()));
@@ -124,7 +128,9 @@ impl MirActorExecutionPlan {
                     continue;
                 };
                 let is_method_receiver = actors.method(owner).is_some_and(|(actor, method)| {
-                    parameter == &method.self_value && value.ty == actor.state_type
+                    method.flow_transition.is_none()
+                        && parameter == &method.self_value
+                        && value.ty == actor.state_type
                 });
                 if !is_method_receiver && !is_i32(types, &value.ty) {
                     errors.push(format!(
@@ -145,8 +151,11 @@ impl MirActorExecutionPlan {
                     && (is_i32(types, &value.ty)
                         || matches!(descriptor.abi, MirAbiClass::Bool | MirAbiClass::Unit))
                     || actors.method(owner).is_some_and(|(actor, method)| {
-                        identity == &method.self_value && value.ty == actor.state_type
+                        method.flow_transition.is_none()
+                            && identity == &method.self_value
+                            && value.ty == actor.state_type
                     })
+                    || root_flow_state_values.contains(identity)
                     || owner == root && matches!(descriptor.kind, MirTypeKind::ActorHandle { .. });
                 if !admitted {
                     errors.push(format!(
@@ -158,7 +167,15 @@ impl MirActorExecutionPlan {
             }
             for block in function.blocks.values() {
                 for instruction in &block.instructions {
-                    scalar_instruction_types(function, instruction, types, functions, &mut errors);
+                    scalar_instruction_types(
+                        function,
+                        instruction,
+                        actors,
+                        &root_flow_state_values,
+                        types,
+                        functions,
+                        &mut errors,
+                    );
                     match &instruction.kind {
                         MirInstructionKind::Actor { operation } => {
                             let allowed = match operation {
@@ -182,6 +199,7 @@ impl MirActorExecutionPlan {
                         }
                         MirInstructionKind::Const { .. }
                         | MirInstructionKind::Load { .. }
+                        | MirInstructionKind::Project { .. }
                         | MirInstructionKind::Move { .. }
                         | MirInstructionKind::Clone { .. }
                         | MirInstructionKind::Drop { .. }
@@ -291,9 +309,78 @@ impl MirActorExecutionPlan {
     }
 }
 
+fn checked_flow_state_values(
+    function: &MirFunction,
+    actors: &MirActorCatalog,
+    root: &NodeId,
+) -> BTreeSet<super::MirValueId> {
+    if &function.owner != root {
+        return BTreeSet::new();
+    }
+    let mut values = BTreeSet::new();
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        if let MirInstructionKind::Actor {
+            operation:
+                MirActorOperation::Call {
+                    result,
+                    actor,
+                    method,
+                    ..
+                },
+        } = &instruction.kind
+        {
+            if actors
+                .get(actor)
+                .and_then(|contract| {
+                    contract
+                        .methods
+                        .iter()
+                        .find(|entry| &entry.owner == method && entry.flow_transition.is_some())
+                        .and(contract.flow.as_ref())
+                })
+                .is_some_and(|flow| {
+                    function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == flow.root_state_type)
+                })
+            {
+                values.insert(result.clone());
+            }
+        }
+    }
+    loop {
+        let before = values.len();
+        for instruction in function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+        {
+            if let MirInstructionKind::Move { result, source } = &instruction.kind {
+                if values.contains(source)
+                    && function.values.get(result).map(|value| &value.ty)
+                        == function.values.get(source).map(|value| &value.ty)
+                {
+                    values.insert(result.clone());
+                }
+            }
+        }
+        if values.len() == before {
+            break;
+        }
+    }
+    values
+}
+
 fn scalar_instruction_types(
     function: &MirFunction,
     instruction: &super::MirInstruction,
+    actors: &MirActorCatalog,
+    root_flow_state_values: &BTreeSet<super::MirValueId>,
     types: &MirTypeCatalog,
     functions: &BTreeMap<NodeId, MirFunction>,
     errors: &mut Vec<String>,
@@ -313,8 +400,16 @@ fn scalar_instruction_types(
             ResolvedLiteral::Unit => primitive(result, crate::core::PrimitiveType::Unit),
             _ => false,
         },
+        MirInstructionKind::Move { result, source } => {
+            ty(result).is_some()
+                && ty(result) == ty(source)
+                && (ty(result)
+                    .and_then(|ty| types.get(ty))
+                    .is_some_and(|desc| desc.has_canonical_copy_noop_metadata())
+                    || root_flow_state_values.contains(result)
+                        && root_flow_state_values.contains(source))
+        }
         MirInstructionKind::Copy { result, source }
-        | MirInstructionKind::Move { result, source }
         | MirInstructionKind::Clone { result, source } => {
             ty(result).is_some()
                 && ty(result) == ty(source)
@@ -396,6 +491,16 @@ fn scalar_instruction_types(
                     _ => false,
                 }
         }
+        MirInstructionKind::Project {
+            result,
+            base,
+            projection: super::MirProjection::Field(field),
+            list_index_contract: None,
+        } => {
+            root_flow_state_values.contains(base)
+                && flow_payload_type_for_projection(actors, ty(base), field, ty(result), types)
+        }
+        MirInstructionKind::Drop { value } => root_flow_state_values.contains(value),
         MirInstructionKind::Actor { .. } | MirInstructionKind::Nop => true,
         _ => false,
     };
@@ -405,6 +510,29 @@ fn scalar_instruction_types(
             instruction.id.as_str()
         ));
     }
+}
+
+fn flow_payload_type_for_projection(
+    actors: &MirActorCatalog,
+    base: Option<&crate::core::ir::ResolvedTypeId>,
+    field: &NodeId,
+    result: Option<&crate::core::ir::ResolvedTypeId>,
+    types: &MirTypeCatalog,
+) -> bool {
+    let Some(base) = base else {
+        return false;
+    };
+    actors.iter().any(|(_, actor)| {
+        actor.flow.as_ref().is_some_and(|flow| {
+            &flow.root_state_type == base
+                && flow.payload.as_slice().first().is_some_and(|payload| {
+                    flow.payload.len() == 1
+                        && &payload.field == field
+                        && result == Some(&payload.ty)
+                        && is_i32(types, &payload.ty)
+                })
+        })
+    })
 }
 
 fn is_i32(types: &MirTypeCatalog, ty: &crate::core::ir::ResolvedTypeId) -> bool {

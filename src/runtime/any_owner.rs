@@ -12,6 +12,7 @@
 //! their actual `(tag, type-id, hash, size, align)` and glue are pinned by the
 //! V2 payload descriptor registry. No second token table is permitted.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 const ANY_CLASS_TAG: u32 = 1 << 31;
@@ -187,9 +188,10 @@ struct Slot {
 }
 
 struct Registry {
-    current_descriptors: [Arc<DescriptorVersion>; 2],
+    current_descriptors: Option<[Arc<DescriptorVersion>; 2]>,
     slots: Vec<Slot>,
     max_slots: u32,
+    shutting_down: bool,
 }
 
 impl Registry {
@@ -202,7 +204,7 @@ impl Registry {
             return Err(AnyOwnerError::Capacity);
         }
         Ok(Self {
-            current_descriptors: [
+            current_descriptors: Some([
                 Arc::new(DescriptorVersion::new(
                     AnyOwnerKind::I32,
                     DESCRIPTOR_V1,
@@ -215,17 +217,29 @@ impl Registry {
                     Arc::new(clone_owned_string),
                     Arc::new(drop_payload),
                 )),
-            ],
+            ]),
             slots: Vec::new(),
             max_slots,
+            shutting_down: false,
         })
     }
 
-    fn current_descriptor(&self, kind: AnyOwnerKind) -> &Arc<DescriptorVersion> {
-        &self.current_descriptors[kind.descriptor_index().expect("V2 has no v1 descriptor")]
+    fn current_descriptor(
+        &self,
+        kind: AnyOwnerKind,
+    ) -> Result<&Arc<DescriptorVersion>, AnyOwnerError> {
+        self.current_descriptors
+            .as_ref()
+            .map(|descriptors| {
+                &descriptors[kind.descriptor_index().expect("V2 has no v1 descriptor")]
+            })
+            .ok_or(AnyOwnerError::Capacity)
     }
 
     fn allocate(&mut self, owner: Arc<StoredOwner>) -> Result<AnyOwnerToken, AnyOwnerError> {
+        if self.shutting_down {
+            return Err(AnyOwnerError::Capacity);
+        }
         let descriptor = &owner.descriptor;
         let payload = owner.payload();
         if descriptor.identity.version == 0 || descriptor.identity.kind != payload.kind() {
@@ -319,13 +333,16 @@ impl Registry {
         let Some(index) = descriptor.identity.kind.descriptor_index() else {
             return Err(AnyOwnerError::DescriptorMismatch);
         };
+        let Some(current_descriptors) = self.current_descriptors.as_mut() else {
+            return Err(AnyOwnerError::Capacity);
+        };
         if descriptor.identity.version == 0
-            || descriptor.identity.version <= self.current_descriptors[index].identity.version
+            || descriptor.identity.version <= current_descriptors[index].identity.version
         {
             return Err(AnyOwnerError::DescriptorMismatch);
         }
         Ok(std::mem::replace(
-            &mut self.current_descriptors[index],
+            &mut current_descriptors[index],
             descriptor,
         ))
     }
@@ -384,16 +401,27 @@ fn map_managed_v2_error(
     }
 }
 
-fn managed_v2_descriptor() -> Arc<DescriptorVersion> {
-    static DESCRIPTOR: OnceLock<Arc<DescriptorVersion>> = OnceLock::new();
-    Arc::clone(DESCRIPTOR.get_or_init(|| {
+static MANAGED_V2_DESCRIPTOR: Mutex<Option<Arc<DescriptorVersion>>> = Mutex::new(None);
+static RUNTIME_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+fn managed_v2_descriptor() -> Result<Arc<DescriptorVersion>, AnyOwnerError> {
+    if RUNTIME_SHUTDOWN.load(Ordering::Acquire) {
+        return Err(AnyOwnerError::Capacity);
+    }
+    let mut descriptor = MANAGED_V2_DESCRIPTOR
+        .lock()
+        .map_err(|_| AnyOwnerError::Poisoned)?;
+    if RUNTIME_SHUTDOWN.load(Ordering::Acquire) {
+        return Err(AnyOwnerError::Capacity);
+    }
+    Ok(Arc::clone(descriptor.get_or_insert_with(|| {
         Arc::new(DescriptorVersion::new(
             AnyOwnerKind::ManagedV2,
             super::managed_any_payload_v2::MANAGED_ANY_PAYLOAD_V2_VERSION,
             Arc::new(clone_managed_v2),
             Arc::new(drop_payload),
         ))
-    }))
+    })))
 }
 
 fn drop_payload(payload: AnyOwnerPayload) {
@@ -414,6 +442,44 @@ fn owner_registry() -> &'static Mutex<Registry> {
     OWNER_REGISTRY.get_or_init(|| Mutex::new(Registry::new()))
 }
 
+/// Close the process-wide owner registry at native shutdown. Existing live
+/// owners retain their slots and descriptor glue, so an incomplete Mimi
+/// ownership path remains visible to Memcheck. Empty tables release only
+/// their runtime bookkeeping after future allocations have been rejected.
+pub(crate) fn shutdown_empty_registry_at_exit() -> bool {
+    // Initialize through OnceLock rather than using `get()`: if first use is
+    // racing shutdown, `get_or_init` waits for it and gives this callback the
+    // same registry mutex used by every allocation. That makes closure and
+    // allocation a serialized decision instead of leaving an initialized
+    // descriptor table behind an empty OnceLock observation.
+    let table = owner_registry();
+    let mut registry = match table.lock() {
+        Ok(registry) => registry,
+        Err(_) => return false,
+    };
+
+    // Publish shutdown while holding the allocation lock. An allocation that
+    // wins the lock first remains live and visible below; one that follows
+    // observes `shutting_down` in Registry::allocate and fails closed.
+    RUNTIME_SHUTDOWN.store(true, Ordering::Release);
+    registry.shutting_down = true;
+    if registry.slots.iter().any(|slot| slot.owner.is_some()) {
+        return false;
+    }
+    let slots_to_drop = std::mem::take(&mut registry.slots);
+    let descriptors_to_drop = registry.current_descriptors.take();
+    drop(registry);
+
+    let managed_descriptor_to_drop = match MANAGED_V2_DESCRIPTOR.lock() {
+        Ok(mut descriptor) => descriptor.take(),
+        Err(_) => return false,
+    };
+    drop(slots_to_drop);
+    drop(descriptors_to_drop);
+    drop(managed_descriptor_to_drop);
+    true
+}
+
 fn lock_registry(table: &Mutex<Registry>) -> Result<MutexGuard<'_, Registry>, AnyOwnerError> {
     table.lock().map_err(|_| AnyOwnerError::Poisoned)
 }
@@ -424,7 +490,7 @@ fn allocate_payload_on(
     payload: AnyOwnerPayload,
 ) -> Result<AnyOwnerToken, AnyOwnerError> {
     let mut registry = lock_registry(table)?;
-    let descriptor = Arc::clone(registry.current_descriptor(kind));
+    let descriptor = Arc::clone(registry.current_descriptor(kind)?);
     let owner = Arc::new(StoredOwner {
         descriptor,
         payload: Some(payload),
@@ -475,7 +541,7 @@ fn allocate_managed_v2_on(
     payload: super::managed_any_payload_v2::ManagedAnyPayloadV2,
 ) -> Result<AnyOwnerToken, AnyOwnerError> {
     let owner = Arc::new(StoredOwner {
-        descriptor: managed_v2_descriptor(),
+        descriptor: managed_v2_descriptor()?,
         payload: Some(AnyOwnerPayload::ManagedV2(payload)),
     });
     let result = {
@@ -941,12 +1007,12 @@ pub(crate) fn string_payload_pointer_for_test(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "ordinary-map-set-result-l3"))]
 pub(crate) fn live_count() -> Result<usize, AnyOwnerError> {
     live_count_on(owner_registry())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "ordinary-map-set-result-l3"))]
 fn live_count_on(table: &Mutex<Registry>) -> Result<usize, AnyOwnerError> {
     let registry = lock_registry(table)?;
     Ok(registry
@@ -1023,7 +1089,7 @@ mod tests {
     ) -> crate::runtime::managed_any_payload_v2::ManagedAnyPayloadV2 {
         use crate::runtime::managed_any_payload_v2::{
             ManagedAnyPayloadV2, ManagedAnyPayloadV2Glue, ManagedAnyPayloadV2Identity,
-            ManagedAnyPayloadV2Tag, ManagedAnyPayloadV2TypeId,
+            ManagedAnyPayloadV2TypeId,
         };
         let identity = ManagedAnyPayloadV2Identity {
             tag,
@@ -1644,24 +1710,25 @@ mod receipt_v1_tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let dropped_in_glue = Arc::clone(&dropped);
         let weak = Arc::downgrade(&table);
-        table.lock().unwrap().current_descriptors[1] = Arc::new(DescriptorVersion::new(
-            AnyOwnerKind::OwnedString,
-            1,
-            Arc::new(move |payload| {
-                let live = weak.upgrade().unwrap();
-                assert!(
-                    live.try_lock().is_ok(),
-                    "clone glue executes after the receipt acquire unlocks"
-                );
-                entered_tx.send(()).unwrap();
-                resume_rx.lock().unwrap().recv().unwrap();
-                clone_owned_string(payload)
-            }),
-            Arc::new(move |payload| {
-                dropped_in_glue.fetch_add(1, Ordering::SeqCst);
-                drop(payload);
-            }),
-        ));
+        table.lock().unwrap().current_descriptors.as_mut().unwrap()[1] =
+            Arc::new(DescriptorVersion::new(
+                AnyOwnerKind::OwnedString,
+                1,
+                Arc::new(move |payload| {
+                    let live = weak.upgrade().unwrap();
+                    assert!(
+                        live.try_lock().is_ok(),
+                        "clone glue executes after the receipt acquire unlocks"
+                    );
+                    entered_tx.send(()).unwrap();
+                    resume_rx.lock().unwrap().recv().unwrap();
+                    clone_owned_string(payload)
+                }),
+                Arc::new(move |payload| {
+                    dropped_in_glue.fetch_add(1, Ordering::SeqCst);
+                    drop(payload);
+                }),
+            ));
         let token = allocate_string_on(&table, "snapshot\0雪").unwrap();
         let descriptor = descriptor_identity_on(&table, token).unwrap();
         let worker_table = Arc::clone(&table);

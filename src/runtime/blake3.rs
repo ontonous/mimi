@@ -52,8 +52,8 @@ fn compress_pre(
     flags: u8,
 ) -> [u32; 16] {
     let mut msg = [0u32; 16];
-    for (word, bytes) in msg.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (word, &bytes) in msg.iter_mut().zip(block.as_chunks::<4>().0) {
+        *word = u32::from_le_bytes(bytes);
     }
     let mut state = [
         cv[0],

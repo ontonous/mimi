@@ -307,13 +307,25 @@ pub(super) fn analyze_canonical(
         ordinary_map_owner_lifecycle_v1_actions: Vec::new(),
         ordinary_map_owner_lifecycle_v1_new_attempts: BTreeSet::new(),
         ordinary_map_owner_lifecycle_v1_operation_attempts: BTreeSet::new(),
+        ordinary_map_owner_observer_v1_attempts: BTreeSet::new(),
+        ordinary_map_owner_observer_v1_receipts: Vec::new(),
         ordinary_map_owned_get_i32_string_v1_actions: Vec::new(),
         ordinary_map_owned_get_i32_string_v1_new_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_operation_attempts: BTreeSet::new(),
         ordinary_map_owned_get_i32_string_v1_cfg_receipt: None,
+        ordinary_map_owned_get_any_tuple_result_v1_receipt: None,
         ordinary_map_owned_any_v2_actions: Vec::new(),
         ordinary_map_owned_any_v2_operation_attempts: BTreeSet::new(),
         ordinary_map_owned_any_v2_cfg_receipt: None,
+        ordinary_map_owned_any_v2_new_result_receipt: None,
+        ordinary_map_owned_any_v2_set_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_string_lineage_receipt: None,
+        ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt: None,
+        ordinary_map_owned_any_v2_direct_print_result_receipt: None,
+        ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt: None,
+        ordinary_map_owned_any_v2_set_get_string_lineage_receipt: None,
         managed_any_cfg_receipt: None,
         in_states: in_flow
             .into_iter()
@@ -1260,9 +1272,11 @@ func main() -> i32 { 0 }
             })
             .map(|action| action.resource.clone())
             .expect("typed token resource identity");
-        assert!(analysis.out_states.values().any(|state| state
-            .get(&token)
-            .is_some_and(|fact| { fact.availability == Availability::Consumed })));
+        assert!(analysis.out_states.values().any(|state| {
+            state
+                .get(&token)
+                .is_some_and(|fact| fact.availability == Availability::Consumed)
+        }));
         assert!(analysis.actions.iter().all(|action| {
             program
                 .callable_cfg(&owner)

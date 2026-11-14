@@ -8,8 +8,8 @@
 use super::*;
 
 /// 正集：`token_id(make_token())` 连续取两两不同的唯一 id（VM + native）。
-/// 注意：进程内单调计数器跨测试共享（VM static / native static），故不断言
-/// 具体值，只断言三值两两不同（程序自检打印 distinct）。
+/// 注意：进程内注册表跨测试共享，句柄值是不透明身份；故不断言具体值，
+/// 只断言三值两两不同（程序自检打印 distinct）。
 #[test]
 fn phase_d_make_token_globally_unique_dual() {
     let src = r#"

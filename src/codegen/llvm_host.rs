@@ -153,12 +153,57 @@ mod tests {
         type Increment = unsafe extern "C" fn(i32) -> i32;
         // SAFETY: The verified IR function matches Increment, the engine remains
         // alive during the call, and its function body only adds one to 42.
-        let actual = unsafe {
+        let increment = unsafe {
             engine
                 .get_function::<Increment>("increment")
                 .expect("JIT function exists")
-                .call(42)
         };
+        crate::codegen::assert_execution_engine_linked(&engine, "calling the host increment JIT");
+        // SAFETY: `increment` has the checked i32(i32) ABI.
+        let actual = unsafe { increment.call(42) };
         assert_eq!(actual, 43);
+    }
+
+    #[test]
+    fn llvm18_mcjit_reports_unresolved_external_before_native_call() {
+        let context = Context::create();
+        let module = context.create_module("llvm18_host_jit_missing_external");
+        let builder = context.create_builder();
+        let i32_type = context.i32_type();
+        let missing = module.add_function(
+            "mimi_mir_test_deliberately_unresolved_import_0_1_11",
+            i32_type.fn_type(&[], false),
+            None,
+        );
+        let main = module.add_function("main", i32_type.fn_type(&[], false), None);
+        let entry = context.append_basic_block(main, "entry");
+        builder.position_at_end(entry);
+        let call = builder
+            .build_call(missing, &[], "missing")
+            .expect("valid external call");
+        let value = call
+            .try_as_basic_value()
+            .basic()
+            .expect("i32 external result");
+        builder
+            .build_return(Some(&value.into_int_value()))
+            .expect("valid main return");
+        module
+            .verify()
+            .expect("the unresolved-symbol fixture must still be valid LLVM IR");
+
+        let engine = module
+            .create_jit_execution_engine(OptimizationLevel::None)
+            .expect("create MCJIT engine for unresolved-symbol probe");
+        assert!(
+            engine.get_function_address("main").is_ok(),
+            "MCJIT can expose the entry address even when an external relocation fails"
+        );
+        let message = crate::codegen::check_execution_engine_linked(&engine)
+            .expect_err("checked lookup must reject unresolved relocations before native call");
+        assert!(
+            message.contains("mimi_mir_test_deliberately_unresolved_import_0_1_11"),
+            "the unresolved symbol must be identified: {message}"
+        );
     }
 }

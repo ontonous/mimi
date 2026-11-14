@@ -112,37 +112,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }))
     }
 
-    /// I-H13: compile a nested `func` statement.
-    /// - No free vars: standalone LLVM function (existing dual_nested_func path).
-    /// - With free vars: lambda-style closure bound as a local of type `Func`.
-    pub(in crate::codegen) fn compile_nested_func_stmt(
-        &mut self,
-        f: &FuncDef,
-        vars: &mut HashMap<String, VarEntry<'ctx>>,
-    ) -> Result<(), CompileError> {
-        let mut param_names: std::collections::HashSet<String> =
-            f.params.iter().map(|p| p.name.clone()).collect();
-        param_names.insert(f.name.clone());
-        let mut free_vars = BTreeMap::new();
-        self.collect_free_vars(&f.body, &param_names, vars, &mut free_vars);
-
-        // Ordinary nested declarations are admitted only through the
-        // checker-owned canonical MIR receipt.  The LLVM compatibility owner
-        // must never synthesize a standalone function or closure here: if the
-        // route gate missed a shape, fail closed before any legacy body is
-        // emitted.  Captures, branch-local declarations and every other
-        // unsupported nested shape share this diagnostic.
-        let shape = if free_vars.is_empty() {
-            "capture-free nested callable"
-        } else {
-            "capturing nested callable"
-        };
-        Err(CompileError::Unsupported(format!(
-            "MIR-COVERAGE-001: {shape} '{}' requires the canonical scalar nested-callable route",
-            f.name
-        )))
-    }
-
     /// Load captured variables from the env struct into the lambda's local scope.
     fn load_captured_vars(
         &self,

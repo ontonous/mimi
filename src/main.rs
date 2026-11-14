@@ -42,8 +42,12 @@ mod list;
 mod lsp_cmd;
 #[path = "main/mir_cmd.rs"]
 mod mir_cmd;
+#[path = "main/module.rs"]
+mod module;
 #[path = "main/publish.rs"]
 mod publish;
+#[path = "main/query.rs"]
+mod query_cmd;
 #[path = "main/remove.rs"]
 mod remove;
 #[path = "main/run.rs"]
@@ -176,6 +180,16 @@ enum Command {
         /// Emit a deterministic route receipt manifest instead of MIR text
         #[arg(long)]
         receipt: bool,
+    },
+    /// Inspect stable module identities, public interfaces, and dependency edges
+    Module {
+        path: Option<PathBuf>,
+        /// Print public ABI/interface summaries for every loaded module
+        #[arg(long)]
+        interface: bool,
+        /// Print dependency edges only
+        #[arg(long)]
+        deps: bool,
     },
     /// Disassemble a .mimi file to bytecode (debugging)
     Disasm {
@@ -351,6 +365,16 @@ enum Command {
         #[command(subcommand)]
         action: WireAction,
     },
+    /// Query checker/MIR semantic facts as versioned JSON
+    Query {
+        #[command(subcommand)]
+        action: query_cmd::QueryAction,
+    },
+    /// Explain canonical cost facts as versioned JSON
+    Cost {
+        #[command(subcommand)]
+        action: query_cmd::CostAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -524,7 +548,14 @@ fn main() -> std::process::ExitCode {
                 // Return through Rust's normal shutdown so solver/thread-local
                 // state created by canonical preflight is released as well.
                 Ok(code) => return std::process::ExitCode::from(code as u8),
-                Err(e) => Err(e),
+                Err(run::RunError::Ordinary(message)) => Err(message),
+                Err(run::RunError::Trap(error)) => {
+                    // Write the existing typed context directly. No owned
+                    // String/Diagnostic is constructed at this handoff. A
+                    // failed stderr write still terminates with failure.
+                    let _ = write_terminal_trap(&mut std::io::stderr().lock(), &error);
+                    return std::process::ExitCode::FAILURE;
+                }
             }
         }
         Command::Test {
@@ -561,6 +592,11 @@ fn main() -> std::process::ExitCode {
             fail_on_warnings,
         } => lint_cmd::lint_files(&files, fail_on_warnings),
         Command::Mir { path, all, receipt } => mir_cmd::mir(path.as_deref(), all, receipt),
+        Command::Module {
+            path,
+            interface,
+            deps,
+        } => module::run(path.as_deref(), interface, deps),
         Command::Disasm { file } => disasm_cmd::disasm_file(&file),
         Command::Verify {
             path,
@@ -640,12 +676,21 @@ fn main() -> std::process::ExitCode {
         Command::Search { query } => search::search(&query),
         Command::Abi { action } => abi::run(action),
         Command::Wire { action } => wire::run(action),
+        Command::Query { action } => query_cmd::run(action),
+        Command::Cost { action } => query_cmd::run_cost(action),
     };
     if let Err(e) = result {
         eprintln!("{}", format_cli_error(&e));
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
+}
+
+fn write_terminal_trap(
+    output: &mut impl std::io::Write,
+    error: &mimi::interp::InterpError,
+) -> std::io::Result<()> {
+    writeln!(output, "{error}")
 }
 
 /// Preserve registered MIR route identity when a command returns a textual
@@ -686,6 +731,37 @@ fn format_cli_error(message: &str) -> String {
 mod tests {
     use super::format_cli_error;
     use mimi::diagnostic::format::strip_ansi;
+
+    #[test]
+    fn terminal_trap_writer_streams_existing_context_without_cli_error_formatting() {
+        struct FixedWriter {
+            bytes: [u8; 256],
+            length: usize,
+        }
+        impl std::io::Write for FixedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let available = self.bytes.len() - self.length;
+                let count = available.min(bytes.len());
+                self.bytes[self.length..self.length + count].copy_from_slice(&bytes[..count]);
+                self.length += count;
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let error = mimi::interp::InterpError::new("allocation failed")
+            .with_call_stack(vec!["caller".into(), "callee".into()]);
+        let mut output = FixedWriter {
+            bytes: [0; 256],
+            length: 0,
+        };
+        super::write_terminal_trap(&mut output, &error).expect("fixed-capacity trap write");
+        assert_eq!(
+            &output.bytes[..output.length],
+            "[E0800] allocation failed | call stack: caller → callee\n".as_bytes()
+        );
+    }
 
     #[test]
     fn cli_route_errors_keep_structured_code_at_top_level() {

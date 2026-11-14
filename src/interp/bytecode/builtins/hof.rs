@@ -78,7 +78,7 @@ pub(crate) fn builtin_filter_list(
         _ => {
             return Err(InterpError::new(
                 "filter_list: first argument must be a list",
-            ))
+            ));
         }
     };
     let closure = &args[1];
@@ -101,7 +101,7 @@ pub(crate) fn builtin_reduce_list(
         _ => {
             return Err(InterpError::new(
                 "reduce_list: first argument must be a list",
-            ))
+            ));
         }
     };
     let closure = &args[1];

@@ -695,7 +695,7 @@ impl ResolvedTypeTable {
             Type::TyErr => {
                 return Err(ResolvedTypeError::ResidualInference(
                     "TyErr poison type cannot be interned",
-                ))
+                ));
             }
             Type::Name(name, arguments) if name == "_" || name == "unknown" => {
                 return Err(ResolvedTypeError::ResidualInference("Unknown"));

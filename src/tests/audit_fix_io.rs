@@ -1,15 +1,16 @@
 //! Wave-1 audit-fix regression tests — io.
 //! Findings: devdocs/full-audit-2026-08-05.md §8 (2026-08-05 full audit).
 //! Discipline: each fix must carry a regression test here; L1 divergences
-//! assert BOTH sides (VM via run_source*/bytecode helpers, codegen via
-//! compile_and_run). Owned emitter: src/codegen/builtins/io.rs.
+//! assert BOTH sides (VM via run_source*/bytecode helpers, native via
+//! the relevant checked or explicit legacy test adapter). Owned emitter:
+//! src/codegen/builtins/io.rs.
 use super::*;
 
 /// Local exec harness. The shared `compile_and_run` discards stdout on
 /// non-zero exits and cannot control stdin; several Wave-1 io fixes need
 /// exactly that (assert traps with observable stdout, input() with a known
-/// stdin). Mirrors `link_and_run_module` in tests/mod.rs using the same
-/// pub(crate) building blocks (compile_only + cached_runtime_lib + cc).
+/// stdin). Mirrors `link_and_run_module` in tests/mod.rs using the explicit
+/// legacy object adapter, cached runtime library, and `cc`.
 fn io_compile_link_exec(
     src: &str,
     stdin_bytes: Option<&[u8]>,
@@ -20,7 +21,7 @@ fn io_compile_link_exec(
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let obj = compile_only(src)?;
+    let obj = checked_codegen_compile_to_object_for_test(src)?;
     let runtime_lib = cached_runtime_lib()?;
     let tmp_dir = std::env::temp_dir().join(format!("mimi_io_fix_{}_{}", std::process::id(), n));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
@@ -102,9 +103,10 @@ func main() -> i32 {
     );
     assert!(vm_stdout.contains("OUT_MARKER_732"));
 
-    // Codegen: compile_and_run returns the binary's STDOUT only. Before the
-    // fix, eprintln emitted printf(...) → the marker leaked into stdout.
-    let cg_stdout = compile_and_run(src).expect("codegen eprintln run failed");
+    // Legacy-emitter smoke test: the explicit test adapter returns the binary's
+    // STDOUT only. Before the fix, eprintln emitted printf(...) → the marker leaked.
+    let cg_stdout =
+        checked_codegen_compile_and_run(src).expect("legacy codegen eprintln run failed");
     assert!(
         !cg_stdout.contains("E_MARKER_731"),
         "codegen stdout must NOT contain the eprintln marker: {:?}",
@@ -622,7 +624,9 @@ func main() -> i32 {
 }
 "#;
     let (_vm_val, vm_stdout) = run_source_with_stdout(src);
-    let cg_stdout = compile_and_run(src).expect("codegen float println run failed");
+    // Literal-only scalar f64 println is supported by the canonical route.
+    let cg_stdout =
+        checked_codegen_compile_and_run(src).expect("checked production float println run failed");
     // %g printed "1.23457e+08" (6 sig digits); Rust `{}` prints the full
     // shortest round-trip digits.
     assert!(

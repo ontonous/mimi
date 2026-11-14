@@ -6,11 +6,89 @@
 //! or compatibility Actor emitter participates in this path.
 
 use super::*;
-use crate::core::mir::MirActorContract;
 use crate::core::mir::MirActorOperation;
+use crate::core::mir::{MirActorContract, MirActorMethodContract};
 use crate::core::NodeId;
 use inkwell::types::StructType;
 use inkwell::values::{IntValue, PointerValue};
+
+fn validate_flow_result_contract<'a>(
+    program: &'a MirProgram,
+    actor: &'a MirActorContract,
+    method: &'a MirActorMethodContract,
+    result_type: &crate::core::ResolvedTypeId,
+    subject: &str,
+) -> Result<
+    (
+        &'a crate::core::ir::ResolvedActorFlowDescriptor,
+        &'a crate::core::ir::ResolvedActorFlowPayloadDescriptor,
+    ),
+    NativeMirError,
+> {
+    let flow = actor
+        .flow
+        .as_ref()
+        .ok_or_else(|| NativeMirError::new(subject, "Flow Actor has no checked Flow receipt"))?;
+    let transition = method.flow_transition.as_ref().ok_or_else(|| {
+        NativeMirError::new(
+            subject,
+            "Actor method has no checked Flow transition receipt",
+        )
+    })?;
+    let [payload] = flow.payload.as_slice() else {
+        return Err(NativeMirError::new(
+            subject,
+            "Flow Actor state receipt is outside the one-field scalar profile",
+        ));
+    };
+    let descriptor = program
+        .type_catalog()
+        .get(result_type)
+        .ok_or_else(|| NativeMirError::new(subject, "Flow state result TypeDesc is absent"))?;
+    let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+        return Err(NativeMirError::new(
+            subject,
+            "Flow Actor result TypeDesc is not a nominal state record",
+        ));
+    };
+    let expected_nominal = crate::core::NominalTypeId::new(flow.root_state.0.clone())
+        .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let payload_type_ok = program.type_catalog().get(&payload.ty).is_some_and(|ty| {
+        ty.kind == MirTypeKind::Primitive(crate::core::PrimitiveType::I32)
+            && ty.layout == MirLayout::Scalar
+            && ty.abi
+                == (MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+            && ty.has_canonical_copy_noop_metadata()
+    });
+    if result_type != &flow.root_state_type
+        || method.result_type != flow.root_state_type
+        || method.execution_result_type != i32_type
+        || method.execution_parameter_types.first() != Some(&i32_type)
+        || transition.method_owner != method.owner
+        || transition.body_owner != method.body_owner
+        || !matches!(&descriptor.kind, MirTypeKind::Nominal)
+        || nominal != &expected_nominal
+        || !matches!(
+            fields.as_slice(),
+            [field] if field.id == payload.field && field.name == payload.name && field.ty == payload.ty
+        )
+        || !payload_type_ok
+        || !matches!(
+            actor.fields.as_slice(),
+            [field] if field.field == payload.field && field.index == 0 && field.ty == payload.ty
+        )
+    {
+        return Err(NativeMirError::new(
+            subject,
+            "Flow Actor transition/result differs from the checked root-state receipt",
+        ));
+    }
+    Ok((flow, payload))
+}
 
 pub(super) fn actor_state_layout<'ctx>(
     context: &'ctx Context,
@@ -144,6 +222,15 @@ pub(super) fn validate_actor_operation(
                         "Actor mailbox method does not belong to its manifest",
                     )
                 })?;
+            if target.flow_transition.is_some() {
+                validate_flow_result_contract(
+                    program,
+                    actor,
+                    target,
+                    value_type(result)?,
+                    subject,
+                )?;
+            }
             if function.owner != plan.root
                 || plan.worker_functions.contains(&function.owner)
                 || value_type(handle)? != &actor.handle_type
@@ -151,7 +238,10 @@ pub(super) fn validate_actor_operation(
                 || args.len() + 1 != target.execution_parameter_types.len()
                 || args.len() > 64
             {
-                return Err(NativeMirError::new(subject, "Actor mailbox owner, handle, payload or result ABI disagrees with its manifest"));
+                return Err(NativeMirError::new(
+                    subject,
+                    "Actor mailbox owner, handle, payload or result ABI disagrees with its manifest",
+                ));
             }
             for (argument, ty) in args
                 .iter()
@@ -479,7 +569,35 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
             self.generator.builder.position_at_end(execute);
             let payload_layout = context.struct_type(&vec![i32_ty.into(); count], false);
-            let mut arguments = vec![BasicMetadataValueEnum::PointerValue(fields)];
+            let mut arguments = if method.flow_transition.is_some() {
+                let flow = actor.flow.as_ref().ok_or_else(|| {
+                    NativeMirError::new(subject, "Flow Actor transition has no state receipt")
+                })?;
+                if flow.payload.len() != 1 || actor.fields.len() != 1 {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "Flow Actor transition is outside the exact one-field root-state profile",
+                    ));
+                }
+                let slot = self
+                    .generator
+                    .builder
+                    .build_struct_gep(
+                        actor_state_layout(context, actor),
+                        fields,
+                        0,
+                        "flow_root_state_slot",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                let receiver = self
+                    .generator
+                    .builder
+                    .build_load(i32_ty, slot, "flow_root_state_receiver")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                vec![BasicMetadataValueEnum::IntValue(receiver.into_int_value())]
+            } else {
+                vec![BasicMetadataValueEnum::PointerValue(fields)]
+            };
             for index in 0..count {
                 let slot = self
                     .generator
@@ -496,7 +614,7 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
             // Workers have no domain admission or cleanup authority. The
             // shared finite-turn plan forbids Spawn/Call throughout this graph.
             arguments.push(i64_ty.const_zero().into());
-            let target = *self.functions.get(&method.owner).ok_or_else(|| {
+            let target = *self.functions.get(&method.body_owner).ok_or_else(|| {
                 NativeMirError::new(subject, "Actor method tagged declaration is absent")
             })?;
             let call = self
@@ -540,6 +658,31 @@ impl<'a, 'ctx> NativeMirEmitter<'a, 'ctx> {
                 .builder
                 .build_extract_value(result, 1, "turn_value")
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            if method.flow_transition.is_some() {
+                let flow = actor.flow.as_ref().ok_or_else(|| {
+                    NativeMirError::new(subject, "Flow Actor transition has no state receipt")
+                })?;
+                if flow.payload.len() != 1 || actor.fields.len() != 1 {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "Flow Actor transition is outside the exact one-field root-state profile",
+                    ));
+                }
+                let slot = self
+                    .generator
+                    .builder
+                    .build_struct_gep(
+                        actor_state_layout(context, actor),
+                        fields,
+                        0,
+                        "flow_next_root_state_slot",
+                    )
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+                self.generator
+                    .builder
+                    .build_store(slot, value)
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            }
             self.generator
                 .builder
                 .build_store(result_out, value)
@@ -573,7 +716,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 args,
             } => {
                 let value = self.emit_actor_mailbox_call(actor, method, handle, args, subject)?;
-                self.values.insert(result.clone(), value.into());
+                let value = self.flow_state_result_value(actor, method, value, subject)?;
+                self.values.insert(result.clone(), value);
             }
             MirActorOperation::FieldLoad {
                 result,
@@ -806,6 +950,48 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .build_load(i32_ty, output, "actor_call_result")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))
             .map(|value| value.into_int_value())
+    }
+
+    fn flow_state_result_value(
+        &self,
+        actor_id: &NodeId,
+        method_id: &NodeId,
+        value: IntValue<'ctx>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let actor = self
+            .program
+            .actors()
+            .get(actor_id)
+            .ok_or_else(|| NativeMirError::new(subject, "Actor result manifest is absent"))?;
+        let method = actor
+            .methods
+            .iter()
+            .find(|method| &method.owner == method_id)
+            .ok_or_else(|| NativeMirError::new(subject, "Actor result method is absent"))?;
+        if method.flow_transition.is_none() {
+            return Ok(value.into());
+        }
+        let (flow, _) = validate_flow_result_contract(
+            self.program,
+            actor,
+            method,
+            &method.result_type,
+            subject,
+        )?;
+        let result_type = native_basic_type(
+            self.generator.context,
+            self.program.type_catalog(),
+            &flow.root_state_type,
+        )?
+        .into_struct_type();
+        let aggregate = self
+            .generator
+            .builder
+            .build_insert_value(result_type.get_undef(), value, 0, "flow_actor_state_result")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_struct_value();
+        Ok(aggregate.into())
     }
 
     pub(super) fn actor_runtime(

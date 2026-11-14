@@ -2,7 +2,7 @@ use super::super::call_try_basic_value;
 use super::super::CallSiteValueExt;
 use super::CodeGenerator;
 use crate::error::MimiResult;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{BasicMetadataTypeEnum, BasicTypeEnum};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum};
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -94,7 +94,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Phase D (0.39.75): 收 cap 的 env API——SystemToken 门禁在 args[1]
-    /// （运行时忽略），name 在 args[0]。复用 getenv 核心。
+    /// （runtime registry checks the concrete name），name 在 args[0]。
+    /// 复用 getenv 核心。
     pub(super) fn compile_get_env_guarded(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -104,6 +105,86 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "get_env_guarded expects 2 arguments (name, a SystemToken capability)".into(),
             );
         }
+        let name_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let token = match args[1] {
+            BasicMetadataValueEnum::IntValue(value) => value,
+            _ => return Err("get_env_guarded capability must be a SystemToken".into()),
+        };
+        let i32_ty = self.context.i32_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let check_fn = self
+            .module
+            .get_function("mimi_capability_check_env")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_capability_check_env",
+                    i32_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let check = self
+            .builder
+            .build_call(
+                check_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(token),
+                    BasicMetadataValueEnum::PointerValue(name_ptr),
+                ],
+                "get_env_capability_check",
+            )
+            .map_err(|error| format!("capability check error: {error}"))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| "capability check returned void".to_string())?
+            .into_int_value();
+        let denied = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                check,
+                i32_ty.const_zero(),
+                "get_env_capability_denied",
+            )
+            .map_err(|error| format!("capability compare error: {error}"))?;
+        let function = self
+            .current_function()
+            .ok_or_else(|| "get_env_guarded: no enclosing function".to_string())?;
+        let denied_bb = self
+            .context
+            .append_basic_block(function, "get_env_capability_denied_bb");
+        let allowed_bb = self
+            .context
+            .append_basic_block(function, "get_env_capability_allowed_bb");
+        self.builder
+            .build_conditional_branch(denied, denied_bb, allowed_bb)
+            .map_err(|error| format!("capability branch error: {error}"))?;
+        self.builder.position_at_end(denied_bb);
+        let abort_fn = self.get_or_declare_abort_fn();
+        let msg = self
+            .builder
+            .build_global_string_ptr(
+                "get_env_guarded: capability scope denied",
+                "get_env_capability_msg",
+            )
+            .map_err(|error| format!("global string error: {error}"))?;
+        self.builder
+            .build_call(
+                abort_fn,
+                &[inkwell::values::BasicMetadataValueEnum::PointerValue(
+                    msg.as_pointer_value(),
+                )],
+                "get_env_capability_abort",
+            )
+            .map_err(|error| format!("capability abort error: {error}"))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|error| format!("capability unreachable error: {error}"))?;
+        self.builder.position_at_end(allowed_bb);
         self.compile_getenv(&args[0..1])
     }
 

@@ -5,8 +5,15 @@
 //! imported here, and unsupported nodes fail closed instead of falling back to
 //! the legacy emitter.
 
+mod comptime;
 mod eligibility;
 mod types;
+
+#[cfg(test)]
+mod comptime_tests;
+
+#[cfg(test)]
+mod cast_tests;
 
 use std::collections::BTreeMap;
 
@@ -28,9 +35,11 @@ use crate::core::{
 use crate::diagnostic::Diagnostic;
 use crate::error::CompileError;
 
+#[cfg(test)]
+use self::eligibility::is_core_kernel_function;
 use self::eligibility::{
-    eligible_function_ids_with_stats, is_core_kernel_function, require_resolved_native_program,
-    DispatchStats, UnsupportedResolvedNode,
+    eligible_function_ids_with_stats, require_resolved_native_program, DispatchStats,
+    UnsupportedResolvedNode,
 };
 use self::types::{llvm_type_for_resolved, llvm_type_for_resolved_with};
 
@@ -45,21 +54,22 @@ pub(super) fn supports_resolved_native(program: &CheckedProgram) -> bool {
     require_resolved_native_program(program).is_ok()
 }
 
-/// The legacy compatibility remainder shares the erased-i64 ABI for Any and
-/// has no runtime tag check either. Keep its reachable body gate available to
-/// the public `compile_checked` entry so an eligibility fallback cannot
-/// silently emit DynamicAnyUnpack.
-pub(super) fn first_reachable_dynamic_any_unpack(
-    program: &CheckedProgram,
-) -> Option<(NodeId, NodeId)> {
-    eligibility::first_reachable_dynamic_any_unpack(program)
-}
-
 pub(super) fn first_reachable_dynamic_any_unpack_from_roots(
     program: &CheckedProgram,
     additional_roots: &std::collections::BTreeSet<NodeId>,
 ) -> Option<(NodeId, NodeId)> {
     eligibility::first_reachable_dynamic_any_unpack_from_roots(program, additional_roots)
+}
+
+pub(super) fn reachable_callable_ids_from_roots(
+    program: &CheckedProgram,
+    additional_roots: &std::collections::BTreeSet<NodeId>,
+) -> std::collections::BTreeSet<NodeId> {
+    eligibility::reachable_function_ids(program, additional_roots)
+}
+
+pub(super) fn is_std_maps_callable(program: &CheckedProgram, owner: &NodeId) -> bool {
+    eligibility::is_std_maps_callable(program, owner)
 }
 
 pub(super) fn dynamic_any_unpack_diagnostic(
@@ -181,6 +191,8 @@ enum TryInnerKind {
 struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     program: &'program CheckedProgram,
     generator: &'generator mut CodeGenerator<'ctx>,
+    comptime_values: comptime::ComptimeValues,
+    eligible_function_ids: std::collections::BTreeSet<NodeId>,
     loop_stack: Vec<LoopContext<'ctx>>,
     /// Per-callable place inputs (dynamic index expressions). Set before
     /// emitting each function body, cleared after.
@@ -198,14 +210,14 @@ struct NativeResolvedEmitter<'program, 'generator, 'ctx> {
     /// fault/exit(...) paths, discarded on normal return).
     defer_scopes: Vec<ResolvedBlock>,
     comp_scopes: Vec<ResolvedBlock>,
-    /// Historical generic-instance bookkeeping retained for the public subset
-    /// return shape. The canonical consumer below never populates this slot or
-    /// routes a resolved call through the legacy monomorphizer.
-    pending_generic_instances: Vec<(String, Vec<ResolvedTypeId>)>,
     /// Canonical generic instances compiled by the MIR adapter before this
     /// emitter starts. The key is checker-owned (template, concrete arguments);
     /// the resolved emitter never reconstructs an AST mangle.
     canonical_generic_instances: BTreeMap<(NodeId, Vec<ResolvedTypeId>), MirInstance>,
+}
+
+fn resolved_emission_success_event(qualified_name: &str) -> String {
+    format!("info: resolved emitter emitted '{qualified_name}'")
 }
 
 impl<'ctx> CodeGenerator<'ctx> {
@@ -231,17 +243,24 @@ impl<'ctx> CodeGenerator<'ctx> {
         let canonical_generic_instances = self
             .prepare_canonical_generic_instances(program, &eligible)
             .map_err(|error| vec![resolved_compile_diagnostic(program, error)])?;
+        let (comptime_values, comptime_error) = comptime::fold_comptime_items(program);
+        if let Some(error) = comptime_error {
+            eprintln!(
+                "warning: typed comptime folding failed ({error}); comptime values will be unavailable"
+            );
+        }
         NativeResolvedEmitter {
             program,
             generator: self,
+            comptime_values,
+            eligible_function_ids: eligible.clone(),
             loop_stack: Vec::new(),
             place_inputs: BTreeMap::new(),
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
-            pending_generic_instances: Vec::new(),
             canonical_generic_instances,
         }
-        .compile_program()
+        .compile_program(None)
         .map_err(|error| {
             let mut diagnostic = error.to_diagnostic();
             if let Some(span) = program.entry_span() {
@@ -251,11 +270,57 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    /// Test-only compatibility helper for compiling an explicitly selected
-    /// subset through the resolved emitter. The test harness may pair this
-    /// with its retained surface-AST fifth pass to exercise equivalence
-    /// cases; production `compile_checked` uses `compile_resolved_native`
-    /// and fails closed before any ineligible body can reach that pass.
+    /// Production path for a checker-proven dormant std::maps admission
+    /// signal. The strict public entry above still validates every body.
+    /// Native roots include main and C exports (all callables in shared mode),
+    /// and unknown dispatch expands the cohort conservatively to every body.
+    /// Eligibility and emission failures propagate without a legacy retry.
+    pub(super) fn compile_resolved_native_reachable(
+        &mut self,
+        program: &CheckedProgram,
+        native_roots: &std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        program.validate_backend(crate::core::BackendProfile::Native)?;
+        let cohort = eligibility::reachable_function_ids(program, native_roots);
+        eligibility::require_resolved_native_reachable_program(program, &cohort)
+            .map_err(|error| vec![unsupported_diagnostic(program, error)])?;
+        // TypeDesc construction is a whole-program generic capability gate.
+        // A cohort with no generic edge must not reintroduce the dormant Map
+        // bodies through that catalog. Actual generic callers keep the full
+        // strict materialization boundary and propagate its failures.
+        let canonical_generic_instances =
+            if eligibility::cohort_has_generic_function_call(program, &cohort) {
+                self.prepare_canonical_generic_instances(program, &cohort)
+                    .map_err(|error| vec![resolved_compile_diagnostic(program, error)])?
+            } else {
+                BTreeMap::new()
+            };
+        let (comptime_values, comptime_error) = comptime::fold_comptime_items(program);
+        if let Some(error) = comptime_error {
+            eprintln!(
+                "warning: typed comptime folding failed ({error}); comptime values will be unavailable"
+            );
+        }
+        NativeResolvedEmitter {
+            program,
+            generator: self,
+            comptime_values,
+            eligible_function_ids: cohort.clone(),
+            loop_stack: Vec::new(),
+            place_inputs: BTreeMap::new(),
+            defer_scopes: Vec::new(),
+            comp_scopes: Vec::new(),
+            canonical_generic_instances,
+        }
+        .compile_program(Some(&cohort))
+        .map_err(|error| vec![resolved_compile_diagnostic(program, error)])
+    }
+
+    /// Test-only helper for compiling an explicitly selected CheckedProgram
+    /// subset through resolved lowering. It does not admit or invoke a native
+    /// surface-AST body emitter; production `compile_checked` uses
+    /// `compile_resolved_native` and fails closed when the checked program is
+    /// outside the canonical native profile.
     #[cfg(test)]
     pub fn compile_resolved_subset(
         &mut self,
@@ -271,14 +336,16 @@ impl<'ctx> CodeGenerator<'ctx> {
         let canonical_generic_instances = self
             .prepare_canonical_generic_instances(program, eligible)
             .map_err(|error| vec![resolved_compile_diagnostic(program, error)])?;
+        let (comptime_values, _) = comptime::fold_comptime_items(program);
         NativeResolvedEmitter {
             program,
             generator: self,
+            comptime_values,
+            eligible_function_ids: eligible.clone(),
             loop_stack: Vec::new(),
             place_inputs: BTreeMap::new(),
             defer_scopes: Vec::new(),
             comp_scopes: Vec::new(),
-            pending_generic_instances: Vec::new(),
             canonical_generic_instances,
         }
         .compile_subset(eligible)
@@ -286,7 +353,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Materialize checker-owned generic MIR instances needed by resolved
-    /// callers before the AST emitter starts. The closed materializer admits
+    /// callers before the native resolved emitter starts. The closed materializer admits
     /// ScalarIdentity plus the current List/Set/record/tuple/variant families;
     /// every unsupported shape fails closed with MIR-COVERAGE-001/NITS rather
     /// than re-entering the legacy monomorphizer.
@@ -486,108 +553,6 @@ fn resolved_compile_diagnostic(program: &CheckedProgram, error: CompileError) ->
     diagnostic
 }
 
-/// Historical conversion helper retained for compatibility tooling. The
-/// resolved native generic consumer uses checker-owned MIR instance receipts
-/// and does not call this AST mangle path.
-fn resolved_type_args_to_ast(
-    generics: &[crate::ast::GenericParam],
-    type_args: &[crate::core::ResolvedTypeId],
-    table: &crate::core::ResolvedTypeTable,
-) -> std::collections::HashMap<String, crate::ast::Type> {
-    let mut map = std::collections::HashMap::new();
-    for (gp, tid) in generics.iter().zip(type_args.iter()) {
-        if let Some(rt) = table.get(tid) {
-            if let Some(ast_ty) = resolved_type_to_ast(rt, table) {
-                map.insert(gp.name.clone(), ast_ty);
-            }
-        }
-    }
-    map
-}
-
-/// Best-effort conversion of a resolved type to an AST type for monomorphization.
-pub(super) fn resolved_type_to_ast(
-    rt: &crate::core::ResolvedType,
-    table: &crate::core::ResolvedTypeTable,
-) -> Option<crate::ast::Type> {
-    use crate::core::ResolvedType::*;
-    match rt {
-        Primitive(p) => {
-            let name = match p {
-                crate::core::PrimitiveType::I8 => "i8",
-                crate::core::PrimitiveType::I16 => "i16",
-                crate::core::PrimitiveType::I32 => "i32",
-                crate::core::PrimitiveType::I64 => "i64",
-                crate::core::PrimitiveType::I128 => "i128",
-                crate::core::PrimitiveType::U8 => "u8",
-                crate::core::PrimitiveType::U16 => "u16",
-                crate::core::PrimitiveType::U32 => "u32",
-                crate::core::PrimitiveType::U64 => "u64",
-                crate::core::PrimitiveType::U128 => "u128",
-                crate::core::PrimitiveType::Isize => "isize",
-                crate::core::PrimitiveType::Usize => "usize",
-                crate::core::PrimitiveType::F32 => "f32",
-                crate::core::PrimitiveType::F64 => "f64",
-                crate::core::PrimitiveType::Bool => "bool",
-                crate::core::PrimitiveType::Char => "char",
-                crate::core::PrimitiveType::String => "string",
-                _ => return None,
-            };
-            Some(crate::ast::Type::Name(name.to_string(), vec![]))
-        }
-        Nominal {
-            item, arguments, ..
-        } => {
-            let item_str = item.as_str();
-            let name = item_str
-                .strip_prefix("type:")
-                .or_else(|| item_str.strip_prefix("builtin:type:"))
-                .unwrap_or(item_str);
-            let args: Vec<crate::ast::Type> = arguments
-                .iter()
-                .filter_map(|tid| table.get(tid).and_then(|t| resolved_type_to_ast(t, table)))
-                .collect();
-            Some(crate::ast::Type::Name(name.to_string(), args))
-        }
-        // 0.1.9 (bare-T return ABI, L1): monomorphized generic instances whose
-        // bare type parameter `T` is instantiated to a composite (tuple / Option
-        // / Result) must lower that composite into the legacy `type_map` so the
-        // instance's parameter and return layouts match the resolved caller.
-        // Without these arms `resolved_type_to_ast` returned `None` for the
-        // composite, leaving `type_map` empty and erasing the bare-T slot to the
-        // i64 skeleton — which then disagrees with the caller's real `{i64,i64}`
-        // (or `{i1, …}`) value and crashes codegen (E0700 / numeric-convert).
-        Tuple(elements) => {
-            let elems: Vec<crate::ast::Type> = elements
-                .iter()
-                .filter_map(|tid| table.get(tid).and_then(|t| resolved_type_to_ast(t, table)))
-                .collect();
-            if elems.len() == elements.len() {
-                Some(crate::ast::Type::Tuple(elems))
-            } else {
-                None
-            }
-        }
-        Option(payload) => table
-            .get(payload)
-            .and_then(|t| resolved_type_to_ast(t, table))
-            .map(|p| crate::ast::Type::Name("Option".to_string(), vec![p])),
-        Result { ok, error } => {
-            let ok_t = table.get(ok).and_then(|t| resolved_type_to_ast(t, table));
-            let err_t = table
-                .get(error)
-                .and_then(|t| resolved_type_to_ast(t, table));
-            match (ok_t, err_t) {
-                (Some(o), Some(e)) => {
-                    Some(crate::ast::Type::Name("Result".to_string(), vec![o, e]))
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 /// A3 compatibility gate over the A1 canonical ownership shape.
 ///
 /// `Set`/`Map` and the proven unsafe nested-list shapes remain fail-closed with
@@ -602,7 +567,10 @@ pub(crate) fn native_return_owns_unclaimed_heap(
 }
 
 impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ctx> {
-    fn compile_program(&mut self) -> Result<(), CompileError> {
+    fn compile_program(
+        &mut self,
+        cohort: Option<&std::collections::BTreeSet<NodeId>>,
+    ) -> Result<(), CompileError> {
         let mut functions: Vec<_> = self
             .program
             .functions()
@@ -612,6 +580,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             // emitting an unsubstituted generic callable here would recreate
             // the legacy ABI hole.
             .filter(|function| !function.is_comptime && function.generics.is_empty())
+            .filter(|function| cohort.is_none_or(|selected| selected.contains(&function.node_id)))
             .collect();
         functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
 
@@ -624,6 +593,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             })?;
             self.declare_callable(callable)?;
         }
+        let verbose = std::env::var("MIMI_VERBOSE").is_ok();
+        let mut emitted_successes = Vec::new();
         for function in functions {
             let callable = self.program.callable(&function.node_id).ok_or_else(|| {
                 CompileError::Unsupported(format!(
@@ -631,17 +602,111 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     function.node_id.0
                 ))
             })?;
-            self.emit_callable(callable)?;
+            let symbol = self.callable_symbol(&function.node_id)?;
+            if let Err(error) = self.emit_callable(callable) {
+                // `compile_program` is the canonical-only production path:
+                // unlike the test-only subset adapter, it never retries a
+                // failed body through the surface emitter. Keep the function
+                // declaration (other emitted callables may already refer to
+                // it), but remove every block emitted by this failed attempt
+                // so callers cannot retain an unterminated LLVM body.
+                if let Some(llvm_function) = self.generator.module.get_function(&symbol) {
+                    self.clear_partial_body(llvm_function);
+                }
+                return Err(error);
+            }
+            let llvm_function = self.generator.module.get_function(&symbol).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved callable '{}' has no LLVM function after body emission",
+                    function.node_id.0
+                ))
+            })?;
+            if llvm_function.count_basic_blocks() == 0 {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved callable '{}' has no LLVM body after emission",
+                    function.node_id.0
+                )));
+            }
+            if !llvm_function.verify(verbose) {
+                return Err(CompileError::LlvmError(format!(
+                    "resolved callable '{}' failed per-function LLVM verification",
+                    function.node_id.0
+                )));
+            }
+            if self.eligible_function_ids.contains(&function.node_id) {
+                emitted_successes.push(function.qualified_name.clone());
+            }
         }
+
+        // Canonical generic instances are emitted by the MIR adapter before
+        // this resolved-body loop. Check every materialized instance on its
+        // own and attribute a source-level success only to an eligible
+        // template that actually received at least one concrete body.
+        let mut verified_generic_templates = std::collections::BTreeSet::new();
+        for instance in self.canonical_generic_instances.values() {
+            let symbol = crate::codegen::mir::native_symbol_for_owner(&instance.function).map_err(
+                |error| {
+                    CompileError::Unsupported(format!(
+                        "resolved generic instance '{}' has no native LLVM symbol: {error}",
+                        instance.function.0
+                    ))
+                },
+            )?;
+            let llvm_function = self.generator.module.get_function(&symbol).ok_or_else(|| {
+                CompileError::Unsupported(format!(
+                    "resolved generic instance '{}' has no LLVM function after body emission",
+                    instance.function.0
+                ))
+            })?;
+            if llvm_function.count_basic_blocks() == 0 {
+                return Err(CompileError::Unsupported(format!(
+                    "resolved generic instance '{}' has no LLVM body after emission",
+                    instance.function.0
+                )));
+            }
+            if !llvm_function.verify(verbose) {
+                return Err(CompileError::LlvmError(format!(
+                    "resolved generic instance '{}' failed per-function LLVM verification",
+                    instance.function.0
+                )));
+            }
+            verified_generic_templates.insert(instance.template.clone());
+        }
+        for template in verified_generic_templates {
+            if !self.eligible_function_ids.contains(&template) {
+                continue;
+            }
+            if let Some(function) = self.program.functions().get(&template) {
+                emitted_successes.push(function.qualified_name.clone());
+            }
+        }
+
         self.generator.module.verify().map_err(|message| {
             CompileError::LlvmError(format!(
                 "resolved native module verification failed: {message}"
             ))
-        })
+        })?;
+        if verbose {
+            for qualified_name in &emitted_successes {
+                eprintln!("{}", resolved_emission_success_event(qualified_name));
+            }
+            let attempted_eligible = self.eligible_function_ids.len();
+            if attempted_eligible > 0 {
+                eprintln!(
+                    "info: resolved emitter compiled {}/{} function(s), 0 used native surface-AST emission",
+                    emitted_successes.len(),
+                    attempted_eligible
+                );
+            }
+        }
+        Ok(())
     }
 
-    /// Compile only the functions in the eligible set. Does NOT verify the
-    /// module (the legacy emitter will add remaining functions afterwards).
+    /// Test helper that compiles only functions in the selected set. It does
+    /// not verify the whole module: excluded callables may remain declarations,
+    /// and callers should verify the selected bodies or resulting module when
+    /// that is part of the assertion.
+    #[cfg(test)]
     fn compile_subset(
         &mut self,
         eligible: &std::collections::BTreeSet<NodeId>,
@@ -664,11 +729,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             })?;
             self.declare_callable(callable)?;
         }
-        // Emit eligible functions. If a function fails (e.g., calls an
-        // unimplemented builtin), skip it — the legacy emitter will handle it.
-        // The compile_func_legacy skip guard (count_basic_blocks != 0) ensures the
-        // legacy emitter won't re-emit successfully compiled functions.
-        // Set MIMI_VERBOSE=1 to see per-function fallback details.
+        // Emit eligible functions independently. A failed body is recorded and
+        // cleared below; this subset helper does not retry through a surface-AST
+        // emitter. Set MIMI_VERBOSE=1 to see per-function failures.
         let mut count = 0;
         let mut failed = 0;
         for function in functions {
@@ -681,9 +744,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             match self.emit_callable(callable) {
                 Ok(()) => {
                     // P1-4 fix: verify each emitted function individually.
-                    // compile_subset() cannot call module.verify() because the
-                    // legacy emitter will add remaining functions later. But
-                    // each function we emit must be valid LLVM IR on its own.
+                    // This helper may emit only a selected subset, so it checks
+                    // each body without assuming excluded callables have bodies.
                     let symbol = function.qualified_name.clone();
                     if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
                         let verbose = std::env::var("MIMI_VERBOSE").is_ok();
@@ -704,17 +766,14 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     eprintln!("  | {}", line);
                                 }
                             }
-                            // Track failed functions so the legacy emitter
-                            // can re-compile them (clearing the partial body
-                            // before re-emitting).
+                            // Keep the failed function visible to direct tests;
+                            // the partial body is cleared and no compatibility
+                            // retry is attempted.
                             self.generator
                                 .resolved_failed_functions
                                 .insert(symbol.clone());
-                            // 0.34.42: clear the partial body HERE. The legacy
-                            // skip guard is keyed on surface func.name which
-                            // can differ from the LLVM symbol (impl method
-                            // mangling); a leftover terminator-less stub
-                            // segfaults LLVM's pass pipeline.
+                            // Clear the partial body here so the subset module
+                            // has no unterminated LLVM function left behind.
                             self.clear_partial_body(llvm_fn);
                             if self
                                 .generator
@@ -722,7 +781,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 .contains_key(&function.node_id)
                             {
                                 return Err(CompileError::CanonicalMirCoverage(format!(
-                                    "MIR-COVERAGE-001/NITS: resolved impl method '{}' failed LLVM verification; refusing legacy body emission",
+                                    "MIR-COVERAGE-001/NITS: resolved impl method '{}' failed LLVM verification",
                                     function.node_id.0
                                 )));
                             }
@@ -748,9 +807,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                     // F-004 (0.40.1.8) / A3 E0723: a fail-closed ownership error
                     // (code E0723 — e.g. returning a closure that captures a heap
-                    // value) must NOT be silently downgraded to the legacy emitter;
-                    // that would re-emit broken IR that aliases freed heap. Escalate
-                    // it as a hard error instead of falling back.
+                    // value) must not be treated as a recoverable skipped body.
+                    // Escalate it as a hard error.
                     if e.code() == "E0723" {
                         let symbol = function.qualified_name.clone();
                         if let Some(llvm_fn) = self.generator.module.get_function(&symbol) {
@@ -768,14 +826,13 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             self.clear_partial_body(llvm_fn);
                         }
                         return Err(CompileError::CanonicalMirCoverage(format!(
-                            "MIR-COVERAGE-001/NITS: resolved impl method '{}' could not be lowered; refusing legacy body emission: {e}",
+                            "MIR-COVERAGE-001/NITS: resolved impl method '{}' could not be lowered: {e}",
                             function.node_id.0
                         )));
                     }
-                    // Function failed to emit through resolved path.
-                    // Record in failed set — the legacy emitter's skip check
-                    // will handle it by deleting the partial body and
-                    // re-compiling from scratch.
+                    // Function failed to emit through resolved lowering. Keep
+                    // the failure visible to the subset-test caller and clear
+                    // any partial body before continuing to the next callable.
                     let symbol = function.qualified_name.clone();
                     self.generator
                         .resolved_failed_functions
@@ -793,7 +850,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     }
                     if std::env::var("MIMI_VERBOSE").is_ok() {
                         eprintln!(
-                            "warning: resolved emitter fallback for '{}': {}",
+                            "warning: resolved emitter failed for '{}': {}",
                             function.qualified_name, e
                         );
                     }
@@ -803,24 +860,17 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
         if std::env::var("MIMI_VERBOSE").is_ok() && (count + failed) > 0 {
             eprintln!(
-                "info: resolved emitter compiled {}/{} function(s), {} fell back to legacy",
+                "info: resolved emitter compiled {}/{} function(s), {} failed emission",
                 count,
                 count + failed,
                 failed
             );
         }
-        Ok((count, std::mem::take(&mut self.pending_generic_instances)))
+        Ok((count, Vec::new()))
     }
 
-    /// 0.34.42: delete every basic block of a partially-emitted function,
-    /// restoring it to a pure declaration. Keeps the symbol alive (callers
-    /// compiled by the resolved emitter hold value references) while making
-    /// the body slot reusable by whichever emitter recompiles it. Mirrors the
-    /// clear loop in func.rs compile_func_legacy_inner.
-    /// 0.34.42: delete every basic block of a partially-emitted function,
-    /// restoring it to a pure declaration. Keeps the symbol alive (callers
-    /// compiled by the resolved emitter hold value references) while making
-    /// the body slot reusable by whichever emitter recompiles it.
+    /// Delete every basic block of a partially-emitted function, restoring it
+    /// to a pure declaration while keeping its symbol available to callers.
     ///
     /// 0.39.x matrix sweep: delegates to the shared three-pass teardown on
     /// CodeGenerator (valgrind-pinned: appearance-order deletion corrupted the
@@ -1062,7 +1112,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 return Err(CompileError::Unsupported(format!(
                     "resolved callable '{}' has unsupported LLVM result {other:?}",
                     callable.owner.0
-                )))
+                )));
             }
         };
         if self.generator.module.get_function(&symbol).is_none() {
@@ -1217,7 +1267,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 return Err(CompileError::Unsupported(format!(
                     "resolved callable '{}' has no value for its non-unit result",
                     callable.owner.0
-                )))
+                )));
             }
         };
         let value = self.coerce_to(value, result_type)?;
@@ -1498,7 +1548,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 return Err(CompileError::Unsupported(format!(
                     "contract condition is not boolean ({:?})",
                     other.get_type()
-                )))
+                )));
             }
         };
         let function = self
@@ -2330,7 +2380,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         return Err(CompileError::Unsupported(format!(
                             "resolved return '{}' has a conversion without a value",
                             statement.node_id.0
-                        )))
+                        )));
                     }
                 };
                 let function = self
@@ -3084,7 +3134,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         _ => {
                             return Err(CompileError::Unsupported(
                                 "flow-state constructor pattern bound to non-struct value".into(),
-                            ))
+                            ));
                         }
                     };
                     for (field_id, sub_pattern) in fields {
@@ -3249,7 +3299,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     _ => {
                         return Err(CompileError::Unsupported(
                             "record construction on non-struct nominal type".into(),
-                        ))
+                        ));
                     }
                 };
                 let alloca = self.generator.build_alloca(struct_ty, "record_alloc")?;
@@ -3408,7 +3458,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 }
                             }
                         }
-                        self.convert_list_elem_i64(elem_int, result_llvm_ty)
+                        self.convert_list_elem_i64_owned(elem_int, result_llvm_ty)
                     }
                     // 0.32.5: Field value projection for record rvalue access.
                     crate::core::ir::ResolvedValueProjection::Field(field_id) => {
@@ -3511,6 +3561,29 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             ResolvedExprKind::Spawn(value) => self.emit_spawn(value, frame),
             ResolvedExprKind::Await(value) => self.emit_await(value, &expression.ty, frame),
             ResolvedExprKind::Call(call) => {
+                if let ResolvedCallee::Function(owner) = &call.callee {
+                    if self
+                        .program
+                        .functions()
+                        .get(owner)
+                        .is_some_and(|function| function.is_comptime)
+                    {
+                        if !call.arguments.is_empty() {
+                            return Err(CompileError::Unsupported(format!(
+                                "comptime function calls are no-arg only; '{}' received {} arguments",
+                                owner.0,
+                                call.arguments.len()
+                            )));
+                        }
+                        let value = self.comptime_values.get(owner).ok_or_else(|| {
+                            CompileError::Unsupported(format!(
+                                "comptime function '{}' could not be folded",
+                                owner.0
+                            ))
+                        })?;
+                        return self.generator.value_to_llvm_const(value);
+                    }
+                }
                 // Generic calls in the resolved native slice are admitted only
                 // through a checker-receipted canonical MIR instance. The
                 // materializer covers ScalarIdentity and the current List/Set,
@@ -3566,6 +3639,46 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 if !scalar_identity_call {
                                     return Err(CompileError::Unsupported(format!(
                                         "MIR-COVERAGE-001/NITS: canonical ScalarIdentity instance receipt disagrees with generic call '{}'",
+                                        callee_fn.qualified_name
+                                    )));
+                                }
+                            }
+                            if let MirGenericInstanceContract::ScalarArgumentProjection {
+                                parameter_index,
+                                parameter_count,
+                            } = &instance.contract
+                            {
+                                let projection_call =
+                                    self.program.callable(owner).is_some_and(|callable| {
+                                        crate::core::mir::scalar_generic_argument_projection(
+                                            self.program,
+                                            callable,
+                                        ) == Some((*parameter_index, *parameter_count))
+                                    }) && call.type_arguments.len() == 1
+                                        && matches!(
+                                            call.type_arguments.first().and_then(|argument| {
+                                                self.program.resolved_types().get(argument)
+                                            }),
+                                            Some(ResolvedType::Primitive(
+                                                PrimitiveType::I32 | PrimitiveType::I64
+                                            ))
+                                        )
+                                        && call.result == call.type_arguments[0]
+                                        && call.arguments.len() == *parameter_count as usize
+                                        && call.arguments.iter().all(|argument| {
+                                            argument.value.ty == call.type_arguments[0]
+                                                && argument.conversion.kind
+                                                    == CheckedConversionKind::Identity
+                                                && argument.conversion.from
+                                                    == call.type_arguments[0]
+                                                && argument.conversion.to == call.type_arguments[0]
+                                        })
+                                        && call.permission.is_none()
+                                        && call.effects.is_empty()
+                                        && call.session.is_empty();
+                                if !projection_call {
+                                    return Err(CompileError::Unsupported(format!(
+                                        "MIR-COVERAGE-001/NITS: canonical argument projection instance receipt disagrees with generic call '{}'",
                                         callee_fn.qualified_name
                                     )));
                                 }
@@ -4121,7 +4234,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         return Err(CompileError::Unsupported(
                                             "resolved read_lines_each: unsupported argument kind"
                                                 .into(),
-                                        ))
+                                        ));
                                     }
                                 }
                             }
@@ -4255,7 +4368,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "Option/Result method on non-struct receiver".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let disc = self
@@ -4299,7 +4412,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "unwrap_or on non-struct receiver".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let disc = self
@@ -4364,7 +4477,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "unwrap on non-struct receiver".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let disc = self
@@ -4451,7 +4564,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "Option map on non-struct receiver".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             // Option.map_err on an Option is a no-op pass-through.
@@ -4464,7 +4577,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "Option map closure must be a closure struct".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let disc = self
@@ -4508,7 +4621,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     _ => {
                                         return Err(CompileError::Unsupported(
                                             "Option map: result type not an Option".into(),
-                                        ))
+                                        ));
                                     }
                                 }
                             };
@@ -4805,7 +4918,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "Result map/map_err on non-struct receiver".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let f_val = self.emit_expr(&call.arguments[1].value, frame)?;
@@ -4815,7 +4928,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     return Err(CompileError::Unsupported(
                                         "Result map/map_err closure must be a closure struct"
                                             .into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let disc = self
@@ -4867,7 +4980,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         return Err(CompileError::Unsupported(
                                             "Result map/map_err closure type is not a Function"
                                                 .into(),
-                                        ))
+                                        ));
                                     }
                                 };
                             let arg_slot_llvm = self.lower_type(&arg_ty)?;
@@ -5159,7 +5272,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "Result map/map_err result type is not a struct".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             let phi_slot = self
@@ -5507,7 +5620,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                     _ => {
                                         return Err(CompileError::Unsupported(
                                             "resolved from_json requires a string argument".into(),
-                                        ))
+                                        ));
                                     }
                                 };
                                 return self.generator.compile_from_json_raw(&ty, raw_ptr);
@@ -5842,7 +5955,25 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 then_block,
                 else_block,
             } => self.emit_if(expression, condition, then_block, else_block, frame, false),
-            ResolvedExprKind::Block(block) | ResolvedExprKind::Comptime(block) => {
+            ResolvedExprKind::Comptime(block) => {
+                let body = &self
+                    .program
+                    .callable(&frame.owner)
+                    .ok_or_else(|| {
+                        CompileError::Unsupported(format!(
+                            "resolved callable '{}' is absent for comptime block",
+                            frame.owner.0
+                        ))
+                    })?
+                    .body;
+                let mut folder =
+                    comptime::TypedComptimeFolder::new(self.program, &self.comptime_values);
+                let value = folder.eval_comptime_block(body, block).map_err(|error| {
+                    CompileError::Generic(format!("comptime block fold failed: {error}"))
+                })?;
+                self.generator.value_to_llvm_const(&value)
+            }
+            ResolvedExprKind::Block(block) => {
                 // A nested block expression: emit inline and return its value.
                 let value = self.emit_block(
                     &self
@@ -6144,7 +6275,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 return Err(CompileError::Unsupported(
                                     "f-string bool interpolation did not lower to an integer"
                                         .into(),
-                                ))
+                                ));
                             }
                         };
                         let true_g = self
@@ -6198,7 +6329,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             _ => {
                                 return Err(CompileError::Unsupported(
                                     "f-string float interpolation did not lower to a float".into(),
-                                ))
+                                ));
                             }
                         };
                         let fv64 = if fv.get_type().get_bit_width() == 32 {
@@ -6266,31 +6397,21 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 total_size = self
                                     .generator
                                     .builder
-                                    .build_int_add(
-                                        total_size,
-                                        len,
-                                        &format!("fstr_isz_{}", i),
-                                    )
+                                    .build_int_add(total_size, len, &format!("fstr_isz_{}", i))
                                     .map_err(|e| {
                                         CompileError::LlvmError(format!("add error: {e}"))
                                     })?;
-                                compiled_parts.push(CompiledPart::Interp {
-                                    ptr: data_ptr,
-                                    len,
-                                });
+                                compiled_parts.push(CompiledPart::Interp { ptr: data_ptr, len });
                             }
                             // Raw C-string pointer: length only recoverable via
                             // strlen (length-carrying strings travel as structs).
                             BasicValueEnum::PointerValue(pv) => {
-                                let len = self.call_strlen(strlen_fn, pv, &format!("fstr_strlen_{}", i))?;
+                                let len =
+                                    self.call_strlen(strlen_fn, pv, &format!("fstr_strlen_{}", i))?;
                                 total_size = self
                                     .generator
                                     .builder
-                                    .build_int_add(
-                                        total_size,
-                                        len,
-                                        &format!("fstr_isz_{}", i),
-                                    )
+                                    .build_int_add(total_size, len, &format!("fstr_isz_{}", i))
                                     .map_err(|e| {
                                         CompileError::LlvmError(format!("add error: {e}"))
                                     })?;
@@ -6300,7 +6421,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 return Err(CompileError::Unsupported(format!(
                                     "f-string string interpolation did not lower to a string value in part {}",
                                     i
-                                )))
+                                )));
                             }
                         }
                     } else {
@@ -6313,7 +6434,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 return Err(CompileError::Unsupported(format!(
                                     "f-string interpolation of type '{}' is not supported",
                                     expr.ty.as_str()
-                                )))
+                                )));
                             }
                         };
                         let bw = iv.get_type().get_bit_width();
@@ -6679,7 +6800,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(
                                         "constructor match on non-struct scrutinee".into(),
-                                    ))
+                                    ));
                                 }
                             };
                             // Extract discriminant (field 0).
@@ -6695,7 +6816,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 other => {
                                     return Err(CompileError::Unsupported(format!(
                                         "constructor discriminant is not an integer: {other:?}"
-                                    )))
+                                    )));
                                 }
                             };
                             // Determine the expected discriminant value.
@@ -6771,7 +6892,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     _ => {
                         return Err(CompileError::Unsupported(
                             "match pattern escaped resolved native eligibility".into(),
-                        ))
+                        ));
                     }
                 };
 
@@ -6875,7 +6996,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                             _ => {
                                 return Err(CompileError::Unsupported(
                                     "constructor match on non-struct scrutinee".into(),
-                                ))
+                                ));
                             }
                         };
                         // Determine which struct field holds the payload.
@@ -6891,7 +7012,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                 _ => {
                                     return Err(CompileError::Unsupported(format!(
                                         "unsupported builtin constructor variant '{variant_name}'"
-                                    )))
+                                    )));
                                 }
                             }
                         } else {
@@ -7117,8 +7238,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                                 })?
                                                 .into_int_value();
                                             let elem_llvm = self.lower_type(&elem.ty)?;
-                                            let elem_val: BasicValueEnum<'ctx> = match elem_llvm
-                                            {
+                                            let elem_val: BasicValueEnum<'ctx> = match elem_llvm {
                                                 BasicTypeEnum::StructType(_)
                                                 | BasicTypeEnum::ArrayType(_) => {
                                                     let elem_ptr = self
@@ -7185,11 +7305,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                                     }
                                                 }
                                                 _ => {
-                                                    return Err(CompileError::Unsupported(
-                                                        format!(
-                                                            "flow Err tuple element {ei} has an unsupported decoded LLVM type"
-                                                        ),
-                                                    ))
+                                                    return Err(CompileError::Unsupported(format!(
+                                                        "flow Err tuple element {ei} has an unsupported decoded LLVM type"
+                                                    )));
                                                 }
                                             };
                                             self.bind_pattern(
@@ -7307,7 +7425,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             other => {
                 return Err(CompileError::Unsupported(format!(
                     "static flow match scrutinee must be a record struct, got {other:?}"
-                )))
+                )));
             }
         };
 
@@ -7621,7 +7739,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(format!(
                     "short-circuit lowering requires `and`/`or`, got {op:?}"
-                )))
+                )));
             }
         };
         self.generator.build_cond_br(cond, truthy_bb, falsy_bb)?;
@@ -7649,7 +7767,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "short-circuit constant requested for a non-logical operator".into(),
-                ))
+                ));
             }
         };
         let const_val: BasicValueEnum<'ctx> = match result_ty {
@@ -7657,7 +7775,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             other => {
                 return Err(CompileError::Unsupported(format!(
                     "'and'/'or' result must be boolean, got {other:?}"
-                )))
+                )));
             }
         };
         self.generator.build_br(merge_bb)?;
@@ -7780,7 +7898,15 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                         .map_err(|e| CompileError::LlvmError(format!("int widen: {e}")))
                 }
             }
-            // float → int
+            // Float→i32/i64 is an explicit cast in the source language and
+            // follows Rust/Bytecode saturation semantics. Keep the legacy
+            // lowering for other integer widths so this does not broaden the
+            // resolved conversion matrix.
+            (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(target_ty))
+                if matches!(target_ty.get_bit_width(), 32 | 64) =>
+            {
+                self.saturating_float_to_int(fv, target_ty)
+            }
             (BasicValueEnum::FloatValue(fv), BasicTypeEnum::IntType(target_ty)) => self
                 .generator
                 .builder
@@ -7994,6 +8120,94 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         }
     }
 
+    /// Saturating float→signed-int cast for Mimi's i32/i64 casts, matching
+    /// Rust's `as` semantics used by the Bytecode VM and legacy native path:
+    /// truncate toward zero, NaN→0, and clamp infinities/out-of-range values.
+    /// Inputs outside the `fptosi` representable interval are first replaced
+    /// with zero so LLVM never observes poison from the conversion instruction.
+    fn saturating_float_to_int(
+        &self,
+        value: inkwell::values::FloatValue<'ctx>,
+        target: inkwell::types::IntType<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let width = target.get_bit_width();
+        debug_assert!(matches!(width, 32 | 64));
+
+        let float_type = value.get_type();
+        // ±2^(width-1) are exactly representable in both Mimi float widths.
+        // The lower endpoint itself is valid; the upper endpoint is one past
+        // the signed maximum and therefore saturates.
+        let limit = (1u64 << (width - 1)) as f64;
+        let upper_bound = float_type.const_float(limit);
+        let lower_bound = float_type.const_float(-limit);
+        let builder = &self.generator.builder;
+
+        let is_nan = builder
+            .build_float_compare(inkwell::FloatPredicate::UNO, value, value, "cast_is_nan")
+            .map_err(|e| CompileError::LlvmError(format!("fcmp: {e}")))?;
+        let is_high = builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OGE,
+                value,
+                upper_bound,
+                "cast_is_high",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fcmp: {e}")))?;
+        let is_low = builder
+            .build_float_compare(
+                inkwell::FloatPredicate::OLT,
+                value,
+                lower_bound,
+                "cast_is_low",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("fcmp: {e}")))?;
+
+        let zero_float = BasicValueEnum::FloatValue(float_type.const_zero());
+        let safe_value = builder
+            .build_select(
+                is_nan,
+                zero_float,
+                BasicValueEnum::FloatValue(value),
+                "cast_safe_nan",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?;
+        let safe_value = builder
+            .build_select(is_high, zero_float, safe_value, "cast_safe_high")
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?;
+        let safe_value = builder
+            .build_select(is_low, zero_float, safe_value, "cast_safe_low")
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?;
+        let raw = builder
+            .build_float_to_signed_int(safe_value.into_float_value(), target, "resolved_fptosi_sat")
+            .map_err(|e| CompileError::LlvmError(format!("fptosi: {e}")))?;
+
+        let (max_int, min_int) = if width == 64 {
+            (
+                target.const_int(i64::MAX as u64, false),
+                target.const_int(i64::MIN as u64, false),
+            )
+        } else {
+            (
+                target.const_int(i32::MAX as u64, false),
+                target.const_int(i32::MIN as u64, false),
+            )
+        };
+        let saturated = builder
+            .build_select(is_low, min_int, raw, "cast_saturate_low")
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?
+            .into_int_value();
+        let saturated = builder
+            .build_select(is_high, max_int, saturated, "cast_saturate_high")
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?
+            .into_int_value();
+        let saturated = builder
+            .build_select(is_nan, target.const_zero(), saturated, "cast_saturate_nan")
+            .map_err(|e| CompileError::LlvmError(format!("select: {e}")))?
+            .into_int_value();
+
+        Ok(BasicValueEnum::IntValue(saturated))
+    }
+
     fn coerce_to(
         &self,
         value: BasicValueEnum<'ctx>,
@@ -8075,7 +8289,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(format!(
                     "resolved optional ctor '{name}'"
-                )))
+                )));
             }
         }
         self.generator
@@ -8244,7 +8458,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             other => {
                 return Err(CompileError::Unsupported(format!(
                     "resolved string list element cannot become a fat string box: {other:?}"
-                )))
+                )));
             }
         };
         let box_fn = self.generator.get_runtime_fn("mimi_str_box")?;
@@ -8370,7 +8584,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
 
     /// Convert a list element loaded as i64 back to its proper type.
     /// Mirror of the legacy emitter's `try_convert_list_element` / `convert_list_elem_by_type`:
-    /// - String ({i8*, i64}): load i64 → inttoptr → strlen → build struct
+    /// - String ({i8*, i64}): load the fat MimiStr box; ordinary index values
+    ///   clone its explicit ptr+len payload, while borrowed loop conversions
+    ///   keep the existing slot-backed value.
     /// - Nested list/tuple/record/Option/Result: inttoptr → load struct from heap pointer
     /// - Pointer: inttoptr
     /// - Int/Float: use as-is
@@ -8378,6 +8594,23 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
         &self,
         elem_int: inkwell::values::IntValue<'ctx>,
         elem_llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.convert_list_elem_i64_with_ownership(elem_int, elem_llvm_ty, false)
+    }
+
+    fn convert_list_elem_i64_owned(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        elem_llvm_ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        self.convert_list_elem_i64_with_ownership(elem_int, elem_llvm_ty, true)
+    }
+
+    fn convert_list_elem_i64_with_ownership(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        elem_llvm_ty: BasicTypeEnum<'ctx>,
+        own_string: bool,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let ptr_ty = self
             .generator
@@ -8394,7 +8627,11 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     let boxed =
                         self.generator
                             .build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                    self.generator.load_fat_list_string(boxed)
+                    if own_string {
+                        self.generator.load_owned_fat_list_string(boxed)
+                    } else {
+                        self.generator.load_fat_list_string(boxed)
+                    }
                 } else {
                     // Non-string struct: stored as heap pointer.
                     let struct_ptr = self
@@ -8972,11 +9209,9 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                     let elem_llvm_ty = self.lower_type(ty)?;
                     // When the element is a struct (nested list, tuple, record,
                     // Option, Result) or a pointer (string), the i64 slot stores
-                    // a pointer-to-value, not the value itself. Load the i64,
-                    // inttoptr, then load the struct from the heap pointer —
-                    // matching the legacy data layout.
-                    // Only the string struct {ptr, i64} stores the raw pointer
-                    // (field 0) directly; all other structs are heap-allocated.
+                    // a pointer-to-value, not the value itself. List<String>
+                    // slots point to ABI v3 fat MimiStr boxes; other compound
+                    // values point to heap-allocated structs.
                     // F-016 (0.40.1.20): when this Index is the FINAL projection
                     // and we are writing (`read == false`), the data-array slot
                     // is an `i64` handle — keep `current_ptr` as the element GEP
@@ -9016,7 +9251,8 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                                         ptr_ty,
                                         "elem_str_ptr",
                                     )?;
-                                    let str_val = self.generator.load_fat_list_string(boxed)?;
+                                    let str_val =
+                                        self.generator.load_owned_fat_list_string(boxed)?;
                                     let str_alloca =
                                         self.generator.build_alloca(sty, "str_struct")?;
                                     self.generator.build_store(str_alloca, str_val)?;
@@ -9214,7 +9450,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 return Err(CompileError::Unsupported(format!(
                     "list index width {} is not supported",
                     idx.get_type().get_bit_width()
-                )))
+                )));
             }
         };
         let zero = i64_ty.const_int(0, false);
@@ -9567,7 +9803,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "for-loop end is not an integer".into(),
-                ))
+                ));
             }
         };
 
@@ -9604,7 +9840,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "for-loop counter is not an integer".into(),
-                ))
+                ));
             }
         };
         let cond = self
@@ -9654,7 +9890,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "for-loop counter is not an integer".into(),
-                ))
+                ));
             }
         };
         let one = current_int.get_type().const_int(1, false);
@@ -9704,7 +9940,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "for-in-list iterable is not a list struct".into(),
-                ))
+                ));
             }
         };
 
@@ -9935,7 +10171,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "optional chain receiver is not a struct".into(),
-                ))
+                ));
             }
         };
 
@@ -10000,7 +10236,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "optional chain payload is not a struct (expected record)".into(),
-                ))
+                ));
             }
         };
         let field_val = self
@@ -10092,7 +10328,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "comprehension iterable is not a list struct".into(),
-                ))
+                ));
             }
         };
         let iter_len = self
@@ -10638,7 +10874,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "try inner type is not Result, Option, or Ok/Err enum".into(),
-                ))
+                ));
             }
         };
 
@@ -10656,7 +10892,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "try inner value is not a struct (Result/Option/enum)".into(),
-                ))
+                ));
             }
         };
 
@@ -10999,7 +11235,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 _ => {
                     return Err(CompileError::Unsupported(
                         "actor method argument has unsupported LLVM metadata kind".into(),
-                    ))
+                    ));
                 }
             };
             let param_ty = method_params.get(slot_index - 1).copied();
@@ -14086,7 +14322,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "await operand is not a future pointer".into(),
-                ))
+                ));
             }
         };
 
@@ -14160,7 +14396,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "lambda expression type is not a Function type".into(),
-                ))
+                ));
             }
         };
 
@@ -14195,7 +14431,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
                 other => {
                     return Err(CompileError::Unsupported(format!(
                         "lambda param type {other:?} unsupported"
-                    )))
+                    )));
                 }
             });
         }
@@ -14207,7 +14443,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             other => {
                 return Err(CompileError::Unsupported(format!(
                     "lambda return type {other:?} unsupported"
-                )))
+                )));
             }
         };
 
@@ -14440,7 +14676,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "resolved reduce first argument is not a list struct".into(),
-                ))
+                ));
             }
         };
         let len_val = self
@@ -14460,7 +14696,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "resolved reduce second argument is not a closure struct".into(),
-                ))
+                ));
             }
         };
         let fn_ptr = self
@@ -14492,7 +14728,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "resolved reduce closure type is not a two-parameter function".into(),
-                ))
+                ));
             }
         };
 
@@ -14504,7 +14740,7 @@ impl<'program, 'generator, 'ctx> NativeResolvedEmitter<'program, 'generator, 'ct
             _ => {
                 return Err(CompileError::Unsupported(
                     "resolved reduce unsupported init value".into(),
-                ))
+                ));
             }
         };
         let init_adj = self.coerce_to(init_val, acc_ty)?;
@@ -15069,20 +15305,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolved_codegen_boundary_has_no_surface_body_backdoor() {
+    fn resolved_emission_success_event_uses_the_census_name_format() {
+        assert_eq!(
+            resolved_emission_success_event("Actor::step"),
+            "info: resolved emitter emitted 'Actor::step'"
+        );
+    }
+
+    #[test]
+    fn resolved_codegen_boundary_has_no_surface_compiler_backdoor() {
         let sources = [
             ("mod.rs", include_str!("mod.rs")),
             ("eligibility.rs", include_str!("eligibility.rs")),
             ("types.rs", include_str!("types.rs")),
         ];
-        let retained_body_accessor = concat!("legacy_body", "_file(");
         let surface_emitter_entry = concat!("compile_", "file(");
 
         for (name, source) in sources {
-            assert!(
-                !source.contains(retained_body_accessor),
-                "{name} must not recover the retained surface body"
-            );
             assert!(
                 !source.contains(surface_emitter_entry),
                 "{name} must not enter the surface emitter"
@@ -15172,10 +15411,13 @@ func main() -> i32 { helper(41) }
     }
 
     #[test]
-    fn partial_non_core_resolved_emission_retries_cleanly_through_legacy() {
+    fn partial_canonical_resolved_emission_fails_closed_without_legacy_retry() {
         let program = checked(
             r#"
-func compatibility_only<T>(value: T) -> T { value }
+func earlier(value: i32) -> i32 {
+    let staged = value + 1
+    return staged + 1
+}
 func helper(value: i32) -> i32 {
     let incremented = value + 1
     return incremented + 1
@@ -15184,56 +15426,89 @@ func main() -> i32 { return helper(40) }
 "#,
         );
         assert!(
-            !supports_resolved_native(&program),
-            "the generic compatibility body keeps the program on per-function dispatch"
+            supports_resolved_native(&program),
+            "the scalar program must enter canonical resolved emission"
         );
+        let mut ordered_functions = program.functions().values().collect::<Vec<_>>();
+        ordered_functions.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let earlier_index = ordered_functions
+            .iter()
+            .position(|function| function.qualified_name == "earlier")
+            .expect("earlier callable");
         let helper = program
             .functions()
             .values()
             .find(|function| function.qualified_name == "helper")
             .expect("helper callable");
-        let eligible = resolved_eligible_functions(&program, false)
-            .expect("helper and main have eligible resolved bodies");
-        assert!(eligible.contains(&helper.node_id));
+        let helper_index = ordered_functions
+            .iter()
+            .position(|function| function.qualified_name == "helper")
+            .expect("helper callable is ordered for emission");
+        assert!(
+            earlier_index < helper_index,
+            "the sibling must be emitted before the injected failure"
+        );
 
+        crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
         let context = inkwell::context::Context::create();
-        let mut generator = CodeGenerator::new(&context, "resolved_legacy_retry");
+        let mut generator = CodeGenerator::new(&context, "resolved_canonical_fail_closed");
         generator.inject_resolved_emission_failure_for_test(
             helper.node_id.clone(),
             crate::codegen::ResolvedEmissionFailureForTest::Recoverable,
         );
-        generator
+        let diagnostics = generator
             .compile_checked(&program)
-            .expect("the legacy retry recompiles the test-failed non-core body");
+            .expect_err("a partial canonical body failure must fail closed");
 
         assert!(generator.resolved_emission_failure_observed_partial_for_test());
-        assert!(generator
-            .resolved_failed_functions()
-            .contains(&helper.qualified_name));
+        assert_eq!(
+            diagnostics[0].code.as_deref(),
+            Some(crate::diagnostic::codes::E0722)
+        );
+        assert!(diagnostics[0]
+            .message
+            .contains("test-injected resolved emitter failure after partial body"));
+        assert!(
+            generator.resolved_failed_functions().is_empty(),
+            "canonical failure must not be recorded as a legacy retry candidate"
+        );
+        assert!(
+            crate::core::CheckedProgram::test_legacy_codegen_function_calls().is_empty(),
+            "canonical failure must not invoke the legacy function emitter"
+        );
         let helper_llvm = generator
             .module
             .get_function("helper")
-            .expect("helper declaration remains live across the retry");
+            .expect("failed callable declaration remains available");
+        assert_eq!(
+            helper_llvm.count_basic_blocks(),
+            0,
+            "failed canonical emission must remove its partial LLVM body"
+        );
+        let earlier_llvm = generator
+            .module
+            .get_function("earlier")
+            .expect("successful sibling declaration remains available");
         assert!(
-            helper_llvm.count_basic_blocks() > 0,
-            "legacy retry must install a body after the injected partial resolved body is cleared"
+            earlier_llvm.count_basic_blocks() > 0,
+            "rollback must preserve a sibling body emitted before the failure"
         );
         generator
             .module
             .verify()
-            .expect("recovered module is valid LLVM");
+            .expect("failed-body rollback leaves the retained module valid LLVM");
         assert!(
             generator.heap_boundaries.borrow().is_empty(),
-            "failed resolved emission must not leak a function heap boundary into legacy retry"
+            "failed resolved emission must not leak a function heap boundary"
         );
         assert_eq!(
             generator.heap_allocs.borrow().len(),
             1,
-            "failed resolved emission restores the caller's heap scope depth"
+            "failed resolved emission restores the generator's heap scope depth"
         );
         assert!(
             generator.heap_claim_scopes.borrow().is_empty(),
-            "failed resolved emission restores the caller's heap claim scopes"
+            "failed resolved emission restores the generator's heap claim scopes"
         );
     }
 
@@ -15281,11 +15556,12 @@ func main() -> i32 { later_loop(broken_loop(1)) }
             let mut emitter = NativeResolvedEmitter {
                 program: &program,
                 generator: &mut generator,
+                comptime_values: comptime::ComptimeValues::new(),
+                eligible_function_ids: eligible.clone(),
                 loop_stack: Vec::new(),
                 place_inputs: BTreeMap::new(),
                 defer_scopes: Vec::new(),
                 comp_scopes: Vec::new(),
-                pending_generic_instances: Vec::new(),
                 canonical_generic_instances: BTreeMap::new(),
             };
             emitter

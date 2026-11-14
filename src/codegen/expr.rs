@@ -141,6 +141,21 @@ impl<'ctx> CodeGenerator<'ctx> {
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
         let val = self.compile_expr(inner, vars)?;
+        let resolved_target = self.resolve_type(target_type);
+        let resolved_source = self
+            .expr_type_of(inner, vars)
+            .map(|source_type| self.resolve_type(&source_type));
+        if resolved_source.as_ref() == Some(&resolved_target)
+            && self
+                .llvm_type_for(&resolved_target)
+                .is_some_and(|target_llvm_type| target_llvm_type == val.get_type())
+        {
+            // Preserve exact identity casts for primitive types outside the
+            // closed numeric conversion matrix. The LLVM type check also
+            // prevents a large integer literal, whose inferred surface type
+            // defaults to i32, from skipping the required width conversion.
+            return Ok(val);
+        }
         let target_name = match target_type.unlocated() {
             Type::Name(name, _) => name.as_str(),
             _ => return Err("unsupported cast target type in codegen".into()),
@@ -231,6 +246,26 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 _ => Err("unsupported cast to f64".into()),
+            },
+            "f32" => match val {
+                BasicValueEnum::IntValue(iv) => Ok(self
+                    .builder
+                    .build_signed_int_to_float(iv, self.context.f32_type(), "sitofp_f32")
+                    .map_err(|e| CompileError::LlvmError(format!("sitofp error: {}", e)))?
+                    .into()),
+                BasicValueEnum::FloatValue(fv) => {
+                    let f32_ty = self.context.f32_type();
+                    if fv.get_type() == f32_ty {
+                        Ok(val)
+                    } else {
+                        Ok(self
+                            .builder
+                            .build_float_trunc(fv, f32_ty, "fptrunc_f32")
+                            .map_err(|e| CompileError::LlvmError(format!("fptrunc error: {}", e)))?
+                            .into())
+                    }
+                }
+                _ => Err("unsupported cast to f32".into()),
             },
             "List" => {
                 // Type annotation for lists — no runtime conversion needed

@@ -4,16 +4,17 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use crate::interp::SharedString;
 use std::sync::Arc;
-
-/// Phase D (0.39.71): global unique token id. Monotonic counter shared across
-/// the whole interpreter process; every `make_token()` returns a distinct id.
-static TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// `make_token() -> i64` — globally unique token id (Phase D foundation).
 fn builtin_make_token(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpError> {
-    let id = TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(Value::Int(id as i64))
+    // Use the same host-owned registry as native code.  This keeps a token
+    // issued by a VM run from becoming an unscoped integer when it crosses an
+    // FFI/task boundary and gives guarded builtins a real dynamic scope check.
+    Ok(Value::Int(
+        crate::runtime::capability_scope::issue_unrestricted(),
+    ))
 }
 
 /// `token_id(t: Token) -> i64` — 消费 token、取其唯一 id（Phase D 0.39.72）。
@@ -458,7 +459,7 @@ fn json_to_value(j: &serde_json::Value) -> Value {
                 Value::Unit
             }
         }
-        serde_json::Value::String(s) => Value::String(crate::interp::SharedString::new(s.clone())),
+        serde_json::Value::String(s) => Value::String(SharedString::new(s.clone())),
         serde_json::Value::Array(arr) => {
             Value::List(Arc::new(arr.iter().map(json_to_value).collect()))
         }
@@ -474,7 +475,7 @@ fn json_to_value(j: &serde_json::Value) -> Value {
 
 fn builtin_to_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let json = value_to_json(&args[0]);
-    Ok(Value::String(crate::interp::SharedString::new(json.to_string())))
+    Ok(Value::String(SharedString::new(json.to_string())))
 }
 
 fn builtin_from_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -974,14 +975,20 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
             let jv: serde_json::Value = serde_json::from_str(json_str)
                 .map_err(|e| InterpError::new(format!("json_get_string parse error: {}", e)))?;
             match jv.get(key.as_str()) {
-                Some(serde_json::Value::String(s)) => Ok(Value::String(crate::interp::SharedString::new(s.clone()))),
-                Some(serde_json::Value::Bool(b)) => Ok(Value::String(crate::interp::SharedString::new(if *b {
+                Some(serde_json::Value::String(s)) => {
+                    Ok(Value::String(SharedString::new(s.clone())))
+                }
+                Some(serde_json::Value::Bool(b)) => Ok(Value::String(SharedString::new(if *b {
                     "true".into()
                 } else {
                     "false".into()
                 }))),
-                Some(serde_json::Value::Number(n)) => Ok(Value::String(crate::interp::SharedString::new(n.to_string()))),
-                Some(serde_json::Value::Null) => Ok(Value::String(crate::interp::SharedString::new("null".into()))),
+                Some(serde_json::Value::Number(n)) => {
+                    Ok(Value::String(SharedString::new(n.to_string())))
+                }
+                Some(serde_json::Value::Null) => {
+                    Ok(Value::String(SharedString::new("null".into())))
+                }
                 // JSON-VALUE-PARITY: object/array values must be returned as the
                 // EXACT raw source span (preserving key order + whitespace),
                 // matching the native runtime's json_get_inner (which returns
@@ -989,10 +996,10 @@ fn builtin_json_get_string(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
                 // and reorders object keys, diverging from codegen
                 // (`{"age":30,"name":"bob"}` vs `{"name":"bob","age":30}`).
                 Some(_) => match json_raw_object_value_span(json_str, key.as_str()) {
-                    Some(span) => Ok(Value::String(crate::interp::SharedString::new(span))),
-                    None => Ok(Value::String(crate::interp::SharedString::new(String::new()))),
+                    Some(span) => Ok(Value::String(SharedString::new(span))),
+                    None => Ok(Value::String(SharedString::new(String::new()))),
                 },
-                None => Ok(Value::String(crate::interp::SharedString::new(String::new()))),
+                None => Ok(Value::String(SharedString::new(String::new()))),
             }
         }
         _ => Err(InterpError::new("json_get_string expects (string, string)")),
@@ -1041,7 +1048,7 @@ fn builtin_sha256(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
         Value::String(data) => {
             let hash = crate::runtime::sha256_bytes(data.as_bytes());
             let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
-            Ok(Value::String(crate::interp::SharedString::new(hex)))
+            Ok(Value::String(SharedString::new(hex)))
         }
         _ => Err(InterpError::new("sha256 expects a string")),
     }
@@ -1051,7 +1058,7 @@ fn builtin_base64_encode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
     match &args[0] {
         Value::String(data) => {
             let encoded = crate::runtime::base64_encode_bytes(data.as_bytes());
-            Ok(Value::String(crate::interp::SharedString::new(encoded)))
+            Ok(Value::String(SharedString::new(encoded)))
         }
         _ => Err(InterpError::new("base64_encode expects a string")),
     }
@@ -1062,11 +1069,13 @@ fn builtin_base64_decode(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         Value::String(data) => match crate::runtime::base64_decode_str(data) {
             Ok(decoded) => Ok(Value::Variant(
                 "Ok".into(),
-                vec![Value::String(crate::interp::SharedString::new(decoded))],
+                vec![Value::String(SharedString::new(decoded))],
             )),
             Err(_) => Ok(Value::Variant(
                 "Err".into(),
-                vec![Value::String(crate::interp::SharedString::new("invalid base64".to_string()))],
+                vec![Value::String(SharedString::new(
+                    "invalid base64".to_string(),
+                ))],
             )),
         },
         _ => Err(InterpError::new("base64_decode expects a string")),
@@ -1149,8 +1158,10 @@ fn builtin_input(_vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpE
     // on EOF (variant vs string compare) and input_line always returned Err.
     let mut input = String::new();
     match std::io::stdin().read_line(&mut input) {
-        Ok(_) => Ok(Value::String(crate::interp::SharedString::new(input.trim_end().to_string()))),
-        Err(_) => Ok(Value::String(crate::interp::SharedString::new(String::new()))),
+        Ok(_) => Ok(Value::String(SharedString::new(
+            input.trim_end().to_string(),
+        ))),
+        Err(_) => Ok(Value::String(SharedString::new(String::new()))),
     }
 }
 
@@ -1203,20 +1214,22 @@ fn builtin_json_get_element(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Valu
                     // `a`. Extract the inner string for String values; keep the
                     // textual form for numbers/bools/null and raw JSON text for
                     // nested objects/arrays.
-                    Some(serde_json::Value::String(s)) => Ok(Value::String(crate::interp::SharedString::new(s.clone()))),
-                    Some(serde_json::Value::Bool(b)) => Ok(Value::String(crate::interp::SharedString::new(
+                    Some(serde_json::Value::String(s)) => {
+                        Ok(Value::String(SharedString::new(s.clone())))
+                    }
+                    Some(serde_json::Value::Bool(b)) => Ok(Value::String(SharedString::new(
                         if *b { "true" } else { "false" }.to_string(),
                     ))),
                     Some(serde_json::Value::Number(n)) => {
-                        Ok(Value::String(crate::interp::SharedString::new(n.to_string())))
+                        Ok(Value::String(SharedString::new(n.to_string())))
                     }
                     Some(serde_json::Value::Null) => {
-                        Ok(Value::String(crate::interp::SharedString::new("null".to_string())))
+                        Ok(Value::String(SharedString::new("null".to_string())))
                     }
                     // JSON-VALUE-PARITY: object/array elements returned as the
                     // exact raw source span (see builtin_json_get_string note).
                     Some(_) => match json_raw_array_value_span(json_str, *idx as usize) {
-                        Some(span) => Ok(Value::String(crate::interp::SharedString::new(span))),
+                        Some(span) => Ok(Value::String(SharedString::new(span))),
                         None => Err(InterpError::new(format!(
                             "json_get_element: index {} out of bounds",
                             idx
@@ -1300,7 +1313,7 @@ fn builtin_regex_find_all(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
                         + &format!("\"{}\"", escape_json_string(m))
                 })
                 .collect::<String>();
-            Ok(Value::String(crate::interp::SharedString::new(format!("[{}]", json))))
+            Ok(Value::String(SharedString::new(format!("[{}]", json))))
         }
         _ => Err(InterpError::new("regex_find_all expects (string, string)")),
     }
@@ -1340,7 +1353,7 @@ fn builtin_fields(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
             keys.sort();
             let out: Vec<Value> = keys
                 .into_iter()
-                .map(|k| Value::String(crate::interp::SharedString::new(k.to_string())))
+                .map(|k| Value::String(SharedString::new(k.to_string())))
                 .collect();
             Ok(Value::List(Arc::new(out)))
         }
@@ -1373,11 +1386,11 @@ fn builtin_type_fields(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
     let names: Vec<Value> = match kind {
         crate::ast::TypeDefKind::Record(fields) => fields
             .iter()
-            .map(|f| Value::String(crate::interp::SharedString::new(f.name.clone())))
+            .map(|f| Value::String(SharedString::new(f.name.clone())))
             .collect(),
         crate::ast::TypeDefKind::Enum(variants) => variants
             .iter()
-            .map(|v| Value::String(crate::interp::SharedString::new(v.name.clone())))
+            .map(|v| Value::String(SharedString::new(v.name.clone())))
             .collect(),
         _ => vec![],
     };
@@ -1399,7 +1412,7 @@ fn builtin_type_variants(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let names: Vec<Value> = match kind {
         crate::ast::TypeDefKind::Enum(variants) => variants
             .iter()
-            .map(|v| Value::String(crate::interp::SharedString::new(v.name.clone())))
+            .map(|v| Value::String(SharedString::new(v.name.clone())))
             .collect(),
         _ => vec![],
     };
@@ -1441,8 +1454,14 @@ fn builtin_exec(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpErr
             let exit_code = code.unwrap_or(-1);
             let mut fields = std::collections::HashMap::new();
             fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-            fields.insert("stdout".to_string(), Value::String(crate::interp::SharedString::new(stdout)));
-            fields.insert("stderr".to_string(), Value::String(crate::interp::SharedString::new(stderr)));
+            fields.insert(
+                "stdout".to_string(),
+                Value::String(SharedString::new(stdout)),
+            );
+            fields.insert(
+                "stderr".to_string(),
+                Value::String(SharedString::new(stderr)),
+            );
             Ok(Value::Record(Some("ExecResult".to_string()), fields))
         }
         _ => Err(InterpError::new("exec expects a string command")),
@@ -1464,7 +1483,7 @@ fn builtin_exec_pipe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
                 std::process::Command::new("sh").arg("-c").arg(cmd.as_str()),
             );
             let stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-            Ok(Value::String(crate::interp::SharedString::new(stdout)))
+            Ok(Value::String(SharedString::new(stdout)))
         }
         _ => Err(InterpError::new("exec_pipe expects a string command")),
     }
@@ -1481,7 +1500,7 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         _ => {
             return Err(InterpError::new(
                 "exec_safe: first argument must be a string (program)",
-            ))
+            ));
         }
     };
     let mut cmd = std::process::Command::new(prog.as_str());
@@ -1501,8 +1520,14 @@ fn builtin_exec_safe(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     let exit_code = code.unwrap_or(-1);
     let mut fields = std::collections::HashMap::new();
     fields.insert("exit_code".to_string(), Value::Int(exit_code as i64));
-    fields.insert("stdout".to_string(), Value::String(crate::interp::SharedString::new(stdout)));
-    fields.insert("stderr".to_string(), Value::String(crate::interp::SharedString::new(stderr)));
+    fields.insert(
+        "stdout".to_string(),
+        Value::String(SharedString::new(stdout)),
+    );
+    fields.insert(
+        "stderr".to_string(),
+        Value::String(SharedString::new(stderr)),
+    );
     Ok(Value::Record(Some("ExecResult".to_string()), fields))
 }
 
@@ -1555,7 +1580,7 @@ fn builtin_read_file_bytes(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
             match std::fs::read(path.as_str()) {
                 Ok(bytes) => {
                     let s = String::from_utf8_lossy(&bytes).to_string();
-                    Ok(Value::String(crate::interp::SharedString::new(s)))
+                    Ok(Value::String(SharedString::new(s)))
                 }
                 Err(e) => Err(InterpError::new(format!("read_file_bytes: {}", e))),
             }
@@ -1612,7 +1637,7 @@ fn builtin_read_file_partial(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Val
                     &bytes
                 };
                 let s = String::from_utf8_lossy(slice).to_string();
-                Ok(Value::String(crate::interp::SharedString::new(s)))
+                Ok(Value::String(SharedString::new(s)))
             }
             Err(e) => Err(InterpError::new(format!("read_file_partial: {}", e))),
         },
@@ -1627,7 +1652,7 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
         _ => {
             return Err(InterpError::new(
                 "read_lines_each expects (string, closure)",
-            ))
+            ));
         }
     };
     let callback = &args[1];
@@ -1640,7 +1665,7 @@ fn builtin_read_lines_each(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value,
         let line = line_result.map_err(|e| {
             InterpError::new(format!("read_lines_each: failed to read line: {}", e))
         })?;
-        vm.call_closure(callback, &[Value::String(crate::interp::SharedString::new(line))])?;
+        vm.call_closure(callback, &[Value::String(SharedString::new(line))])?;
         count += 1;
     }
     Ok(Value::Int(count))
@@ -1667,7 +1692,7 @@ fn builtin_read_lines_json(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value
         result.push('"');
     }
     result.push(']');
-    Ok(Value::String(crate::interp::SharedString::new(result)))
+    Ok(Value::String(SharedString::new(result)))
 }
 
 fn builtin_regex_capture_groups(
@@ -1694,9 +1719,9 @@ fn builtin_regex_capture_groups(
                                 + &format!("\"{}\"", escape_json_string(g))
                         })
                         .collect::<String>();
-                    Ok(Value::String(crate::interp::SharedString::new(format!("[{}]", json))))
+                    Ok(Value::String(SharedString::new(format!("[{}]", json))))
                 }
-                None => Ok(Value::String(crate::interp::SharedString::new("[]".to_string()))),
+                None => Ok(Value::String(SharedString::new("[]".to_string()))),
             }
         }
         _ => Err(InterpError::new(
@@ -1810,13 +1835,13 @@ fn builtin_lexer(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpEr
     // SAFETY: `c_source` is a live NUL-terminated CString outliving the call; the runtime returns a malloc'd NUL-terminated result or NULL.
     let result_ptr = unsafe { crate::runtime::mimi_lexer_tokenize(c_source.as_ptr()) };
     if result_ptr.is_null() {
-        return Ok(Value::String(crate::interp::SharedString::new("[]".to_string())));
+        return Ok(Value::String(SharedString::new("[]".to_string())));
     }
     let result = unsafe { std::ffi::CStr::from_ptr(result_ptr) } // SAFETY: result_ptr 非空（上方检查），为 C 侧 NUL 结尾字符串；CStr 借用不释放。
         .to_string_lossy()
         .into_owned();
     unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
-    Ok(Value::String(crate::interp::SharedString::new(result)))
+    Ok(Value::String(SharedString::new(result)))
 }
 
 fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1828,7 +1853,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     // SAFETY: `c_source` is a live NUL-terminated CString outliving the call; the runtime returns a malloc'd NUL-terminated result or NULL.
     let result_ptr = unsafe { crate::runtime::mimi_parse_source(c_source.as_ptr()) };
     if result_ptr.is_null() {
-        return Ok(Value::String(crate::interp::SharedString::new(
+        return Ok(Value::String(SharedString::new(
             r#"{"functions":[],"types":[],"imports":[],"has_main":false}"#.to_string(),
         )));
     }
@@ -1836,7 +1861,7 @@ fn builtin_mms_parse(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         .to_string_lossy()
         .into_owned();
     unsafe { libc::free(result_ptr as *mut libc::c_void) }; // SAFETY: result_ptr 为 C 侧分配指针，与上方 CStr 读取配对，释放一次。
-    Ok(Value::String(crate::interp::SharedString::new(result)))
+    Ok(Value::String(SharedString::new(result)))
 }
 
 fn builtin_ast_dump(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -1846,8 +1871,8 @@ fn builtin_ast_dump(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         ));
     }
     match &args[0] {
-        Value::QuoteAst(q) => Ok(Value::String(crate::interp::SharedString::new(format!("{:?}", q)))),
-        other => Ok(Value::String(crate::interp::SharedString::new(format!(
+        Value::QuoteAst(q) => Ok(Value::String(SharedString::new(format!("{:?}", q)))),
+        other => Ok(Value::String(SharedString::new(format!(
             "Not a QuoteAst: {}",
             other
         )))),
@@ -1866,7 +1891,7 @@ fn builtin_ast_eval(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
             return Err(InterpError::new(format!(
                 "ast_eval expects a QuoteAst, got {}",
                 other
-            )))
+            )));
         }
     };
     // 0.33 Phase F: evaluate the quoted AST via bytecode VM.

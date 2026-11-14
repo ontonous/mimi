@@ -637,8 +637,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let emitted_symbol = if type_map.is_empty() {
                 symbol.clone()
             } else {
-                self.compile_checked_impl_method_instance(&target.key.callable, &type_map)?;
-                Self::mangle_name(&symbol, &type_map)
+                return Err(CompileError::CanonicalMirCoverage(format!(
+                    "MIR-COVERAGE-001/NITS: checked generic protocol method '{}' requires a canonical specialized MIR instance",
+                    target.key.callable.0
+                )));
             };
             let function = self.module.get_function(&emitted_symbol).ok_or_else(|| {
                 CompileError::LlvmError(format!(
@@ -813,15 +815,10 @@ impl<'ctx> CodeGenerator<'ctx> {
                                         borrow: None,
                                     }
                                 });
-                                #[cfg(test)]
-                                self.compile_legacy_generic_test_instance(f, &type_map)?;
-                                #[cfg(not(test))]
-                                {
-                                    return Err(CompileError::CanonicalMirCoverage(format!(
-                                        "MIR-COVERAGE-001/NITS: generic method '{}' reached the retired legacy monomorphizer",
-                                        method_name
-                                    )));
-                                }
+                                return Err(CompileError::CanonicalMirCoverage(format!(
+                                    "MIR-COVERAGE-001/NITS: generic method '{}' requires a canonical specialized MIR instance",
+                                    method_name
+                                )));
                             }
                         }
                         if let Some(function) = self.module.get_function(&mangled) {
@@ -2315,15 +2312,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        if !self
-            .checked_impl_method_bodies
-            .contains_key(&target_key.callable)
-        {
-            return Err(CompileError::LlvmError(format!(
-                "checked impl method '{}' has no canonical body payload",
-                target_key.callable.0
-            )));
-        }
         Ok((target.compatibility_symbol.clone(), type_map))
     }
 
@@ -2455,8 +2443,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             let emitted_symbol = if type_map.is_empty() {
                 symbol.clone()
             } else {
-                self.compile_checked_impl_method_instance(&target.key.callable, &type_map)?;
-                Self::mangle_name(&symbol, &type_map)
+                return Err(CompileError::CanonicalMirCoverage(format!(
+                    "MIR-COVERAGE-001/NITS: checked generic impl-trait method '{}' requires a canonical specialized MIR instance",
+                    target.key.callable.0
+                )));
             };
             let function = self.module.get_function(&emitted_symbol).ok_or_else(|| {
                 CompileError::LlvmError(format!(
@@ -2731,16 +2721,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             .map(|f| f.count_basic_blocks() == 0)
             .unwrap_or(true)
         {
-            #[cfg(test)]
-            self.compile_legacy_generic_test_instance(&func, &merged_map)
-                .map_err(|e| CompileError::Generic(e.to_string()))?;
-            #[cfg(not(test))]
-            {
-                return Err(CompileError::CanonicalMirCoverage(format!(
-                    "MIR-COVERAGE-001/NITS: turbofish '{}' reached the retired legacy monomorphizer",
-                    name
-                )));
-            }
+            return Err(CompileError::CanonicalMirCoverage(format!(
+                "MIR-COVERAGE-001/NITS: turbofish '{}' requires a canonical specialized MIR instance",
+                name
+            )));
         }
         // Call the mangled function
         self.compile_call_mangled(&mangled, args, vars)

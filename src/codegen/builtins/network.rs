@@ -609,7 +609,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Phase D (0.39.76): 收 cap 的 net API——SystemToken 门禁在 args[1]
-    /// （运行时忽略），url 在 args[0]。复用 http_get 核心。
+    /// （runtime registry checks the concrete host/port），url 在 args[0]。
+    /// 复用 http_get 核心。
     pub(super) fn compile_http_get_guarded(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -619,6 +620,80 @@ impl<'ctx> CodeGenerator<'ctx> {
                 "http_get_guarded expects 2 arguments (url, a SystemToken capability)".to_string(),
             ));
         }
+        let url_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let token = match args[1] {
+            BasicMetadataValueEnum::IntValue(value) => value,
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "http_get_guarded capability must be a SystemToken".into(),
+                ))
+            }
+        };
+        // C-02: endpoint scope is checked by the same host-owned registry used
+        // by the VM before any socket connection is attempted.
+        let i32_ty = self.context.i32_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let check_fn = self
+            .module
+            .get_function("mimi_capability_check_url")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_capability_check_url",
+                    i32_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let check = self
+            .builder
+            .build_call(
+                check_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(token),
+                    BasicMetadataValueEnum::PointerValue(url_ptr),
+                ],
+                "http_get_capability_check",
+            )
+            .map_err(|error| CompileError::LlvmError(format!("capability check error: {error}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("capability check returned void".into()))?
+            .into_int_value();
+        let denied = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                check,
+                i32_ty.const_zero(),
+                "http_get_capability_denied",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability compare error: {error}"))
+            })?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("http_get_guarded: no enclosing function".into())
+        })?;
+        let denied_bb = self
+            .context
+            .append_basic_block(function, "http_get_capability_denied_bb");
+        let allowed_bb = self
+            .context
+            .append_basic_block(function, "http_get_capability_allowed_bb");
+        self.builder
+            .build_conditional_branch(denied, denied_bb, allowed_bb)
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability branch error: {error}"))
+            })?;
+        self.builder.position_at_end(denied_bb);
+        self.emit_net_trap(
+            "http_get_guarded: capability scope denied",
+            "http_get_capability",
+        )?;
+        self.builder.position_at_end(allowed_bb);
         self.compile_http_get(&args[0..1])
     }
 

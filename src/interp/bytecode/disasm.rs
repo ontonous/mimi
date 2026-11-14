@@ -31,6 +31,7 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::DivFloat { .. } => "DIV_FLOAT",
         Op::NegFloat { .. } => "NEG_FLOAT",
         Op::IntToFloat { .. } => "INT_TO_FLOAT",
+        Op::IntToFloat32 { .. } => "INT_TO_FLOAT32",
         Op::FloatNarrow { .. } => "FLOAT_NARROW",
         Op::EqInt { .. } => "EQ_INT",
         Op::NeInt { .. } => "NE_INT",
@@ -141,12 +142,24 @@ pub fn op_name(op: &Op) -> &'static str {
         Op::MirOrdinaryMapOwnerLifecycleI32StringV1Drop { .. } => {
             "MIR_ORDINARY_MAP_OWNER_LIFECYCLE_I32_STRING_V1_DROP"
         }
+        Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_OBSERVER_V1_TO_JSON"
+        }
+        Op::MirOrdinaryMapOwnerLifecycleObserverV1Println { .. } => {
+            "MIR_ORDINARY_MAP_OWNER_OBSERVER_V1_PRINTLN"
+        }
         Op::MirOrdinaryMapOwnedGetI32StringV1New { .. } => {
             "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_NEW"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1NewResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_NEW_RESULT"
         }
         Op::MirOrdinaryMapOwnedGetI32StringV1Clone { .. } => "MIR_OMAP_GET_CLONE",
         Op::MirOrdinaryMapOwnedGetI32StringV1Set { .. } => {
             "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_SET"
+        }
+        Op::MirOrdinaryMapOwnedGetI32StringV1SetResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_SET_RESULT"
         }
         Op::MirOrdinaryMapOwnedGetI32StringV1Remove { .. } => {
             "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_REMOVE"
@@ -171,21 +184,55 @@ pub fn op_name(op: &Op) -> &'static str {
             "MIR_ORDINARY_MAP_OWNED_GET_I32_STRING_V1_DROP"
         }
         Op::MirOrdinaryMapOwnedAnyV2New { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_NEW",
+        Op::MirOrdinaryMapOwnedAnyV2NewResult { .. } => "MIR_ORDINARY_MAP_NEW_RESULT_PENDING_L1",
+        Op::MirOrdinaryMapOwnedAnyV2SetResult { .. } => "MIR_ORDINARY_MAP_SET_RESULT_PENDING_L1",
+        Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_I32_RESULT"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_RESULT"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_RESULT"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_SET_ANY_RESULT"
+        }
         Op::MirOrdinaryMapOwnedAnyV2Clone { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_CLONE",
         Op::MirOrdinaryMapOwnedAnyV2Set { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_SET",
         Op::MirOrdinaryMapOwnedAnyV2Remove { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_REMOVE",
         Op::MirOrdinaryMapOwnedAnyV2Size { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_SIZE",
         Op::MirOrdinaryMapOwnedAnyV2Contains { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_CONTAINS",
         Op::MirOrdinaryMapOwnedAnyV2GetAny { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY",
+        Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY_RESULT"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2Println { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_PRINTLN",
         Op::MirOrdinaryMapOwnedAnyV2Unpack { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_UNPACK",
         Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. } => {
             "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_UNPACK"
         }
         Op::MirOrdinaryMapOwnedAnyV2Values { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES",
+        Op::MirOrdinaryMapOwnedAnyV2Keys { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_KEYS",
+        Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_KEYS_UNPACK"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2DynamicArg0 { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_ARG0"
+        }
         Op::MirOrdinaryMapOwnedAnyV2IsEmpty { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY",
         Op::MirOrdinaryMapOwnedAnyV2Drop { .. } => "MIR_ORDINARY_MAP_OWNED_ANY_V2_DROP",
         Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. } => {
             "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_DROP"
+        }
+        Op::MirOrdinaryMapOwnedAnyV2ValuesClone { .. } => {
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_VALUES_CLONE"
         }
         Op::MirVariantPredicate { .. } => "MIR_VARIANT_PREDICATE",
         Op::MirVariantProjectOr { .. } => "MIR_VARIANT_PROJECT_OR",
@@ -357,6 +404,7 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::NegInt { rd, ra }
         | Op::NegFloat { rd, ra }
         | Op::IntToFloat { rd, ra }
+        | Op::IntToFloat32 { rd, ra }
         | Op::FloatNarrow { rd, ra }
         | Op::BitNot { rd, ra }
         | Op::Not { rd, ra }
@@ -1054,9 +1102,26 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} drop mir_ordinary_map_owner_lifecycle_i32_string_v1(r{})",
             pc, name, ra
         ),
+        Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_observer_v1_to_json_borrowed(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnerLifecycleObserverV1Println { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owner_observer_v1_println_borrowed(r{})",
+            pc, name, rd, ra
+        ),
         Op::MirOrdinaryMapOwnedGetI32StringV1New { rd } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1()",
             pc, name, rd
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1NewResult {
+            rd,
+            result_type,
+            type_desc,
+            shapes,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_new_result(result_type=c{}, type_desc=c{}, shapes=c{})",
+            pc, name, rd, result_type, type_desc, shapes
         ),
         Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, ra } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_clone(r{})",
@@ -1065,6 +1130,18 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::MirOrdinaryMapOwnedGetI32StringV1Set { rd, ra, key, value } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_set_persistent(r{}, r{}, r{})",
             pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnedGetI32StringV1SetResult {
+            rd,
+            ra,
+            key,
+            value,
+            result_type,
+            type_desc,
+            shapes,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_set_result(r{}, r{}, r{}, result_type=c{}, type_desc=c{}, shapes=c{})",
+            pc, name, rd, ra, key, value, result_type, type_desc, shapes
         ),
         Op::MirOrdinaryMapOwnedGetI32StringV1Remove { rd, ra, key } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_get_i32_string_v1_remove_persistent(r{}, r{})",
@@ -1127,6 +1204,10 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_new()",
             pc, name, rd
         ),
+        Op::MirOrdinaryMapOwnedAnyV2NewResult { rd } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_new_result_pending_l1()",
+            pc, name, rd
+        ),
         Op::MirOrdinaryMapOwnedAnyV2Clone { rd, ra } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_clone(r{})",
             pc, name, rd, ra
@@ -1134,6 +1215,52 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::MirOrdinaryMapOwnedAnyV2Set { rd, ra, key, value } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_set(r{}, r{}, r{})",
             pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, ra, key, value } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_set_result(r{}, r{}, r{})",
+            pc, name, rd, ra, key, value
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2SetAnyResult {
+            rd,
+            ra,
+            key,
+            value,
+            payload_type_id,
+            payload_descriptor_hash,
+            selection_bytes,
+            selection_hash,
+            payload_tag,
+            payload_size,
+            payload_align,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_set_any_result(r{}, r{}, r{}, type_id=c{}, descriptor_hash=c{}, selection_bytes=c{}, selection_hash=c{}, tag={}, size={}, align={})",
+            pc, name, rd, ra, key, value, payload_type_id, payload_descriptor_hash,
+            selection_bytes, selection_hash, payload_tag, payload_size, payload_align
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2GetI32Result { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_i32_result(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2GetStringResult {
+            rd,
+            ra,
+            key,
+            string_type_id,
+            string_type_desc_hash,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_string_result(r{}, r{}, string_type_id=c{}, string_type_desc_hash=c{})",
+            pc, name, rd, ra, key, string_type_id, string_type_desc_hash
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2SetStringResult {
+            rd,
+            ra,
+            key,
+            value,
+            string_type_id,
+            string_type_desc_hash,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_set_string_result(r{}, r{}, r{}, string_type_id=c{}, string_type_desc_hash=c{})",
+            pc, name, rd, ra, key, value, string_type_id, string_type_desc_hash
         ),
         Op::MirOrdinaryMapOwnedAnyV2Remove { rd, ra, key } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_remove(r{}, r{})",
@@ -1151,6 +1278,32 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_any(r{}, r{})",
             pc, name, rd, ra, key
         ),
+        Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { rd, ra, key } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_any_result(r{}, r{})",
+            pc, name, rd, ra, key
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 {
+            rd,
+            ra,
+            key,
+            default,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_or_default_i32(r{}, r{}, r{})",
+            pc, name, rd, ra, key, default
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString {
+            rd,
+            ra,
+            key,
+            default,
+        } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_get_or_default_string(r{}, r{}, r{})",
+            pc, name, rd, ra, key, default
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2Println { rd, pair } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_println(pair=r{})",
+            pc, name, rd, pair
+        ),
         Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_unpack(r{})",
             pc, name, rd, ra
@@ -1163,6 +1316,18 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_values(r{})",
             pc, name, rd, ra
         ),
+        Op::MirOrdinaryMapOwnedAnyV2Keys { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_keys(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { rd, ra } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_keys_unpack_zero(r{})",
+            pc, name, rd, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2DynamicArg0 { rd } => format!(
+            "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_dynamic_arg0()",
+            pc, name, rd
+        ),
         Op::MirOrdinaryMapOwnedAnyV2IsEmpty { rd, ra } => format!(
             "{:04}  {:<16} r{} = mir_ordinary_map_owned_any_v2_is_empty(r{})",
             pc, name, rd, ra
@@ -1174,6 +1339,10 @@ pub fn format_op(op: &Op, proto: &FunctionProto, pc: usize) -> String {
         Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra } => format!(
             "{:04}  {:<16} drop mir_ordinary_map_owned_any_v2_values(r{})",
             pc, name, ra
+        ),
+        Op::MirOrdinaryMapOwnedAnyV2ValuesClone { rd, ra } => format!(
+            "{:04}  {:<16} clone mir_ordinary_map_owned_any_v2_values(r{}) -> r{}",
+            pc, name, ra, rd
         ),
         Op::MirVariantPredicate {
             rd,
@@ -1616,6 +1785,63 @@ mod tests {
         assert_eq!(
             format_op(&op, &proto, 12),
             "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_ANY r7 = mir_ordinary_map_owned_any_v2_get_any(r3, r5)"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_get_or_default_string_shows_its_typed_operation_and_operands() {
+        let proto = FunctionProto::new("function:get_or_default_string".into(), 0);
+        let op = Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString {
+            rd: 7,
+            ra: 3,
+            key: 5,
+            default: 6,
+        };
+
+        assert_eq!(
+            op_name(&op),
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING"
+        );
+        assert_eq!(
+            format_op(&op, &proto, 12),
+            "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING r7 = mir_ordinary_map_owned_any_v2_get_or_default_string(r3, r5, r6)"
+        );
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_set_get_string_result_disassembly_keeps_type_constants_visible() {
+        let proto = FunctionProto::new("function:set_get_string_result".into(), 0);
+        let set = Op::MirOrdinaryMapOwnedAnyV2SetStringResult {
+            rd: 7,
+            ra: 3,
+            key: 5,
+            value: 6,
+            string_type_id: 8,
+            string_type_desc_hash: 9,
+        };
+        let get = Op::MirOrdinaryMapOwnedAnyV2GetStringResult {
+            rd: 10,
+            ra: 3,
+            key: 5,
+            string_type_id: 8,
+            string_type_desc_hash: 9,
+        };
+
+        assert_eq!(
+            op_name(&set),
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_RESULT"
+        );
+        assert_eq!(
+            format_op(&set, &proto, 12),
+            "0012  MIR_ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_RESULT r7 = mir_ordinary_map_owned_any_v2_set_string_result(r3, r5, r6, string_type_id=c8, string_type_desc_hash=c9)"
+        );
+        assert_eq!(
+            op_name(&get),
+            "MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_RESULT"
+        );
+        assert_eq!(
+            format_op(&get, &proto, 13),
+            "0013  MIR_ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_RESULT r10 = mir_ordinary_map_owned_any_v2_get_string_result(r3, r5, string_type_id=c8, string_type_desc_hash=c9)"
         );
     }
 

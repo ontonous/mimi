@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, Weak as ArcWeak};
 
 /// Shared VM string storage. Clones share the allocation; mutation uses COW.
+/// Unlike the stable standard Arc, this storage also supports fallible publication.
 pub type SharedString = triomphe::Arc<String>;
 
 /// Poll-based future state.
@@ -288,6 +289,10 @@ pub enum CanonicalOrdinaryMapOwnedAnyV2Value {
         type_id: crate::core::ResolvedTypeId,
         value: i32,
     },
+    Bool {
+        type_id: crate::core::ResolvedTypeId,
+        value: bool,
+    },
     String {
         type_id: crate::core::ResolvedTypeId,
         text: SharedString,
@@ -318,8 +323,16 @@ pub struct CanonicalManagedAnyV2 {
 #[derive(Debug, PartialEq, Eq)]
 enum CanonicalManagedAnyV2Payload {
     I32(i32),
+    /// The payload bytes stay in the production ManagedAny-v2 runtime token.
+    /// The Bytecode VM's Core site sidecar owns that token until the
+    /// Checker-receipted pair Drop.
+    RuntimeI32,
+    Bool(bool),
     String(String),
-    Record { nominal: String, text: String },
+    Record {
+        nominal: String,
+        text: String,
+    },
 }
 
 impl CanonicalManagedAnyV2 {
@@ -327,6 +340,20 @@ impl CanonicalManagedAnyV2 {
         Self {
             type_id,
             payload: CanonicalManagedAnyV2Payload::I32(value),
+        }
+    }
+
+    pub(crate) fn from_runtime_i32(type_id: crate::core::ResolvedTypeId) -> Self {
+        Self {
+            type_id,
+            payload: CanonicalManagedAnyV2Payload::RuntimeI32,
+        }
+    }
+
+    pub(crate) fn from_bool(type_id: crate::core::ResolvedTypeId, value: bool) -> Self {
+        Self {
+            type_id,
+            payload: CanonicalManagedAnyV2Payload::Bool(value),
         }
     }
 
@@ -350,6 +377,70 @@ impl CanonicalManagedAnyV2 {
 
     pub(crate) fn type_id(&self) -> &crate::core::ResolvedTypeId {
         &self.type_id
+    }
+
+    pub(crate) fn i32_value_for_type_id(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<i32> {
+        if &self.type_id != expected_type_id {
+            return None;
+        }
+        match &self.payload {
+            CanonicalManagedAnyV2Payload::I32(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_runtime_i32_for_type_id(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        &self.type_id == expected_type_id
+            && matches!(&self.payload, CanonicalManagedAnyV2Payload::RuntimeI32)
+    }
+
+    pub(crate) fn bool_value_for_type_id(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<bool> {
+        if &self.type_id != expected_type_id {
+            return None;
+        }
+        match &self.payload {
+            CanonicalManagedAnyV2Payload::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn try_deep_clone(&self) -> Result<Self, std::collections::TryReserveError> {
+        let payload = match &self.payload {
+            CanonicalManagedAnyV2Payload::I32(value) => CanonicalManagedAnyV2Payload::I32(*value),
+            CanonicalManagedAnyV2Payload::RuntimeI32 => CanonicalManagedAnyV2Payload::RuntimeI32,
+            CanonicalManagedAnyV2Payload::Bool(value) => CanonicalManagedAnyV2Payload::Bool(*value),
+            CanonicalManagedAnyV2Payload::String(text) => {
+                let mut copy = String::new();
+                copy.try_reserve_exact(text.len())?;
+                copy.push_str(text);
+                CanonicalManagedAnyV2Payload::String(copy)
+            }
+            CanonicalManagedAnyV2Payload::Record { nominal, text } => {
+                let mut nominal_copy = String::new();
+                nominal_copy.try_reserve_exact(nominal.len())?;
+                nominal_copy.push_str(nominal);
+                let mut text_copy = String::new();
+                text_copy.try_reserve_exact(text.len())?;
+                text_copy.push_str(text);
+                CanonicalManagedAnyV2Payload::Record {
+                    nominal: nominal_copy,
+                    text: text_copy,
+                }
+            }
+        };
+        Ok(Self {
+            type_id: self.type_id.clone(),
+            payload,
+        })
     }
 
     /// Borrow a direct String payload only when the complete selected
@@ -398,6 +489,16 @@ impl CanonicalManagedAnyV2 {
     ) -> bool {
         self.type_id == *expected_type_id
             && matches!(self.payload, CanonicalManagedAnyV2Payload::I32(value) if value == expected_value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_bool_value(
+        &self,
+        expected_type_id: &crate::core::ResolvedTypeId,
+        expected_value: bool,
+    ) -> bool {
+        self.type_id == *expected_type_id
+            && matches!(self.payload, CanonicalManagedAnyV2Payload::Bool(value) if value == expected_value)
     }
 
     #[cfg(test)]
@@ -511,6 +612,131 @@ impl Clone for CanonicalManagedAnyI32StringV1 {
     }
 }
 
+/// Runtime handle for the real ordinary Map/Any owner-v2 NewResult profile.
+/// Cloning a `Value` may clone this Arc cell, but it never clones the unique
+/// runtime owner. The synchronized alias count lets owner operations reject a
+/// copied value; unwind cleanup can retire the exact handle through any
+/// remaining alias without touching unrelated roots.
+pub struct CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+    Arc<Mutex<CanonicalOrdinaryMapOwnedAnyV2RuntimeRootCell>>,
+);
+
+struct CanonicalOrdinaryMapOwnedAnyV2RuntimeRootCell {
+    aliases: usize,
+    owner: Option<crate::runtime::OwnedAnyV2Root>,
+}
+
+impl CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot {
+    pub(crate) fn new(owner: crate::runtime::OwnedAnyV2Root) -> Self {
+        Self(Arc::new(Mutex::new(
+            CanonicalOrdinaryMapOwnedAnyV2RuntimeRootCell {
+                aliases: 1,
+                owner: Some(owner),
+            },
+        )))
+    }
+
+    pub(crate) fn is_unique(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .aliases
+            == 1
+    }
+
+    pub(crate) fn with_owner<R>(
+        &self,
+        operation: impl FnOnce(&crate::runtime::OwnedAnyV2Root) -> R,
+    ) -> Option<R> {
+        let owner = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        owner.owner.as_ref().map(operation)
+    }
+
+    pub(crate) fn take_unique(self) -> Result<crate::runtime::OwnedAnyV2Root, Self> {
+        let mut cell = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cell.aliases != 1 {
+            drop(cell);
+            return Err(self);
+        }
+        let owner = cell.owner.take();
+        drop(cell);
+        match owner {
+            Some(owner) => Ok(owner),
+            None => Err(self),
+        }
+    }
+
+    /// Retire the exact owner if this cell still contains one. This is
+    /// idempotent across Value aliases and deliberately does not drain any
+    /// execution-domain or process-wide registry.
+    pub(crate) fn cleanup(&self) {
+        let owner = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .owner
+            .take();
+        drop(owner);
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .owner
+            .is_some()
+    }
+
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Clone for CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot {
+    fn clone(&self) -> Self {
+        let mut cell = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cell.aliases = cell
+            .aliases
+            .checked_add(1)
+            .unwrap_or_else(|| std::process::abort());
+        let clone = Self(Arc::clone(&self.0));
+        drop(cell);
+        clone
+    }
+}
+
+impl Drop for CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot {
+    fn drop(&mut self) {
+        let mut cell = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cell.aliases == 0 {
+            std::process::abort();
+        }
+        cell.aliases -= 1;
+    }
+}
+
+impl std::fmt::Debug for CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.is_live() {
+            "<ordinary Map/Any owner-v2 runtime root>"
+        } else {
+            "<retired ordinary Map/Any owner-v2 runtime root>"
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum Value {
     Int(i64),
@@ -554,6 +780,10 @@ pub enum Value {
     /// owner-v2 profile.  This runtime identity is separate from all v1 and
     /// legacy Map values; its payloads are deep-copied snapshots.
     CanonicalOrdinaryMapOwnedAnyV2(Arc<BTreeMap<String, CanonicalOrdinaryMapOwnedAnyV2Value>>),
+    /// Unique real-runtime owner-v2 root created by the narrow recoverable
+    /// NewResult opcode. It is distinct from snapshot-backed V2 roots, which
+    /// remain limited to the existing owner-v2 routes.
+    CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot),
     /// Dedicated owned Any; construction and extraction require canonical MIR receipts.
     CanonicalManagedAnyI32StringV1(CanonicalManagedAnyI32StringV1),
     /// Dedicated owned dynamic Any for the independently receipted
@@ -688,6 +918,9 @@ impl Clone for Value {
             }
             Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
                 Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::clone(root))
+            }
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root.clone())
             }
             Value::CanonicalManagedAnyI32StringV1(value) => {
                 Value::CanonicalManagedAnyI32StringV1(value.clone())
@@ -2103,6 +2336,7 @@ impl std::fmt::Display for Value {
             Value::CanonicalOrdinaryMapOwnedAnyV2(_) => {
                 write!(f, "<canonical ordinary Map/Any owner-v2>")
             }
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => write!(f, "{root:?}"),
             Value::CanonicalManagedAnyI32StringV1(_) => {
                 write!(f, "<canonical managed Any i32/String v1>")
             }
@@ -2501,6 +2735,10 @@ fn values_equal_depth(a: &Value, b: &Value, depth: u32) -> bool {
         (Value::CanonicalOrdinaryMapOwnedAnyV2(a), Value::CanonicalOrdinaryMapOwnedAnyV2(b)) => {
             a == b
         }
+        (
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(a),
+            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(b),
+        ) => a.ptr_eq(b),
         (Value::CanonicalManagedAnyI32StringV1(a), Value::CanonicalManagedAnyI32StringV1(b)) => {
             a == b
         }
@@ -2637,6 +2875,9 @@ pub(crate) fn type_name(val: &Value) -> &'static str {
         }
         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(_) => "ordinary-map-owned-get-i32-string-v1",
         Value::CanonicalOrdinaryMapOwnedAnyV2(_) => "ordinary-map-owned-any-v2",
+        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
+            "ordinary-map-owned-any-v2-runtime-root"
+        }
         Value::CanonicalManagedAnyI32StringV1(_) => "managed-any-i32-string-v1",
         Value::CanonicalManagedAnyV2(_) => "managed-any-v2",
         Value::Record(Some(_), _) => "record",

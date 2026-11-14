@@ -15,7 +15,7 @@ pub(crate) const NATIVE_DATA_EXPORT_ROUTE_PROFILE: &str = "native-data-export-v1
 
 use mimi::ast::File;
 use mimi::core::mir::reference::{MirProgram, MirProgramBuildError};
-use mimi::core::CheckedProgram;
+use mimi::core::resolved::CheckedProgram;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyRouteReason {
@@ -110,9 +110,32 @@ pub(crate) enum DefaultMirRoute {
     /// Once an island is recognized, its old production path is deleted and
     /// the CLI must fail closed instead of silently compiling it with legacy.
     Rejected(String),
+    /// Proof-only default verification route for the exact isolated
+    /// `repr(C)` String-record FFI owner slice. This is not execution MIR and
+    /// cannot be consumed by run, build, bytecode, or native backends.
+    VerifierOnlyFfiStringRecordOwnerSlice,
+    /// Proof-only L2 semantic projection for the direct tuple-valued Map Get
+    /// Checker receipt. This is not executable MIR and must remain unavailable
+    /// to run/build consumers.
+    VerifierOnlyDirectTupleGetUnpackL2,
 }
 
 const MAP_NEW_RESULT_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Map NewResult source receipt has no canonical native/route receipt yet";
+const MAP_SET_RESULT_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Map SetResult lineage has no canonical native/route receipt yet";
+const MAP_SET_GET_I32_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Map Set/Get-i32 lineage has no canonical native/route receipt yet";
+const MAP_SET_GET_STRING_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Map Set/Get-String lineage has no canonical native/route receipt yet";
+const MAP_SET_GET_ANY_I32_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Map Set/GetAny-i32 lineage has no canonical consumer receipt yet";
+const MAP_SET_GET_ANY_RESULT_I32_SOURCE_PENDING_REASON: &str = "MIR-COVERAGE-001: Checker-recognized Result-valued Map Set/GetAny-i32 lineage has no canonical consumer receipt yet";
+
+/// Dynamic Protocol dispatch is no longer part of the Mimi surface contract.
+/// Reject it from the Checker-issued receiver node type before a consumer can
+/// choose a compatibility backend. `callee` is only a display spelling and
+/// intentionally loses nested field and expression receivers.
+pub(crate) fn dynamic_protocol_method_boundary_diagnostic(
+    checked: &CheckedProgram,
+) -> Option<String> {
+    checked.dynamic_protocol_method_boundary_reason()
+}
 
 /// A Checker NewResult receipt recognizes the exact source-level recoverable
 /// `map_new()` shape, but it is not yet an admission for production MIR.
@@ -124,6 +147,42 @@ fn map_new_result_source_pending_reason(checked: &CheckedProgram) -> Option<&'st
         .values()
         .any(|analysis| analysis.has_pending_ordinary_map_owned_any_v2_new_result_source_receipt())
         .then_some(MAP_NEW_RESULT_SOURCE_PENDING_REASON)
+}
+
+/// The SetResult source receipt is a separate admission from NewResult-only.
+/// It authorizes only the exact New/Set lineage whose old and updated roots
+/// are settled along their respective result branches.
+fn map_set_result_source_pending_reason(checked: &CheckedProgram) -> Option<&'static str> {
+    mimi::core::mir::has_ordinary_map_set_result_route_candidate(checked)
+        .then_some(MAP_SET_RESULT_SOURCE_PENDING_REASON)
+}
+
+fn map_set_get_i32_source_pending_reason(checked: &CheckedProgram) -> Option<&'static str> {
+    mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate(checked)
+        .then_some(MAP_SET_GET_I32_SOURCE_PENDING_REASON)
+}
+
+fn map_set_get_string_source_pending_reason(checked: &CheckedProgram) -> Option<&'static str> {
+    mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(checked)
+        .then_some(MAP_SET_GET_STRING_SOURCE_PENDING_REASON)
+}
+
+fn map_set_get_any_i32_source_pending_reason(checked: &CheckedProgram) -> Option<&'static str> {
+    mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate(checked)
+        .then_some(MAP_SET_GET_ANY_I32_SOURCE_PENDING_REASON)
+}
+
+fn map_set_get_any_result_i32_source_pending_reason(
+    checked: &CheckedProgram,
+) -> Option<&'static str> {
+    let recognized_attempt = checked.callables().values().any(|callable| {
+        callable.body.resolved_calls.values().any(|callee| {
+            matches!(callee, mimi::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "map_get_any")
+        })
+    });
+    (recognized_attempt
+        || mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate(checked))
+    .then_some(MAP_SET_GET_ANY_RESULT_I32_SOURCE_PENDING_REASON)
 }
 
 /// Materialize the production route graph with only the known prelude
@@ -154,7 +213,125 @@ pub(crate) fn build_canonical_program(
     checked: &CheckedProgram,
     merged_file: &File,
 ) -> Result<MirProgram, String> {
-    if map_new_result_source_pending_reason(checked).is_some() {
+    if let Some(reason) = dynamic_protocol_method_boundary_diagnostic(checked) {
+        return Err(reason);
+    }
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_reference_candidate(
+        checked,
+    ) {
+        return mimi::core::mir::materialize_ordinary_map_direct_tuple_get_unpack_l1_reference_route(
+            checked,
+        )
+        .map(|(program, _receipt)| program);
+    }
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(checked)
+    {
+        return Err(format!(
+            "{}: direct tuple Get L2 is a VerifierOnly semantic projection and cannot be used as an execution MIR route",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    if mimi::core::mir::classify_canonical_mir_route_admission(checked).ordinary_map_owned_any_v2
+        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+    {
+        return materialize_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(
+            checked,
+            merged_file,
+        );
+    }
+    if mimi::core::mir::classify_canonical_mir_route_admission(checked)
+        .ordinary_map_owned_any_v2
+        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
+    {
+        return match select_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+            checked,
+            merged_file,
+            RoutePurpose::Execution,
+        ) {
+            DefaultMirRoute::Canonical(program) => Ok(*program),
+            DefaultMirRoute::Rejected(reason) => Err(reason),
+            DefaultMirRoute::Legacy(reason) => Err(format!(
+                "{}: ValuesLocalIndexI32 Result-branch route cannot use compatibility path: {}",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                reason.as_str()
+            )),
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+            | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => Err(format!(
+                "{}: verifier-only disposition cannot be used as an execution MIR route",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+        };
+    }
+    let direct_print_result_admission =
+        mimi::core::mir::classify_canonical_mir_route_admission(checked)
+            .ordinary_map_owned_any_v2
+            .is_direct_print_result();
+    if direct_print_result_admission {
+        let route = materialize_canonical_route(checked, merged_file)
+            .map_err(|error| error.to_diagnostic().message)?;
+        if !ordinary_map_owned_any_v2_direct_print_result_materialization_is_exact(&route) {
+            return Err(format!(
+                "{}: Checker DirectPrintResult admission did not materialize its exact independent Result-match route receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        return match select_ordinary_map_owned_any_v2_direct_print_result_route(
+            checked,
+            route.program,
+        ) {
+            DefaultMirRoute::Canonical(program) => Ok(*program),
+            DefaultMirRoute::Rejected(reason) => Err(reason),
+            DefaultMirRoute::Legacy(reason) => Err(format!(
+                "{}: explicit DirectPrintResult route cannot use compatibility path: {}",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                reason.as_str()
+            )),
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => Err(format!(
+                "{}: verifier-only String-record FFI owner slice cannot be used as an execution route",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => Err(format!(
+                "{}: VerifierOnly direct tuple Get L2 cannot be used as an execution route",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+        };
+    }
+    if !direct_print_result_admission
+        && map_set_get_any_result_i32_source_pending_reason(checked).is_some()
+    {
+        return match select_map_set_get_any_result_i32_route(checked, RoutePurpose::Execution) {
+            DefaultMirRoute::Canonical(program) => Ok(*program),
+            DefaultMirRoute::Rejected(reason) => Err(reason),
+            DefaultMirRoute::Legacy(_) => Err(format!(
+                "{}: Result-valued Set/GetAny-i32 route unexpectedly requested legacy fallback",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => Err(format!(
+                "{}: verifier-only String-record FFI owner slice cannot be used as an execution route",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+            DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => Err(format!(
+                "{}: direct tuple Get L2 is a VerifierOnly semantic projection and cannot be used as an execution route",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+        };
+    }
+    if !direct_print_result_admission
+        && map_set_get_any_i32_source_pending_reason(checked).is_some()
+    {
+        return mimi::core::mir::materialize_ordinary_map_set_get_any_i32_route(checked);
+    }
+    if !direct_print_result_admission && map_set_get_string_source_pending_reason(checked).is_some()
+    {
+        return mimi::core::mir::materialize_ordinary_map_set_get_string_route(checked);
+    }
+    if !direct_print_result_admission && map_set_get_i32_source_pending_reason(checked).is_some() {
+        return mimi::core::mir::materialize_ordinary_map_set_get_i32_route(checked);
+    }
+    if !direct_print_result_admission && map_set_result_source_pending_reason(checked).is_some() {
+        return mimi::core::mir::materialize_ordinary_map_set_result_route(checked);
+    }
+    if !direct_print_result_admission && map_new_result_source_pending_reason(checked).is_some() {
         return match mimi::core::mir::materialize_ordinary_map_new_result_route(checked) {
             Ok(program) => Ok(program),
             Err(reason) => Err(reason),
@@ -385,6 +562,56 @@ pub(crate) fn build_canonical_program(
         })?;
         return Ok(route.program);
     }
+    if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+        let route = materialize_canonical_route(checked, merged_file)
+            .map_err(|error| error.to_diagnostic().message)?;
+        let profile = mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+            .as_str();
+        if !route
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt == &route.program.route_receipt(profile))
+        {
+            return Err(format!(
+                "{}: Checker ValuesResultCrosscallStringCallerIndex1 V4 admission did not materialize its exact independent route receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1(
+            checked,
+            &route.program,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesResultCrosscallStringCallerIndex1 V4 route rejected: {reason}")
+        })?;
+        return Ok(route.program);
+    }
+    if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3() {
+        let route = materialize_canonical_route(checked, merged_file)
+            .map_err(|error| error.to_diagnostic().message)?;
+        let profile = mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+            .as_str();
+        if !route
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt == &route.program.route_receipt(profile))
+        {
+            return Err(format!(
+                "{}: Checker ValuesResultCrosscallStringCaller V3 admission did not materialize its exact independent route receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller(
+            checked,
+            &route.program,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesResultCrosscallStringCaller V3 route rejected: {reason}")
+        })?;
+        return Ok(route.program);
+    }
     if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1() {
         let route = materialize_canonical_route(checked, merged_file)
             .map_err(|error| error.to_diagnostic().message)?;
@@ -496,6 +723,7 @@ pub(crate) fn build_canonical_program(
     let v2_admission = admission.ordinary_map_owned_any_v2;
     if v2_admission.has_profile_signal()
         && !v2_admission.is_direct_print()
+        && !v2_admission.is_direct_print_result()
         && !v2_admission.is_checked_get()
         && !v2_admission.is_computed_key_get()
         && !v2_admission.is_computed_string_key_owner_chain()
@@ -504,12 +732,14 @@ pub(crate) fn build_canonical_program(
         && !admission.ordinary_map_owned_any_v2_removed_key_checked_miss()
         && !v2_admission.is_values_field_move()
         && !v2_admission.is_values_local_index_i32()
+        && !v2_admission.ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
         && !v2_admission.is_values_heterogeneous_string_index1()
         && v2_admission
             != mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesMixedSnapshotRemove
         && !v2_admission.is_values_mixed_snapshot()
         && v2_admission
             != mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesSnapshotReplacement
+        && v2_admission != mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
         && !v2_admission.is_ordinary_map_owned_any_v2_persistent_root_alias_replacement()
         && (!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY
             || !v2_admission.is_complete())
@@ -532,6 +762,9 @@ pub(crate) fn build_canonical_program(
             .map_err(|reason| {
                 format!("canonical PersistentRootAliasReplacement route rejected: {reason}")
             })?;
+    } else if v2_admission.is_direct_print_result() {
+        preflight_ordinary_map_owned_any_v2_direct_print_result(checked, &program)
+            .map_err(|reason| format!("canonical DirectPrintResult route rejected: {reason}"))?;
     } else if v2_admission.is_direct_print() {
         preflight_ordinary_map_owned_any_v2_direct_print(&program)
             .map_err(|reason| format!("canonical DirectPrint route rejected: {reason}"))?;
@@ -555,6 +788,21 @@ pub(crate) fn build_canonical_program(
     } else if v2_admission.is_values_local_index_i32() {
         preflight_ordinary_map_owned_any_v2_values_local_index_i32(checked, &program)
             .map_err(|reason| format!("canonical ValuesLocalIndexI32 route rejected: {reason}"))?;
+    } else if v2_admission.ordinary_map_owned_any_v2_values_local_index_i32_result_branch() {
+        let receipt = program.route_receipt(
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE,
+        );
+        let results = preflight_ordinary_map_owned_any_v2_values_local_index_i32_result_branch(
+            checked, &program, &receipt,
+        )
+        .map_err(|reason| {
+            format!("canonical ValuesLocalIndexI32 Result-branch route rejected: {reason}")
+        })?;
+        if !mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+            return Err(format!(
+                "canonical ValuesLocalIndexI32 Result-branch verifier rejected the execution route: {results:?}"
+            ));
+        }
     } else if v2_admission.is_values_heterogeneous_string_index1() {
         preflight_ordinary_map_owned_any_v2_values_heterogeneous_string_index1(checked, &program)
             .map_err(|reason| {
@@ -627,13 +875,13 @@ fn scalar_ffi_map_owner_composition_failure(
 }
 
 /// Select the route identity used by CLI consumers for a checker-owned graph.
-/// The recoverable ordinary Map NewResult receipt leads the chain: it is
-/// shape-disjoint from every admission-based profile below (its exact source
-/// shape admits no other ordinary Map operation), so the early return cannot
-/// shadow them and the pending-source dispatch cannot be shadowed either.
+/// The exact ordinary Map SetResult lineage receipt leads the chain, followed
+/// by the shape-disjoint NewResult-only receipt. Both are source-receipt
+/// routes that are not selected from the older admission table below.
 /// Observer V1, DirectPrint, CheckedGet, ComputedKeyGet,
 /// ComputedStringKeyOwnerChain, IsEmpty,
-/// MapSetDropControl, BranchLocalSetDiamond, CloneIsolation, ValuesFieldMove,
+/// MapSetDropControl, MapSetDropControlResult, BranchLocalSetDiamond,
+/// CloneIsolation, ValuesFieldMove,
 /// ValuesLocalIndexI32, KeysSnapshot,
 /// ValuesSnapshotReplacement, ValuesMixedSnapshot, ValuesMixedSnapshotRemove,
 /// RemovedKeyCheckedMiss, ValuesProducerCaller, ValuesCrosscallStringCaller,
@@ -645,6 +893,84 @@ pub(crate) fn route_receipt_profile_for_checked(
     default_profile: &'static str,
 ) -> &'static str {
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    // The Result-branch profile deliberately carries an older owned-Get
+    // Checker receipt as duplicate evidence. Keep its independent V2 route
+    // identity ahead of the legacy ResultBranchV3 identity so execution and
+    // verifier consumers select the receipt that admitted this graph.
+    if admission
+        .ordinary_map_owned_any_v2
+        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
+    {
+        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+    }
+    if checked
+        .resource_analyses()
+        .values()
+        .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt())
+    {
+        return mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;
+    }
+    if admission.ordinary_map_owned_any_v2
+        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+    {
+        return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
+    }
+    if admission.ordinary_map_owned_any_v2.is_direct_print_result() {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult
+                .as_str()
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_reference_candidate(
+        checked,
+    ) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(checked)
+    {
+        return mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE;
+    }
+    if mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate(checked) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate(checked) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(checked) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate(checked) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE
+        };
+    }
+    if mimi::core::mir::has_ordinary_map_set_result_route_candidate(checked) {
+        return if default_profile == "verify-canonical-v1" {
+            mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE
+        } else {
+            mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE
+        };
+    }
     if mimi::core::mir::has_ordinary_map_new_result_route_candidate(checked) {
         return mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE;
     }
@@ -910,6 +1236,25 @@ pub(crate) fn build_canonical_program_for_sources_with_diagnostics(
             },
         ]));
     }
+    if admission
+        .ordinary_map_owned_any_v2
+        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
+    {
+        if included_sources.is_some() {
+            return Err(MirProgramBuildError::Validation(vec![
+                mimi::core::mir::MirValidationError {
+                    subject: "source-scoped route coverage".into(),
+                    message: format!(
+                        "{}: ValuesLocalIndexI32 Result-branch inspection requires the complete CheckedProgram source graph",
+                        mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                    ),
+                },
+            ]));
+        }
+        return MirProgram::from_checked_program_ordinary_map_owned_any_v2_values_local_index_i32_result_branch(
+            checked,
+        );
+    }
     let excluded_sources = merged_file
         .sources
         .records()
@@ -956,7 +1301,7 @@ fn source_scope_import_boundary_error(
         else {
             continue;
         };
-        let caller_owner = mimi::core::NodeId(site.owner.clone());
+        let caller_owner = mimi::core::resolved::NodeId(site.owner.clone());
         let Some(caller) = checked.callable(&caller_owner) else {
             continue;
         };
@@ -1086,6 +1431,22 @@ fn select_default_route_for_purpose(
     let route = select_default_route_inner(checked, merged_file, purpose);
     let verbose = std::env::var_os("MIMI_VERBOSE").is_some();
     let census = std::env::var_os("MIMI_ROUTE_CENSUS").is_some();
+    if (verbose || census)
+        && matches!(
+            &route,
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2
+        )
+    {
+        let profile = match &route {
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => "verifier-ffi-owner-slice-v1",
+            DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE
+            }
+            _ => unreachable!("the route was matched as verifier-only above"),
+        };
+        eprintln!("canonical route disposition: verifier-only ({profile}; no execution route)");
+    }
     if let DefaultMirRoute::Canonical(program) = &route {
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
         let is_map_root = admission.map_root.is_candidate();
@@ -1121,7 +1482,13 @@ fn select_default_route_for_purpose(
             if census && is_ordinary_map_owner_observer {
                 report_observer_v1_readiness_census();
             }
-            let profile = route_receipt_profile_for_checked(checked, "default-route");
+            let profile = route_receipt_profile_for_checked(
+                checked,
+                match purpose {
+                    RoutePurpose::Execution => "default-route",
+                    RoutePurpose::Verification => "verify-canonical-v1",
+                },
+            );
             eprintln!(
                 "canonical route disposition: canonical ({profile}) mir_digest={}",
                 program.canonical_digest()
@@ -1136,8 +1503,77 @@ fn select_default_route_inner(
     merged_file: &File,
     purpose: RoutePurpose,
 ) -> DefaultMirRoute {
-    if map_new_result_source_pending_reason(checked).is_some() {
+    if let Some(reason) = dynamic_protocol_method_boundary_diagnostic(checked) {
+        return DefaultMirRoute::Rejected(reason);
+    }
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_reference_candidate(
+        checked,
+    ) {
+        return select_direct_tuple_get_l1_route(checked, purpose);
+    }
+    if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(checked)
+    {
+        return match purpose {
+            RoutePurpose::Verification => DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2,
+            RoutePurpose::Execution => DefaultMirRoute::Rejected(format!(
+                "{}: direct tuple Get L2 is VerifierOnly; run/build cannot execute or fall back to Legacy",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )),
+        };
+    }
+    if admission
+        .ordinary_map_owned_any_v2
+        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
+    {
+        return select_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+            checked,
+            merged_file,
+            purpose,
+        );
+    }
+    if admission.ordinary_map_owned_any_v2
+        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+    {
+        return match materialize_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(
+            checked,
+            merged_file,
+        ) {
+            Ok(program) => DefaultMirRoute::Canonical(Box::new(program)),
+            Err(reason) => DefaultMirRoute::Rejected(format!(
+                "canonical MapSetDropControlResult route rejected: {reason}"
+            )),
+        };
+    }
+    let direct_print_result_admission =
+        admission.ordinary_map_owned_any_v2.is_direct_print_result();
+    if !direct_print_result_admission
+        && map_set_get_any_result_i32_source_pending_reason(checked).is_some()
+    {
+        return select_map_set_get_any_result_i32_route(checked, purpose);
+    }
+    if !direct_print_result_admission
+        && map_set_get_any_i32_source_pending_reason(checked).is_some()
+    {
+        return select_map_set_get_any_i32_route(checked, purpose);
+    }
+    if !direct_print_result_admission && map_set_get_string_source_pending_reason(checked).is_some()
+    {
+        return select_map_set_get_string_route(checked, purpose);
+    }
+    if !direct_print_result_admission && map_set_get_i32_source_pending_reason(checked).is_some() {
+        return select_map_set_get_i32_route(checked, purpose);
+    }
+    if !direct_print_result_admission && map_set_result_source_pending_reason(checked).is_some() {
+        return select_map_set_result_route(checked, purpose);
+    }
+    if !direct_print_result_admission && map_new_result_source_pending_reason(checked).is_some() {
         return select_map_new_result_route(checked, purpose);
+    }
+    if purpose == RoutePurpose::Verification
+        && mimi::verifier::has_default_dual_ffi_string_record_owner_slice(checked)
+    {
+        return DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice;
     }
     // A called extern declaration that is outside the migrated scalar C ABI
     // is still a canonical FFI boundary.  Reject it before considering any
@@ -1164,9 +1600,15 @@ fn select_default_route_inner(
     if admission.ordinary_map_owned_any_v2
         == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
     {
+        let direct_print_result_reason =
+            mimi::core::mir::ordinary_map_owned_any_v2_direct_print_result_source_census_failure(
+                checked,
+            )
+            .map(|reason| format!("; DirectPrintResult census rejected: {reason}"))
+            .unwrap_or_default();
         return DefaultMirRoute::Rejected(format!(
-            "{}: Checker observed an incomplete ordinary Map/Any owner-v2 attempt, including unreceipted Values producer/caller or cross-call String caller intent; default dispatch cannot use legacy or a generic collection route",
-            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            "{}: Checker observed an incomplete ordinary Map/Any owner-v2 attempt, including unreceipted Values producer/caller or cross-call String caller intent; default dispatch cannot use legacy or a generic collection route{direct_print_result_reason}",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
         ));
     }
     if admission.ordinary_map_owned_any_v2_persistent_root_alias_replacement() {
@@ -1199,7 +1641,7 @@ fn select_default_route_inner(
     // outside every migration island would send the caller to bytecode even
     // though the same checked graph can be materialized as Canonical MIR.
     let module_alias_call_hint = checked.call_sites().values().any(|site| {
-        matches!(site.kind, mimi::core::ResolvedCallKind::Function)
+        matches!(site.kind, mimi::core::resolved::ResolvedCallKind::Function)
             && site.target_function.is_some()
             && site.callee.contains("::")
     });
@@ -1513,7 +1955,7 @@ fn select_default_route_inner(
             Ok(route)
                 if route.materialized_ordinary_map_owned_get_i32_string_v1_candidate =>
             {
-                select_ordinary_map_owned_get_i32_string_v1_route(route.program)
+                select_ordinary_map_owned_get_i32_string_v1_route(checked, route.program)
             }
             Ok(_) => DefaultMirRoute::Rejected(format!(
                 "{}: complete ordinary Map owned-get admission did not materialize its operation receipt",
@@ -1552,6 +1994,60 @@ fn select_default_route_inner(
                 }
                 Ok(_) => DefaultMirRoute::Rejected(format!(
                     "{}: Checker ZeroMissI32 admission did not materialize its exact independent operation receipt",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                )),
+                Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+            };
+        }
+        if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+            return match materialize_canonical_route(checked, merged_file) {
+                Ok(route)
+                    if route
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt
+                                == &route.program.route_receipt(
+                                    mimi::core::mir::CanonicalMirRouteProfile::
+                                        OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+                                        .as_str(),
+                                )
+                        }) =>
+                {
+                    select_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+                        checked,
+                        route.program,
+                    )
+                }
+                Ok(_) => DefaultMirRoute::Rejected(format!(
+                    "{}: Checker ValuesResultCrosscallStringCallerIndex1 V4 admission did not materialize its exact independent route receipt",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                )),
+                Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+            };
+        }
+        if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3() {
+            return match materialize_canonical_route(checked, merged_file) {
+                Ok(route)
+                    if route
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt
+                                == &route.program.route_receipt(
+                                    mimi::core::mir::CanonicalMirRouteProfile::
+                                        OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+                                        .as_str(),
+                                )
+                        }) =>
+                {
+                    select_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                        checked,
+                        route.program,
+                    )
+                }
+                Ok(_) => DefaultMirRoute::Rejected(format!(
+                    "{}: Checker ValuesResultCrosscallStringCaller V3 admission did not materialize its exact independent route receipt",
                     mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
                 )),
                 Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
@@ -1687,6 +2183,25 @@ fn select_default_route_inner(
                 }
                 Ok(_) => DefaultMirRoute::Rejected(format!(
                     "{}: Checker MapRootProducerCaller admission did not materialize its exact independent route receipt",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                )),
+                Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+            };
+        }
+        if admission.ordinary_map_owned_any_v2.is_direct_print_result() {
+            return match materialize_canonical_route(checked, merged_file) {
+                Ok(route)
+                    if ordinary_map_owned_any_v2_direct_print_result_materialization_is_exact(
+                        &route,
+                    ) =>
+                {
+                    select_ordinary_map_owned_any_v2_direct_print_result_route(
+                        checked,
+                        route.program,
+                    )
+                }
+                Ok(_) => DefaultMirRoute::Rejected(format!(
+                    "{}: Checker DirectPrintResult admission did not materialize its exact independent Result-match route receipt",
                     mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
                 )),
                 Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
@@ -1854,6 +2369,16 @@ fn select_default_route_inner(
                 )),
                 Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
             };
+        }
+        if admission
+            .ordinary_map_owned_any_v2
+            .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
+        {
+            return select_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+                checked,
+                merged_file,
+                purpose,
+            );
         }
         if admission
             .ordinary_map_owned_any_v2
@@ -2133,8 +2658,8 @@ fn select_default_route_inner(
     let generic_record_update_candidate_hint = generic_record_update_unsupported_hint
         || mimi::core::mir::has_generic_record_update_candidate(checked);
     let user_record_hint = checked.type_defs().values().any(|definition| {
-        definition.kind == mimi::core::ResolvedTypeKind::Record
-            && matches!(definition.origin, mimi::core::Origin::User(_))
+        definition.kind == mimi::core::resolved::ResolvedTypeKind::Record
+            && matches!(definition.origin, mimi::core::resolved::Origin::User(_))
     });
     let complete_record_candidate = matches!(
         record_admission,
@@ -3439,7 +3964,7 @@ fn select_default_route_inner(
         && materialized_collection_candidate
         && !canonical
             .functions()
-            .contains_key(&mimi::core::NodeId("function:main".into()))
+            .contains_key(&mimi::core::resolved::NodeId("function:main".into()))
     {
         return DefaultMirRoute::Canonical(Box::new(route.program));
     }
@@ -3599,6 +4124,123 @@ fn select_default_route_inner(
     DefaultMirRoute::Canonical(Box::new(route.program))
 }
 
+/// Admit the exact direct tuple Get L1 slice only after its independent
+/// Reference, Bytecode, native and verifier consumers accept the same
+/// Checker-bound receipt. Verification remains a separate L2 semantic
+/// projection; it is never used as an executable graph.
+fn select_direct_tuple_get_l1_route(
+    checked: &CheckedProgram,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    use mimi::core::mir::{
+        has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate,
+        materialize_ordinary_map_direct_tuple_get_unpack_l1_reference_route,
+        materialize_ordinary_map_direct_tuple_get_unpack_l2_verifier_route,
+        validate_ordinary_map_direct_tuple_get_unpack_l1_reference_route,
+        validate_ordinary_map_direct_tuple_get_unpack_l2_verifier_profile,
+        validate_ordinary_map_direct_tuple_get_unpack_l2_verifier_route,
+        MIR_ROUTE_COVERAGE_ERROR_CODE, ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE,
+        ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE,
+    };
+
+    if !has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(checked) {
+        return DefaultMirRoute::Rejected(format!(
+            "{MIR_ROUTE_COVERAGE_ERROR_CODE}: direct tuple Get L1 receipt has no independently validated L2 semantic projection"
+        ));
+    }
+
+    let (verifier_program, verifier_route) =
+        match materialize_ordinary_map_direct_tuple_get_unpack_l2_verifier_route(checked) {
+            Ok(route) => route,
+            Err(reason) => return DefaultMirRoute::Rejected(reason),
+        };
+    if let Err(reason) =
+        validate_ordinary_map_direct_tuple_get_unpack_l2_verifier_route(checked, &verifier_program)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "direct tuple Get L2 semantic projection failed validation: {reason}"
+        ));
+    }
+    if verifier_route.profile != ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE {
+        return DefaultMirRoute::Rejected(format!(
+            "{MIR_ROUTE_COVERAGE_ERROR_CODE}: direct tuple Get L2 returned unexpected route profile '{}'",
+            verifier_route.profile
+        ));
+    }
+    if let Err(errors) =
+        mimi::verifier::validate_mir_capabilities_with_ordinary_map_direct_tuple_get_unpack_l2_verifier_route(
+            checked,
+            &verifier_program,
+            &verifier_route,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "direct tuple Get L2 verifier capability: {errors:?}"
+        ));
+    }
+
+    if purpose == RoutePurpose::Verification {
+        return DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2;
+    }
+
+    let (program, core_route) =
+        match materialize_ordinary_map_direct_tuple_get_unpack_l1_reference_route(checked) {
+            Ok(route) => route,
+            Err(reason) => return DefaultMirRoute::Rejected(reason),
+        };
+    if core_route.profile != ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE {
+        return DefaultMirRoute::Rejected(format!(
+            "{MIR_ROUTE_COVERAGE_ERROR_CODE}: direct tuple Get L1 returned unexpected Core profile '{}'",
+            core_route.profile
+        ));
+    }
+    if let Err(reason) =
+        validate_ordinary_map_direct_tuple_get_unpack_l1_reference_route(checked, &program)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "direct tuple Get L1 Reference route validation failed: {reason}"
+        ));
+    }
+    let bytecode = match mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+        checked,
+        &program,
+        &core_route,
+    ) {
+        Ok(bytecode) => bytecode,
+        Err(errors) => {
+            return DefaultMirRoute::Rejected(format!(
+                "direct tuple Get L1 Bytecode capability: {errors:?}"
+            ));
+        }
+    };
+    if bytecode.ast.is_some() {
+        return DefaultMirRoute::Rejected(
+            "direct tuple Get L1 Bytecode route unexpectedly retained a legacy AST".into(),
+        );
+    }
+    if let Err(errors) =
+        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+            checked,
+            &program,
+            &core_route,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "direct tuple Get L1 native capability: {errors:?}"
+        ));
+    }
+    // Keep the profile check independent from the construction helper so a
+    // future adapter cannot silently substitute the verifier-only projection.
+    if let Err(reason) =
+        validate_ordinary_map_direct_tuple_get_unpack_l2_verifier_profile(&verifier_program)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "direct tuple Get L2 profile revalidation failed: {reason}"
+        ));
+    }
+    DefaultMirRoute::Canonical(Box::new(program))
+}
+
 /// Selection for the recoverable ordinary Map NewResult slice. Execution
 /// binds the exact Checker receipt through the contract-free L1 graph and its
 /// Core MIR route receipt; verification binds the same receipt through the
@@ -3609,7 +4251,29 @@ fn select_map_new_result_route(checked: &CheckedProgram, purpose: RoutePurpose) 
     match purpose {
         RoutePurpose::Execution => {
             match mimi::core::mir::materialize_ordinary_map_new_result_route(checked) {
-                Ok(program) => DefaultMirRoute::Canonical(Box::new(program)),
+                Ok(program) => {
+                    if let Err(errors) =
+                        mimi::interp::bytecode::compile_mir_program_with_map_new_result_route(
+                            checked, &program,
+                        )
+                    {
+                        return DefaultMirRoute::Rejected(format!(
+                            "ordinary Map NewResult bytecode capability: {errors:?}"
+                        ));
+                    }
+                    let receipt = program
+                        .route_receipt(mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE);
+                    if let Err(errors) =
+                        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_new_result_route(
+                            checked, &program, &receipt,
+                        )
+                    {
+                        return DefaultMirRoute::Rejected(format!(
+                            "ordinary Map NewResult native capability: {errors:?}"
+                        ));
+                    }
+                    DefaultMirRoute::Canonical(Box::new(program))
+                }
                 Err(reason) => DefaultMirRoute::Rejected(reason),
             }
         }
@@ -3620,6 +4284,335 @@ fn select_map_new_result_route(checked: &CheckedProgram, purpose: RoutePurpose) 
             }
         }
     }
+}
+
+/// Select the exact recoverable ordinary Map SetResult lineage. Execution
+/// preflights both production consumers before returning Canonical, while
+/// verification selects its isolated no-obligation L2 projection. Any
+/// adapter failure is a hard rejection.
+fn select_map_set_result_route(checked: &CheckedProgram, purpose: RoutePurpose) -> DefaultMirRoute {
+    match purpose {
+        RoutePurpose::Execution => {
+            match mimi::core::mir::materialize_ordinary_map_set_result_route(checked) {
+                Ok(program) => {
+                    if let Err(errors) =
+                        mimi::interp::bytecode::compile_mir_program_with_map_set_result_route(
+                            checked, &program,
+                        )
+                    {
+                        return DefaultMirRoute::Rejected(format!(
+                            "ordinary Map SetResult bytecode capability: {errors:?}"
+                        ));
+                    }
+                    let receipt = program
+                        .route_receipt(mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE);
+                    if let Err(errors) =
+                        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_set_result_route(
+                            checked, &program, &receipt,
+                        )
+                    {
+                        return DefaultMirRoute::Rejected(format!(
+                            "ordinary Map SetResult native capability: {errors:?}"
+                        ));
+                    }
+                    DefaultMirRoute::Canonical(Box::new(program))
+                }
+                Err(reason) => DefaultMirRoute::Rejected(reason),
+            }
+        }
+        RoutePurpose::Verification => {
+            match mimi::core::mir::materialize_ordinary_map_set_result_verifier_route(checked) {
+                Ok(program) => DefaultMirRoute::Canonical(Box::new(program)),
+                Err(reason) => DefaultMirRoute::Rejected(reason),
+            }
+        }
+    }
+}
+
+/// Select the exact New/Set/Get-String lineage. Execution is admitted only
+/// after the Checker-bound bytecode and native adapters accept the same L1
+/// graph; verification carries the separate CheckedProgram-aware L2 receipt.
+fn select_map_set_get_string_route(
+    checked: &CheckedProgram,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    let program = match if purpose == RoutePurpose::Verification {
+        mimi::core::mir::materialize_ordinary_map_set_get_string_verifier_route(checked)
+    } else {
+        mimi::core::mir::materialize_ordinary_map_set_get_string_route(checked)
+    } {
+        Ok(program) => program,
+        Err(reason) => return DefaultMirRoute::Rejected(reason),
+    };
+    if purpose == RoutePurpose::Verification {
+        return DefaultMirRoute::Canonical(Box::new(program));
+    }
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_map_set_get_string_route(checked, &program)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/Get-String bytecode capability: {errors:?}"
+        ));
+    }
+    let receipt =
+        program.route_receipt(mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE);
+    if let Err(errors) =
+        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_set_get_string_route(
+            checked, &program, &receipt,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/Get-String native capability: {errors:?}"
+        ));
+    }
+    DefaultMirRoute::Canonical(Box::new(program))
+}
+
+/// Select the exact New/Set/Get-i32 lineage. Execution is admitted only after
+/// both source-bound adapters accept the same Checker/MIR pair. Verification
+/// deliberately carries only the L1 Core graph to the general verifier, whose
+/// Result status/tag gap remains an explicit coverage failure.
+fn select_map_set_get_i32_route(
+    checked: &CheckedProgram,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    let program = match if purpose == RoutePurpose::Verification {
+        mimi::core::mir::materialize_ordinary_map_set_get_i32_verifier_route(checked)
+    } else {
+        mimi::core::mir::materialize_ordinary_map_set_get_i32_route(checked)
+    } {
+        Ok(program) => program,
+        Err(reason) => return DefaultMirRoute::Rejected(reason),
+    };
+    if purpose == RoutePurpose::Verification {
+        return DefaultMirRoute::Canonical(Box::new(program));
+    }
+    if let Err(errors) =
+        mimi::interp::bytecode::compile_mir_program_with_map_set_get_i32_route(checked, &program)
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/Get-i32 bytecode capability: {errors:?}"
+        ));
+    }
+    let receipt =
+        program.route_receipt(mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE);
+    if let Err(errors) =
+        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_set_get_i32_route(
+            checked, &program, &receipt,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/Get-i32 native capability: {errors:?}"
+        ));
+    }
+    DefaultMirRoute::Canonical(Box::new(program))
+}
+
+/// Select the exact `map_new -> map_set -> map_get -> unpack_i32` lineage.
+/// The source receipt is independent from the older bare-root CheckedGet and
+/// typed Set/Get-i32 profiles. Execution preflights AST-free bytecode, native
+/// emission, and the isolated CheckedProgram-bound L2 projection before
+/// selecting the L1 graph; verification selects that L2 graph directly.
+fn select_map_set_get_any_i32_route(
+    checked: &CheckedProgram,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    if !mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate(checked) {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: ordinary Map Set/GetAny-i32 route lost its Checker source receipt",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    if purpose == RoutePurpose::Verification {
+        return match mimi::core::mir::materialize_ordinary_map_set_get_any_i32_verifier_route(
+            checked,
+        ) {
+            Ok(program) => DefaultMirRoute::Canonical(Box::new(program)),
+            Err(reason) => DefaultMirRoute::Rejected(reason),
+        };
+    }
+
+    let program = match mimi::core::mir::materialize_ordinary_map_set_get_any_i32_route(checked) {
+        Ok(program) => program,
+        Err(reason) => return DefaultMirRoute::Rejected(reason),
+    };
+    let bytecode = match mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_set_get_any_i32_route(
+        checked, &program,
+    ) {
+        Ok(bytecode) => bytecode,
+        Err(errors) => {
+            return DefaultMirRoute::Rejected(format!(
+                "ordinary Map Set/GetAny-i32 bytecode capability: {errors:?}"
+            ));
+        }
+    };
+    if bytecode.ast.is_some() {
+        return DefaultMirRoute::Rejected(
+            "ordinary Map Set/GetAny-i32 bytecode capability unexpectedly retained an AST".into(),
+        );
+    }
+    let receipt = program.route_receipt(
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE,
+    );
+    if let Err(errors) =
+        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_owned_any_v2_set_get_any_i32_route(
+            checked, &program, &receipt,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/GetAny-i32 native capability: {errors:?}"
+        ));
+    }
+
+    let verifier_program =
+        match mimi::core::mir::materialize_ordinary_map_set_get_any_i32_verifier_route(checked) {
+            Ok(program) => program,
+            Err(reason) => {
+                return DefaultMirRoute::Rejected(format!(
+                    "ordinary Map Set/GetAny-i32 L2 materialization: {reason}"
+                ));
+            }
+        };
+    if let Err(reason) = mimi::core::mir::validate_ordinary_map_set_get_any_i32_l2_verifier_route(
+        checked,
+        &verifier_program,
+    ) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/GetAny-i32 L2 route validation: {reason}"
+        ));
+    }
+    let verifier_receipt = verifier_program.route_receipt(
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE,
+    );
+    if let Err(error) = mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_set_get_any_i32_l2_verifier_route(
+        checked,
+        &verifier_program,
+        &verifier_receipt,
+    ) {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map Set/GetAny-i32 L2 verifier capability: {error:?}"
+        ));
+    }
+    DefaultMirRoute::Canonical(Box::new(program))
+}
+
+/// Select the independent fallible `map_get_any -> Result<(bool, Any), i32>`
+/// route. The exact Result receipt is required for default and explicit MIR
+/// entry points; the old tuple-valued `map_get` route cannot satisfy these
+/// capability checks.
+fn select_map_set_get_any_result_i32_route(
+    checked: &CheckedProgram,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    if !mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate(checked) {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: Result-valued Set/GetAny-i32 route lost its Checker source receipt",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    if purpose == RoutePurpose::Verification {
+        let program =
+            match mimi::core::mir::materialize_ordinary_map_set_get_any_result_i32_verifier_route(
+                checked,
+            ) {
+                Ok(program) => program,
+                Err(reason) => return DefaultMirRoute::Rejected(reason),
+            };
+        if let Err(reason) =
+            mimi::core::mir::validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(
+                checked, &program,
+            )
+        {
+            return DefaultMirRoute::Rejected(format!(
+                "Result-valued Set/GetAny-i32 L2 route validation: {reason}"
+            ));
+        }
+        let receipt = program.route_receipt(
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE,
+        );
+        if let Err(error) =
+            mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_set_get_any_result_i32_l2_verifier_route(
+                checked,
+                &program,
+                &receipt,
+            )
+        {
+            return DefaultMirRoute::Rejected(format!(
+                "Result-valued Set/GetAny-i32 L2 verifier capability: {error:?}"
+            ));
+        }
+        return DefaultMirRoute::Canonical(Box::new(program));
+    }
+
+    let program =
+        match mimi::core::mir::materialize_ordinary_map_set_get_any_result_i32_route(checked) {
+            Ok(program) => program,
+            Err(reason) => return DefaultMirRoute::Rejected(reason),
+        };
+    let bytecode = match mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_set_get_any_result_i32_route(
+        checked, &program,
+    ) {
+        Ok(bytecode) => bytecode,
+        Err(errors) => {
+            return DefaultMirRoute::Rejected(format!(
+                "Result-valued Set/GetAny-i32 bytecode capability: {errors:?}"
+            ));
+        }
+    };
+    if bytecode.ast.is_some() {
+        return DefaultMirRoute::Rejected(
+            "Result-valued Set/GetAny-i32 bytecode capability unexpectedly retained an AST".into(),
+        );
+    }
+    let receipt = program.route_receipt(
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE,
+    );
+    if let Err(errors) =
+        mimi::codegen::mir::validate_checked_mir_native_ordinary_map_owned_any_v2_set_get_any_result_i32_route(
+            checked, &program, &receipt,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "Result-valued Set/GetAny-i32 native capability: {errors:?}"
+        ));
+    }
+
+    let verifier_program =
+        match mimi::core::mir::materialize_ordinary_map_set_get_any_result_i32_verifier_route(
+            checked,
+        ) {
+            Ok(program) => program,
+            Err(reason) => {
+                return DefaultMirRoute::Rejected(format!(
+                    "Result-valued Set/GetAny-i32 L2 materialization: {reason}"
+                ));
+            }
+        };
+    if let Err(reason) =
+        mimi::core::mir::validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(
+            checked,
+            &verifier_program,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "Result-valued Set/GetAny-i32 L2 route validation: {reason}"
+        ));
+    }
+    let verifier_receipt = verifier_program.route_receipt(
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE,
+    );
+    if let Err(error) =
+        mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_set_get_any_result_i32_l2_verifier_route(
+            checked,
+            &verifier_program,
+            &verifier_receipt,
+        )
+    {
+        return DefaultMirRoute::Rejected(format!(
+            "Result-valued Set/GetAny-i32 L2 verifier capability: {error:?}"
+        ));
+    }
+    DefaultMirRoute::Canonical(Box::new(program))
 }
 
 /// Consumer preflight for the closed Checker-owned MapRoot lifecycle. Every
@@ -3849,6 +4842,86 @@ fn select_ordinary_map_owned_any_v2_direct_print_route(program: MirProgram) -> D
     }
 }
 
+/// Revalidate the distinct Result-match materialization before default
+/// selection. Its profile receipt is separate from the flat DirectPrint
+/// receipt, and the source/MIR route validator replays the Checker Result
+/// receipt rather than accepting a generic println witness.
+fn ordinary_map_owned_any_v2_direct_print_result_materialization_is_exact(
+    route: &mimi::core::mir::CanonicalMirRouteMaterialization,
+) -> bool {
+    let profile =
+        mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult.as_str();
+    let Some(receipt) = route
+        .ordinary_map_owned_any_v2_direct_print_result_route_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    route
+        .admission
+        .ordinary_map_owned_any_v2
+        .is_direct_print_result()
+        && route.materialized_ordinary_map_owned_any_v2_direct_print_result_candidate
+        && receipt.profile == profile
+        && receipt.same_semantic_identity(&route.program.route_receipt(profile))
+        && receipt.validate_against_program(&route.program).is_ok()
+}
+
+/// Preflight the nested Result-match Map/Any execution profile against its
+/// own Checker/MIR receipt and execution consumers. Verification remains
+/// behind a separate CheckedProgram-bound L2 route; this gate never reuses
+/// the flat DirectPrint verifier capability.
+fn preflight_ordinary_map_owned_any_v2_direct_print_result(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<(), String> {
+    let profile =
+        mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult.as_str();
+    let receipt = mimi::core::mir::validate_ordinary_map_owned_any_v2_direct_print_result_route(
+        checked, program,
+    )?;
+    if receipt.profile != profile {
+        return Err(format!(
+            "DirectPrintResult requires exact route profile '{profile}', found '{}'",
+            receipt.profile
+        ));
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|error| format!("DirectPrintResult route receipt rejected: {error}"))?;
+    let program_receipt = program.route_receipt(profile);
+    if !receipt.same_semantic_identity(&program_receipt) {
+        return Err(
+            "DirectPrintResult Checker/MIR receipt differs from the canonical profile receipt"
+                .into(),
+        );
+    }
+    // The Checker/MIR validator above is the execution route's dedicated
+    // source and graph gate. Generic verification remains closed until its
+    // separate L2 capability is wired.
+    mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_print_result_route(
+        checked, program,
+    )
+        .map_err(|errors| format!("MIR bytecode capability: {errors:?}"))?;
+    mimi::codegen::mir::validate_checked_mir_native_ordinary_map_owned_any_v2_direct_print_result_route(
+        checked, program, &receipt,
+    )
+        .map_err(|errors| format!("MIR native capability: {errors:?}"))?;
+    Ok(())
+}
+
+fn select_ordinary_map_owned_any_v2_direct_print_result_route(
+    checked: &CheckedProgram,
+    program: MirProgram,
+) -> DefaultMirRoute {
+    match preflight_ordinary_map_owned_any_v2_direct_print_result(checked, &program) {
+        Ok(()) => DefaultMirRoute::Canonical(Box::new(program)),
+        Err(reason) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 DirectPrintResult preflight failed: {reason}"
+        )),
+    }
+}
+
 /// Consumer preflight for the concrete-record ordinary Map/Any owner-v2
 /// profile. The profile owns its TypeDesc and receipt; no older MapRoot or
 /// MapAnyOwner adapter may claim the same graph after a consumer failure.
@@ -4001,6 +5074,98 @@ fn ordinary_map_owned_any_v2_map_set_drop_control_materialization_is_exact(
                         mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE,
                     )
             })
+}
+
+/// Require the Result-branch control's own materialization bit and
+/// digest-bound receipt. This is deliberately disjoint from the historical
+/// no-query MapSetDropControl profile and the broad owner-v2 readiness bit.
+fn ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+    route: &mimi::core::mir::CanonicalMirRouteMaterialization,
+) -> bool {
+    route.admission.ordinary_map_owned_any_v2
+        == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+        && route.materialized_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_candidate
+        && route
+            .ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route_receipt
+            .as_ref()
+            .is_some_and(|receipt| {
+                receipt
+                    == &route.program.route_receipt(
+                        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE,
+                    )
+            })
+}
+
+/// Materialize and preflight the exact Map New/Set Result control branch for
+/// default execution and explicit `--mir` construction. All consumers bind
+/// to its independent receipt; broad owner-v2 readiness and the older
+/// straight-line MapSetDropControl receipt cannot authorize this route.
+fn materialize_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(
+    checked: &CheckedProgram,
+    merged_file: &File,
+) -> Result<MirProgram, String> {
+    let route = materialize_canonical_route(checked, merged_file)
+        .map_err(|error| error.to_diagnostic().message)?;
+    if !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+        &route,
+    ) {
+        return Err(format!(
+            "{}: Checker MapSetDropControlResult admission did not materialize its exact independent route receipt",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    preflight_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(checked, &route.program)
+        .map_err(|reason| format!("MapSetDropControlResult preflight failed: {reason}"))?;
+    Ok(route.program)
+}
+
+/// Preflight the exact Result-branch control through its Checker, MIR,
+/// AST-free Bytecode, native-capability, and L2 verifier consumers. The
+/// native CLI build performs the dedicated emitter admission in
+/// `compile_checked_mir_native_for_route`; route selection itself never
+/// emits a binary.
+pub(crate) fn preflight_ordinary_map_owned_any_v2_map_set_drop_control_result_branch(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<(), String> {
+    mimi::core::mir::validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+        checked, program,
+    )?;
+    mimi::core::mir::validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_mir_route(
+        program,
+    )?;
+    let receipt = program.route_receipt(
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE,
+    );
+    receipt.validate_against_program(program)?;
+    mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+        checked,
+        program,
+        &receipt,
+    )
+        .map_err(|errors| format!("MIR verifier capability: {errors:?}"))?;
+    mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+        checked, program,
+    )
+    .map_err(|errors| format!("MIR bytecode capability: {errors:?}"))?;
+    mimi::codegen::mir::validate_mir_native(program)
+        .map_err(|errors| format!("MIR native capability: {errors:?}"))?;
+    match mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+        checked,
+        program,
+        &receipt,
+        String::new(),
+    ) {
+        Ok(results)
+            if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
+        {
+            Ok(())
+        }
+        Ok(results) => Err(format!(
+            "MIR verifier returned an unsupported or inconclusive result: {results:?}"
+        )),
+        Err(error) => Err(format!("MIR verifier pass: {error}")),
+    }
 }
 
 /// Preflight the independent no-query control through the Checker, verifier,
@@ -4717,6 +5882,169 @@ fn select_ordinary_map_owned_any_v2_checked_get_route(
     }
 }
 
+/// Preflight the Result-branch Values/String caller V3 through every canonical
+/// consumer. Its exact profile receipt binds the producer, caller, copied
+/// String, and owner settlement independently of the straight-line routes.
+pub(crate) fn preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<(), String> {
+    let profile = mimi::core::mir::CanonicalMirRouteProfile::
+        OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+        .as_str();
+    let receipt =
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+            checked, program,
+        )?;
+    if receipt.schema != mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA || receipt.profile != profile {
+        return Err(format!(
+            "exact ValuesResultCrosscallStringCaller V3 route receipt schema/profile required ('{}', '{profile}'), got ('{}', '{}')",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA,
+            receipt.schema,
+            receipt.profile
+        ));
+    }
+    receipt.validate_against_program(program)?;
+    let program_receipt = program.route_receipt(profile);
+    if !program_receipt.same_semantic_identity(&receipt) {
+        return Err(
+            "ValuesResultCrosscallStringCaller V3 Checker/MIR route receipt differs from the canonical MIR profile receipt"
+                .into(),
+        );
+    }
+    mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_mir_route(
+        program,
+    )
+    .map_err(|reason| {
+        format!("MIR ValuesResultCrosscallStringCaller V3 operation/ownership receipt: {reason}")
+    })?;
+    mimi::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_route(
+        checked, program,
+    )
+    .map_err(|errors| {
+        format!("MIR ValuesResultCrosscallStringCaller V3 bytecode capability: {errors:?}")
+    })?;
+    mimi::codegen::mir::validate_checked_mir_native_values_result_crosscall_string_caller_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| {
+        format!("MIR ValuesResultCrosscallStringCaller V3 native capability: {errors:?}")
+    })?;
+    mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| {
+        format!("MIR verifier ValuesResultCrosscallStringCaller V3 capability: {errors:?}")
+    })?;
+    let results = mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+        checked,
+        program,
+        &receipt,
+        String::new(),
+    )?;
+    if !mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+        return Err(format!(
+            "MIR ValuesResultCrosscallStringCaller V3 verifier returned an unsupported or inconclusive result: {results:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Preflight the separately versioned Result-branch literal-index-one V4
+/// profile. A V3 receipt or the straight-line V2 profile cannot authorize it.
+pub(crate) fn preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<(), String> {
+    let profile = mimi::core::mir::CanonicalMirRouteProfile::
+        OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+        .as_str();
+    let receipt =
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+            checked, program,
+        )?;
+    if receipt.schema != mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA || receipt.profile != profile {
+        return Err(format!(
+            "exact ValuesResultCrosscallStringCallerIndex1 V4 route receipt schema/profile required ('{}', '{profile}'), got ('{}', '{}')",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA,
+            receipt.schema,
+            receipt.profile
+        ));
+    }
+    receipt.validate_against_program(program)?;
+    let program_receipt = program.route_receipt(profile);
+    if !program_receipt.same_semantic_identity(&receipt) {
+        return Err(
+            "ValuesResultCrosscallStringCallerIndex1 V4 Checker/MIR route receipt differs from the canonical MIR profile receipt"
+                .into(),
+        );
+    }
+    mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_mir_route(
+        program,
+    )
+    .map_err(|reason| {
+        format!("MIR ValuesResultCrosscallStringCallerIndex1 V4 operation/ownership receipt: {reason}")
+    })?;
+    mimi::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_index1_route(
+        checked, program,
+    )
+    .map_err(|errors| {
+        format!("MIR ValuesResultCrosscallStringCallerIndex1 V4 bytecode capability: {errors:?}")
+    })?;
+    mimi::codegen::mir::validate_checked_mir_native_values_result_crosscall_string_caller_index1_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| {
+        format!("MIR ValuesResultCrosscallStringCallerIndex1 V4 native capability: {errors:?}")
+    })?;
+    mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| {
+        format!("MIR verifier ValuesResultCrosscallStringCallerIndex1 V4 capability: {errors:?}")
+    })?;
+    let results = mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+        checked,
+        program,
+        &receipt,
+        String::new(),
+    )?;
+    if !mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+        return Err(format!(
+            "MIR ValuesResultCrosscallStringCallerIndex1 V4 verifier returned an unsupported or inconclusive result: {results:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn select_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+    checked: &CheckedProgram,
+    program: MirProgram,
+) -> DefaultMirRoute {
+    match preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller(
+        checked, &program,
+    ) {
+        Ok(()) => DefaultMirRoute::Canonical(Box::new(program)),
+        Err(reason) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 ValuesResultCrosscallStringCaller V3 preflight failed: {reason}"
+        )),
+    }
+}
+
+fn select_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+    checked: &CheckedProgram,
+    program: MirProgram,
+) -> DefaultMirRoute {
+    match preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1(
+        checked, &program,
+    ) {
+        Ok(()) => DefaultMirRoute::Canonical(Box::new(program)),
+        Err(reason) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 ValuesResultCrosscallStringCallerIndex1 V4 preflight failed: {reason}"
+        )),
+    }
+}
+
 /// Preflight the separately versioned literal-index-one Values cross-call
 /// route through its own Checker, MIR, bytecode, native, and verifier gates.
 /// The route receipt shares a Rust type with V1, so this gate pins the V2
@@ -5189,6 +6517,91 @@ fn select_ordinary_map_owned_any_v2_values_local_index_i32_route(
     }
 }
 
+/// Consumer preflight for the nested fallible New/Set Values branch graph.
+/// This route has a separate Checker receipt, bytecode adapter, native
+/// compiler entrypoint, and whole-program verifier capability. The symbolic
+/// verifier result is returned unchanged so a reachable E0800 remains a
+/// Disproven runtime-safety obligation.
+fn preflight_ordinary_map_owned_any_v2_values_local_index_i32_result_branch(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+    receipt: &mimi::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<mimi::verifier::VerificationResult>, String> {
+    let profile =
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+    if receipt.profile != profile {
+        return Err(format!(
+            "ValuesLocalIndexI32 Result-branch validator returned unexpected profile {}",
+            receipt.profile
+        ));
+    }
+    receipt.validate_against_program(program)?;
+    let checked_receipt =
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+            checked, program,
+        )?;
+    if &checked_receipt != receipt {
+        return Err(format!(
+            "{}: ValuesLocalIndexI32 Result-branch receipt differs from the exact CheckedProgram/MIR route",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+        checked,
+        program,
+        receipt,
+        String::new(),
+    )
+}
+
+fn select_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+    checked: &CheckedProgram,
+    merged_file: &File,
+    purpose: RoutePurpose,
+) -> DefaultMirRoute {
+    let route = match materialize_canonical_route(checked, merged_file) {
+        Ok(route) => route,
+        Err(error) => return DefaultMirRoute::Rejected(error.to_diagnostic().message),
+    };
+    let profile =
+        mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+    let Some(receipt) = route
+        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route_receipt
+        .as_ref()
+    else {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: Checker ValuesLocalIndexI32 Result-branch admission did not materialize its independent route receipt",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    };
+    if receipt.profile != profile || receipt != &route.program.route_receipt(profile) {
+        return DefaultMirRoute::Rejected(format!(
+            "{}: Checker ValuesLocalIndexI32 Result-branch admission did not materialize its exact independent route receipt",
+            mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    let results = match preflight_ordinary_map_owned_any_v2_values_local_index_i32_result_branch(
+        checked,
+        &route.program,
+        receipt,
+    ) {
+        Ok(results) => results,
+        Err(reason) => {
+            return DefaultMirRoute::Rejected(format!(
+                "ordinary Map/Any owner-v2 ValuesLocalIndexI32 Result-branch preflight failed: {reason}"
+            ));
+        }
+    };
+    if purpose == RoutePurpose::Verification
+        || mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false)
+    {
+        return DefaultMirRoute::Canonical(Box::new(route.program));
+    }
+    DefaultMirRoute::Rejected(format!(
+        "ordinary Map/Any owner-v2 ValuesLocalIndexI32 Result-branch verifier rejected the execution route: {results:?}"
+    ))
+}
+
 /// Consumer preflight for the two-entry heterogeneous Values String
 /// extraction. Core, bytecode, native and verifier consumers receive the
 /// same dedicated route identity before default dispatch can select it.
@@ -5546,17 +6959,54 @@ fn select_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_route(
 
 /// Consumer preflight for the distinct typed owned-get profile. Its getter
 /// authority is not inherited from the old ordinary lifecycle receipt.
-fn select_ordinary_map_owned_get_i32_string_v1_route(program: MirProgram) -> DefaultMirRoute {
+fn select_ordinary_map_owned_get_i32_string_v1_route(
+    checked: &CheckedProgram,
+    program: MirProgram,
+) -> DefaultMirRoute {
     if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
         return DefaultMirRoute::Rejected(format!(
             "ordinary Map owned-get MIR verifier capability: {errors:?}"
         ));
     }
-    let receipt =
-        program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
-    if let Err(errors) =
+
+    let has_result_branch_v3 = checked
+        .resource_analyses()
+        .values()
+        .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt());
+    let receipt = if has_result_branch_v3 {
+        match mimi::core::mir::validate_ordinary_map_owned_get_result_branch_v3_mir_route(
+            checked, &program,
+        ) {
+            Ok(receipt)
+                if receipt.profile
+                    == mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND =>
+            {
+                receipt
+            }
+            Ok(_) => {
+                return DefaultMirRoute::Rejected(format!(
+                    "{}: ordinary Map owned-get ResultBranchV3 validator returned an unexpected route profile",
+                    mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ));
+            }
+            Err(reason) => {
+                return DefaultMirRoute::Rejected(format!(
+                    "{}: ordinary Map owned-get ResultBranchV3 Checker/MIR receipt rejected: {reason}",
+                    mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ));
+            }
+        }
+    } else {
+        program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND)
+    };
+    let bytecode_result = if has_result_branch_v3 {
+        mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+            checked, &program,
+        )
+    } else {
         mimi::interp::bytecode::compile_mir_program_with_route_receipt(&program, &receipt)
-    {
+    };
+    if let Err(errors) = bytecode_result {
         return DefaultMirRoute::Rejected(format!(
             "ordinary Map owned-get MIR bytecode capability: {errors:?}"
         ));
@@ -6027,9 +7477,328 @@ mod tests {
     }
 
     #[test]
-    fn pending_map_new_result_source_receipt_rejects_default_and_explicit_routes() {
+    fn map_set_drop_control_result_branch_uses_its_exact_default_explicit_and_verifier_route() {
+        let source =
+            include_str!("../../tests/fixtures/mir_ordinary_map_any_v2_map_set_drop_control.mimi");
+        let (checked_program, file) = checked(source);
+        let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked_program);
+        assert_eq!(
+            admission.ordinary_map_owned_any_v2,
+            mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+        );
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
+
+        let materialized = materialize_canonical_route(&checked_program, &file)
+            .expect("the exact Result-branch control materializes");
+        assert!(
+            ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &materialized
+            ),
+            "the independent candidate bit and profile-bound receipt are required"
+        );
+        let profile =
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            profile
+        );
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            profile
+        );
+
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
+        else {
+            panic!("default dispatch must select the dedicated Result-branch route");
+        };
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit --mir must use the same dedicated route preflight");
+        let DefaultMirRoute::Canonical(verification_program) =
+            select_default_verification_route(&checked_program, &file)
+        else {
+            panic!("default verification must select the same dedicated route");
+        };
+
+        for program in [&*default_program, &explicit_program, &*verification_program] {
+            assert_eq!(
+                program.canonical_digest(),
+                materialized.program.canonical_digest(),
+                "all CLI purposes must materialize the same graph"
+            );
+            let receipt = program.route_receipt(profile);
+            receipt
+                .validate_against_program(program)
+                .expect("route identity is bound to this canonical graph");
+            assert_eq!(receipt, materialized.program.route_receipt(profile));
+        }
+        assert_eq!(
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest()
+        );
+        assert_eq!(
+            default_program.canonical_digest(),
+            verification_program.canonical_digest()
+        );
+    }
+
+    #[test]
+    fn map_set_drop_control_result_branch_rejects_wrong_stale_and_broad_receipts() {
+        let source =
+            include_str!("../../tests/fixtures/mir_ordinary_map_any_v2_map_set_drop_control.mimi");
+        let (checked_program, file) = checked(source);
+        let materialized = materialize_canonical_route(&checked_program, &file)
+            .expect("the exact Result-branch control materializes");
+        assert!(
+            ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &materialized
+            )
+        );
+
+        let mut missing_bit = materialized.clone();
+        missing_bit
+            .materialized_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_candidate =
+            false;
+        assert!(
+            !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &missing_bit
+            ),
+            "the old MapSetDropControl materialization bit cannot substitute"
+        );
+
+        let mut wrong_profile = materialized.clone();
+        wrong_profile.ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route_receipt =
+            Some(wrong_profile.program.route_receipt(
+                mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE,
+            ));
+        assert!(
+            !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &wrong_profile
+            ),
+            "the legacy straight-line profile cannot authorize Result branches"
+        );
+
+        let mut stale = materialized.clone();
+        let mut stale_receipt = stale
+            .ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route_receipt
+            .clone()
+            .expect("dedicated receipt");
+        stale_receipt.mir_digest = "0".repeat(64);
+        stale.ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route_receipt =
+            Some(stale_receipt);
+        assert!(
+            !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &stale
+            ),
+            "a stale graph digest must fail closed"
+        );
+
+        let mut broad_profile = materialized.clone();
+        broad_profile.ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route_receipt =
+            Some(
+                broad_profile
+                    .program
+                    .route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND),
+            );
+        assert!(
+            !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &broad_profile
+            ),
+            "generic owner-v2 readiness cannot borrow the dedicated receipt"
+        );
+
+        let old_profile_materialization = {
+            let mut route = materialized.clone();
+            route.admission.ordinary_map_owned_any_v2 =
+                mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControl;
+            route.materialized_ordinary_map_owned_any_v2_map_set_drop_control_candidate = true;
+            route
+                .materialized_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_candidate =
+                false;
+            route.ordinary_map_owned_any_v2_map_set_drop_control_route_receipt =
+                Some(route.program.route_receipt(
+                    mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE,
+                ));
+            route
+        };
+        assert!(
+            !ordinary_map_owned_any_v2_map_set_drop_control_result_branch_materialization_is_exact(
+                &old_profile_materialization
+            ),
+            "the old MapSetDropControl admission, bit, and receipt cannot authorize Result branches"
+        );
+
+        let broad_fallback_source = source.replace(
+            "            drop(populated)\n            drop(payload)\n            0",
+            "            println(99)\n            drop(populated)\n            drop(payload)\n            0",
+        );
+        assert_ne!(
+            broad_fallback_source, source,
+            "the near-miss mutation must apply"
+        );
+        let (broad_checked, broad_file) = checked(&broad_fallback_source);
+        assert_ne!(
+            mimi::core::mir::classify_canonical_mir_route_admission(&broad_checked)
+                .ordinary_map_owned_any_v2,
+            mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult,
+            "an extra output operation must lose the dedicated Result-branch admission"
+        );
+        assert!(matches!(
+            select_default_route(&broad_checked, &broad_file),
+            DefaultMirRoute::Rejected(_)
+        ));
+        let broad_error = build_canonical_program(&broad_checked, &broad_file)
+            .expect_err("explicit --mir must reject the unreceipted broad candidate");
+        assert!(broad_error.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+    }
+
+    #[test]
+    fn direct_tuple_get_l1_executes_with_separate_l2_semantic_projection() {
+        let (checked_program, file) = checked(
+            r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => match map_set(empty, "stored", 41) {
+            Ok(root) => {
+                drop(empty)
+                let pair = map_get(root, "stored")
+                drop(root)
+                let decoded = unpack_i32(pair.1)
+                drop(pair)
+                drop(decoded)
+                0
+            },
+            Err(status) => { drop(empty); status },
+        },
+        Err(status) => { status },
+    }
+}
+"#,
+        );
+        assert!(
+            mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate(
+                &checked_program
+            ),
+            "the exact Checker receipt must retain its independent L2 semantic projection"
+        );
+
+        let (expected_l1, l1_route) =
+            mimi::core::mir::materialize_ordinary_map_direct_tuple_get_unpack_l1_reference_route(
+                &checked_program,
+            )
+            .expect("materialize exact executable L1 tuple Get route");
+        assert_eq!(
+            l1_route.profile,
+            mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+        );
+        match select_default_route(&checked_program, &file) {
+            DefaultMirRoute::Canonical(canonical) => {
+                assert_eq!(canonical.canonical_digest(), expected_l1.canonical_digest());
+                assert_eq!(
+                    route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+                    mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+                );
+            }
+            DefaultMirRoute::Legacy(reason) => {
+                panic!("default execution must not retry Legacy ({reason:?})")
+            }
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                panic!("direct tuple L2 must not select the unrelated FFI verifier route")
+            }
+            DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                panic!("execution selector cannot return a verifier-only disposition")
+            }
+            DefaultMirRoute::Rejected(reason) => {
+                panic!("exact tuple L1 route should pass all execution consumers: {reason}")
+            }
+        }
+        let explicit = build_canonical_program(&checked_program, &file)
+            .expect("explicit --mir must materialize the same executable L1 graph");
+        assert_eq!(explicit.canonical_digest(), expected_l1.canonical_digest());
+
+        assert!(matches!(
+            select_default_verification_route(&checked_program, &file),
+            DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2
+        ));
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE
+        );
+    }
+
+    #[test]
+    fn result_get_any_route_uses_one_exact_profile_for_default_explicit_and_verifier_paths() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage.mimi"
+        );
+        let (checked_program, file) = checked(source);
+        assert!(map_set_get_any_result_i32_source_pending_reason(&checked_program).is_some());
+
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
+        else {
+            panic!("default Result-valued GetAny route must pass all consumer preflights");
+        };
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit --mir uses the same preflighted route");
+        let execution_profile =
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            execution_profile
+        );
+        assert_eq!(
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest()
+        );
+        assert_eq!(
+            default_program.route_receipt(execution_profile),
+            explicit_program.route_receipt(execution_profile)
+        );
+
+        let DefaultMirRoute::Canonical(verification_program) =
+            select_default_verification_route(&checked_program, &file)
+        else {
+            panic!("verification route must pass its dedicated L2 capability preflight");
+        };
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE
+        );
+        mimi::core::mir::validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(
+            &checked_program,
+            &verification_program,
+        )
+        .expect("verification carries the exact Result-valued GetAny L2 receipt");
+    }
+
+    #[test]
+    fn result_get_any_near_miss_is_rejected_by_default_and_explicit_mir() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage.mimi"
+        );
+        let near_miss = source.replace(
+            "                            drop(updated)\n                            if found { payload } else { 0 }",
+            "                            let _extra = map_size(updated)\n                            drop(updated)\n                            if found { payload } else { 0 }",
+        );
+        assert_ne!(near_miss, source, "the test mutation must apply");
+        let (checked_program, file) = checked(&near_miss);
+        assert!(map_set_get_any_result_i32_source_pending_reason(&checked_program).is_some());
+        assert!(matches!(
+            select_default_route(&checked_program, &file),
+            DefaultMirRoute::Rejected(_)
+        ));
+        assert!(build_canonical_program(&checked_program, &file)
+            .expect_err("explicit --mir does not fall back on an unreceipted Map call")
+            .contains(mimi::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE));
+    }
+
+    #[test]
+    fn exact_map_new_result_source_receipt_admits_default_and_explicit_routes() {
         let map_new_result_source = r#"
-            func observe() -> i32 {
+            func main() -> i32 {
                 let outcome = map_new()
                 match outcome {
                     Ok(root) => {
@@ -6040,21 +7809,26 @@ mod tests {
                     Err(status) => status
                 }
             }
-            func main() -> i32 { 0 }
         "#;
         let (checked_program, file) = checked(map_new_result_source);
         assert!(map_new_result_source_pending_reason(&checked_program).is_some());
 
-        let DefaultMirRoute::Rejected(reason) = select_default_route(&checked_program, &file)
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
         else {
-            panic!("Checker NewResult source receipt must reject before any legacy fallback");
+            panic!("the exact Checker NewResult source receipt should select its canonical route");
         };
-        assert_eq!(reason, MAP_NEW_RESULT_SOURCE_PENDING_REASON);
+        let profile = mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE;
+        let default_receipt = default_program.route_receipt(profile);
+        default_receipt
+            .validate_against_program(&default_program)
+            .expect("default route receipt binds the NewResult MIR");
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit canonical build should admit the exact NewResult graph");
         assert_eq!(
-            build_canonical_program(&checked_program, &file).expect_err(
-                "explicit canonical build must reject while the NewResult route receipt is pending"
-            ),
-            MAP_NEW_RESULT_SOURCE_PENDING_REASON
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest(),
+            "default and explicit NewResult routes must bind the same canonical graph"
         );
 
         let near_misses = [
@@ -6117,6 +7891,404 @@ mod tests {
         assert!(build_canonical_program(&plain_result, &plain_result_file).is_ok());
     }
 
+    #[test]
+    fn exact_map_set_result_lineage_selects_l1_execution_and_l2_verification_routes_and_rejects_near_misses(
+    ) {
+        let source = include_str!(
+            "../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_result_lineage.mimi"
+        );
+        let (checked_program, file) = checked(source);
+        assert!(map_set_result_source_pending_reason(&checked_program).is_some());
+
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
+        else {
+            panic!("the exact Checker SetResult lineage should select its canonical route");
+        };
+        let profile = mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            profile,
+            "run and build use the SetResult execution receipt profile"
+        );
+        assert_eq!(
+            route_receipt_profile_for_checked(
+                &checked_program,
+                mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+            ),
+            profile,
+            "explicit MIR build identity uses the same SetResult execution receipt profile"
+        );
+        let default_receipt = default_program.route_receipt(profile);
+        default_receipt
+            .validate_against_program(&default_program)
+            .expect("default SetResult receipt binds the exact MIR graph");
+        mimi::core::mir::validate_ordinary_map_set_result_l1_core_mir_route(&default_program)
+            .expect("the selected SetResult graph retains its separate Core L1 receipt");
+
+        let DefaultMirRoute::Canonical(verification_program) =
+            select_default_verification_route(&checked_program, &file)
+        else {
+            panic!("default verification should select the exact SetResult L2 graph");
+        };
+        let verifier_profile = mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            verifier_profile,
+            "the verifier must report the dedicated SetResult L2 profile"
+        );
+        let verifier_receipt = mimi::core::mir::validate_ordinary_map_set_result_l2_verifier_route(
+            &checked_program,
+            &verification_program,
+        )
+        .expect("the selected verifier graph retains its Checker-bound L2 receipt");
+        assert_eq!(verifier_receipt.profile, verifier_profile);
+        verifier_receipt
+            .validate_against_program(&verification_program)
+            .expect("L2 verifier receipt binds the selected SetResult graph");
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit canonical build should admit the exact SetResult graph");
+        assert_eq!(
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest(),
+            "default and explicit SetResult routes must bind the same canonical graph"
+        );
+
+        let near_misses = [
+            (
+                "missing old-root settlement",
+                source.replacen("                    drop(root)\n", "", 1),
+            ),
+            (
+                "rewritten Set error status",
+                source.replace(
+                    "                    status\n",
+                    "                    status + 1\n",
+                ),
+            ),
+            (
+                "changed Set payload",
+                source.replace(
+                    "map_set(root, \"answer\", 42)",
+                    "map_set(root, \"answer\", 43)",
+                ),
+            ),
+        ];
+        for (shape, near_source) in near_misses {
+            let tokens = mimi::lexer::Lexer::new(&near_source)
+                .tokenize()
+                .expect("near-miss source lexes");
+            let near_file = mimi::parser::Parser::new(tokens)
+                .parse_file()
+                .expect("near-miss source parses");
+            let near_checked = match mimi::core::check_program(&near_file) {
+                Ok(checked) => checked,
+                Err(diagnostics) => {
+                    assert!(
+                        diagnostics.iter().any(|diagnostic| {
+                            diagnostic
+                                .code
+                                .as_deref()
+                                .is_some_and(|code| matches!(code, "E0256" | "E0304"))
+                        }),
+                        "{shape} should fail through the linear checker: {diagnostics:?}"
+                    );
+                    continue;
+                }
+            };
+            assert!(
+                !mimi::core::mir::has_ordinary_map_set_result_route_candidate(&near_checked),
+                "{shape} must not receive the exact SetResult source receipt"
+            );
+            assert!(
+                mimi::core::mir::classify_canonical_mir_route_admission(&near_checked)
+                    .ordinary_map_owned_any_v2
+                    == mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage,
+                "the ordinary Map attempt census must claim {shape}"
+            );
+            let route = select_default_route(&near_checked, &near_file);
+            assert!(
+                matches!(&route, DefaultMirRoute::Rejected(_)),
+                "unsupported {shape} must fail closed rather than select Legacy: {route:?}"
+            );
+            assert!(
+                matches!(
+                    select_default_verification_route(&near_checked, &near_file),
+                    DefaultMirRoute::Rejected(_)
+                ),
+                "default verifier selection must reject unsupported {shape}"
+            );
+            let explicit_error = build_canonical_program(&near_checked, &near_file)
+                .expect_err("explicit MIR must reject unsupported SetResult shape");
+            assert!(
+                explicit_error.contains("MIR-COVERAGE-001"),
+                "{shape}: {explicit_error}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_map_set_get_string_lineage_selects_l1_and_l2_routes() {
+        const SOURCE: &str = r#"
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let text = "payload"
+            let changed = map_set(root, "answer", text)
+            drop(text)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let lookup = map_get_string(updated, "answer")
+                    match lookup {
+                        Ok(value) => {
+                            let matches = value == "payload"
+                            drop(updated)
+                            drop(value)
+                            if matches { 42 } else { 0 }
+                        },
+                        Err(status) => { drop(updated); status },
+                    }
+                },
+                Err(status) => { drop(root); status },
+            }
+        },
+        Err(status) => status,
+    }
+}
+"#;
+        let (checked_program, file) = checked(SOURCE);
+        assert!(map_set_get_string_source_pending_reason(&checked_program).is_some());
+        assert!(
+            checked_program
+                .callable(&mimi::core::resolved::NodeId("function:main".into()))
+                .is_some_and(|callable| {
+                    callable
+                        .resources
+                        .has_pending_ordinary_map_set_get_string_lineage_source_receipt()
+                }),
+            "dispatch must be backed by the Checker-owned String lineage receipt"
+        );
+
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
+        else {
+            panic!("the exact Checker String lineage should select its canonical execution route");
+        };
+        let execution_profile = mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            execution_profile
+        );
+        assert_eq!(
+            route_receipt_profile_for_checked(
+                &checked_program,
+                mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+            ),
+            execution_profile
+        );
+        default_program
+            .route_receipt(execution_profile)
+            .validate_against_program(&default_program)
+            .expect("execution receipt binds the exact String Set/Get MIR");
+        let l1 = mimi::core::mir::validate_ordinary_map_set_get_string_l1_core_mir_route(
+            &default_program,
+        )
+        .expect("execution graph retains its independent String L1 identity");
+        assert_eq!(
+            l1.profile,
+            mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L1_CORE_PROFILE
+        );
+        assert_ne!(
+            l1.profile,
+            mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE,
+            "String owner route cannot be claimed by the i32 specialization"
+        );
+        assert_ne!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND,
+            "generic owner-v2 dispatch must not swallow the String receipt"
+        );
+
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit --mir build must materialize the same String L1 route");
+        assert_eq!(
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest(),
+            "default run/build and explicit --mir must bind one canonical graph"
+        );
+
+        let DefaultMirRoute::Canonical(verification_program) =
+            select_default_verification_route(&checked_program, &file)
+        else {
+            panic!("verification must select the exact String L2 route");
+        };
+        let verifier_profile = mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            verifier_profile,
+            "verification must keep a distinct CheckedProgram-aware String L2 identity"
+        );
+        let l2 = mimi::core::mir::validate_ordinary_map_set_get_string_l2_verifier_route(
+            &checked_program,
+            &verification_program,
+        )
+        .expect("L2 route receipt is bound to the exact CheckedProgram");
+        assert_eq!(l2.profile, verifier_profile);
+        l2.validate_against_program(&verification_program)
+            .expect("verifier receipt binds its own isolated graph");
+
+        let mut forged_receipt = default_program.route_receipt(execution_profile);
+        forged_receipt.mir_digest = "0".repeat(64);
+        assert!(
+            forged_receipt
+                .validate_against_program(&default_program)
+                .is_err(),
+            "a forged String route receipt must fail the graph identity check"
+        );
+
+        let near_source = SOURCE.replace(
+            "map_get_string(updated, \"answer\")",
+            "map_get_string(updated, \"different\")",
+        );
+        let (near_checked, near_file) = checked(&near_source);
+        assert!(map_set_get_string_source_pending_reason(&near_checked).is_none());
+        assert!(!mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(&near_checked));
+        for route in [
+            select_default_route(&near_checked, &near_file),
+            select_default_verification_route(&near_checked, &near_file),
+        ] {
+            assert!(
+                matches!(&route, DefaultMirRoute::Rejected(_)),
+                "source-shaped near miss must fail closed: {route:?}"
+            );
+        }
+        assert!(build_canonical_program(&near_checked, &near_file)
+            .expect_err("explicit --mir must reject source without its exact receipt")
+            .contains("MIR-COVERAGE-001"));
+
+        let extra_map_source = SOURCE.replace(
+            "func main() -> i32 {\n    let created = map_new()",
+            "func main() -> i32 {\n    let unrelated = map_new()\n    let unrelated_status = match unrelated {\n        Ok(other) => {\n            drop(other)\n            0\n        },\n        Err(status) => status,\n    }\n    let created = map_new()",
+        );
+        let (mixed_map, mixed_map_file) = checked(&extra_map_source);
+        assert!(!mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(&mixed_map));
+        for route in [
+            select_default_route(&mixed_map, &mixed_map_file),
+            select_default_verification_route(&mixed_map, &mixed_map_file),
+        ] {
+            assert!(
+                matches!(&route, DefaultMirRoute::Rejected(_)),
+                "an additional Map owner must fail closed: {route:?}"
+            );
+        }
+        assert!(build_canonical_program(&mixed_map, &mixed_map_file).is_err());
+
+        let actor_prefix = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/real_world/actor_nested_func_capture.mimi"
+        ))
+        .split("\nfunc main() -> i32 {")
+        .next()
+        .expect("Actor fixture has a main entry");
+        let actor_mixed_main = SOURCE.replace(
+            "func main() -> i32 {\n",
+            "func main() -> i32 {\n    let actor = Counter.spawn()\n    let actor_value = actor.bump(5)\n",
+        );
+        let actor_mixed_source = format!("{actor_prefix}\n{actor_mixed_main}");
+        let (mixed_actor, mixed_actor_file) = checked(&actor_mixed_source);
+        assert!(mimi::core::mir::has_scalar_actor_nested_callable_candidate(
+            &mixed_actor
+        ));
+        assert!(!mimi::core::mir::has_ordinary_map_set_get_string_route_candidate(&mixed_actor));
+        for route in [
+            select_default_route(&mixed_actor, &mixed_actor_file),
+            select_default_verification_route(&mixed_actor, &mixed_actor_file),
+        ] {
+            assert!(
+                matches!(&route, DefaultMirRoute::Rejected(_)),
+                "a reachable Actor plus another Map owner must fail closed: {route:?}"
+            );
+        }
+        assert!(build_canonical_program(&mixed_actor, &mixed_actor_file).is_err());
+    }
+
+    #[test]
+    fn exact_map_set_get_i32_lineage_selects_l1_and_l2_routes() {
+        let source = include_str!(
+            "../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_i32_lineage.mimi"
+        );
+        let (checked_program, file) = checked(source);
+        assert!(map_set_get_i32_source_pending_reason(&checked_program).is_some());
+
+        let DefaultMirRoute::Canonical(default_program) =
+            select_default_route(&checked_program, &file)
+        else {
+            panic!("the exact Checker Set/Get-i32 lineage should select its canonical route");
+        };
+        let execution_profile = mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE;
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "run-canonical-v1"),
+            execution_profile
+        );
+        assert_eq!(
+            route_receipt_profile_for_checked(
+                &checked_program,
+                mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+            ),
+            execution_profile
+        );
+        default_program
+            .route_receipt(execution_profile)
+            .validate_against_program(&default_program)
+            .expect("execution receipt binds the exact source-bound Set/Get MIR");
+        mimi::core::mir::validate_ordinary_map_set_get_i32_l1_core_mir_route(&default_program)
+            .expect("production execution route retains the independent Core L1 identity");
+
+        let explicit_program = build_canonical_program(&checked_program, &file)
+            .expect("explicit MIR build uses the exact Set/Get-i32 adapter preflights");
+        assert_eq!(
+            default_program.canonical_digest(),
+            explicit_program.canonical_digest(),
+            "default and explicit MIR routes must bind the same canonical graph"
+        );
+
+        let DefaultMirRoute::Canonical(verification_program) =
+            select_default_verification_route(&checked_program, &file)
+        else {
+            panic!("verification must expose the exact graph to its fail-closed L2 gate");
+        };
+        assert_eq!(
+            route_receipt_profile_for_checked(&checked_program, "verify-canonical-v1"),
+            mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE,
+            "the verification route carries its distinct CheckedProgram-aware L2 profile"
+        );
+        mimi::core::mir::validate_ordinary_map_set_get_i32_l2_verifier_route(
+            &checked_program,
+            &verification_program,
+        )
+        .expect("verification route retains its exact CheckedProgram-bound L2 receipt");
+
+        let near_source = source.replace(
+            "map_get_i32(updated, \"answer\")",
+            "map_get_i32(updated, \"different\")",
+        );
+        let (near_checked, near_file) = checked(&near_source);
+        assert!(map_set_get_i32_source_pending_reason(&near_checked).is_none());
+        assert!(matches!(
+            select_default_route(&near_checked, &near_file),
+            DefaultMirRoute::Rejected(_)
+        ));
+        assert!(matches!(
+            select_default_verification_route(&near_checked, &near_file),
+            DefaultMirRoute::Rejected(_)
+        ));
+        assert!(build_canonical_program(&near_checked, &near_file)
+            .expect_err("explicit MIR rejects the unmatched Get shape")
+            .contains("MIR-COVERAGE-001"));
+    }
+
     /// MIR route integration tests use the host process's 8 MiB stack budget.
     /// Rust's test harness gives each worker a smaller stack than the
     /// production CLI entry thread uses during full graph lowering.
@@ -6139,16 +8311,29 @@ mod tests {
         let unpack_expression = checked_get_unpack_expression(unpack_type);
         format!(
             r#"
-func main() -> bool {{
-    let empty = map_new()
-    let root = map_set(empty, {set_key}, {set_value})
-    let pair = map_get(root, {get_key})
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = {unpack_expression}
-    drop(pair)
-    found
+func main() -> i32 {{
+    let created = map_new()
+    match created {{
+        Ok(empty) => {{
+            let changed = map_set(empty, {set_key}, {set_value})
+            match changed {{
+                Ok(root) => {{
+                    drop(empty)
+                    let pair = map_get(root, {get_key})
+                    drop(root)
+                    let found = pair.0
+                    let payload = {unpack_expression}
+                    drop(pair)
+                    if found {{ 1 }} else {{ 0 }}
+                }},
+                Err(status) => {{
+                    drop(empty)
+                    status
+                }},
+            }}
+        }},
+        Err(status) => status,
+    }}
 }}
 "#
         )
@@ -6163,31 +8348,57 @@ func main() -> bool {{
         }
     }
 
-    fn checked_get_observed_source(
-        preamble: &str,
-        set_key: &str,
-        get_key: &str,
-        set_value: &str,
-        unpack_type: &str,
-        result_type: &str,
-        result_expression: &str,
-        payload_cleanup: &str,
-    ) -> String {
+    struct CheckedGetObservedSourceSpec<'a> {
+        preamble: &'a str,
+        set_key: &'a str,
+        get_key: &'a str,
+        set_value: &'a str,
+        unpack_type: &'a str,
+        result_type: &'a str,
+        result_expression: &'a str,
+        payload_cleanup: &'a str,
+    }
+
+    fn checked_get_observed_source(spec: CheckedGetObservedSourceSpec<'_>) -> String {
+        let CheckedGetObservedSourceSpec {
+            preamble,
+            set_key,
+            get_key,
+            set_value,
+            unpack_type,
+            result_type,
+            result_expression,
+            payload_cleanup,
+        } = spec;
         let unpack_expression = checked_get_unpack_expression(unpack_type);
         format!(
             r#"
 {preamble}
-func main() -> {result_type} {{
-    let empty = map_new()
-    let root = map_set(empty, {set_key}, {set_value})
-    let pair = map_get(root, {get_key})
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = {unpack_expression}
-    drop(pair)
-    {payload_cleanup}
-    {result_expression}
+func main() -> i32 {{
+    let created = map_new()
+    match created {{
+        Ok(empty) => {{
+            let changed = map_set(empty, {set_key}, {set_value})
+            match changed {{
+                Ok(root) => {{
+                    drop(empty)
+                    let pair = map_get(root, {get_key})
+                    drop(root)
+                    let found = pair.0
+                    let payload = {unpack_expression}
+                    drop(pair)
+                    {payload_cleanup}
+                    let observed: {result_type} = {result_expression}
+                    if observed {{ 1 }} else {{ 0 }}
+                }},
+                Err(status) => {{
+                    drop(empty)
+                    status
+                }},
+            }}
+        }},
+        Err(status) => status,
+    }}
 }}
 "#
         )
@@ -6205,7 +8416,9 @@ func main() -> {result_type} {{
             .ordinary_map_owner_lifecycle_observer_v1
             .is_complete());
         assert!(!admission.ordinary_map_owned_any_v2.has_profile_signal());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
 
         let profile = mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE;
         for default_profile in [
@@ -6396,7 +8609,9 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
                 mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::DirectPrint
             );
             assert!(!admission.is_complete());
-            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+            const {
+                assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+            };
             for default_profile in [
                 "run-canonical-v1",
                 mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
@@ -6481,6 +8696,10 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
                 DefaultMirRoute::Canonical(_) => {
                     panic!("{label} must not select a canonical execution route")
                 }
+                DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    panic!("{label} must not select a verifier-only route for execution")
+                }
             }
             assert!(
                 build_canonical_program(&checked, &file).is_err(),
@@ -6502,7 +8721,9 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesFieldMove
         );
         assert!(!admission.is_complete());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         assert_eq!(
             route_receipt_profile_for_checked(&checked, "run-canonical-v1"),
             mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE
@@ -6567,7 +8788,9 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesSnapshotReplacement
         );
         assert!(!admission.is_complete());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         for default_profile in [
             "run-canonical-v1",
             mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
@@ -6616,23 +8839,38 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
                 .profile,
             mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
     fn keys_snapshot_uses_its_exact_receipt_for_default_and_explicit_routes() {
         let source = r#"
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 41)
-    let snapshot = keys(root)
-    drop(empty)
-    drop(root)
-    let key = snapshot[0]
-    drop(snapshot)
-    println(key)
-    drop(key)
-    0
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "answer", 41)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let snapshot = keys(root)
+                    drop(root)
+                    let key = snapshot[0]
+                    drop(snapshot)
+                    println(key)
+                    drop(key)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let (checked, file) = checked(source);
@@ -6643,7 +8881,9 @@ func main() -> i32 {
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::KeysSnapshot
         );
         assert!(!admission.is_complete());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         let profile = mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE;
         for default_profile in [
             "run-canonical-v1",
@@ -6686,6 +8926,10 @@ func main() -> i32 {
                 DefaultMirRoute::Rejected(reason) => {
                     panic!("{label} must select the exact KeysSnapshot route: {reason}")
                 }
+                DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    panic!("{label} must materialize an executable KeysSnapshot route")
+                }
             };
             let receipt = program.route_receipt(profile);
             assert_eq!(receipt.profile, profile);
@@ -6700,23 +8944,38 @@ func main() -> i32 {
         let explicit_receipt = explicit.route_receipt(profile);
         assert_eq!(explicit_receipt.profile, profile);
         assert!(explicit_receipt.same_semantic_identity(materialized_receipt));
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
     fn keys_snapshot_rejects_broad_or_mismatched_receipts_without_legacy_retry() {
         let source = r#"
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 41)
-    let snapshot = keys(root)
-    drop(empty)
-    drop(root)
-    let key = snapshot[0]
-    drop(snapshot)
-    println(key)
-    drop(key)
-    0
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "answer", 41)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let snapshot = keys(root)
+                    drop(root)
+                    let key = snapshot[0]
+                    drop(snapshot)
+                    println(key)
+                    drop(key)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let (checked_program, file) = checked(source);
@@ -6782,13 +9041,19 @@ func main() -> i32 {
                 DefaultMirRoute::Canonical(_) => {
                     panic!("{label} must not route incomplete Keys canonically")
                 }
+                DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    panic!("{label} must reject incomplete Keys for the verifier-only route")
+                }
             }
         }
         assert!(
             build_canonical_program(&incomplete_checked, &incomplete_file).is_err(),
             "explicit --mir must reject incomplete Keys coverage"
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
@@ -6800,7 +9065,9 @@ func main() -> i32 {
             .ordinary_map_owned_any_v2;
         assert!(admission.has_profile_signal());
         assert!(!admission.is_values_field_move());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
 
         match select_default_route(&checked, &file) {
             DefaultMirRoute::Rejected(reason) => assert!(
@@ -6812,6 +9079,10 @@ func main() -> i32 {
             }
             DefaultMirRoute::Canonical(_) => {
                 panic!("unsupported Values shape must not select a production route")
+            }
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+            | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                panic!("unsupported Values shape must not select a verifier-only route")
             }
         }
         let explicit_error = build_canonical_program(&checked, &file)
@@ -6835,18 +9106,24 @@ func main() -> i32 {
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::CheckedGet,
             "{context}: unsupported shape must not enter the dedicated CheckedGet profile"
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
 
         match select_default_route(checked, file) {
             DefaultMirRoute::Rejected(reason) => assert!(
-                !reason.contains("legacy"),
-                "{context}: fail-closed route must not report a hidden fallback: {reason}"
+                reason.contains("cannot use legacy"),
+                "{context}: rejection must explicitly close the compatibility path: {reason}"
             ),
             DefaultMirRoute::Legacy(reason) => {
                 panic!("{context}: recognized owner-v2 attempt escaped to Legacy ({reason:?})")
             }
             DefaultMirRoute::Canonical(_) => {
                 panic!("{context}: unsupported owner-v2 shape selected an executable route")
+            }
+            DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+            | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                panic!("{context}: unsupported owner-v2 shape selected a verifier-only route")
             }
         }
         let explicit_error = build_canonical_program(checked, file)
@@ -6969,7 +9246,7 @@ func main() -> i32 {
             ),
         ) in cases.into_iter().enumerate()
         {
-            let source = checked_get_observed_source(
+            let source = checked_get_observed_source(CheckedGetObservedSourceSpec {
                 preamble,
                 set_key,
                 get_key,
@@ -6978,7 +9255,7 @@ func main() -> i32 {
                 result_type,
                 result_expression,
                 payload_cleanup,
-            );
+            });
             let (checked, file) = checked(&source);
             let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked)
                 .ordinary_map_owned_any_v2;
@@ -7003,7 +9280,9 @@ func main() -> i32 {
                     "CheckedGet must select one raw receipt profile for {default_profile}"
                 );
             }
-            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+            const {
+                assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+            };
 
             let expected_key_digest = blake3::hash(expected_key).to_hex().to_string();
 
@@ -7014,6 +9293,10 @@ func main() -> i32 {
                 ),
                 DefaultMirRoute::Rejected(reason) => panic!(
                     "CheckedGet static literal/concat case {index} failed default-route consumer preflight: {reason}"
+                ),
+                DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => panic!(
+                    "CheckedGet static literal/concat case {index} cannot use a verifier-only route"
                 ),
             };
             let route_profile = route_receipt_profile_for_checked(&checked, "run-canonical-v1");
@@ -7069,12 +9352,16 @@ func main() -> i32 {
 
             let reference =
                 mimi::core::mir::reference::MirReferenceInterpreter::new(&default_program)
-                    .execute_with_output(&mimi::core::NodeId("function:main".into()), &[])
+                    .execute_with_output(&mimi::core::resolved::NodeId("function:main".into()), &[])
                     .expect("Reference observes the selected payload after root and pair Drops");
             assert_eq!(
                 reference.value,
-                mimi::core::mir::reference::MirRuntimeValue::Bool(expected_found),
-                "the selected presence or payload observation must be exact"
+                mimi::core::mir::reference::MirRuntimeValue::Int(if expected_found {
+                    1
+                } else {
+                    0
+                }),
+                "main must exhaustively convert the selected presence observation to an i32 status"
             );
 
             let bytecode = mimi::interp::bytecode::compile_mir_program_with_route_receipt(
@@ -7111,6 +9398,10 @@ func main() -> i32 {
                     DefaultMirRoute::Rejected(reason) => panic!(
                         "CheckedGet static literal/concat case {index} failed verification-route preflight: {reason}"
                     ),
+                    DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice
+                    | DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => panic!(
+                        "CheckedGet static literal/concat case {index} cannot use a verifier-only route"
+                    ),
                 };
             let verify_route_profile =
                 route_receipt_profile_for_checked(&checked, "verify-canonical-v1");
@@ -7124,42 +9415,70 @@ func main() -> i32 {
                 .validate_against_program(&verification_program)
                 .expect("verification receipt is bound to its selected MIR graph");
         }
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
     fn checked_get_rejects_runtime_keys_type_mismatch_helpers_and_values() {
         let variable_key = r#"
 func runtime_key() -> string { "answer" }
-func main() -> bool {
-    let empty = map_new()
-    let root = map_set(empty, runtime_key(), 0)
-    let pair = map_get(root, runtime_key())
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = unpack_i32(pair.1)
-    drop(pair)
-    found
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, runtime_key(), 0)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let pair = map_get(root, runtime_key())
+                    drop(root)
+                    let found = pair.0
+                    let payload = unpack_i32(pair.1)
+                    drop(pair)
+                    if found { 1 } else { 0 }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
-        assert_checked_get_source_rejected(&variable_key, "runtime variable key");
+        assert_checked_get_source_rejected(variable_key, "runtime variable key");
 
         let helper_key = r#"
 func runtime_key() -> string { "answer" }
-func main() -> bool {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 0)
-    let pair = map_get(root, runtime_key())
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = unpack_i32(pair.1)
-    drop(pair)
-    found
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "answer", 0)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let pair = map_get(root, runtime_key())
+                    drop(root)
+                    let found = pair.0
+                    let payload = unpack_i32(pair.1)
+                    drop(pair)
+                    if found { 1 } else { 0 }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
-        assert_checked_get_source_rejected(&helper_key, "helper-computed key");
+        assert_checked_get_source_rejected(helper_key, "helper-computed key");
 
         let wrong_payload = checked_get_source("\"answer\"", "\"answer\"", "\"text\"", "i32");
         assert_checked_get_source_rejected(
@@ -7171,25 +9490,40 @@ func main() -> bool {
 type Label { text: string }
 func main() -> i32 {
     let label = Label { text: "owned values payload" }
-    let empty = map_new()
-    let root = map_set(empty, "answer", label)
-    let snapshot = values(root)
-    drop(snapshot)
-    drop(empty)
-    drop(root)
-    drop(label)
-    0
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "answer", label)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let snapshot = values(root)
+                    drop(snapshot)
+                    drop(root)
+                    drop(label)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(label)
+                    status
+                },
+            }
+        },
+        Err(status) => { drop(label); status },
+    }
 }
 "#;
-        assert_checked_get_source_rejected(&values, "Values owner shape");
+        assert_checked_get_source_rejected(values, "Values owner shape");
     }
 
     #[test]
     fn checked_get_requires_exactly_one_explicit_pair_settlement() {
         let double_settlement = checked_get_source("\"answer\"", "\"answer\"", "0", "i32").replace(
-            "    drop(pair)\n    found",
-            "    drop(pair)\n    drop(pair)\n    found",
+            "                    drop(pair)\n                    if found { 1 } else { 0 }",
+            "                    drop(pair)\n                    drop(pair)\n                    if found { 1 } else { 0 }",
         );
+        assert!(double_settlement.contains("drop(pair)\n                    drop(pair)"));
         assert_checker_or_route_rejects_exactly_once_shape(
             &double_settlement,
             "E0200",
@@ -7197,7 +9531,11 @@ func main() -> i32 {
         );
 
         let missing_settlement = checked_get_source("\"answer\"", "\"answer\"", "0", "i32")
-            .replace("    drop(pair)\n    found", "    found");
+            .replace(
+                "                    drop(pair)\n                    if found { 1 } else { 0 }",
+                "                    if found { 1 } else { 0 }",
+            );
+        assert!(!missing_settlement.contains("drop(pair)"));
         assert_checker_or_route_rejects_exactly_once_shape(
             &missing_settlement,
             "E0200",
@@ -7229,7 +9567,9 @@ func main() -> i32 {
                 "ComputedKeyGet must select its dedicated receipt for {default_profile}"
             );
         }
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
@@ -7260,7 +9600,9 @@ func main() -> i32 {
             select_default_route(&checked, &file),
             DefaultMirRoute::Canonical(_)
         ));
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
@@ -7306,7 +9648,9 @@ func main() -> i32 {
             !ordinary_map_owned_any_v2_zero_miss_i32_materialization_is_exact(&missing_receipt),
             "a missing dedicated receipt must not authorize fallback or a generic route"
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     #[test]
@@ -7367,16 +9711,29 @@ func unused_scalar_ffi_helper() -> i32 {{ scalar_probe(0) }}
         let checked_get_source = r#"
 extern "C" { func scalar_probe(value: i32) -> i32; }
 func unused_scalar_ffi_helper() -> i32 { scalar_probe(0) }
-func main() -> bool {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 41)
-    let pair = map_get(root, "answer")
-    drop(empty)
-    drop(root)
-    let found = pair.0
-    let payload = unpack_i32(pair.1)
-    drop(pair)
-    found
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "answer", 41)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let pair = map_get(root, "answer")
+                    drop(root)
+                    let found = pair.0
+                    let payload = unpack_i32(pair.1)
+                    drop(pair)
+                    if found { 1 } else { 0 }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let cases = [
@@ -7474,7 +9831,9 @@ func main() -> bool {
             forged_selection.validate_against_program(&program).is_err(),
             "payload selection validator must recompute its Checker/MIR TypeDesc evidence"
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
     }
 
     fn checked_module_alias_graph(main_source: &str) -> (CheckedProgram, File, std::path::PathBuf) {
@@ -7539,7 +9898,7 @@ func main() -> bool {
         let (checked, file, directory) = checked_module_alias_graph(&main_source);
         assert!(
             checked.call_sites().values().any(|site| {
-                matches!(site.kind, mimi::core::ResolvedCallKind::Function)
+                matches!(site.kind, mimi::core::resolved::ResolvedCallKind::Function)
                     && site.target_function.is_some()
                     && site.callee.contains("::")
             }),
@@ -7633,15 +9992,12 @@ func main() -> bool {
     fn unsupported_nested_actor_candidate_rejects_before_legacy_route() {
         let source = r#"
 actor Counter {
-    base: i32 = 0;
-
     func bump(delta: i32) -> i32 {
         // The nested helper is deliberately outside the finite i32
         // environment ABI.  A checked Actor candidate must fail closed here;
         // it must never be handed to the legacy actor emitter.
         func unsupported(value: i64) -> i64 { value + 1 }
-        self.base = self.base + delta
-        self.base
+        delta
     }
 }
 
@@ -7716,20 +10072,30 @@ extern "C" {
 func main() -> i32 {
     let counter = Counter.spawn()
     let actor_value = counter.bump(5)
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(actor_value))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    let observed = scalar_probe(actor_value)
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let size = map_size(root)
+            drop(root)
+            size
+        },
+        Err(status) => status,
+    }
 }
 "#;
         const UNUSED_ACTOR_MAIN: &str = r#"
 func main() -> i32 {
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(41 as i32))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    let observed = scalar_probe(41 as i32)
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let size = map_size(root)
+            drop(root)
+            size
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let actor_prefix = include_str!(concat!(
@@ -7792,11 +10158,26 @@ func main() -> i32 {
                     value\n\
                 }}\n\
                 func main() -> i32 {{\n\
-                    let root = map_new()\n\
-                    let updated = map_set(root, \"answer\", guarded(1))\n\
-                    let size = map_size(updated)\n\
-                    drop(updated)\n\
-                    size\n\
+                    let value = guarded(1)\n\
+                    let created = map_new()\n\
+                    match created {{\n\
+                        Ok(root) => {{\n\
+                            let changed = map_set(root, \"answer\", value)\n\
+                            match changed {{\n\
+                                Ok(updated) => {{\n\
+                                    drop(root)\n\
+                                    let size = map_size(updated)\n\
+                                    drop(updated)\n\
+                                    size\n\
+                                }},\n\
+                                Err(status) => {{\n\
+                                    drop(root)\n\
+                                    status\n\
+                                }},\n\
+                            }}\n\
+                        }},\n\
+                        Err(status) => status,\n\
+                    }}\n\
                 }}"
         );
         let (program, file) = checked(&source);
@@ -7804,6 +10185,7 @@ func main() -> i32 {
         assert!(
             admission.map_any_owner.is_candidate()
                 || admission.map_root.is_candidate()
+                || admission.ordinary_map_owned_any_v2.is_candidate()
                 || admission
                     .ordinary_map_owner_lifecycle_i32_string_v1
                     .has_profile_signal()
@@ -7825,7 +10207,7 @@ func main() -> i32 {
             };
             assert!(reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
             assert!(reason.contains("Map/Any owner"));
-            assert!(!reason.contains("legacy"));
+            assert!(reason.contains("cannot use legacy"), "{reason}");
         }
     }
 
@@ -8003,12 +10385,26 @@ func main() -> i32 {
     fn map_any_owner_default_route_admits_no_contract_execution_with_stdout() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                let updated = map_set(root, "answer", 42)
-                let size = map_size(updated)
-                println(size)
-                drop(updated)
-                0
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let changed = map_set(root, "answer", 42)
+                        match changed {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                println(size)
+                                drop(updated)
+                                0
+                            },
+                            Err(status) => {
+                                drop(root)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8044,7 +10440,7 @@ func main() -> i32 {
                 .profile,
             mimi::core::mir::MAP_ANY_OWNER_V1_ISLAND
         );
-        let main = mimi::core::NodeId("function:main".into());
+        let main = mimi::core::resolved::NodeId("function:main".into());
         let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
             .execute_with_output(&main, &[])
             .expect("reference no-contract execution");
@@ -8059,15 +10455,29 @@ func main() -> i32 {
     fn map_any_owner_default_route_admits_static_contains_and_retains_the_root() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                let inserted = map_set(root, "answer", 42)
-                let present = has_key(inserted, "answer")
-                let absent = has_key(inserted, "missing")
-                let size = map_size(inserted)
-                println(present)
-                println(absent)
-                drop(inserted)
-                size
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let changed = map_set(root, "answer", 42)
+                        match changed {
+                            Ok(inserted) => {
+                                drop(root)
+                                let present = has_key(inserted, "answer")
+                                let absent = has_key(inserted, "missing")
+                                let size = map_size(inserted)
+                                println(present)
+                                println(absent)
+                                drop(inserted)
+                                size
+                            },
+                            Err(status) => {
+                                drop(root)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8083,7 +10493,7 @@ func main() -> i32 {
         let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
             panic!("static contains over a typed owner must enter the default canonical route");
         };
-        let main = mimi::core::NodeId("function:main".into());
+        let main = mimi::core::resolved::NodeId("function:main".into());
         let reference = mimi::core::mir::reference::MirReferenceInterpreter::new(&program)
             .execute_with_output(&main, &[])
             .expect("MapRoot remains usable after static contains queries");
@@ -8100,11 +10510,16 @@ func main() -> i32 {
             extern "C" func exported_identity(value: i32) -> i32 { value }
 
             func main() -> i32 {
-                let root = map_new()
-                let result = map_get_i32(root, "answer")
-                drop(root)
-                match result {
-                    Ok(value) => value,
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let result = map_get_i32(root, "answer")
+                        drop(root)
+                        match result {
+                            Ok(value) => value,
+                            Err(status) => status,
+                        }
+                    },
                     Err(status) => status,
                 }
             }
@@ -8131,79 +10546,128 @@ func main() -> i32 {
         for (index, source) in [
             r#"
                 func main() -> i32 {
-                    let root = map_new()
-                    let value = map_get(root, "answer")
-                    drop(value)
-                    drop(root)
-                    0
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            let value = map_get(root, "answer")
+                            drop(value)
+                            drop(root)
+                            0
+                        },
+                        Err(status) => { status },
+                    }
                 }
             "#,
             r#"
                 func main() -> i32 {
-                    let root = map_new()
-                    let key = "answer"
-                    let updated = map_set(root, key, 42)
-                    drop(updated)
-                    0
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            let key = "answer"
+                            let changed = map_set(root, key, 42)
+                            match changed {
+                                Ok(updated) => {
+                                    drop(root)
+                                    drop(updated)
+                                    0
+                                },
+                                Err(status) => { drop(root); status },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
                 }
             "#,
             r#"
                 func branch_size(flag: bool) -> i32 {
-                    let root = map_new()
-                    if flag {
-                        let size = map_size(root)
-                    } else {
-                        let size = map_size(root)
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            if flag {
+                                let size = map_size(root)
+                            } else {
+                                let size = map_size(root)
+                            }
+                            drop(root)
+                            0
+                        },
+                        Err(status) => { status },
                     }
-                    drop(root)
-                    0
                 }
                 func main() -> i32 { branch_size(true) }
             "#,
             r#"
                 func main() -> i32 {
                     loop {
-                        let root = map_new()
-                        drop(root)
-                        break
+                        let created = map_new()
+                        match created {
+                            Ok(root) => { drop(root); break },
+                            Err(status) => { return status },
+                        }
                     }
                     0
                 }
             "#,
             r#"
                 func main() -> i32 {
-                    let root = map_new()
-                    0
+                    let created = map_new()
+                    match created {
+                        Ok(root) => { 0 },
+                        Err(status) => { status },
+                    }
                 }
             "#,
             r#"
                 func main() -> i32 {
-                    let root = map_new()
-                    let values_snapshot = values(root)
-                    let count = values_snapshot.len()
-                    drop(values_snapshot)
-                    drop(root)
-                    count
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            let values_snapshot = values(root)
+                            let count = values_snapshot.len()
+                            drop(values_snapshot)
+                            drop(root)
+                            count
+                        },
+                        Err(status) => { status },
+                    }
                 }
             "#,
             r#"
                 type Point { x: i32 }
                 func main() -> i32 {
-                    let root = map_new()
-                    let updated = map_set(root, "point", Point { x: 7 })
-                    drop(updated)
-                    0
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            let changed = map_set(root, "point", Point { x: 7 })
+                            match changed {
+                                Ok(updated) => { drop(root); drop(updated); 0 },
+                                Err(status) => { drop(root); status },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
                 }
             "#,
             r#"
                 func main() -> i32 {
-                    let root = map_new()
-                    let first = map_set(root, "answer", 42)
-                    let mixed = map_set(first, "label", "forty-two")
-                    drop(root)
-                    drop(first)
-                    drop(mixed)
-                    0
+                    let created = map_new()
+                    match created {
+                        Ok(root) => {
+                            let changed = map_set(root, "answer", 42)
+                            match changed {
+                                Ok(first) => {
+                                    drop(root)
+                                    let mixed_result = map_set(first, "label", "forty-two")
+                                    match mixed_result {
+                                        Ok(mixed) => { drop(first); drop(mixed); 0 },
+                                        Err(status) => { drop(first); status },
+                                    }
+                                },
+                                Err(status) => { drop(root); status },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
                 }
             "#,
         ]
@@ -8261,13 +10725,14 @@ func main() -> i32 {
         // expose one shared MIR coverage rejection instead of handing the
         // escaped owner to the AST compatibility emitter.
         let source = r#"
-            func escape_root() -> Record {
-                let root = map_new()
-                root
+            func escape_root() -> Result<Record, i32> {
+                map_new()
             }
             func main() -> i32 {
-                let escaped = escape_root()
-                0
+                match escape_root() {
+                    Ok(escaped) => { drop(escaped); 0 },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8304,12 +10769,26 @@ func main() -> i32 {
 type Label { text: string }
 func main() -> i32 {
     let label = Label { text: "owned label" }
-    let empty = map_new()
-    let root = map_set(empty, "label", label)
-    drop(empty)
-    drop(root)
-    drop(label)
-    0
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "label", label)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    drop(root)
+                    drop(label)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(label)
+                    status
+                },
+            }
+        },
+        Err(status) => { drop(label); status },
+    }
 }
 "#;
         let (checked, file) = checked(source);
@@ -8319,7 +10798,9 @@ func main() -> i32 {
             admission,
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
 
         let error = build_canonical_program(&checked, &file)
             .expect_err("explicit execution/build/verify builder must keep V2 readiness closed");
@@ -8343,12 +10824,26 @@ func main() -> i32 {
             type Label { text: string }
             func main() -> i32 {
                 let label = Label { text: "route preflight" }
-                let empty = map_new()
-                let root = map_set(empty, "label", label)
-                drop(empty)
-                drop(root)
-                drop(label)
-                0
+                let created = map_new()
+                match created {
+                    Ok(empty) => {
+                        let changed = map_set(empty, "label", label)
+                        match changed {
+                            Ok(root) => {
+                                drop(empty)
+                                drop(root)
+                                drop(label)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                drop(label)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => { drop(label); status },
+                }
             }
             "#,
         )
@@ -8375,12 +10870,26 @@ func main() -> i32 {
             type Label { text: string }
             func main() -> i32 {
                 let label = Label { text: "route preflight" }
-                let empty = map_new()
-                let root = map_set(empty, "label", label)
-                drop(empty)
-                drop(root)
-                drop(label)
-                0
+                let created = map_new()
+                match created {
+                    Ok(empty) => {
+                        let changed = map_set(empty, "label", label)
+                        match changed {
+                            Ok(root) => {
+                                drop(empty)
+                                drop(root)
+                                drop(label)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                drop(label)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => { drop(label); status },
+                }
             }
             func hidden() -> i32 { 1 * 2 }
             "#,
@@ -8405,12 +10914,17 @@ func main() -> i32 {
         let (checked, file) = checked(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let found = pair.0
-    drop(pair)
-    drop(root)
-    if found { 1 } else { 0 }
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            if found { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -8419,7 +10933,9 @@ func main() -> i32 {
             admission.ordinary_map_owned_any_v2,
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::CompleteCoverage
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
 
         let canonical = MirProgram::from_checked_program(&checked)
             .expect("direct empty-root GetAny must pass MIR construction and validation");
@@ -8455,10 +10971,15 @@ func main() -> i32 {
     fn ordinary_map_direct_mir_boundary_rejects_incomplete_operation_coverage() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                let value = map_get(root, "answer")
-                drop(root)
-                0
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let value = map_get(root, "answer")
+                        drop(root)
+                        0
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8473,6 +10994,10 @@ func main() -> i32 {
         let (checked, file) = checked(source);
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert!(admission.ordinary_map_owned_get_i32_string_v1_complete());
+        assert!(checked
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt()));
         let profile = mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;
         for default_profile in [
             "run-canonical-v1",
@@ -8493,18 +11018,28 @@ func main() -> i32 {
         receipt
             .validate_against_program(&program)
             .expect("owned-get receipt must bind the selected MIR graph");
+        mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+            &checked,
+            &program,
+        )
+        .expect("owned-get ResultBranchV3 must select its exact Checker-bound bytecode adapter");
     }
 
     #[test]
     fn ordinary_map_owned_get_direct_mir_boundary_rejects_incomplete_coverage() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                let result = map_get_i32(root, "answer")
-                drop(root)
-                match result {
-                    Ok(value) => value,
-                    Err(code) => code,
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let result = map_get_i32(root, "answer")
+                        drop(root)
+                        match result {
+                            Ok(value) => value,
+                            Err(code) => code,
+                        }
+                    },
+                    Err(status) => status,
                 }
             }
         "#;
@@ -8529,11 +11064,16 @@ func main() -> i32 {
                 "Values",
                 r#"
                     func main() -> i32 {
-                        let root = map_new()
-                        let snapshot = values(root)
-                        let count = snapshot.len()
-                        drop(root)
-                        count
+                        let created = map_new()
+                        match created {
+                            Ok(root) => {
+                                let snapshot = values(root)
+                                let count = snapshot.len()
+                                drop(root)
+                                count
+                            },
+                            Err(status) => status,
+                        }
                     }
                 "#,
             ),
@@ -8541,11 +11081,16 @@ func main() -> i32 {
                 "GetAny",
                 r#"
                     func main() -> i32 {
-                        let root = map_new()
-                        let pair = map_get(root, "answer")
-                        let found = pair.0
-                        drop(root)
-                        if found { 1 } else { 0 }
+                        let created = map_new()
+                        match created {
+                            Ok(root) => {
+                                let pair = map_get(root, "answer")
+                                let found = pair.0
+                                drop(root)
+                                if found { 1 } else { 0 }
+                            },
+                            Err(status) => status,
+                        }
                     }
                 "#,
             ),
@@ -8576,14 +11121,29 @@ func main() -> i32 {
     fn ordinary_map_complete_profile_materializes_its_own_mir_receipt() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                let keyed = map_set(root, "answer", 0)
-                let updated = map_set(keyed, "label", "")
-                let size = map_size(updated)
-                drop(root)
-                drop(keyed)
-                drop(updated)
-                size
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let keyed_result = map_set(root, "answer", 0)
+                        match keyed_result {
+                            Ok(keyed) => {
+                                drop(root)
+                                let updated_result = map_set(keyed, "label", "")
+                                match updated_result {
+                                    Ok(updated) => {
+                                        drop(keyed)
+                                        let size = map_size(updated)
+                                        drop(updated)
+                                        size
+                                    },
+                                    Err(status) => { drop(keyed); status },
+                                }
+                            },
+                            Err(status) => { drop(root); status },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8622,13 +11182,43 @@ func main() -> i32 {
     fn map_any_owner_default_route_rejects_extra_temporary_root_without_legacy_retry() {
         let source = r#"
             func main() -> i32 {
-                let root = map_new()
-                    let updated = map_set(root, "answer", 42)
-                    let size = map_size(updated)
-                    let temporary_size = map_size(map_new())
-                    let unreceipted = map_get(map_new(), "missing")
-                    drop(updated)
-                    size + temporary_size
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let changed = map_set(root, "answer", 42)
+                        match changed {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                let temporary_creation = map_new()
+                                let temporary_size = match temporary_creation {
+                                    Ok(temporary) => {
+                                        let size = map_size(temporary)
+                                        drop(temporary)
+                                        size
+                                    },
+                                    Err(status) => { return status },
+                                }
+                                let extra_creation = map_new()
+                                let extra_size = match extra_creation {
+                                    Ok(extra) => {
+                                        let size = map_size(extra)
+                                        drop(extra)
+                                        size
+                                    },
+                                    Err(status) => { return status },
+                                }
+                                drop(updated)
+                                size + temporary_size + extra_size
+                            },
+                            Err(status) => {
+                                drop(root)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8656,14 +11246,36 @@ func main() -> i32 {
     fn map_any_owner_default_route_receipts_temporary_roots_across_callables() {
         let source = r#"
             func temporary_size() -> i32 {
-                map_size(map_new())
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let size = map_size(root)
+                        drop(root)
+                        size
+                    },
+                    Err(status) => status,
+                }
             }
             func main() -> i32 {
-                let root = map_new()
-                let updated = map_set(root, "answer", 42)
-                let size = map_size(updated)
-                drop(updated)
-                size
+                let created = map_new()
+                match created {
+                    Ok(root) => {
+                        let changed = map_set(root, "answer", 42)
+                        match changed {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                drop(updated)
+                                size
+                            },
+                            Err(status) => {
+                                drop(root)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let (checked, file) = checked(source);
@@ -8712,7 +11324,11 @@ func main() -> i32 {
             ),
             (
                 r#"extern "C" { func foreign(value: i64) -> string; }
-                func main() -> string { foreign(42 as i64) }"#,
+                func main() -> i32 {
+                    let returned = foreign(42 as i64)
+                    drop(returned)
+                    0
+                }"#,
                 "result type is outside canonical scalar FFI",
             ),
         ] {
@@ -8733,7 +11349,7 @@ func main() -> i32 {
     fn scalar_ffi_default_route_rejects_uncovered_graph_without_fallback() {
         for (index, source) in [
             r#"extern "C" { func foreign(x: f64) -> f64 requires: x > 0.0; }
-                func main() -> f64 { foreign(42.5) }"#,
+                func main() -> i32 { let returned = foreign(42.5); 0 }"#,
             r#"extern "C" { func foreign(x: i64) -> i64; }
                 func main() -> i64 { let xs = [1, 2]; println(len(xs)); foreign(42 as i64) }"#,
         ]
@@ -8984,7 +11600,7 @@ func main() -> i32 {
     fn source_scope_builder_preserves_typed_build_diagnostics_until_cli_boundary() {
         let source = r#"
             extern "C" { func foreign(value: f64) -> f64 requires: value > 0.0; }
-            func main() -> f64 { foreign(42.5) }
+            func main() -> i32 { let returned = foreign(42.5); 0 }
         "#;
         let (checked, file) = checked(source);
         let error = build_canonical_program_for_sources_with_diagnostics(&checked, &file, None)
@@ -9115,7 +11731,7 @@ func main() -> i32 {
     }
 
     #[test]
-    fn dynamic_trait_object_sibling_keeps_legacy_compatibility_route() {
+    fn dynamic_protocol_method_is_rejected_before_execution_or_verifier_fallback() {
         let (checked, file) = checked(include_str!(
             "../../tests/fixtures/mir_protocol_method_dyn.mimi"
         ));
@@ -9123,10 +11739,81 @@ func main() -> i32 {
             mimi::core::mir::classify_flat_copy_record_admission(&checked),
             mimi::core::mir::FlatCopyRecordAdmission::MixedCoverage
         );
-        assert!(matches!(
-            select_default_route(&checked, &file),
-            DefaultMirRoute::Legacy(LegacyRouteReason::MixedCoverageWithoutMaterializedCandidate)
-        ));
+
+        let DefaultMirRoute::Rejected(execution_reason) = select_default_route(&checked, &file)
+        else {
+            panic!("dynamic Protocol dispatch must not reach bytecode or LLVM compatibility");
+        };
+        assert!(execution_reason.contains(mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
+        assert!(execution_reason.contains("dynamic Protocol method dispatch"));
+        assert!(execution_reason.contains("cannot use Bytecode, LLVM"));
+
+        let DefaultMirRoute::Rejected(verification_reason) =
+            select_default_verification_route(&checked, &file)
+        else {
+            panic!("dynamic Protocol dispatch must not reach the compatibility verifier");
+        };
+        assert_eq!(verification_reason, execution_reason);
+
+        let build_reason = build_canonical_program(&checked, &file)
+            .expect_err("explicit MIR construction must reject dynamic Protocol dispatch");
+        assert_eq!(build_reason, execution_reason);
+    }
+
+    #[test]
+    fn dynamic_protocol_boundary_uses_receiver_node_types_not_display_names() {
+        let cases = [
+            (
+                "nested field receiver",
+                r#"
+trait Read { func read() -> i32 }
+type Counter { value: i32 }
+impl Read for Counter { func read() -> i32 { self.value } }
+type Holder { reader: dyn Read }
+func main() -> i32 {
+    let counter = Counter { value: 41 }
+    let holder = Holder { reader: counter }
+    holder.reader.read()
+}
+"#,
+            ),
+            (
+                "call expression receiver",
+                r#"
+trait Read { func read() -> i32 }
+type Counter { value: i32 }
+impl Read for Counter { func read() -> i32 { self.value } }
+func pass(value: dyn Read) -> dyn Read { value }
+func main() -> i32 {
+    let counter = Counter { value: 41 }
+    let dynamic: dyn Read = counter
+    pass(dynamic).read()
+}
+"#,
+            ),
+        ];
+
+        for (label, source) in cases {
+            let (checked, file) = checked(source);
+            let reason = dynamic_protocol_method_boundary_diagnostic(&checked)
+                .unwrap_or_else(|| panic!("{label}: typed dynamic receiver must be rejected"));
+            assert!(
+                reason.contains("dynamic Protocol method dispatch"),
+                "{label}: {reason}"
+            );
+
+            let DefaultMirRoute::Rejected(route_reason) = select_default_route(&checked, &file)
+            else {
+                panic!("{label}: dynamic receiver must not reach a compatibility route");
+            };
+            assert_eq!(route_reason, reason, "{label}");
+            assert_eq!(
+                build_canonical_program(&checked, &file)
+                    .expect_err("explicit MIR must reject dynamic Protocol dispatch"),
+                reason,
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -12162,7 +14849,7 @@ func main() -> i32 {
             let synthetic_main = checked.flow("Main").expect("parser-synthesized Main flow");
             assert!(matches!(
                 &synthetic_main.origin,
-                mimi::core::Origin::RuntimeSystem { parent, rule, .. }
+                mimi::core::resolved::Origin::RuntimeSystem { parent, rule, .. }
                     if parent.0 == "function:main" && rule == "progressive.main"
             ));
             let DefaultMirRoute::Canonical(program) = select_default_route(&checked, &file) else {
@@ -12412,19 +15099,45 @@ func main() -> i32 {
         type Label { text: string }
         func main() -> i32 {
             let payload = Label { text: "shared" }
-            let base = map_new()
-            let flag = true
-            if flag {
-                let left = map_set(base, "left", payload)
-                let left_size = map_size(left)
-                drop(left)
-            } else {
-                let right = map_set(base, "right", payload)
-                let right_size = map_size(right)
-                drop(right)
+            let created = map_new()
+            match created {
+                Ok(base) => {
+                    let flag = true
+                    if flag {
+                        let left_result = map_set(base, "left", payload)
+                        match left_result {
+                            Ok(left) => {
+                                let left_size = map_size(left)
+                                drop(left)
+                                0
+                            },
+                            Err(status) => {
+                                drop(base)
+                                drop(payload)
+                                return status
+                            },
+                        }
+                    } else {
+                        let right_result = map_set(base, "right", payload)
+                        match right_result {
+                            Ok(right) => {
+                                let right_size = map_size(right)
+                                drop(right)
+                                0
+                            },
+                            Err(status) => {
+                                drop(base)
+                                drop(payload)
+                                return status
+                            },
+                        }
+                    }
+                    drop(base)
+                    drop(payload)
+                    0
+                },
+                Err(status) => { drop(payload); status },
             }
-            drop(base)
-            0
         }
     "#;
 
@@ -12437,7 +15150,9 @@ func main() -> i32 {
             admission.ordinary_map_owned_any_v2,
             mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::BranchLocalPersistentSetDiamond
         );
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         for consumer_profile in [
             "run-canonical-v1",
             mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
@@ -12495,13 +15210,15 @@ func main() -> i32 {
     #[test]
     fn branch_local_set_diamond_near_miss_is_rejected_without_opening_global_readiness() {
         let near_miss = BRANCH_LOCAL_SET_DIAMOND_SOURCE.replace(
-            "            drop(base)",
-            "            let extra = map_set(base, \"extra\", 47)\n            drop(extra)\n            drop(base)",
+            "                    drop(base)\n                    drop(payload)",
+            "                    let extra_result = map_set(base, \"extra\", 47)\n                    match extra_result {\n                        Ok(extra) => {\n                            drop(extra)\n                            0\n                        },\n                        Err(status) => {\n                            drop(base)\n                            drop(payload)\n                            return status\n                        },\n                    }\n                    drop(base)\n                    drop(payload)",
         );
         let (checked, file) = checked(&near_miss);
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert!(!admission.ordinary_map_owned_any_v2_branch_local_set_diamond());
-        assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        const {
+            assert!(!mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+        };
         let DefaultMirRoute::Rejected(reason) = select_default_route(&checked, &file) else {
             panic!("the extra Set must fail closed instead of taking a legacy route");
         };

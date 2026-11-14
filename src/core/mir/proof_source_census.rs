@@ -12,10 +12,11 @@ use crate::core::ir::{
     ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFfiContractRoot,
     ResolvedFfiParameterMode, ResolvedParameterId, ResolvedStmtKind, ResolvedTypeId,
     TypedCallEffectAuthority, TypedCallExecutionDisposition, TypedCallProofPoint,
-    TypedLoopInvariantPoint, TypedMathProofPoint, TypedProofBlock, TypedProofOperation,
-    TypedProofPointId, TypedProofPointWorklist, TypedProofScopeFrame,
+    TypedDefaultProofUse, TypedLoopInvariantPoint, TypedMatchPathReceipt, TypedMathProofPoint,
+    TypedProofBlock, TypedProofOperation, TypedProofPointId, TypedProofPointWorklist,
+    TypedProofScopeFrame,
 };
-use crate::core::{CheckedProgram, NodeId, Origin};
+use crate::core::{CheckedProgram, NodeId, Origin, ResolvedCallSite, ResolvedItemKind};
 
 use super::{MirInstance, MirProofPointId};
 
@@ -57,11 +58,13 @@ impl MirProofSourceRoot {
 pub struct MirProofSourceCall {
     origin: MirProofSourceCallOrigin,
     body_owner: NodeId,
+    caller_qualified_name: String,
     owner: NodeId,
     statement: NodeId,
     order: Option<u64>,
     scope: Vec<MirProofSourceScopeFrame>,
     guards: Vec<(NodeId, bool)>,
+    match_path: Vec<TypedMatchPathReceipt>,
     disposition: TypedCallExecutionDisposition,
     call_node: NodeId,
     callee: ResolvedCallee,
@@ -92,6 +95,10 @@ impl MirProofSourceCall {
         &self.body_owner
     }
 
+    pub fn caller_qualified_name(&self) -> &str {
+        &self.caller_qualified_name
+    }
+
     /// Selected callable owner at the call point (different from `body_owner`
     /// for a latent lambda body).
     pub fn owner(&self) -> &NodeId {
@@ -119,6 +126,10 @@ impl MirProofSourceCall {
 
     pub fn disposition(&self) -> &TypedCallExecutionDisposition {
         &self.disposition
+    }
+
+    pub fn match_path(&self) -> &[TypedMatchPathReceipt] {
+        &self.match_path
     }
 
     pub fn callee(&self) -> &ResolvedCallee {
@@ -230,6 +241,7 @@ pub struct MirProofSourceCallArgument {
     conversion: CheckedConversionKind,
     conversion_from: ResolvedTypeId,
     target_type: ResolvedTypeId,
+    eager_source_nodes: Vec<NodeId>,
 }
 
 impl MirProofSourceCallArgument {
@@ -260,6 +272,10 @@ impl MirProofSourceCallArgument {
     pub fn target_type(&self) -> &ResolvedTypeId {
         &self.target_type
     }
+
+    pub fn eager_source_nodes(&self) -> &[NodeId] {
+        &self.eager_source_nodes
+    }
 }
 
 /// Exact source call identity kept even when its callable is not materialized
@@ -269,6 +285,8 @@ impl MirProofSourceCallArgument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirProofSourceCallIdentity {
     call_node: NodeId,
+    caller_qualified_name: String,
+    origin: Option<Origin>,
     callee: ResolvedCallee,
     callee_identity: String,
     selected_signature: String,
@@ -284,6 +302,12 @@ pub struct MirProofSourceCallIdentity {
 impl MirProofSourceCallIdentity {
     pub fn call_node(&self) -> &NodeId {
         &self.call_node
+    }
+    pub fn caller_qualified_name(&self) -> &str {
+        &self.caller_qualified_name
+    }
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_ref()
     }
     pub fn callee(&self) -> &ResolvedCallee {
         &self.callee
@@ -386,6 +410,191 @@ pub struct MirProofSourceDefault {
     proof_relevant: bool,
 }
 
+/// Execution meaning of a Checker-owned FFI call that appears in a
+/// declaration expression root. Keeping this separate from the source call
+/// identity prevents an unactivated parameter default from being represented
+/// as an executable call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MirProofSourceFfiRootExecution {
+    /// A top-level constant initializer is an eager declaration root. Its
+    /// call identity is censused, but this slice has no executable MIR owner.
+    ConstantInitializer,
+    /// Actor field initialization is conditional on Actor construction; the
+    /// construction/reachability join remains outside this slice.
+    ActorConstructionPending,
+    /// Trait defaults remain declaration roots until an exact activation
+    /// receipt is available.
+    TraitDefaultDeclarationOnly,
+    /// A callable default is not a call unless a Checker-issued omitted-
+    /// argument use activates it.
+    CallableDefaultDeclarationOnly,
+    /// At least one exact Checker-issued omitted-argument use activates this
+    /// root. The FFI default expansion remains explicitly unsupported.
+    CallableDefaultActivatedUnsupported,
+}
+
+/// Exact Checker-issued omitted-argument link for an FFI call in a callable
+/// default. It identifies the invocation that activates the default without
+/// pretending that the declaration expression itself is an ordinary body
+/// call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirProofSourceFfiDefaultActivation {
+    caller_owner: NodeId,
+    call_node: NodeId,
+    callee_owner: NodeId,
+    parameter: ResolvedParameterId,
+    argument_node: NodeId,
+    parameter_index: usize,
+    order: u64,
+    scope: Vec<MirProofSourceScopeFrame>,
+    guards: Vec<(NodeId, bool)>,
+    disposition: TypedCallExecutionDisposition,
+    origin: Origin,
+}
+
+impl MirProofSourceFfiDefaultActivation {
+    pub fn caller_owner(&self) -> &NodeId {
+        &self.caller_owner
+    }
+
+    pub fn call_node(&self) -> &NodeId {
+        &self.call_node
+    }
+
+    pub fn callee_owner(&self) -> &NodeId {
+        &self.callee_owner
+    }
+
+    pub fn parameter(&self) -> &ResolvedParameterId {
+        &self.parameter
+    }
+
+    pub fn argument_node(&self) -> &NodeId {
+        &self.argument_node
+    }
+
+    pub fn parameter_index(&self) -> usize {
+        self.parameter_index
+    }
+
+    pub fn order(&self) -> u64 {
+        self.order
+    }
+
+    pub fn scope(&self) -> &[MirProofSourceScopeFrame] {
+        &self.scope
+    }
+
+    pub fn guards(&self) -> &[(NodeId, bool)] {
+        &self.guards
+    }
+
+    pub fn disposition(&self) -> &TypedCallExecutionDisposition {
+        &self.disposition
+    }
+
+    pub fn origin(&self) -> &Origin {
+        &self.origin
+    }
+}
+
+/// Declaration-owned FFI call identity materialized from Checker-issued
+/// source-root and call handles. It is not an executable MIR call by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirProofSourceFfiRootCall {
+    root_node: NodeId,
+    call_node: NodeId,
+    declaration: NodeId,
+    symbol: String,
+    call_origin: Origin,
+    call_fingerprint: String,
+}
+
+impl MirProofSourceFfiRootCall {
+    pub fn root_node(&self) -> &NodeId {
+        &self.root_node
+    }
+
+    pub fn call_node(&self) -> &NodeId {
+        &self.call_node
+    }
+
+    pub fn declaration(&self) -> &NodeId {
+        &self.declaration
+    }
+
+    pub fn symbol(&self) -> &str {
+        &self.symbol
+    }
+
+    pub fn call_origin(&self) -> &Origin {
+        &self.call_origin
+    }
+
+    pub fn call_fingerprint(&self) -> &str {
+        &self.call_fingerprint
+    }
+}
+
+/// One checked declaration expression root and the direct typed extern calls
+/// inside it. Constant, Actor-field, trait-default, and callable-default roots
+/// keep distinct execution classifications and owner identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirProofSourceFfiRoot {
+    root_node: NodeId,
+    owner: NodeId,
+    kind: crate::core::ir::lower::ResolvedDeclarationExpressionKind,
+    identity: Option<crate::core::ir::lower::ResolvedDeclarationRootIdentity>,
+    origin: Option<Origin>,
+    body_fingerprint: String,
+    call_census_valid: bool,
+    execution: MirProofSourceFfiRootExecution,
+    activations: Vec<MirProofSourceFfiDefaultActivation>,
+    calls: Vec<MirProofSourceFfiRootCall>,
+}
+
+impl MirProofSourceFfiRoot {
+    pub fn root_node(&self) -> &NodeId {
+        &self.root_node
+    }
+
+    pub fn owner(&self) -> &NodeId {
+        &self.owner
+    }
+
+    pub fn kind(&self) -> crate::core::ir::lower::ResolvedDeclarationExpressionKind {
+        self.kind
+    }
+
+    pub fn identity(&self) -> Option<&crate::core::ir::lower::ResolvedDeclarationRootIdentity> {
+        self.identity.as_ref()
+    }
+
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_ref()
+    }
+
+    pub fn body_fingerprint(&self) -> &str {
+        &self.body_fingerprint
+    }
+
+    pub fn call_census_valid(&self) -> bool {
+        self.call_census_valid
+    }
+
+    pub fn execution(&self) -> MirProofSourceFfiRootExecution {
+        self.execution
+    }
+
+    pub fn activations(&self) -> &[MirProofSourceFfiDefaultActivation] {
+        &self.activations
+    }
+
+    pub fn calls(&self) -> &[MirProofSourceFfiRootCall] {
+        &self.calls
+    }
+}
+
 impl MirProofSourceDefault {
     pub fn parameter(&self) -> &ResolvedParameterId {
         &self.parameter
@@ -443,9 +652,11 @@ pub struct MirProofSourceDeclaration {
     requires_declared: bool,
     requires_root: Option<NodeId>,
     requires_deferred: bool,
+    requires_types: BTreeMap<Vec<u8>, ResolvedTypeId>,
     ensures_declared: bool,
     ensures_root: Option<NodeId>,
     ensures_deferred: bool,
+    ensures_types: BTreeMap<Vec<u8>, ResolvedTypeId>,
 }
 
 impl MirProofSourceDeclaration {
@@ -525,6 +736,10 @@ impl MirProofSourceDeclaration {
         self.requires_deferred
     }
 
+    pub fn requires_types(&self) -> &BTreeMap<Vec<u8>, ResolvedTypeId> {
+        &self.requires_types
+    }
+
     pub fn ensures_declared(&self) -> bool {
         self.ensures_declared
     }
@@ -536,6 +751,10 @@ impl MirProofSourceDeclaration {
     pub fn ensures_deferred(&self) -> bool {
         self.ensures_deferred
     }
+
+    pub fn ensures_types(&self) -> &BTreeMap<Vec<u8>, ResolvedTypeId> {
+        &self.ensures_types
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,6 +765,7 @@ pub struct MirProofOwnerCensus {
     roots: Vec<MirProofSourceRoot>,
     calls: Vec<MirProofSourceCall>,
     defaults: Vec<MirProofSourceDefault>,
+    default_proof_roots: Vec<super::MirProofDefaultRoot>,
     place_inputs: Vec<MirProofSourcePlaceInput>,
     math_points: Vec<MirProofPointId>,
     loop_invariants: Vec<MirProofPointId>,
@@ -581,6 +801,13 @@ impl MirProofOwnerCensus {
 
     pub fn defaults(&self) -> &[MirProofSourceDefault] {
         &self.defaults
+    }
+
+    /// Isolated typed MIR proof roots for declaration defaults. These roots
+    /// are sealed with the checked-source census and carry exact omitted-
+    /// argument use receipts; they do not inherit caller contracts.
+    pub fn default_proof_roots(&self) -> &[super::MirProofDefaultRoot] {
+        &self.default_proof_roots
     }
 
     pub fn place_inputs(&self) -> &[MirProofSourcePlaceInput] {
@@ -744,6 +971,7 @@ struct MirProofSourceCallEvent {
     order: u64,
     scope: Vec<MirProofSourceScopeFrame>,
     guards: Vec<(NodeId, bool)>,
+    match_path: Vec<TypedMatchPathReceipt>,
     disposition: TypedCallExecutionDisposition,
     expression: NodeId,
     expression_type: ResolvedTypeId,
@@ -769,6 +997,20 @@ struct MirProofSourceCallMetadata {
     arguments: Vec<MirProofSourceCallArgument>,
 }
 
+fn complete_call_metadata_eager_nodes<'a>(
+    metadata: impl IntoIterator<Item = &'a mut MirProofSourceCallMetadata>,
+    place_inputs: &BTreeMap<NodeId, ResolvedExpr>,
+) {
+    for call in metadata {
+        for argument in &mut call.arguments {
+            argument.eager_source_nodes = ResolvedExpr::expand_eager_source_nodes(
+                std::mem::take(&mut argument.eager_source_nodes),
+                place_inputs,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct MirProofSourceCallContext {
     owner: NodeId,
@@ -776,6 +1018,7 @@ struct MirProofSourceCallContext {
     order: u64,
     scope: Vec<MirProofSourceScopeFrame>,
     guards: Vec<(NodeId, bool)>,
+    match_path: Vec<TypedMatchPathReceipt>,
     disposition: TypedCallExecutionDisposition,
     effect_authority: TypedCallEffectAuthority,
 }
@@ -822,6 +1065,17 @@ enum CensusAuthority {
     Unavailable,
 }
 
+/// Source declarations that a MIR-only consumer cannot recover from the
+/// executable graph. This inventory is sealed with the proof census so a
+/// narrow source profile can reject dormant top-level declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MirProofSourceItem {
+    node_id: NodeId,
+    qualified_name: String,
+    kind: ResolvedItemKind,
+    origin: Origin,
+}
+
 /// Private and nonoptional on `MirProgram`. The fields, including the seal,
 /// are intentionally not public so consumer code cannot erase or rewrite the
 /// independently derived source census.
@@ -832,6 +1086,11 @@ pub struct MirProofSourceCensus {
     owners: BTreeMap<NodeId, MirProofOwnerCensus>,
     checked_callables: BTreeMap<NodeId, MirProofSourceCallableCensus>,
     declarations: Vec<MirProofSourceDeclaration>,
+    ffi_source_roots: Vec<MirProofSourceFfiRoot>,
+    ffi_source_root_errors: Vec<String>,
+    source_items: Vec<MirProofSourceItem>,
+    has_imports: bool,
+    main_function_safe: bool,
     checked_source_fingerprint: String,
     witness: String,
 }
@@ -843,6 +1102,34 @@ impl Default for MirProofSourceCensus {
 }
 
 impl MirProofSourceCensus {
+    /// Build a sealed source-only FFI declaration-root census. This does not
+    /// materialize executable functions or MIR instructions, so verifier
+    /// boundary reporting cannot accidentally admit an unsupported default
+    /// expansion to a backend.
+    pub(crate) fn checked_ffi_declaration_roots(program: &CheckedProgram) -> Self {
+        Self::checked(program, &BTreeMap::new(), &BTreeMap::new(), None)
+    }
+
+    /// Validate a source-only census against its empty executable-owner map.
+    /// Full MIR consumers must use `MirProgram::validate_proof_source_census`.
+    pub(crate) fn validate_source_only(&self) -> Result<(), MirProofCensusIntegrityError> {
+        self.validate_integrity(&BTreeMap::new())
+    }
+
+    /// Validate only the declaration-root side of the FFI census. This is for
+    /// verifier diagnostics that report an explicit unsupported boundary; it
+    /// cannot produce an executable call contract or backend admission.
+    pub(crate) fn validate_ffi_source_roots(&self) -> Result<(), Vec<String>> {
+        self.validate_source_only()
+            .map_err(|error| vec![format!("checked-source census integrity failed: {error:?}")])?;
+        let errors = super::validate_ffi_source_root_census(self, &BTreeSet::new());
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     pub(crate) fn unavailable(functions: &BTreeMap<NodeId, super::MirFunction>) -> Self {
         let owners = functions
             .iter()
@@ -869,6 +1156,7 @@ impl MirProofSourceCensus {
                         roots,
                         calls: Vec::new(),
                         defaults: Vec::new(),
+                        default_proof_roots: Vec::new(),
                         place_inputs: Vec::new(),
                         math_points: Vec::new(),
                         loop_invariants: Vec::new(),
@@ -895,6 +1183,11 @@ impl MirProofSourceCensus {
             owners,
             BTreeMap::new(),
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            false,
             String::new(),
         )
     }
@@ -959,16 +1252,66 @@ impl MirProofSourceCensus {
                         &declaration.requires,
                         ResolvedFfiContractRoot::Deferred { .. }
                     ),
+                    requires_types: ffi_root_types(
+                        program,
+                        &declaration.requires,
+                        crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternRequires,
+                    ),
                     ensures_declared: declaration.ensures.is_declared(),
                     ensures_root: ffi_root(&declaration.ensures),
                     ensures_deferred: matches!(
                         &declaration.ensures,
                         ResolvedFfiContractRoot::Deferred { .. }
                     ),
+                    ensures_types: ffi_root_types(
+                        program,
+                        &declaration.ensures,
+                        crate::core::ir::lower::ResolvedDeclarationExpressionKind::ExternEnsures,
+                    ),
                 }
             })
             .collect::<Vec<_>>();
         declarations.sort_by(|left, right| left.declaration.cmp(&right.declaration));
+
+        let (ffi_source_roots, ffi_source_root_errors) =
+            checked_ffi_source_roots(program, excluded_sources);
+
+        // Keep declaration inventory independent from MIR lowering: constants,
+        // traits, types, and other source-only items may not become functions,
+        // transitions, or FFI calls. Match the closed Map profile's standard
+        // prelude exclusion by stable source key, then honor any additional
+        // explicit source exclusion used by the MIR constructor.
+        let mut source_items = program
+            .items()
+            .values()
+            .filter(|item| {
+                let source_id = item.origin.user_span().source_id;
+                !excluded_sources.is_some_and(|excluded| excluded.contains(&source_id))
+                    && !program
+                        .source_registry()
+                        .key(source_id)
+                        .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi")
+            })
+            .map(|item| MirProofSourceItem {
+                node_id: item.node_id.clone(),
+                qualified_name: item.qualified_name.clone(),
+                kind: item.kind,
+                origin: item.origin.clone(),
+            })
+            .collect::<Vec<_>>();
+        source_items.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let has_imports = program.has_imports();
+        let main_function_safe = program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .is_some_and(|main| {
+                !main.pub_
+                    && !main.is_comptime
+                    && !main.is_async
+                    && main.extern_abi.is_none()
+                    && main.generics.is_empty()
+                    && main.effects.is_empty()
+            });
 
         let mut source_for_owner = BTreeMap::<NodeId, NodeId>::new();
         for owner in functions.keys() {
@@ -1041,12 +1384,11 @@ impl MirProofSourceCensus {
                 // A function that survived source exclusion without a source
                 // owner is a structural integrity issue, represented as an
                 // unavailable owner and handled as a per-owner coverage gap.
-                let unavailable =
+                let mut unavailable =
                     Self::unavailable(&BTreeMap::from([(owner.clone(), function.clone())]));
-                owners.insert(
-                    owner.clone(),
-                    unavailable.owners.get(owner).unwrap().clone(),
-                );
+                if let Some(entry) = unavailable.owners.remove(owner) {
+                    owners.insert(owner.clone(), entry);
+                }
                 continue;
             }
 
@@ -1061,7 +1403,7 @@ impl MirProofSourceCensus {
                 roots.insert(MirProofSourceRoot {
                     kind,
                     node: contract.node_id.clone(),
-                    identity: format!("{}", contract.condition.node_id.0),
+                    identity: contract.condition.node_id.0.to_string(),
                 });
                 if source_callable
                     .body
@@ -1313,6 +1655,10 @@ impl MirProofSourceCensus {
                     }
                 }
             }
+            complete_call_metadata_eager_nodes(
+                call_metadata_occurrences.values_mut(),
+                &source_callable.body.place_inputs,
+            );
             // The independently materialized identity directory also carries
             // dormant declaration-owned calls that a consumer may not
             // execute. Preserve the union and flag any mismatch with the
@@ -1363,6 +1709,10 @@ impl MirProofSourceCensus {
                     MirProofSourceCall {
                         origin: origin.clone(),
                         body_owner: source_callable.owner.clone(),
+                        caller_qualified_name: checked_callable_qualified_name(
+                            program,
+                            &source_callable.owner,
+                        ),
                         owner: context.as_ref().map_or_else(
                             || source_callable.owner.clone(),
                             |context| context.owner.clone(),
@@ -1377,6 +1727,9 @@ impl MirProofSourceCensus {
                         guards: context
                             .as_ref()
                             .map_or_else(Vec::new, |context| context.guards.clone()),
+                        match_path: context
+                            .as_ref()
+                            .map_or_else(Vec::new, |context| context.match_path.clone()),
                         disposition: context.as_ref().map_or_else(
                             || {
                                 TypedCallExecutionDisposition::Deferred(
@@ -1451,6 +1804,7 @@ impl MirProofSourceCensus {
                 })
                 .collect::<Vec<_>>();
             defaults.sort();
+            let default_proof_roots = lower_default_proof_roots(source_callable, program);
             for default in &defaults {
                 roots.insert(MirProofSourceRoot {
                     kind: MirProofSourceRootKind::DefaultValue,
@@ -1607,6 +1961,7 @@ impl MirProofSourceCensus {
                     roots: roots.into_iter().collect(),
                     calls,
                     defaults,
+                    default_proof_roots,
                     place_inputs,
                     math_points,
                     loop_invariants,
@@ -1626,7 +1981,7 @@ impl MirProofSourceCensus {
             .map(|(owner, entry)| (owner.clone(), entry.source_fingerprint.clone()))
             .collect();
         let checked_source_material = format!(
-            "callables={source_fingerprints:#?}\ndeclarations={declarations:#?}\ninventory={checked_callables:#?}"
+            "callables={source_fingerprints:#?}\ndeclarations={declarations:#?}\nffi_source_roots={ffi_source_roots:#?}\nffi_source_root_errors={ffi_source_root_errors:#?}\ninventory={checked_callables:#?}\nsource_items={source_items:#?}\nhas_imports={has_imports}\nmain_function_safe={main_function_safe}"
         );
         let checked_source_fingerprint = blake3::hash(checked_source_material.as_bytes())
             .to_hex()
@@ -1637,8 +1992,29 @@ impl MirProofSourceCensus {
             owners,
             checked_callables,
             declarations,
+            ffi_source_roots,
+            ffi_source_root_errors,
+            source_items,
+            has_imports,
+            main_function_safe,
             checked_source_fingerprint,
         )
+    }
+
+    /// Rebuild the independent source census from a live CheckedProgram and
+    /// the supplied MIR owner tables, then compare its private seal. Narrow
+    /// Checker-aware verifier routes use this when their MIR graph is a
+    /// deliberately isolated projection and cannot be compared with the
+    /// general ResolvedBody lowering digest.
+    pub(crate) fn matches_checked_program(
+        &self,
+        program: &CheckedProgram,
+        functions: &BTreeMap<NodeId, super::MirFunction>,
+        instances: &BTreeMap<super::MirInstanceId, MirInstance>,
+    ) -> bool {
+        let expected = Self::checked(program, functions, instances, None);
+        self.witness == expected.witness
+            && self.checked_source_fingerprint == expected.checked_source_fingerprint
     }
 
     fn seal(
@@ -1647,6 +2023,11 @@ impl MirProofSourceCensus {
         owners: BTreeMap<NodeId, MirProofOwnerCensus>,
         checked_callables: BTreeMap<NodeId, MirProofSourceCallableCensus>,
         declarations: Vec<MirProofSourceDeclaration>,
+        ffi_source_roots: Vec<MirProofSourceFfiRoot>,
+        ffi_source_root_errors: Vec<String>,
+        source_items: Vec<MirProofSourceItem>,
+        has_imports: bool,
+        main_function_safe: bool,
         checked_source_fingerprint: String,
     ) -> Self {
         let mut census = Self {
@@ -1655,6 +2036,11 @@ impl MirProofSourceCensus {
             owners,
             checked_callables,
             declarations,
+            ffi_source_roots,
+            ffi_source_root_errors,
+            source_items,
+            has_imports,
+            main_function_safe,
             checked_source_fingerprint,
             witness: String::new(),
         };
@@ -1672,6 +2058,77 @@ impl MirProofSourceCensus {
 
     pub fn declarations(&self) -> &[MirProofSourceDeclaration] {
         &self.declarations
+    }
+
+    /// Declaration-owned extern roots resolved through Checker-issued root
+    /// and call handles. A default root with no activation remains
+    /// declaration-only and is not treated as a call.
+    pub fn ffi_source_roots(&self) -> &[MirProofSourceFfiRoot] {
+        &self.ffi_source_roots
+    }
+
+    pub(crate) fn ffi_source_root_errors(&self) -> &[String] {
+        &self.ffi_source_root_errors
+    }
+
+    /// Whether the sealed CheckedProgram source inventory is exactly the
+    /// import-free MapEmptyRootRootQueriesV1 declaration profile. The raw MIR
+    /// graph cannot reveal constants or other dormant source declarations, so
+    /// this decision uses the independent item census attached at construction.
+    pub fn admits_map_empty_root_root_queries_v1_source(&self) -> bool {
+        if self.authority != CensusAuthority::CheckedSource
+            || self.has_imports
+            || !self.declarations.is_empty()
+            || !self.main_function_safe
+            || self.source_items.len() != 4
+        {
+            return false;
+        }
+
+        let main_count = self
+            .source_items
+            .iter()
+            .filter(|item| {
+                item.node_id.0 == "function:main"
+                    && item.qualified_name == "main"
+                    && item.kind == ResolvedItemKind::Function
+                    && matches!(&item.origin, Origin::User(_))
+            })
+            .count();
+        let generated_main_flow = self.source_items.iter().find(|item| {
+            item.kind == ResolvedItemKind::Flow
+                && item.node_id.0 == "flow:Main"
+                && item.qualified_name == "Main"
+                && matches!(
+                    &item.origin,
+                    Origin::RuntimeSystem { parent, rule, .. }
+                        if parent.0 == "function:main" && rule == "progressive.main"
+                )
+        });
+        let Some(generated_main_flow) = generated_main_flow else {
+            return false;
+        };
+        let generated_flow_span = generated_main_flow.origin.user_span();
+        let generated_fault_nominal_count = |name: &str| {
+            self.source_items
+                .iter()
+                .filter(|item| {
+                    item.kind == ResolvedItemKind::Type
+                        && item.node_id.0 == format!("type:flow::Main::{name}")
+                        && item.qualified_name == format!("flow::Main::{name}")
+                        && matches!(
+                            &item.origin,
+                            Origin::Desugared { parent, rule, span }
+                                if parent.0 == "compilation:root"
+                                    && rule == "flow_matrix.fault_nominal"
+                                    && *span == generated_flow_span
+                        )
+                })
+                .count()
+        };
+        main_count == 1
+            && generated_fault_nominal_count("EventId") == 1
+            && generated_fault_nominal_count("StateId") == 1
     }
 
     pub fn declaration(&self, declaration: &NodeId) -> Option<&MirProofSourceDeclaration> {
@@ -1722,7 +2179,7 @@ impl MirProofSourceCensus {
                     .as_ref()
                     .and_then(|source_owner| self.checked_callables.get(source_owner))
                     .map(MirProofSourceCallableCensus::verification_required)
-                    .or_else(|| {
+                    .or({
                         Some(
                             entry.worklist_required
                                 || !entry.direct_contracts.is_empty()
@@ -1745,7 +2202,7 @@ impl MirProofSourceCensus {
             let _ = write!(output, "{}:", value.len());
             output.push_str(value);
         }
-        let mut output = String::from("mir.proof-source-census.v3\n");
+        let mut output = String::from("mir.proof-source-census.v8\n");
         atom(
             &mut output,
             match self.authority {
@@ -1754,6 +2211,33 @@ impl MirProofSourceCensus {
             },
         );
         output.push('\n');
+        output.push_str("  source-imports=");
+        atom(
+            &mut output,
+            if self.has_imports {
+                "present"
+            } else {
+                "absent"
+            },
+        );
+        output.push_str(" main-safe=");
+        atom(
+            &mut output,
+            if self.main_function_safe {
+                "true"
+            } else {
+                "false"
+            },
+        );
+        output.push('\n');
+        for item in &self.source_items {
+            output.push_str("  source-item=");
+            atom(&mut output, &item.node_id.0);
+            atom(&mut output, &item.qualified_name);
+            atom(&mut output, resolved_item_kind_text(item.kind));
+            atom(&mut output, &format!("{:?}", item.origin));
+            output.push('\n');
+        }
         for (owner, entry) in &self.owners {
             output.push_str("  owner=");
             atom(&mut output, &owner.0);
@@ -1800,6 +2284,7 @@ impl MirProofSourceCensus {
                 atom(&mut output, &format!("{:?}", call.disposition));
                 atom(&mut output, &format!("{:?}", call.scope));
                 atom(&mut output, &format!("{:?}", call.guards));
+                atom(&mut output, &format!("{:#?}", call.match_path));
                 atom(&mut output, &format!("{:?}", call.effect_authority));
                 atom(
                     &mut output,
@@ -1831,6 +2316,7 @@ impl MirProofSourceCensus {
                     atom(&mut output, &format!("{:?}", argument.conversion));
                     atom(&mut output, argument.conversion_from.as_str());
                     atom(&mut output, argument.target_type.as_str());
+                    atom(&mut output, &format!("{:?}", argument.eager_source_nodes));
                     output.push('\n');
                 }
             }
@@ -1876,6 +2362,11 @@ impl MirProofSourceCensus {
             output.push_str("    expected-worklist=");
             atom(&mut output, &format!("{:#?}", entry.expected_worklist));
             output.push('\n');
+            for root in &entry.default_proof_roots {
+                output.push_str("    default-proof-root=");
+                atom(&mut output, &format!("{:#?}", root));
+                output.push('\n');
+            }
             output.push_str("    typed-operations=");
             atom(&mut output, &format!("{:#?}", entry.typed_operations));
             output.push('\n');
@@ -1912,6 +2403,8 @@ impl MirProofSourceCensus {
             for call in &entry.calls {
                 output.push_str("    checked-call=");
                 atom(&mut output, &call.call_node.0);
+                atom(&mut output, &call.caller_qualified_name);
+                atom(&mut output, &format!("{:?}", call.origin));
                 atom(&mut output, &call.callee_identity);
                 atom(&mut output, &call.selected_signature);
                 atom(&mut output, &format!("{:?}", call.expression_type));
@@ -1943,6 +2436,7 @@ impl MirProofSourceCensus {
                     atom(&mut output, &format!("{:?}", argument.conversion));
                     atom(&mut output, argument.conversion_from.as_str());
                     atom(&mut output, argument.target_type.as_str());
+                    atom(&mut output, &format!("{:?}", argument.eager_source_nodes));
                     output.push('\n');
                 }
             }
@@ -1966,6 +2460,52 @@ impl MirProofSourceCensus {
                 atom(&mut output, &place.expression.0);
                 output.push('\n');
             }
+        }
+        for root in &self.ffi_source_roots {
+            output.push_str("  ffi-source-root=");
+            atom(&mut output, &root.root_node.0);
+            atom(&mut output, &root.owner.0);
+            atom(&mut output, &format!("{:?}", root.kind));
+            atom(&mut output, &format!("{:?}", root.identity));
+            atom(&mut output, &format!("{:?}", root.origin));
+            atom(&mut output, &root.body_fingerprint);
+            atom(
+                &mut output,
+                if root.call_census_valid {
+                    "calls-valid"
+                } else {
+                    "calls-invalid"
+                },
+            );
+            atom(&mut output, &format!("{:?}", root.execution));
+            output.push('\n');
+            for activation in &root.activations {
+                output.push_str("    ffi-default-activation=");
+                atom(&mut output, &activation.caller_owner.0);
+                atom(&mut output, &activation.call_node.0);
+                atom(&mut output, &activation.callee_owner.0);
+                atom(&mut output, &activation.parameter.0 .0);
+                atom(&mut output, &activation.argument_node.0);
+                atom(&mut output, &activation.parameter_index.to_string());
+                atom(&mut output, &activation.order.to_string());
+                atom(&mut output, &format!("{:?}", activation.origin));
+                output.push('\n');
+            }
+            for call in &root.calls {
+                output.push_str("    ffi-source-call=");
+                atom(&mut output, &call.root_node.0);
+                atom(&mut output, &call.call_node.0);
+                atom(&mut output, &call.declaration.0);
+                atom(&mut output, &call.symbol);
+                atom(&mut output, &format!("{:?}", call.call_origin));
+                atom(&mut output, &call.call_fingerprint);
+                output.push('\n');
+            }
+        }
+        for error in &self.ffi_source_root_errors {
+            output.push_str("  ffi-source-root-error=");
+            atom(&mut output, error);
+            output.push('\n');
         }
         for declaration in &self.declarations {
             output.push_str("  ffi-declaration=");
@@ -2013,6 +2553,7 @@ impl MirProofSourceCensus {
                     "requires-not-deferred"
                 },
             );
+            append_type_path_map(&mut output, &declaration.requires_types);
             atom(
                 &mut output,
                 if declaration.ensures_declared {
@@ -2036,6 +2577,7 @@ impl MirProofSourceCensus {
                     "ensures-not-deferred"
                 },
             );
+            append_type_path_map(&mut output, &declaration.ensures_types);
             output.push('\n');
         }
         output
@@ -2049,6 +2591,67 @@ impl MirProofSourceCensus {
             return Err(MirProofCensusIntegrityError {
                 message: "private checked-source proof census witness mismatch".into(),
             });
+        }
+        if self.authority == CensusAuthority::CheckedSource {
+            let source_fingerprints = self
+                .checked_callables
+                .iter()
+                .map(|(owner, entry)| (owner.clone(), entry.source_fingerprint.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let checked_source_material = format!(
+                "callables={source_fingerprints:#?}\ndeclarations={:#?}\nffi_source_roots={:#?}\nffi_source_root_errors={:#?}\ninventory={:#?}\nsource_items={:#?}\nhas_imports={}\nmain_function_safe={}",
+                self.declarations,
+                self.ffi_source_roots,
+                self.ffi_source_root_errors,
+                self.checked_callables,
+                self.source_items,
+                self.has_imports,
+                self.main_function_safe,
+            );
+            let checked_source_fingerprint = blake3::hash(checked_source_material.as_bytes())
+                .to_hex()
+                .to_string();
+            if self.checked_source_fingerprint != checked_source_fingerprint {
+                return Err(MirProofCensusIntegrityError {
+                    message: "checked source fingerprint does not bind the complete source-root and declaration inventory".into(),
+                });
+            }
+        }
+        let mut ffi_root_nodes = BTreeSet::new();
+        let mut ffi_call_nodes = BTreeMap::<NodeId, NodeId>::new();
+        for root in &self.ffi_source_roots {
+            if !ffi_root_nodes.insert(root.root_node.clone()) {
+                return Err(MirProofCensusIntegrityError {
+                    message: format!(
+                        "declaration FFI root '{}' is duplicated in the proof census",
+                        root.root_node.0
+                    ),
+                });
+            }
+            if root
+                .calls
+                .iter()
+                .any(|call| call.root_node != root.root_node)
+            {
+                return Err(MirProofCensusIntegrityError {
+                    message: format!(
+                        "declaration FFI root '{}' contains a cross-root call receipt",
+                        root.root_node.0
+                    ),
+                });
+            }
+            for call in &root.calls {
+                if let Some(previous) =
+                    ffi_call_nodes.insert(call.call_node.clone(), root.root_node.clone())
+                {
+                    return Err(MirProofCensusIntegrityError {
+                        message: format!(
+                            "declaration FFI call '{}' is duplicated or cross-bound between roots '{}' and '{}'",
+                            call.call_node.0, previous.0, root.root_node.0
+                        ),
+                    });
+                }
+            }
         }
         let function_owners = functions.keys().cloned().collect::<Vec<_>>();
         if self.function_owners != function_owners {
@@ -2110,12 +2713,17 @@ impl MirProofSourceCensus {
 
     fn compute_witness(&self) -> String {
         let material = format!(
-            "authority={:?}\nfunctions={:#?}\nowners={:#?}\nchecked_callables={:#?}\ndeclarations={:#?}\nsource={}",
+            "authority={:?}\nfunctions={:#?}\nowners={:#?}\nchecked_callables={:#?}\ndeclarations={:#?}\nffi_source_roots={:#?}\nffi_source_root_errors={:#?}\nsource_items={:#?}\nhas_imports={}\nmain_function_safe={}\nsource={}",
             self.authority,
             self.function_owners,
             self.owners,
             self.checked_callables,
             self.declarations,
+            self.ffi_source_roots,
+            self.ffi_source_root_errors,
+            self.source_items,
+            self.has_imports,
+            self.main_function_safe,
             self.checked_source_fingerprint
         );
         blake3::hash(material.as_bytes()).to_hex().to_string()
@@ -2128,6 +2736,638 @@ fn mir_point_id(point: &TypedProofPointId) -> MirProofPointId {
         statement: point.statement.clone(),
         ordinal: point.ordinal,
     }
+}
+
+pub(crate) type CallableDefaultKey = (NodeId, ResolvedParameterId);
+
+#[derive(Debug)]
+struct CheckerCallableDefaultUseCandidate {
+    receipt: TypedDefaultProofUse,
+    enclosing_defaults: Vec<CallableDefaultKey>,
+}
+
+#[derive(Debug)]
+struct CheckedCallableDefaultUse {
+    target: CallableDefaultKey,
+    enclosing_defaults: Vec<CallableDefaultKey>,
+    disposition: TypedCallExecutionDisposition,
+    activation: MirProofSourceFfiDefaultActivation,
+}
+
+#[derive(Debug, Default)]
+struct CheckedCallableDefaultActivationClosure {
+    activated: BTreeSet<CallableDefaultKey>,
+    activations_by_default: BTreeMap<CallableDefaultKey, Vec<MirProofSourceFfiDefaultActivation>>,
+    errors: Vec<String>,
+}
+
+const DEFAULT_EXPRESSION_CALL_DISPOSITION: &str =
+    "default expression call requires exact omitted-argument expansion";
+
+fn is_known_non_runtime_deferred_default_use(reason: &str) -> bool {
+    matches!(
+        reason,
+        "lambda body is latent until a checked invocation path exists"
+            | "comptime/quote body is not a runtime call point"
+            | "type-of operand is not an execution point"
+            | "old(...) is a snapshot term, not a runtime call point"
+            | "contract expression is an obligation, not a runtime call point"
+            | "call inside callable contract is a proof term, not a runtime call point"
+            | "call inside loop invariant is a proof term, not a runtime call point"
+            | "call inside nested contract is a proof term, not a runtime call point"
+            | "call inside Math is a proof term, not a runtime call point"
+            | "math term is a proof obligation, not a runtime call point"
+    )
+}
+
+fn classify_callable_default_use(
+    usage: &CheckedCallableDefaultUse,
+    activated_defaults: &BTreeSet<CallableDefaultKey>,
+) -> Result<bool, String> {
+    let has_enclosing_default = !usage.enclosing_defaults.is_empty();
+    if has_enclosing_default
+        && !usage
+            .enclosing_defaults
+            .iter()
+            .all(|default| activated_defaults.contains(default))
+    {
+        // Even an unsupported or possibly-executing call stays dormant while
+        // its exact enclosing declaration default is dormant.
+        return Ok(false);
+    }
+
+    match &usage.disposition {
+        TypedCallExecutionDisposition::Unconditional | TypedCallExecutionDisposition::Guarded => {
+            Ok(true)
+        }
+        TypedCallExecutionDisposition::Deferred(reason)
+            if has_enclosing_default && reason == DEFAULT_EXPRESSION_CALL_DISPOSITION =>
+        {
+            // The Checker defers ordinary calls in a default only because the
+            // default has not yet been expanded. Once every exact enclosing
+            // default is active, this receipt propagates activation.
+            Ok(true)
+        }
+        TypedCallExecutionDisposition::Deferred(reason)
+            if is_known_non_runtime_deferred_default_use(reason) =>
+        {
+            // These exact Checker reasons identify latent lambda bodies or
+            // terms that have no runtime execution point. CheckedProgram has
+            // no closure invocation receipt that could make the lambda case
+            // executable; it remains fail-closed until that authority exists.
+            Ok(false)
+        }
+        TypedCallExecutionDisposition::Deferred(reason) => Err(reason.clone()),
+    }
+}
+
+/// Shared authenticated activation closure for callable parameter defaults.
+/// The verifier and the MIR source census must use the same result so a
+/// declaration default cannot be declaration-only in one consumer and active
+/// in another.
+pub(crate) fn checked_ffi_callable_default_activation_closure(
+    program: &CheckedProgram,
+) -> Result<BTreeSet<CallableDefaultKey>, String> {
+    let closure = compute_checked_callable_default_activation_closure(program, None);
+    if closure.errors.is_empty() {
+        Ok(closure.activated)
+    } else {
+        Err(closure.errors.join("; "))
+    }
+}
+
+fn compute_checked_callable_default_activation_closure(
+    program: &CheckedProgram,
+    excluded_sources: Option<&std::collections::HashSet<crate::span::SourceId>>,
+) -> CheckedCallableDefaultActivationClosure {
+    let mut closure = CheckedCallableDefaultActivationClosure::default();
+    let mut all_default_expressions = BTreeMap::<CallableDefaultKey, NodeId>::new();
+    let mut eligible_defaults = BTreeSet::<CallableDefaultKey>::new();
+    for callable in program.callables().values() {
+        for (parameter, expression) in &callable.body.default_values {
+            let has_default = callable
+                .signature
+                .parameters
+                .iter()
+                .any(|candidate| &candidate.id == parameter && candidate.has_default);
+            if !has_default {
+                continue;
+            }
+            let key = (callable.owner.clone(), parameter.clone());
+            if all_default_expressions
+                .insert(key.clone(), expression.node_id.clone())
+                .is_some()
+            {
+                closure.errors.push(format!(
+                    "callable default '{}:{}' has a duplicate Checker default-expression identity",
+                    key.0 .0, key.1 .0 .0
+                ));
+            }
+            if !excluded_sources
+                .is_some_and(|excluded| excluded.contains(&expression.origin.user_span().source_id))
+            {
+                eligible_defaults.insert(key);
+            }
+        }
+    }
+
+    let mut relevant_defaults = BTreeSet::<CallableDefaultKey>::new();
+    for root in program.checked_ffi_source_roots() {
+        if root.kind()
+            != crate::core::ir::lower::ResolvedDeclarationExpressionKind::CallableParameterDefault
+            || root.calls().is_empty()
+            || excluded_sources.is_some_and(|excluded| {
+                root.origin()
+                    .is_some_and(|origin| excluded.contains(&origin.user_span().source_id))
+            })
+        {
+            continue;
+        }
+        if let Some(
+            crate::core::ir::lower::ResolvedDeclarationRootIdentity::CallableParameterDefault {
+                callable,
+                parameter,
+            },
+        ) = root.identity()
+        {
+            let key = (callable.clone(), parameter.clone());
+            if eligible_defaults.contains(&key) {
+                relevant_defaults.insert(key);
+            }
+        }
+    }
+
+    let mut candidates = Vec::<CheckerCallableDefaultUseCandidate>::new();
+    let mut call_points_by_node = BTreeMap::<NodeId, Vec<TypedCallProofPoint>>::new();
+    for caller in program.callables().values() {
+        if excluded_sources.is_some_and(|excluded| {
+            excluded.contains(&caller.body.root.origin.user_span().source_id)
+        }) {
+            continue;
+        }
+        let worklist = caller.proof_point_worklist();
+        for point in worklist
+            .calls
+            .into_iter()
+            .chain(worklist.deferred_calls)
+            .chain(
+                worklist
+                    .default_roots
+                    .into_iter()
+                    .flat_map(|root| root.calls),
+            )
+        {
+            call_points_by_node
+                .entry(point.call_node.clone())
+                .or_default()
+                .push(point);
+        }
+        for use_receipt in worklist.default_uses {
+            let target_key = (
+                use_receipt.callee_owner.clone(),
+                use_receipt.parameter.clone(),
+            );
+            // Trait defaults and other non-callable default surfaces do not
+            // participate in this closure. They remain explicit declaration
+            // boundaries until they have their own activation receipt.
+            if !all_default_expressions.contains_key(&target_key) {
+                continue;
+            }
+            let enclosing_defaults = use_receipt
+                .scope
+                .iter()
+                .filter_map(|frame| match frame {
+                    TypedProofScopeFrame::Default { parameter, .. } => {
+                        Some((use_receipt.caller_owner.clone(), parameter.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            candidates.push(CheckerCallableDefaultUseCandidate {
+                receipt: use_receipt,
+                enclosing_defaults,
+            });
+        }
+    }
+
+    // Work backward from actual FFI-bearing callable defaults. An enclosing
+    // default matters only if it can lead to one of those roots; unrelated
+    // method/default receipts stay outside this classifier.
+    loop {
+        let mut changed = false;
+        for candidate in &candidates {
+            let target = (
+                candidate.receipt.callee_owner.clone(),
+                candidate.receipt.parameter.clone(),
+            );
+            if !relevant_defaults.contains(&target) {
+                continue;
+            }
+            for enclosing in &candidate.enclosing_defaults {
+                if all_default_expressions.contains_key(enclosing)
+                    && eligible_defaults.contains(enclosing)
+                    && relevant_defaults.insert(enclosing.clone())
+                {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut checked_uses = Vec::<CheckedCallableDefaultUse>::new();
+    for candidate in candidates {
+        let use_receipt = candidate.receipt;
+        let target_key = (
+            use_receipt.callee_owner.clone(),
+            use_receipt.parameter.clone(),
+        );
+        if !eligible_defaults.contains(&target_key) || !relevant_defaults.contains(&target_key) {
+            continue;
+        }
+        let Some(target) = program.callable(&use_receipt.callee_owner) else {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' has no checked target callable",
+                target_key.0 .0, target_key.1 .0 .0
+            ));
+            continue;
+        };
+        if !use_receipt.validate_in_checked_program(program) {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' has a malformed Checker default-use receipt at '{}'",
+                target_key.0 .0, target_key.1 .0 .0, use_receipt.call_node.0
+            ));
+            continue;
+        }
+        let Some(caller) = program.callable(&use_receipt.caller_owner) else {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' has no checked caller owner at '{}'",
+                target_key.0 .0, target_key.1 .0 .0, use_receipt.call_node.0
+            ));
+            continue;
+        };
+        let enclosing_defaults = match checked_default_scope_chain(
+            &use_receipt,
+            caller,
+            &all_default_expressions,
+        ) {
+            Ok(chain) => chain,
+            Err(message) => {
+                closure.errors.push(format!(
+                    "callable default activation '{}:{}' at '{}' has an invalid enclosing default chain: {message}",
+                    target_key.0.0, target_key.1.0.0, use_receipt.call_node.0
+                ));
+                continue;
+            }
+        };
+        let call_points = call_points_by_node
+            .get(&use_receipt.call_node)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let [point] = call_points else {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' at '{}' has no unique typed caller Call",
+                target_key.0 .0, target_key.1 .0 .0, use_receipt.call_node.0
+            ));
+            continue;
+        };
+        let Some(site) = program.call_sites().get(&use_receipt.call_node) else {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' at '{}' is absent from the checked call-site directory",
+                target_key.0.0, target_key.1.0.0, use_receipt.call_node.0
+            ));
+            continue;
+        };
+        let matching_site_count = program
+            .call_sites()
+            .values()
+            .filter(|candidate| candidate.node_id == use_receipt.call_node)
+            .count();
+        if !checked_default_activation_site_matches(
+            &use_receipt,
+            caller,
+            target,
+            point,
+            site,
+            matching_site_count,
+        ) {
+            closure.errors.push(format!(
+                "callable default activation '{}:{}' at '{}' disagrees with the exact checked caller Call and syntax call-site identity",
+                target_key.0.0, target_key.1.0.0, use_receipt.call_node.0
+            ));
+            continue;
+        }
+        checked_uses.push(CheckedCallableDefaultUse {
+            target: target_key,
+            enclosing_defaults,
+            disposition: use_receipt.disposition.clone(),
+            activation: MirProofSourceFfiDefaultActivation {
+                caller_owner: use_receipt.caller_owner.clone(),
+                call_node: use_receipt.call_node.clone(),
+                callee_owner: use_receipt.callee_owner.clone(),
+                parameter: use_receipt.parameter.clone(),
+                argument_node: use_receipt.argument_node.clone(),
+                parameter_index: use_receipt.parameter_index,
+                order: use_receipt.order,
+                scope: source_proof_scope(&use_receipt.scope),
+                guards: use_receipt
+                    .guards
+                    .iter()
+                    .map(|guard| (guard.condition.node_id.clone(), guard.when))
+                    .collect(),
+                disposition: use_receipt.disposition.clone(),
+                origin: site.origin.clone(),
+            },
+        });
+    }
+
+    // A direct body use is a root only when the Checker placed it in an
+    // executable body path. Calls inside a declaration default remain latent
+    // until every exact enclosing default expression is itself activated.
+    loop {
+        let mut changed = false;
+        for usage in &checked_uses {
+            match classify_callable_default_use(usage, &closure.activated) {
+                Ok(true) if closure.activated.insert(usage.target.clone()) => changed = true,
+                Ok(_) => {}
+                Err(reason) => closure.errors.push(format!(
+                    "callable default activation '{}:{}' at '{}' crosses a possibly executable Deferred boundary: '{reason}'",
+                    usage.target.0 .0, usage.target.1 .0 .0, usage.activation.call_node.0
+                )),
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for usage in checked_uses {
+        match classify_callable_default_use(&usage, &closure.activated) {
+            Ok(true) => closure
+                .activations_by_default
+                .entry(usage.target)
+                .or_default()
+                .push(usage.activation),
+            Ok(false) => {}
+            Err(reason) => closure.errors.push(format!(
+                "callable default activation '{}:{}' at '{}' crosses a possibly executable Deferred boundary: '{reason}'",
+                usage.target.0 .0, usage.target.1 .0 .0, usage.activation.call_node.0
+            )),
+        }
+    }
+    for activations in closure.activations_by_default.values_mut() {
+        activations.sort_by(|left, right| {
+            left.caller_owner
+                .cmp(&right.caller_owner)
+                .then_with(|| left.call_node.cmp(&right.call_node))
+                .then_with(|| left.argument_node.cmp(&right.argument_node))
+                .then_with(|| left.parameter_index.cmp(&right.parameter_index))
+                .then_with(|| left.order.cmp(&right.order))
+        });
+        let original_len = activations.len();
+        activations.dedup();
+        if activations.len() != original_len {
+            closure.errors.push(
+                "duplicate Checker default-use activation receipt in FFI source census".into(),
+            );
+        }
+    }
+    closure.errors.sort();
+    closure.errors.dedup();
+    closure
+}
+
+fn checked_default_scope_chain(
+    use_receipt: &TypedDefaultProofUse,
+    caller: &crate::core::ir::ResolvedCallable,
+    default_expressions: &BTreeMap<CallableDefaultKey, NodeId>,
+) -> Result<Vec<CallableDefaultKey>, String> {
+    let mut chain = Vec::new();
+    let mut seen = BTreeSet::new();
+    for frame in &use_receipt.scope {
+        let TypedProofScopeFrame::Default {
+            parameter,
+            expression,
+        } = frame
+        else {
+            continue;
+        };
+        let key = (caller.owner.clone(), parameter.clone());
+        if default_expressions.get(&key) != Some(expression) {
+            return Err(format!(
+                "default frame '{}:{}' does not bind its exact declaration expression",
+                key.0 .0, key.1 .0 .0
+            ));
+        }
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "default frame '{}:{}' appears more than once in the activation scope",
+                key.0 .0, key.1 .0 .0
+            ));
+        }
+        chain.push(key);
+    }
+    Ok(chain)
+}
+
+fn checked_default_activation_site_matches(
+    use_receipt: &TypedDefaultProofUse,
+    caller: &crate::core::ir::ResolvedCallable,
+    target: &crate::core::ir::ResolvedCallable,
+    point: &TypedCallProofPoint,
+    site: &ResolvedCallSite,
+    matching_site_count: usize,
+) -> bool {
+    let ResolvedExprKind::Call(typed_call) = &point.expression.kind else {
+        return false;
+    };
+    let explicit_argc = typed_call
+        .arguments
+        .iter()
+        .filter(|argument| {
+            !matches!(
+                &argument.value.kind,
+                ResolvedExprKind::DefaultArgument { .. }
+            )
+        })
+        .count();
+    let slots_match_signature = typed_call.arguments.len() == target.signature.parameters.len()
+        && typed_call
+            .arguments
+            .iter()
+            .zip(&target.signature.parameters)
+            .all(|(argument, parameter)| {
+                argument.parameter == parameter.id
+                    && match &argument.value.kind {
+                        ResolvedExprKind::DefaultArgument {
+                            callable,
+                            parameter: marker,
+                        } => callable == &target.owner && marker == &parameter.id,
+                        _ => true,
+                    }
+            });
+    let expected_arity_matches = site
+        .expected_argc
+        .is_none_or(|expected| expected == target.signature.parameters.len());
+    matching_site_count == 1
+        && use_receipt.call_node == point.call_node
+        && point.body_owner == caller.owner
+        && point.validate_against(caller)
+        && typed_call.callee == ResolvedCallee::Function(target.owner.clone())
+        && site.node_id == use_receipt.call_node
+        && site.owner == caller.owner.0
+        && site.kind == crate::core::ResolvedCallKind::Function
+        && site.target_function.as_ref() == Some(&target.owner)
+        && site.resolved_callee.as_ref() == Some(&typed_call.callee)
+        && site.origin == point.expression.origin
+        && site.argc == explicit_argc
+        && expected_arity_matches
+        && slots_match_signature
+}
+
+fn checked_ffi_source_roots(
+    program: &CheckedProgram,
+    excluded_sources: Option<&std::collections::HashSet<crate::span::SourceId>>,
+) -> (Vec<MirProofSourceFfiRoot>, Vec<String>) {
+    use crate::core::ir::lower::{
+        ResolvedDeclarationExpressionKind as Kind, ResolvedDeclarationRootIdentity as Identity,
+    };
+
+    let handles = program
+        .checked_ffi_source_roots()
+        .iter()
+        .filter(|root| {
+            !excluded_sources.is_some_and(|excluded| {
+                root.origin()
+                    .is_some_and(|origin| excluded.contains(&origin.user_span().source_id))
+            })
+        })
+        .collect::<Vec<_>>();
+    let activation_closure =
+        compute_checked_callable_default_activation_closure(program, excluded_sources);
+    let mut errors = activation_closure.errors;
+    let activations_by_default = activation_closure.activations_by_default;
+
+    let mut roots = Vec::with_capacity(handles.len());
+    for root in handles {
+        let execution = match root.kind() {
+            Kind::ConstantInitializer => MirProofSourceFfiRootExecution::ConstantInitializer,
+            Kind::ActorFieldInitializer => MirProofSourceFfiRootExecution::ActorConstructionPending,
+            Kind::TraitParameterDefault => {
+                MirProofSourceFfiRootExecution::TraitDefaultDeclarationOnly
+            }
+            Kind::CallableParameterDefault => {
+                let has_activation = match root.identity() {
+                    Some(Identity::CallableParameterDefault {
+                        callable,
+                        parameter,
+                    }) => activations_by_default
+                        .get(&(callable.clone(), parameter.clone()))
+                        .is_some_and(|activations| !activations.is_empty()),
+                    _ => false,
+                };
+                if has_activation {
+                    MirProofSourceFfiRootExecution::CallableDefaultActivatedUnsupported
+                } else {
+                    MirProofSourceFfiRootExecution::CallableDefaultDeclarationOnly
+                }
+            }
+            Kind::ExternRequires | Kind::ExternEnsures => {
+                errors.push(format!(
+                    "unexpected FFI source-call root kind {:?} at '{}'",
+                    root.kind(),
+                    root.root_node().0
+                ));
+                continue;
+            }
+        };
+        let identity = root.identity().cloned();
+        if identity.is_none() {
+            errors.push(format!(
+                "Checker FFI source root '{}' has no declaration owner identity",
+                root.root_node().0
+            ));
+        }
+        if !root.has_valid_witness() || !root.has_valid_call_census() {
+            errors.push(format!(
+                "Checker FFI source root '{}' has an invalid root or direct-call witness",
+                root.root_node().0
+            ));
+        }
+        if let Err(failures) = program.checked_ffi_source_root_body(root) {
+            errors.push(format!(
+                "Checker FFI source root '{}' failed body-handle resolution: {}",
+                root.root_node().0,
+                failures
+                    .iter()
+                    .map(|failure| failure.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        let mut calls = Vec::with_capacity(root.calls().len());
+        for call in root.calls() {
+            match program.checked_ffi_source_call_context(root, call) {
+                Ok(context) => {
+                    calls.push(MirProofSourceFfiRootCall {
+                        root_node: root.root_node().clone(),
+                        call_node: call.call_node().clone(),
+                        declaration: call.external_declaration().clone(),
+                        symbol: context.declaration.symbol.clone(),
+                        call_origin: context.call.origin.clone(),
+                        call_fingerprint: blake3::hash(
+                            format!("{:#?}", context.call).as_bytes(),
+                        )
+                        .to_hex()
+                        .to_string(),
+                    });
+                }
+                Err(failures) => errors.push(format!(
+                    "Checker FFI source call '{}' in root '{}' failed exact call-handle resolution: {}",
+                    call.call_node().0,
+                    root.root_node().0,
+                    failures
+                        .iter()
+                        .map(|failure| failure.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )),
+            }
+        }
+        calls.sort_by(|left, right| left.call_node.cmp(&right.call_node));
+        let activations = match root.identity() {
+            Some(Identity::CallableParameterDefault {
+                callable,
+                parameter,
+            }) => activations_by_default
+                .get(&(callable.clone(), parameter.clone()))
+                .cloned()
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        roots.push(MirProofSourceFfiRoot {
+            root_node: root.root_node().clone(),
+            owner: root.owner().clone(),
+            kind: root.kind(),
+            identity,
+            origin: root.origin().cloned(),
+            body_fingerprint: root.body_fingerprint().to_hex().to_string(),
+            call_census_valid: root.has_valid_call_census(),
+            execution,
+            activations,
+            calls,
+        });
+    }
+    roots.sort_by(|left, right| {
+        left.root_node
+            .cmp(&right.root_node)
+            .then_with(|| left.owner.cmp(&right.owner))
+    });
+    errors.sort();
+    errors.dedup();
+    (roots, errors)
 }
 
 fn source_callable_inventory(
@@ -2217,6 +3457,7 @@ fn source_callable_inventory(
         body_calls.extend(calls);
         nested_lambda_calls.extend(nested);
     }
+    complete_call_metadata_eager_nodes(call_metadata.values_mut(), &callable.body.place_inputs);
     let mut call_directory_matches = body_calls
         .iter()
         .all(|(node, callee)| callable.body.resolved_calls.get(node) == Some(callee));
@@ -2234,6 +3475,8 @@ fn source_callable_inventory(
             }
             let call = MirProofSourceCallIdentity {
                 call_node: node.clone(),
+                caller_qualified_name: checked_callable_qualified_name(program, &callable.owner),
+                origin: metadata.map(|metadata| metadata.source_origin.clone()),
                 callee: callee.clone(),
                 callee_identity: format!("{callee:?}"),
                 selected_signature: selected_signature_identity(callee, metadata, program),
@@ -2360,6 +3603,616 @@ fn source_callable_inventory(
     }
 }
 
+#[cfg(test)]
+mod ffi_source_root_census_tests {
+    use super::*;
+
+    fn canonical_with_two_constant_ffi_roots(
+    ) -> (CheckedProgram, crate::core::mir::reference::MirProgram) {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            const FIRST: i32 = positive(1);
+            const SECOND: i32 = positive(2);
+            func main() -> i32 { 0 }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex FFI declaration-root source");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse FFI declaration-root source");
+        let checked = crate::core::check_program(&file).expect("check FFI declaration roots");
+        let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
+            .expect("materialize Checker-rooted MIR census");
+        (checked, program)
+    }
+
+    fn checked_from_source(source: &str) -> CheckedProgram {
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex callable-default activation source");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse callable-default activation source");
+        crate::core::check_program(&file).expect("check callable-default activation source")
+    }
+
+    fn reseal_outer_witness(census: &mut MirProofSourceCensus) {
+        census.witness = census.compute_witness();
+    }
+
+    #[test]
+    fn constant_ffi_root_census_binds_checker_root_call_and_span() {
+        let (checked, program) = canonical_with_two_constant_ffi_roots();
+        program
+            .validate_ffi_source_census()
+            .expect("canonical MIR consumes and validates declaration-root calls");
+        let roots = program
+            .proof_source_census()
+            .ffi_source_roots()
+            .iter()
+            .filter(|root| root.kind == crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer)
+            .collect::<Vec<_>>();
+        assert_eq!(roots.len(), 2);
+        for root in roots {
+            let checker_root = checked
+                .checked_ffi_source_roots()
+                .iter()
+                .find(|checker_root| checker_root.root_node() == &root.root_node)
+                .expect("MIR root retains the exact Checker-issued root identity");
+            assert!(root.call_census_valid);
+            assert_eq!(
+                root.execution,
+                MirProofSourceFfiRootExecution::ConstantInitializer
+            );
+            assert_eq!(
+                root.identity,
+                Some(
+                    crate::core::ir::lower::ResolvedDeclarationRootIdentity::Constant {
+                        declaration: root.owner.clone()
+                    }
+                )
+            );
+            let [call] = root.calls.as_slice() else {
+                panic!("each constant root has exactly one typed FFI call");
+            };
+            let [checker_call] = checker_root.calls() else {
+                panic!("each Checker constant root has exactly one FFI call handle");
+            };
+            let checker_context = checked
+                .checked_ffi_source_call_context(checker_root, checker_call)
+                .expect("Checker root/call handles resolve to the typed source Call");
+            assert_eq!(call.root_node, root.root_node);
+            assert_eq!(call.root_node, *checker_root.root_node());
+            assert_eq!(call.call_node, *checker_call.call_node());
+            assert_eq!(call.declaration, *checker_call.external_declaration());
+            assert_eq!(call.symbol, "positive");
+            assert_eq!(call.call_origin, checker_context.call.origin);
+            let checker_declaration = checked
+                .ffi_declarations()
+                .get(checker_call.external_declaration())
+                .expect("Checker-issued extern declaration identity exists");
+            assert_eq!(checker_declaration.declaration, call.declaration);
+            let declaration = program
+                .proof_source_census()
+                .declaration(&call.declaration)
+                .expect("Checker-issued call declaration is in the census directory");
+            assert_eq!(declaration.declaration, call.declaration);
+            assert_eq!(declaration.symbol, call.symbol);
+            assert_eq!(declaration.abi, "C");
+            assert!(declaration.requires_declared);
+            assert_ne!(call.call_origin.user_span(), crate::span::Span::UNKNOWN);
+            assert_eq!(call.call_fingerprint.len(), 64);
+        }
+    }
+
+    #[test]
+    fn ffi_root_census_fails_closed_for_tamper_omission_duplicate_and_cross_root_calls() {
+        let (_, program) = canonical_with_two_constant_ffi_roots();
+        let original = program.proof_source_census().clone();
+
+        let mut tampered = original.clone();
+        tampered.ffi_source_roots[0].calls[0].symbol = "forged".into();
+        reseal_outer_witness(&mut tampered);
+        let error = tampered
+            .validate_integrity(program.functions())
+            .expect_err("changed source-call symbol must fail the Checker source seal");
+        assert!(error.message.contains("checked source fingerprint"));
+
+        let mut omitted = original.clone();
+        omitted.ffi_source_roots.remove(0);
+        reseal_outer_witness(&mut omitted);
+        let error = omitted
+            .validate_integrity(program.functions())
+            .expect_err("omitted declaration root must fail the Checker source seal");
+        assert!(error.message.contains("checked source fingerprint"));
+
+        let mut repeated = original.clone();
+        let repeated_call = repeated.ffi_source_roots[0].calls[0].clone();
+        repeated.ffi_source_roots[0].calls.push(repeated_call);
+        reseal_outer_witness(&mut repeated);
+        let error = repeated
+            .validate_integrity(program.functions())
+            .expect_err("repeated source call must fail closed");
+        assert!(
+            error.message.contains("checked source fingerprint")
+                || error.message.contains("duplicated or cross-bound"),
+            "{error:?}"
+        );
+
+        let mut cross_root = original;
+        let foreign_call = cross_root.ffi_source_roots[0].calls[0].clone();
+        cross_root.ffi_source_roots[1].calls.push(foreign_call);
+        reseal_outer_witness(&mut cross_root);
+        let error = cross_root
+            .validate_integrity(program.functions())
+            .expect_err("call receipt moved across declaration roots must fail closed");
+        assert!(
+            error.message.contains("checked source fingerprint")
+                || error.message.contains("cross-root call receipt"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn ffi_callable_default_activation_closure_tracks_direct_nested_and_middle_omission_uses() {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            func direct_default(value: i32 = positive(10)) -> i32 { value }
+            func supplied_default(value: i32 = positive(20)) -> i32 { value }
+            func dormant_inner(value: i32 = positive(30)) -> i32 { value }
+            func dormant_outer(value: i32 = dormant_inner()) -> i32 { value }
+            func active_inner(value: i32 = positive(40)) -> i32 { value }
+            func active_outer(value: i32 = active_inner()) -> i32 { value }
+            func middle_default(a: i32 = 1, middle: i32 = positive(a), c: i32 = 3) -> i32 { middle }
+            func main() -> i32 {
+                let direct = direct_default()
+                let supplied = supplied_default(21)
+                let active = active_outer()
+                let middle = middle_default(a = 2, c = 4)
+                direct + supplied + active + middle
+            }
+        "#;
+        let checked = checked_from_source(source);
+        let census = MirProofSourceCensus::checked_ffi_declaration_roots(&checked);
+        census
+            .validate_ffi_source_roots()
+            .expect("shared activation closure validates exact declaration roots");
+
+        let root_for_owner = |owner: &str| {
+            census
+                .ffi_source_roots()
+                .iter()
+                .find(|root| {
+                    root.owner().0 == format!("function:{owner}")
+                        && root.kind()
+                            == crate::core::ir::lower::ResolvedDeclarationExpressionKind::CallableParameterDefault
+                })
+                .unwrap_or_else(|| panic!("callable default FFI root for {owner}"))
+        };
+        let direct = root_for_owner("direct_default");
+        assert_eq!(
+            direct.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultActivatedUnsupported
+        );
+        assert_eq!(direct.activations().len(), 1);
+
+        let supplied = root_for_owner("supplied_default");
+        assert_eq!(
+            supplied.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultDeclarationOnly
+        );
+        assert!(supplied.activations().is_empty());
+
+        let dormant = root_for_owner("dormant_inner");
+        assert_eq!(
+            dormant.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultDeclarationOnly
+        );
+        assert!(dormant.activations().is_empty());
+
+        let active = root_for_owner("active_inner");
+        assert_eq!(
+            active.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultActivatedUnsupported
+        );
+        let active_ffi_instruction = crate::core::mir::MirInstructionId::new(format!(
+            "inst:call:{}",
+            active.calls()[0].call_node().0
+        ))
+        .expect("canonical activated-default FFI instruction identity");
+        let executable_identity_errors = crate::core::mir::validate_ffi_source_root_census(
+            &census,
+            &BTreeSet::from([active_ffi_instruction]),
+        );
+        assert!(executable_identity_errors.iter().any(|error| {
+            error.contains("duplicated as an executable MIR Call")
+                && error.contains(&active.calls()[0].call_node().0)
+        }));
+        let [nested_activation] = active.activations() else {
+            panic!("activated nested default has exactly one authenticated use");
+        };
+        assert_eq!(nested_activation.caller_owner().0, "function:active_outer");
+        assert!(nested_activation
+            .scope()
+            .iter()
+            .any(|frame| matches!(frame, MirProofSourceScopeFrame::Default { .. })));
+
+        let middle = root_for_owner("middle_default");
+        assert_eq!(
+            middle.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultActivatedUnsupported
+        );
+        let [middle_activation] = middle.activations() else {
+            panic!("omitted middle parameter has exactly one activation receipt");
+        };
+        assert_eq!(middle_activation.parameter_index(), 1);
+        let site = checked
+            .call_sites()
+            .get(middle_activation.call_node())
+            .expect("activation is bound to its exact syntax call site");
+        assert_eq!(
+            site.argc, 2,
+            "only the supplied named slots count as syntax argc"
+        );
+        assert_eq!(
+            site.expected_argc,
+            Some(3),
+            "expected argc is full signature arity"
+        );
+        assert_ne!(
+            site.argc,
+            site.expected_argc.expect("known full signature arity"),
+            "an omitted middle default makes syntax argc differ from full arity"
+        );
+
+        let caller = checked
+            .callable(&NodeId("function:main".into()))
+            .expect("main callable");
+        let target = checked
+            .callable(&NodeId("function:middle_default".into()))
+            .expect("middle-default target callable");
+        let worklist = caller.proof_point_worklist();
+        let use_receipts = worklist
+            .default_uses
+            .iter()
+            .filter(|usage| {
+                usage.callee_owner == target.owner
+                    && usage.parameter_index == 1
+                    && usage.call_node == *middle_activation.call_node()
+            })
+            .collect::<Vec<_>>();
+        let [use_receipt] = use_receipts.as_slice() else {
+            panic!("one Checker default-use receipt binds the omitted middle slot");
+        };
+        let matching_points = worklist
+            .calls
+            .iter()
+            .chain(&worklist.deferred_calls)
+            .chain(
+                worklist
+                    .default_roots
+                    .iter()
+                    .flat_map(|root| root.calls.iter()),
+            )
+            .filter(|point| point.call_node == *middle_activation.call_node())
+            .collect::<Vec<_>>();
+        let [point] = matching_points.as_slice() else {
+            panic!("one typed caller Call owns the activation");
+        };
+        assert!(checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            site,
+            1,
+        ));
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            site,
+            2,
+        ));
+        let mut tampered_argc = site.clone();
+        tampered_argc.argc += 1;
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_argc,
+            1,
+        ));
+        let mut tampered_expected = site.clone();
+        tampered_expected.expected_argc = Some(2);
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_expected,
+            1,
+        ));
+        let mut tampered_target = site.clone();
+        tampered_target.target_function = Some(NodeId("function:direct_default".into()));
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_target,
+            1,
+        ));
+        let mut tampered_owner = site.clone();
+        tampered_owner.owner = "function:wrong_owner".into();
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_owner,
+            1,
+        ));
+        let mut tampered_node = site.clone();
+        tampered_node.node_id = NodeId("call:wrong_node".into());
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_node,
+            1,
+        ));
+        let mut tampered_kind = site.clone();
+        tampered_kind.kind = crate::core::ResolvedCallKind::Method;
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_kind,
+            1,
+        ));
+        let mut tampered_origin = site.clone();
+        tampered_origin.origin = crate::core::Origin::User(crate::span::Span::UNKNOWN);
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_origin,
+            1,
+        ));
+        let mut tampered_resolved_callee = site.clone();
+        tampered_resolved_callee.resolved_callee = Some(ResolvedCallee::Function(NodeId(
+            "function:direct_default".into(),
+        )));
+        assert!(!checked_default_activation_site_matches(
+            use_receipt,
+            caller,
+            target,
+            point,
+            &tampered_resolved_callee,
+            1,
+        ));
+    }
+
+    #[test]
+    fn ffi_default_activation_rejects_direct_unsupported_loop_use() {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            func loop_default(value: i32 = positive(10)) -> i32 { value }
+            func main() -> i32 {
+                let mut index = 0
+                while index < 1 {
+                    let value = loop_default()
+                    index += 1
+                }
+                0
+            }
+        "#;
+        let checked = checked_from_source(source);
+        let error = checked_ffi_callable_default_activation_closure(&checked)
+            .expect_err("an unsupported loop invocation must not become declaration-only");
+        assert!(
+            error.contains("possibly executable Deferred boundary")
+                && error.contains(
+                    "loop call point lacks an exact immutable at-most-once FFI path receipt"
+                ),
+            "loop activation fails closed with its Checker boundary reason: {error}"
+        );
+    }
+
+    #[test]
+    fn ffi_default_activation_rejects_active_outer_with_nested_block_use() {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            func block_inner(value: i32 = positive(20)) -> i32 { value }
+            func block_outer(value: i32 = {
+                let nested = block_inner()
+                nested
+            }) -> i32 { value }
+            func main() -> i32 { block_outer() }
+        "#;
+        let checked = checked_from_source(source);
+        let error = checked_ffi_callable_default_activation_closure(&checked)
+            .expect_err("the active outer default exposes the nested executable block call");
+        assert!(
+            error.contains("possibly executable Deferred boundary")
+                && error.contains("nested expression block has no transfer timeline"),
+            "active nested block fails closed with its Checker boundary reason: {error}"
+        );
+    }
+
+    #[test]
+    fn ffi_default_activation_keeps_unsupported_use_dormant_with_outer_default() {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            func dormant_inner(value: i32 = positive(30)) -> i32 { value }
+            func dormant_outer(value: i32 = {
+                let nested = dormant_inner()
+                nested
+            }) -> i32 { value }
+            func main() -> i32 { 0 }
+        "#;
+        let checked = checked_from_source(source);
+        assert!(checked_ffi_callable_default_activation_closure(&checked)
+            .expect("an unsupported use under a dormant default stays dormant")
+            .is_empty());
+        let census = MirProofSourceCensus::checked_ffi_declaration_roots(&checked);
+        census
+            .validate_ffi_source_roots()
+            .expect("dormant nested default remains a valid declaration-only root");
+        let inner = census
+            .ffi_source_roots()
+            .iter()
+            .find(|root| {
+                root.owner().0 == "function:dormant_inner"
+                    && root.kind()
+                        == crate::core::ir::lower::ResolvedDeclarationExpressionKind::CallableParameterDefault
+            })
+            .expect("dormant inner FFI default root");
+        assert_eq!(
+            inner.execution(),
+            MirProofSourceFfiRootExecution::CallableDefaultDeclarationOnly
+        );
+        assert!(inner.activations().is_empty());
+    }
+
+    #[test]
+    fn ffi_default_activation_keeps_exact_latent_and_proof_only_uses_inactive() {
+        let source = r#"
+            extern "C" {
+                func positive(value: i32) -> i32 requires: value > 0;
+            }
+            func latent_inner(value: i32 = positive(40)) -> i32 { value }
+            func latent_outer(callback: fn() -> i32 = fn() -> i32 { latent_inner() }) -> i32 { 0 }
+            func proof_default(value: i32 = positive(50)) -> i32 { value }
+            func main() -> i32 {
+                math: { proof_default() > 0; }
+                latent_outer()
+            }
+        "#;
+        let checked = checked_from_source(source);
+        let activated = checked_ffi_callable_default_activation_closure(&checked)
+            .expect("latent lambda bodies and proof-only calls are not runtime roots");
+        assert!(activated
+            .iter()
+            .any(|(owner, _)| owner.0 == "function:latent_outer"));
+        assert!(!activated.iter().any(|(owner, _)| {
+            owner.0 == "function:latent_inner" || owner.0 == "function:proof_default"
+        }));
+
+        let census = MirProofSourceCensus::checked_ffi_declaration_roots(&checked);
+        census
+            .validate_ffi_source_roots()
+            .expect("whitelisted non-runtime uses remain declaration-only");
+        for owner in ["latent_inner", "proof_default"] {
+            let root = census
+                .ffi_source_roots()
+                .iter()
+                .find(|root| {
+                    root.owner().0 == format!("function:{owner}")
+                        && root.kind()
+                            == crate::core::ir::lower::ResolvedDeclarationExpressionKind::CallableParameterDefault
+                })
+                .unwrap_or_else(|| panic!("FFI default root for {owner}"));
+            assert_eq!(
+                root.execution(),
+                MirProofSourceFfiRootExecution::CallableDefaultDeclarationOnly
+            );
+            assert!(root.activations().is_empty());
+        }
+    }
+}
+
+fn lower_default_proof_roots(
+    callable: &crate::core::ResolvedCallable,
+    program: &CheckedProgram,
+) -> Vec<super::MirProofDefaultRoot> {
+    let typed = callable.proof_point_worklist();
+    let typed_worklist_valid = typed.validate_against(callable);
+    let mut uses_by_root =
+        BTreeMap::<(NodeId, ResolvedParameterId), (Vec<super::MirProofDefaultUseId>, bool)>::new();
+
+    // Default uses are owned by the caller, while their proof program is
+    // owned by the target declaration. Re-derive the complete use set across
+    // checked callables and keep invalid/deferred entries in the census so
+    // they cannot disappear from source accounting.
+    for caller in program.callables().values() {
+        let worklist = caller.proof_point_worklist();
+        let worklist_valid = worklist.validate_against(caller);
+        for usage in &worklist.default_uses {
+            let key = (usage.callee_owner.clone(), usage.parameter.clone());
+            let (uses, valid) = uses_by_root
+                .entry(key)
+                .or_insert_with(|| (Vec::new(), true));
+            let executable_disposition = matches!(
+                &usage.disposition,
+                TypedCallExecutionDisposition::Unconditional
+                    | TypedCallExecutionDisposition::Guarded
+            );
+            *valid &= worklist_valid
+                && executable_disposition
+                && usage.validate_in_checked_program(program);
+            uses.push(super::MirProofDefaultUseId {
+                caller_owner: usage.caller_owner.clone(),
+                call_node: usage.call_node.clone(),
+                callee_owner: usage.callee_owner.clone(),
+                parameter: usage.parameter.clone(),
+                argument_node: usage.argument_node.clone(),
+                parameter_index: usage.parameter_index,
+                order: usage.order,
+                scope: usage.scope.clone(),
+                guards: usage
+                    .guards
+                    .iter()
+                    .map(|guard| (guard.condition.node_id.clone(), guard.when))
+                    .collect(),
+                disposition: format!("{:?}", usage.disposition),
+            });
+        }
+    }
+
+    let mut roots = typed
+        .default_roots
+        .iter()
+        .filter(|root| {
+            !root.points.is_empty() || !root.calls.is_empty() || !root.boundaries.is_empty()
+        })
+        .map(|root| {
+            let key = (root.owner.clone(), root.parameter.clone());
+            let (mut uses, uses_valid) = uses_by_root.remove(&key).unwrap_or_default();
+            let use_count = uses.len();
+            uses.sort();
+            uses.dedup();
+            let uses_are_unique = uses.len() == use_count;
+            let target_valid = root.validate_in_checked_program(program);
+            super::contracts::lower_default_proof_root(
+                root,
+                callable,
+                uses,
+                typed_worklist_valid && target_valid && uses_valid && uses_are_unique,
+            )
+        })
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| left.id.cmp(&right.id));
+    roots
+}
+
 impl MirProofExpectedWorklist {
     fn empty() -> Self {
         Self {
@@ -2416,6 +4269,7 @@ fn source_call_context(point: &TypedCallProofPoint) -> MirProofSourceCallContext
             .iter()
             .map(|guard| (guard.condition.node_id.clone(), guard.when))
             .collect(),
+        match_path: point.match_path.clone(),
         disposition: point.disposition.clone(),
         effect_authority: point.effect.authority,
     }
@@ -2531,6 +4385,7 @@ fn source_call_event(point: &TypedCallProofPoint) -> MirProofSourceCallEvent {
             .iter()
             .map(|guard| (guard.condition.node_id.clone(), guard.when))
             .collect(),
+        match_path: point.match_path.clone(),
         disposition: point.disposition.clone(),
         expression: point.expression.node_id.clone(),
         expression_type,
@@ -2772,6 +4627,7 @@ fn source_proof_block(block: &TypedProofBlock) -> MirProofSourceBlock {
                 order,
                 scope,
                 condition,
+                ..
             }) => {
                 MirProofSourceOperation::Math(source_proof_assertion(id, *order, scope, condition))
             }
@@ -2920,6 +4776,7 @@ impl MirProofOwnerCensus {
                     .iter()
                     .map(|guard| (guard.condition.origin.clone(), guard.when))
                     .collect(),
+                match_path: call.match_path.clone(),
                 disposition: call.disposition.clone(),
                 expression: call.call_node.clone(),
                 expression_type: call.result_type.clone(),
@@ -3080,6 +4937,23 @@ fn has_direct_ensures_contract(callable: &crate::core::ir::ResolvedCallable) -> 
     })
 }
 
+fn checked_callable_qualified_name(program: &CheckedProgram, owner: &NodeId) -> String {
+    if let Some(function) = program.functions().get(owner) {
+        return function.qualified_name.clone();
+    }
+    if let Some(transition) = program
+        .transitions()
+        .values()
+        .find(|transition| &transition.node_id == owner)
+    {
+        return format!(
+            "{}::{} from {}",
+            transition.id.flow.0, transition.id.event, transition.id.source.name
+        );
+    }
+    owner.0.clone()
+}
+
 fn expression_has_required_call(expression: &ResolvedExpr, program: &CheckedProgram) -> bool {
     let mut calls = BTreeMap::new();
     let mut nested_lambda_calls = BTreeMap::new();
@@ -3102,6 +4976,44 @@ fn ffi_root(root: &ResolvedFfiContractRoot) -> Option<NodeId> {
         ResolvedFfiContractRoot::Ready { node_id } => Some(node_id.clone()),
         ResolvedFfiContractRoot::Deferred { node_id, .. } => node_id.clone(),
     }
+}
+
+fn ffi_root_types(
+    program: &CheckedProgram,
+    root: &ResolvedFfiContractRoot,
+    expected_kind: crate::core::ir::lower::ResolvedDeclarationExpressionKind,
+) -> BTreeMap<Vec<u8>, ResolvedTypeId> {
+    let ResolvedFfiContractRoot::Ready { node_id } = root else {
+        return BTreeMap::new();
+    };
+    let Some(root) = program.declaration_expression_bodies().get(node_id) else {
+        return BTreeMap::new();
+    };
+    if &root.node_id != node_id || root.kind != expected_kind {
+        return BTreeMap::new();
+    }
+    let Ok(body) = &root.body else {
+        return BTreeMap::new();
+    };
+    let Some(expression) = body.root.result.as_deref() else {
+        return BTreeMap::new();
+    };
+    super::contracts::collect_contract_expression_types(expression, body)
+        .unwrap_or_else(|_| BTreeMap::from([(Vec::new(), expression.ty.clone())]))
+}
+
+fn append_type_path_map(output: &mut String, types: &BTreeMap<Vec<u8>, ResolvedTypeId>) {
+    use std::fmt::Write as _;
+    let _ = write!(output, "type-paths:{}[", types.len());
+    for (path, ty) in types {
+        let _ = write!(output, "{}:", path.len());
+        for byte in path {
+            let _ = write!(output, "{byte:02x}");
+        }
+        let ty = ty.as_str();
+        let _ = write!(output, "{}:{ty}", ty.len());
+    }
+    output.push(']');
 }
 
 fn callee_requires_declared(callee: &ResolvedCallee, program: &CheckedProgram) -> bool {
@@ -3355,6 +5267,7 @@ fn collect_expr_calls(
                             conversion: argument.conversion.kind,
                             conversion_from: argument.conversion.from.clone(),
                             target_type: argument.conversion.to.clone(),
+                            eager_source_nodes: argument.value.eager_source_nodes(),
                         })
                         .collect(),
                 },
@@ -3561,5 +5474,20 @@ fn root_kind_text(kind: MirProofSourceRootKind) -> &'static str {
         MirProofSourceRootKind::DefaultValue => "default",
         MirProofSourceRootKind::PlaceInput => "place-input",
         MirProofSourceRootKind::Boundary => "boundary",
+    }
+}
+
+fn resolved_item_kind_text(kind: ResolvedItemKind) -> &'static str {
+    match kind {
+        ResolvedItemKind::Function => "function",
+        ResolvedItemKind::Type => "type",
+        ResolvedItemKind::Constant => "constant",
+        ResolvedItemKind::Capability => "capability",
+        ResolvedItemKind::Trait => "trait",
+        ResolvedItemKind::Impl => "impl",
+        ResolvedItemKind::ExternBlock => "extern-block",
+        ResolvedItemKind::Actor => "actor",
+        ResolvedItemKind::Flow => "flow",
+        ResolvedItemKind::Session => "session",
     }
 }

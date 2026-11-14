@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 #[test]
 fn interp_closure_basic() {
     let src = r#"
@@ -227,7 +228,9 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
+        Ok(interp::Value::String(SharedString::new(
+            "hello".to_string()
+        )))
     );
 }
 
@@ -296,13 +299,15 @@ func main() -> i32 {
 #[test]
 fn move_semantics_float_copy() {
     let src = r#"
-func main() -> f64 {
+func float_copy_result() -> f64 {
     let x = 1.5;
     let y = x;
     x + y
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "float_copy_result", vec![])
+        .expect("float-copy helper should run");
     assert_eq!(v, interp::Value::Float(3.0));
 }
 
@@ -334,7 +339,9 @@ func main() -> i32 {
 "#;
     assert_eq!(
         run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
+        Ok(interp::Value::String(SharedString::new(
+            "hello".to_string()
+        )))
     );
 }
 

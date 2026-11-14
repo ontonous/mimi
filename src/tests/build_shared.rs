@@ -587,15 +587,12 @@ func main() -> i32 { return 0 }
     let so = tmp.join("libm.so");
 
     let file = parse_and_check(src);
+    let checked = crate::core::check_program(&file).expect("shared-library checked program");
     let context = inkwell::context::Context::create();
     let mut gen = codegen::CodeGenerator::new(&context, "m004");
     gen.shared = true;
-    // `compile_checked` currently does not materialize C data exports. This
-    // test-only AST harness retains coverage for the legacy const emitter;
-    // production shared-object emission still requires the checked route.
-    gen.compile_file(&file)
-        .expect("compile_file(test-only legacy const path)");
-    gen.allow_legacy_test_shared_object_emission();
+    gen.compile_checked(&checked)
+        .expect("checked scalar data export should compile");
     gen.compile_to_object(&obj)
         .expect("compile_to_object(shared)");
     link_shared(&obj, &so, false);

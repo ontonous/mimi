@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 impl<'ctx> CodeGenerator<'ctx> {
     /// Wrap a raw C string pointer into a Mimi string struct `{ ptr, i64 }`.
-    /// Calls `strlen` to compute the length, then builds the struct.
+    /// Validates UTF-8 and computes the byte length before building the struct.
     pub(in crate::codegen) fn wrap_c_string(
         &self,
         raw_ptr: PointerValue<'ctx>,
@@ -24,16 +24,29 @@ impl<'ctx> CodeGenerator<'ctx> {
             false,
         );
 
-        // Call strlen to get the length
-        let strlen_fn = self.get_runtime_fn("strlen")?;
+        // Validate UTF-8 before admitting a C string into Mimi's String type.
+        // `strlen` alone would let arbitrary byte sequences satisfy the
+        // verifier's String premise.
+        let utf8_len_fn = self
+            .module
+            .get_function("mimi_c_string_len_utf8")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_c_string_len_utf8",
+                    self.context
+                        .i64_type()
+                        .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let length = self
             .build_call(
-                strlen_fn,
+                utf8_len_fn,
                 &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                "strlen_call",
+                "utf8_cstr_len_call",
             )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("strlen returned void".into()))?
+            .ok_or_else(|| CompileError::LlvmError("UTF-8 C string length returned void".into()))?
             .into_int_value();
 
         // Build the struct { data_ptr, len }
@@ -116,6 +129,46 @@ impl<'ctx> CodeGenerator<'ctx> {
             )?
             .into_int_value();
         self.wrap_string_ptr_len(raw_ptr, raw_len)
+    }
+
+    /// Copy a fat `MimiStr` list slot into an independently owned Mimi string.
+    /// Ordinary index expressions produce values that may outlive their list,
+    /// so they must not retain the slot's borrowed payload pointer.
+    pub(in crate::codegen) fn load_owned_fat_list_string(
+        &self,
+        boxed: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, CompileError> {
+        let borrowed = self.load_fat_list_string(boxed)?;
+        let borrowed = BasicMetadataValueEnum::from(borrowed);
+        let (data, len) = self.extract_string_arg_ptr_len(&borrowed, "List<string> index")?;
+        let clone_fn = self.get_runtime_fn("mimi_str_clone")?;
+        let cloned = self
+            .build_call(
+                clone_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(data),
+                    BasicMetadataValueEnum::IntValue(len),
+                ],
+                "list_string_index_clone",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| {
+                CompileError::LlvmError(
+                    "mimi_str_clone returned void for List<string> index".into(),
+                )
+            })?
+            .into_int_value();
+        let cloned = self.nonzero_string_box_or_abort(cloned, "list_string_index")?;
+        let owned_ptr = self
+            .builder
+            .build_int_to_ptr(
+                cloned,
+                self.context.ptr_type(inkwell::AddressSpace::default()),
+                "list_string_index_owned_ptr",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("List<string> index pointer: {e}")))?;
+        self.register_heap_alloc(owned_ptr);
+        self.wrap_string_ptr_len(owned_ptr, len)
     }
 
     /// Extract a string data pointer from a Mimi string value.
@@ -1304,8 +1357,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
-            (Some(l), Some(r)) => self.compile_string_comparison_binop(op, l, r),
+        match (self.is_string_value(&lhs), self.is_string_value(&rhs)) {
+            (true, true) => {
+                let (l_ptr, l_len) = self.extract_string_value_ptr_len(&lhs)?;
+                let (r_ptr, r_len) = self.extract_string_value_ptr_len(&rhs)?;
+                self.compile_string_comparison_binop(op, l_ptr, l_len, r_ptr, r_len)
+            }
             _ => match (lhs, rhs) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
                     let pred = match op {
@@ -1343,8 +1400,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         lhs: BasicValueEnum<'ctx>,
         rhs: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        match (self.extract_string_ptr(&lhs), self.extract_string_ptr(&rhs)) {
-            (Some(l), Some(r)) => self.compile_string_comparison_binop(op, l, r),
+        match (self.is_string_value(&lhs), self.is_string_value(&rhs)) {
+            (true, true) => {
+                let (l_ptr, l_len) = self.extract_string_value_ptr_len(&lhs)?;
+                let (r_ptr, r_len) = self.extract_string_value_ptr_len(&rhs)?;
+                self.compile_string_comparison_binop(op, l_ptr, l_len, r_ptr, r_len)
+            }
             _ => match (lhs, rhs) {
                 (BasicValueEnum::IntValue(l), BasicValueEnum::IntValue(r)) => {
                     let pred = match op {
@@ -1379,18 +1440,86 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// String comparison using `strcmp`.
+    /// Whether an LLVM value uses Mimi's `{i8*, i64}` String ABI, or is a
+    /// legacy raw C-string pointer.
+    fn is_string_value(&self, value: &BasicValueEnum<'ctx>) -> bool {
+        match value {
+            BasicValueEnum::PointerValue(_) => true,
+            BasicValueEnum::StructValue(sv) => matches!(
+                sv.get_type().get_field_types().as_slice(),
+                [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(it)]
+                    if it.get_bit_width() == 64
+            ),
+            _ => false,
+        }
+    }
+
+    /// Extract the byte pointer and length from a Mimi String value. Legacy
+    /// raw C-string values have no length field, so `strlen` supplies theirs.
+    fn extract_string_value_ptr_len(
+        &self,
+        value: &BasicValueEnum<'ctx>,
+    ) -> Result<(PointerValue<'ctx>, IntValue<'ctx>), CompileError> {
+        match value {
+            BasicValueEnum::StructValue(sv) => {
+                let ptr = self
+                    .build_extract_value(AggregateValueEnum::StructValue(*sv), 0, "str_cmp_ptr")?
+                    .into_pointer_value();
+                let len = self
+                    .build_extract_value(AggregateValueEnum::StructValue(*sv), 1, "str_cmp_len")?
+                    .into_int_value();
+                Ok((ptr, len))
+            }
+            BasicValueEnum::PointerValue(ptr) => Ok((*ptr, self.string_len(*ptr)?)),
+            _ => Err(CompileError::TypeMismatch(
+                "string comparison expected String values".into(),
+            )),
+        }
+    }
+
+    /// Compare Mimi strings by their full UTF-8 byte sequences, including
+    /// embedded NUL bytes. The runtime also checks the UTF-8 premise at this
+    /// native boundary, keeping malformed internal values fail-closed.
     fn compile_string_comparison_binop(
         &self,
         op: BinOp,
         l: PointerValue<'ctx>,
+        l_len: IntValue<'ctx>,
         r: PointerValue<'ctx>,
+        r_len: IntValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, CompileError> {
-        let strcmp_fn = self.get_runtime_fn("strcmp")?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let compare_fn = self
+            .module
+            .get_function("mimi_string_compare_utf8")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_string_compare_utf8",
+                    self.context.i32_type().fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let result = self
-            .build_call(strcmp_fn, &[l.into(), r.into()], "strcmp_call")?
+            .build_call(
+                compare_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(l),
+                    BasicMetadataValueEnum::IntValue(l_len),
+                    BasicMetadataValueEnum::PointerValue(r),
+                    BasicMetadataValueEnum::IntValue(r_len),
+                ],
+                "string_compare_utf8_call",
+            )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("strcmp returned void".into()))?
+            .ok_or_else(|| CompileError::LlvmError("UTF-8 string comparison returned void".into()))?
             .into_int_value();
         let zero = self.context.i32_type().const_int(0, false);
         let pred = match op {
@@ -1409,7 +1538,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             BinOp::Gt => "strgt",
             BinOp::Le => "strle",
             BinOp::Ge => "strge",
-            _ => "strcmp",
+            _ => "str_cmp",
         };
         Ok(self
             .builder

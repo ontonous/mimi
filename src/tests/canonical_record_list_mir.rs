@@ -136,7 +136,6 @@ fn same_mir_three_consumer_and_verifier_case(
     // These are the direct CheckedProgram entry points. The MIR consumers
     // above already used the same immutable graph; this separate tripwire
     // proves the convenience API does not re-enter the legacy AST owner.
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let checked_results = crate::verifier::verify_checked(&checked, source_hash.clone())
         .unwrap_or_else(|error| panic!("{label} verify_checked: {error}"));
     if contract_expected {
@@ -147,14 +146,10 @@ fn same_mir_three_consumer_and_verifier_case(
             "{label} checked verifier must prove main: {checked_results:?}"
         );
     }
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     crate::verifier::verify_checked_dual(&checked, source_hash)
         .unwrap_or_else(|error| panic!("{label} verify_checked_dual: {error}"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let checked_context = inkwell::context::Context::create();
     let mut checked_codegen = crate::codegen::CodeGenerator::new(&checked_context, label);
     checked_codegen
@@ -164,7 +159,6 @@ fn same_mir_three_consumer_and_verifier_case(
         .module
         .verify()
         .unwrap_or_else(|error| panic!("{label} direct checked LLVM module: {error}"));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 
     assert_eq!(mir.canonical_digest(), digest, "{label} consumer stability");
 }

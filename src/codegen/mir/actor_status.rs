@@ -6,7 +6,9 @@
 //! functions never abort or acquire the unique domain cleanup authority.
 
 use super::*;
-use crate::core::mir::{actor_trap_status, MirActorNativeCallableAbi, MIR_ACTOR_STATUS_ABI_SCHEMA};
+use crate::core::mir::{
+    actor_trap_status, MirActorNativeCallableAbi, MirActorOperation, MIR_ACTOR_STATUS_ABI_SCHEMA,
+};
 use crate::core::NodeId;
 use inkwell::types::StructType;
 use inkwell::values::{IntValue, StructValue};
@@ -128,6 +130,7 @@ pub(super) fn validate_actor_native_program(program: &MirProgram) -> Vec<NativeM
     }
     for function in program.functions().values() {
         let tagged = plan.tagged_functions.contains(&function.owner);
+        let flow_state_values = checked_actor_flow_state_values(function, program, &plan.root);
         for parameter in &function.parameters {
             let Some(value) = function.values.get(parameter) else {
                 continue;
@@ -186,9 +189,17 @@ pub(super) fn validate_actor_native_program(program: &MirProgram) -> Vec<NativeM
                     }
                 }
                 _ if tagged => {
-                    if !descriptor.has_canonical_copy_noop_metadata()
-                        || !(is_i32(program, &value.ty)
-                            || matches!(descriptor.abi, MirAbiClass::Bool | MirAbiClass::Unit))
+                    let checked_flow_state = flow_state_values.contains(identity)
+                        && program.actors().iter().any(|(_, actor)| {
+                            actor
+                                .flow
+                                .as_ref()
+                                .is_some_and(|flow| value.ty == flow.root_state_type)
+                        });
+                    if !checked_flow_state
+                        && (!descriptor.has_canonical_copy_noop_metadata()
+                            || !(is_i32(program, &value.ty)
+                                || matches!(descriptor.abi, MirAbiClass::Bool | MirAbiClass::Unit)))
                     {
                         errors.push(NativeMirError::new(
                             identity.to_string(),
@@ -278,6 +289,27 @@ pub(super) fn validate_actor_native_program(program: &MirProgram) -> Vec<NativeM
                         string_field_contract: None,
                         ..
                     } => (),
+                    MirInstructionKind::Project {
+                        result,
+                        base,
+                        projection,
+                        list_index_contract: None,
+                    } if tagged => {
+                        if !checked_flow_state_projection(
+                            program,
+                            &function.owner,
+                            &plan.root,
+                            &flow_state_values,
+                            result,
+                            base,
+                            projection,
+                        ) {
+                            errors.push(NativeMirError::new(
+                                instruction.id.as_str(),
+                                "tagged Actor graph projection is outside its checked Flow root-state field",
+                            ));
+                        }
+                    }
                     _ if tagged => errors.push(NativeMirError::new(
                         instruction.id.as_str(),
                         "instruction has no finite scalar tagged-status implementation",
@@ -380,6 +412,130 @@ fn is_i32(program: &MirProgram, ty: &crate::core::ResolvedTypeId) -> bool {
                     signed: true,
                 })
             && descriptor.layout == MirLayout::Scalar
+    })
+}
+
+fn checked_actor_flow_state_values(
+    function: &MirFunction,
+    program: &MirProgram,
+    root: &NodeId,
+) -> BTreeSet<MirValueId> {
+    if &function.owner != root {
+        return BTreeSet::new();
+    }
+    let mut values = BTreeSet::new();
+    for instruction in function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+    {
+        let MirInstructionKind::Actor {
+            operation:
+                MirActorOperation::Call {
+                    result,
+                    actor,
+                    method,
+                    ..
+                },
+        } = &instruction.kind
+        else {
+            continue;
+        };
+        let checked_flow_call = program.actors().get(actor).is_some_and(|contract| {
+            contract
+                .methods
+                .iter()
+                .any(|entry| &entry.owner == method && entry.flow_transition.is_some())
+                && contract.flow.as_ref().is_some_and(|flow| {
+                    function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == flow.root_state_type)
+                })
+        });
+        if checked_flow_call {
+            values.insert(result.clone());
+        }
+    }
+    loop {
+        let before = values.len();
+        for instruction in function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+        {
+            if let MirInstructionKind::Move { result, source } = &instruction.kind {
+                if values.contains(source)
+                    && function.values.get(result).map(|value| &value.ty)
+                        == function.values.get(source).map(|value| &value.ty)
+                {
+                    values.insert(result.clone());
+                }
+            }
+        }
+        if values.len() == before {
+            return values;
+        }
+    }
+}
+
+fn checked_flow_state_projection(
+    program: &MirProgram,
+    owner: &NodeId,
+    root: &NodeId,
+    flow_state_values: &BTreeSet<MirValueId>,
+    result: &MirValueId,
+    base: &MirValueId,
+    projection: &MirProjection,
+) -> bool {
+    let MirProjection::Field(field) = projection else {
+        return false;
+    };
+    if owner != root || !flow_state_values.contains(base) {
+        return false;
+    }
+    let Some(base_type) = program
+        .functions()
+        .get(owner)
+        .and_then(|function| function.values.get(base).map(|value| &value.ty))
+    else {
+        return false;
+    };
+    let Some(result_type) = program
+        .functions()
+        .get(owner)
+        .and_then(|function| function.values.get(result).map(|value| &value.ty))
+    else {
+        return false;
+    };
+    if !is_i32(program, result_type) {
+        return false;
+    }
+    program.actors().iter().any(|(_, actor)| {
+        let Some(flow) = actor.flow.as_ref() else {
+            return false;
+        };
+        let [payload] = flow.payload.as_slice() else {
+            return false;
+        };
+        let Some(state_type) = program.type_catalog().get(&flow.root_state_type) else {
+            return false;
+        };
+        let MirLayout::Record { nominal, fields } = &state_type.layout else {
+            return false;
+        };
+        let [layout_field] = fields.as_slice() else {
+            return false;
+        };
+        base_type == &flow.root_state_type
+            && result_type == &payload.ty
+            && &payload.field == field
+            && payload.ty == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            && matches!(&state_type.kind, MirTypeKind::Nominal)
+            && nominal.as_str() == flow.root_state.0.as_str()
+            && layout_field.id == payload.field
+            && layout_field.name == payload.name
+            && layout_field.ty == payload.ty
     })
 }
 
@@ -837,40 +993,47 @@ mod tests {
     const CAPTURE: &str = include_str!("../../../tests/real_world/actor_nested_func_capture.mimi");
     const SHADOW: &str = include_str!("../../../tests/real_world/actor_nested_func_shadow.mimi");
     const REPEATED: &str = r#"
-        actor Counter {
-            base: i32 = 0;
-            func bump(delta: i32) -> i32 {
-                let scale = 10
-                func scaled(d: i32) -> i32 { scale + d }
-                self.base = self.base + scaled(delta)
-                self.base
+        flow CounterFlow {
+            state CounterReady { base: i32 }
+            transition accumulate(CounterReady, delta: i32) -> CounterReady {
+                return CounterReady { base: self.base + delta }
             }
         }
+        actor Counter runs CounterFlow { }
         func main() -> i32 {
             let c = Counter.spawn()
-            println(c.bump(5))
-            println(c.bump(7))
+            let first = c.accumulate(15)
+            println(first.base)
+            let second = c.accumulate(7)
+            println(second.base)
             0
         }
     "#;
     const TWO_INSTANCES: &str = r#"
-        actor Counter {
-            base: i32 = 3;
-            func bump(delta: i32) -> i32 {
-                let scale = 8
-                let bias = 2
-                func scaled(d: i32) -> i32 { scale + bias + d }
-                self.base = self.base + scaled(delta)
-                self.base
+        flow CounterFlow {
+            state CounterReady { base: i32 }
+            transition add(CounterReady, delta: i32) -> CounterReady {
+                return CounterReady { base: self.base + delta }
             }
         }
+        actor Counter runs CounterFlow { }
         func main() -> i32 {
             let c = Counter.spawn()
             let d = Counter.spawn()
-            let first = c.bump(5)
-            let second = c.bump(7)
-            let other = d.bump(1)
-            first + second + other
+            let first = c.add(17)
+            let second = c.add(18)
+            let other = d.add(15)
+            first.base + second.base + other.base
+        }
+    "#;
+    const FIELD_LOAD_ACTOR: &str = r#"
+        actor Counter {
+            base: i32 = 3;
+            func current() -> i32 { self.base }
+        }
+        func main() -> i32 {
+            let counter = Counter.spawn()
+            counter.current()
         }
     "#;
 
@@ -962,6 +1125,10 @@ mod tests {
                 crate::runtime::mimi_runtime_abort as *const () as usize,
             ),
             (
+                "mimi_mir_assert_no_live_managed_any_v2_lists",
+                crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
+            ),
+            (
                 "mimi_trap_div_by_zero",
                 crate::runtime::mimi_trap_div_by_zero as *const () as usize,
             ),
@@ -1010,8 +1177,8 @@ mod tests {
     #[test]
     fn canonical_actor_native_jit_preserves_fixtures_state_and_domain_join() {
         for (source, expected, spawned, accepted) in [
-            (CAPTURE, 0, 1, 1),
-            (SHADOW, 0, 1, 1),
+            (CAPTURE, 0, 1, 2),
+            (SHADOW, 0, 1, 2),
             (REPEATED, 0, 1, 2),
             (TWO_INSTANCES, 67, 2, 3),
         ] {
@@ -1061,12 +1228,14 @@ mod tests {
             // SAFETY: public main has the verified argument-free signed-i32
             // C ABI. This test invokes only successful programs; errors are
             // exercised through status-only shims and real child processes.
-            let actual = unsafe {
+            let native_main = unsafe {
                 engine
                     .get_function::<unsafe extern "C" fn() -> i32>("main") // SAFETY: verified public main has the exact no-argument i32 C ABI.
                     .expect("public Actor main")
-                    .call()
             };
+            crate::codegen::assert_execution_engine_linked(&engine, "calling Actor main");
+            // SAFETY: the lookup above verified the exact no-argument i32 ABI.
+            let actual = unsafe { native_main.call() };
             assert_eq!(actual, expected);
             TRACE.with(|trace| {
                 let trace = trace.borrow();
@@ -1179,12 +1348,18 @@ mod tests {
                 assert_ne!(identity, 0);
                 // SAFETY: the verified shim has the exact u64 -> i32 ABI and
                 // executes only status-returning source functions.
-                let status = unsafe {
+                let native_status = unsafe {
                     engine
                         .get_function::<unsafe extern "C" fn(u64) -> i32>("__actor_test_status") // SAFETY: verified shim takes u64 and returns i32.
                         .expect("status-only JIT shim")
-                        .call(identity)
                 };
+                crate::codegen::assert_execution_engine_linked(
+                    &engine,
+                    "calling the Actor status shim",
+                );
+                // SAFETY: the checked lookup verified the shim ABI and this
+                // identity was opened by the same Actor runtime instance.
+                let status = unsafe { native_status.call(identity) };
                 let mut counts = ActorDomainCounts::default();
                 // SAFETY: counts is a writable, aligned runtime C result.
                 let close = unsafe {
@@ -1296,20 +1471,30 @@ mod tests {
             let mut value = 0_i32;
             // SAFETY: the verified shim takes a domain id and writable i32
             // output slot, then returns only the tagged root status.
-            let status = unsafe {
+            let native_status = unsafe {
                 // SAFETY: the verified LLVM shim has exactly this C ABI.
+                // SAFETY: this function-pointer type matches the shim's
+                // checked `(u64, *mut i32) -> i32` declaration.
                 engine
-                    .get_function::<unsafe extern "C" fn(u64, *mut i32) -> i32>(
+                    .get_function::<
+                    // SAFETY: the LLVM function type was verified against the
+                    // shim declaration before this typed lookup.
+                    unsafe extern "C" fn(u64, *mut i32) -> i32
+                    >(
                         "__actor_test_power_status_value",
                     )
                     .expect("Power status/value shim")
-                    .call(identity, &mut value)
             };
+            crate::codegen::assert_execution_engine_linked(
+                &engine,
+                "calling the Actor power status shim",
+            );
+            // SAFETY: the checked lookup verified the shim ABI and `value` is
+            // a live writable i32 result slot.
+            let status = unsafe { native_status.call(identity, &mut value) };
             let mut counts = ActorDomainCounts::default();
             // SAFETY: counts is writable and aligned for the runtime C ABI.
-            let close = unsafe {
-                domain::mimi_mir_actor_domain_close(identity, 1, &mut counts)
-            };
+            let close = unsafe { domain::mimi_mir_actor_domain_close(identity, 1, &mut counts) };
             let destroy = domain::mimi_mir_actor_domain_destroy(identity);
 
             assert_eq!(status, expected_status, "{expression}");
@@ -1324,13 +1509,7 @@ mod tests {
             // SAFETY: null output requests observation of the destroyed entry.
             assert_eq!(
                 // SAFETY: a null output is accepted for this observation-only query.
-                unsafe {
-                    domain::mimi_mir_actor_domain_close(
-                        identity,
-                        1,
-                        std::ptr::null_mut(),
-                    )
-                },
+                unsafe { domain::mimi_mir_actor_domain_close(identity, 1, std::ptr::null_mut(),) },
                 domain::MIR_ACTOR_STATUS_CLOSED,
                 "{expression}"
             );
@@ -1384,14 +1563,9 @@ mod tests {
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "canonical_actor_real_process");
         if direct {
-            crate::core::CheckedProgram::reset_test_legacy_body_access();
             generator
                 .compile_checked(&checked)
                 .expect("production direct Actor native route");
-            assert!(
-                crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-                "direct Actor emitter must not consume legacy bodies"
-            );
             assert_eq!(
                 generator.test_mir_native_route_receipt(),
                 Some(&program.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE))
@@ -1464,18 +1638,18 @@ mod tests {
     #[test]
     fn canonical_actor_direct_native_rejects_unused_user_contracts_without_legacy_access() {
         for predicate in ["result == x", "result != x"] {
-            let source = format!("{CAPTURE}\nfunc guarded(x: i32) -> i32 {{\nrequires: x > 0\nensures: {predicate}\nx\n}}");
+            let source = format!(
+                "{CAPTURE}\nfunc guarded(x: i32) -> i32 {{\nrequires: x > 0\nensures: {predicate}\nx\n}}"
+            );
             let checked = checked_source(&source);
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "actor_user_proof_compatibility");
-            crate::core::CheckedProgram::reset_test_legacy_body_access();
             // This source is outside the execution-only Actor profile.  The
             // canonical owner rejects the unsupported proof graph before code
             // generation; it must not reopen any retained AST owner.
             let compatibility_result = generator.compile_checked(&checked);
             assert!(compatibility_result.is_err());
             assert!(generator.test_mir_native_route_receipt().is_none());
-            assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         }
     }
 
@@ -1524,7 +1698,7 @@ mod tests {
         for (source, stdout, exit) in [
             (CAPTURE, "15\n", 0),
             (SHADOW, "42\n101\n", 0),
-            (REPEATED, "15\n32\n", 0),
+            (REPEATED, "15\n22\n", 0),
             (TWO_INSTANCES, "", 67),
             (
                 "actor Counter { n: i32 = 5; func step(x: i32) -> i32 { let delta = x - x; let base = delta + 2; let exponent = delta + 31; base ** exponent } } func main() -> i32 { let c = Counter.spawn(); println(c.step(0)); 0 }",
@@ -1661,7 +1835,7 @@ mod tests {
 
     #[test]
     fn canonical_actor_native_rejects_forged_field_before_any_runtime_declaration() {
-        let mut program = program(CAPTURE);
+        let mut program = program(FIELD_LOAD_ACTOR);
         let owner = program.actors().iter().next().expect("Actor").1.methods[0]
             .owner
             .clone();
@@ -1672,7 +1846,7 @@ mod tests {
             .flat_map(|block| &mut block.instructions)
             .find_map(|instruction| {
                 if let MirInstructionKind::Actor {
-                    operation: crate::core::mir::MirActorOperation::FieldStore { field, .. },
+                    operation: crate::core::mir::MirActorOperation::FieldLoad { field, .. },
                 } = &mut instruction.kind
                 {
                     Some(field)

@@ -170,6 +170,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         elem_int: inkwell::values::IntValue<'ctx>,
         base_var: Option<&str>,
+        own_string: bool,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         let Some(var_name) = base_var else {
             return Ok(None);
@@ -178,8 +179,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         // Check if the list element type is a struct (stored as pointer to struct)
         if let Some(&BasicTypeEnum::StructType(sty)) = self.list_elem_llvm_types.get(var_name) {
             let fields = sty.get_field_types();
-            // Mimi string is stored in list slots as the raw C-string pointer,
-            // even though its LLVM type is the {i8*, i64} string struct.
+            // List<String> ABI v3 stores an i64 pointer to a fat MimiStr box,
+            // while the native value type is the {i8*, i64} string struct.
             let is_string_struct = matches!(
                 fields.as_slice(),
                 [BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(t)]
@@ -188,7 +189,12 @@ impl<'ctx> CodeGenerator<'ctx> {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             if is_string_struct {
                 let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                return Ok(Some(self.load_fat_list_string(elem_ptr)?));
+                let value = if own_string {
+                    self.load_owned_fat_list_string(elem_ptr)?
+                } else {
+                    self.load_fat_list_string(elem_ptr)?
+                };
+                return Ok(Some(value));
             }
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_ptr")?;
             let struct_val =
@@ -196,12 +202,17 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(Some(struct_val));
         }
 
-        // Check if the list element type is string (stored as raw i8* pointer)
+        // Check if the list element type is string (stored as a fat MimiStr box)
         if let Some(type_name) = self.var_type_names.get(var_name) {
             if type_name == "List<string>" {
                 let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                 let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                return Ok(Some(self.load_fat_list_string(elem_ptr)?));
+                let value = if own_string {
+                    self.load_owned_fat_list_string(elem_ptr)?
+                } else {
+                    self.load_fat_list_string(elem_ptr)?
+                };
+                return Ok(Some(value));
             }
         }
 
@@ -216,20 +227,26 @@ impl<'ctx> CodeGenerator<'ctx> {
         elem_int: inkwell::values::IntValue<'ctx>,
         obj_expr: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
+        own_string: bool,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         // Arch-2: Try type-driven lookup first (no string parsing)
         if let Expr::Ident(name) = obj_expr.unlocated() {
             if let Some(Type::Name(n, args)) = self.var_types.get(name).map(Type::unlocated) {
                 if n == "List" && args.len() == 1 {
                     let elem_ty = &args[0];
-                    // List<string> stores raw C-string pointers in its data slots,
-                    // not pointers to the {i8*, i64} string struct.
+                    // List<string> slots point to fat MimiStr boxes, while the
+                    // expression value is the {i8*, i64} string struct.
                     if let Type::Name(elem_name, _) = elem_ty.unlocated() {
                         if elem_name == "string" {
                             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
                             let elem_ptr =
                                 self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-                            return Ok(Some(self.load_fat_list_string(elem_ptr)?));
+                            let value = if own_string {
+                                self.load_owned_fat_list_string(elem_ptr)?
+                            } else {
+                                self.load_fat_list_string(elem_ptr)?
+                            };
+                            return Ok(Some(value));
                         }
                         if elem_name == "bool" {
                             // bool is stored as i64 0/1 — no conversion needed
@@ -276,11 +293,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Ok(None);
         }
 
-        // Handle List<string> — elements are raw i8* pointers
+        // Handle List<string> — elements point to fat MimiStr boxes.
         if obj_type == "List<string>" {
             let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
             let elem_ptr = self.build_int_to_ptr(elem_int, ptr_ty, "elem_str_ptr")?;
-            return Ok(Some(self.load_fat_list_string(elem_ptr)?));
+            let value = if own_string {
+                self.load_owned_fat_list_string(elem_ptr)?
+            } else {
+                self.load_fat_list_string(elem_ptr)?
+            };
+            return Ok(Some(value));
         }
 
         // Handle bool — stored as i64 0/1, no conversion needed
@@ -666,7 +688,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             // §7-#74: reads wrap negative indices (VM parity).
             let idx_iv = self.check_list_bounds(pv, idx_iv, true, "index read")?;
             let elem_int = self.load_list_element_i64(pv, idx_iv)?;
-            if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
+            if let Some(converted) = self.try_convert_list_element_owned(elem_int, obj, vars)? {
                 return Ok(converted);
             }
             return Ok(elem_int.into());
@@ -695,7 +717,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         // §7-#74: reads wrap negative indices (VM parity).
         let idx_iv = self.check_list_bounds(list_alloca, idx_iv, true, "index read")?;
         let elem_int = self.load_list_element_i64(list_alloca, idx_iv)?;
-        if let Some(converted) = self.try_convert_list_element(elem_int, obj, vars)? {
+        if let Some(converted) = self.try_convert_list_element_owned(elem_int, obj, vars)? {
             return Ok(converted);
         }
         Ok(elem_int.into())
@@ -845,14 +867,33 @@ impl<'ctx> CodeGenerator<'ctx> {
         obj: &Expr,
         vars: &HashMap<String, VarEntry<'ctx>>,
     ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        self.try_convert_list_element_with_ownership(elem_int, obj, vars, false)
+    }
+
+    pub(in crate::codegen) fn try_convert_list_element_owned(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        obj: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
+        self.try_convert_list_element_with_ownership(elem_int, obj, vars, true)
+    }
+
+    fn try_convert_list_element_with_ownership(
+        &self,
+        elem_int: inkwell::values::IntValue<'ctx>,
+        obj: &Expr,
+        vars: &HashMap<String, VarEntry<'ctx>>,
+        own_string: bool,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, CompileError> {
         if let Expr::Ident(var_name) = obj.unlocated() {
             if let Some(converted) =
-                self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()))?
+                self.convert_list_elem_from_i64(elem_int, Some(var_name.as_str()), own_string)?
             {
                 return Ok(Some(converted));
             }
         }
-        self.convert_list_elem_by_type(elem_int, obj, vars)
+        self.convert_list_elem_by_type(elem_int, obj, vars, own_string)
     }
 
     pub(in crate::codegen) fn compile_tuple_index_expr(

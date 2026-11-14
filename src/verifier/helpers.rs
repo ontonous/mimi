@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
-use crate::verifier::ctx::{VerifStatus, VerificationResult};
 
 /// Extract the final value-producing expression from a block.
 /// Used in `expr_to_z3_*` to evaluate the tail expression of an if-else branch.
@@ -384,66 +383,5 @@ pub(crate) fn collect_idents_in_stmt(stmt: &Stmt, idents: &mut Vec<String>) {
             }
         }
         _ => {}
-    }
-}
-
-/// Return Unknown for all functions when Z3 is not available.
-#[cfg(test)]
-pub(crate) fn mock_verify_file(file: &crate::ast::File) -> Vec<VerificationResult> {
-    let mut results = Vec::new();
-    mock_verify_items(&file.items, &mut results);
-    results
-}
-
-#[cfg(test)]
-fn mock_verify_items(items: &[crate::ast::Item], results: &mut Vec<VerificationResult>) {
-    for item in items {
-        match item {
-            crate::ast::Item::Func(f) => {
-                if !f.body.is_empty() {
-                    let has_contracts = f.body.iter().any(|s| {
-                        matches!(
-                            s.unlocated(),
-                            Stmt::Requires(_, _)
-                                | Stmt::Ensures(_, _)
-                                | Stmt::Invariant(_, _)
-                                | Stmt::Math(_)
-                        )
-                    });
-                    results.push(VerificationResult {
-                        func_name: f.name.clone(),
-                        status: VerifStatus::InfrastructureError,
-                        message: if has_contracts {
-                            "Z3 solver not available"
-                        } else {
-                            "no contracts"
-                        }
-                        .into(),
-                        diagnostic: None,
-                        duration_us: 0,
-                        constraint_count: 0,
-                        artifact: None,
-                        trusted_subset_domain: None,
-                    });
-                }
-            }
-            crate::ast::Item::ExternBlock(block) => {
-                for func in &block.funcs {
-                    if func.requires.is_some() || func.ensures.is_some() {
-                        results.push(VerificationResult {
-                            func_name: format!("extern {}", func.name),
-                            status: VerifStatus::InfrastructureError,
-                            message: "Z3 solver not available".into(),
-                            diagnostic: None,
-                            duration_us: 0,
-                            constraint_count: 0,
-                            artifact: None,
-                            trusted_subset_domain: None,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
     }
 }

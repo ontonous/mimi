@@ -7,6 +7,8 @@
 //! - Relative jumps: i32 offsets from current instruction
 //! - Call convention: args in consecutive registers, result in rd
 
+use std::collections::BTreeMap;
+
 /// Register index (u16: max 65536 locals per function — far more than needed).
 pub type Reg = u16;
 
@@ -983,6 +985,15 @@ pub enum Op {
     MirOrdinaryMapOwnedGetI32StringV1New {
         rd: Reg,
     },
+    /// Dedicated, Checker ResultBranchV3 owned-Get V1 New. The synthetic
+    /// Result TypeDesc identity, canonical descriptor text and variant table
+    /// are all tied to the V3-only VM route anchor.
+    MirOrdinaryMapOwnedGetI32StringV1NewResult {
+        rd: Reg,
+        result_type: ConstIdx,
+        type_desc: ConstIdx,
+        shapes: ConstIdx,
+    },
     /// Fresh independent root; the source remains live.
     MirOrdinaryMapOwnedGetI32StringV1Clone {
         rd: Reg,
@@ -993,6 +1004,18 @@ pub enum Op {
         ra: Reg,
         key: Reg,
         value: Reg,
+    },
+    /// Dedicated, Checker ResultBranchV3 persistent Set. The source root is
+    /// borrowed and the Ok branch carries the new root in the synthetic
+    /// Result envelope. Only the V3 route anchor may authorize this opcode.
+    MirOrdinaryMapOwnedGetI32StringV1SetResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+        result_type: ConstIdx,
+        type_desc: ConstIdx,
+        shapes: ConstIdx,
     },
     MirOrdinaryMapOwnedGetI32StringV1Remove {
         rd: Reg,
@@ -1061,6 +1084,74 @@ pub enum Op {
     /// A distinct opcode prevents a bare-root receipt from authorizing it.
     MirOrdinaryMapOwnedAnyV2NewResult {
         rd: Reg,
+    },
+    /// Pending receipt-bound persistent Set that returns canonical
+    /// `Ok(updated-root)` / `Err(2)` while preserving its borrowed source.
+    /// The independent SetResult route anchor authorizes its two root
+    /// payload moves; the NewResult-only anchor cannot authorize this opcode.
+    MirOrdinaryMapOwnedAnyV2SetResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+    },
+    /// Borrow a runtime V2 root and String key, returning the exact typed-i32
+    /// Get status as `Ok(value)` or `Err(status)`. A dedicated Set/Get anchor
+    /// binds this operation to the source receipt and both exhaustive Result
+    /// matches; it is not a general owner-v2 lookup opcode.
+    MirOrdinaryMapOwnedAnyV2GetI32Result {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    /// Borrow a runtime V2 root and String key, returning raw GetAny success as
+    /// `Ok((found, owned Any-v2))`. Only the owner-publication Capacity status
+    /// is translated to source `Err(4)`; all other statuses and malformed
+    /// output tuples remain E0800 traps.
+    MirOrdinaryMapOwnedAnyV2GetAnyResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+    },
+    /// Borrow a runtime V2 root and String key, returning the exact typed-String
+    /// Get status as `Ok(owned String)` or `Err(status)`. The TypeDesc constants
+    /// are part of this dedicated source-bound opcode; the root remains live.
+    MirOrdinaryMapOwnedAnyV2GetStringResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        string_type_id: ConstIdx,
+        string_type_desc_hash: ConstIdx,
+    },
+    /// Persistent source-bound String Set returning `Ok(updated-root)` or
+    /// `Err(2)`. It copies the borrowed String into the new snapshot while the
+    /// original source root, key and String remain live until their checked
+    /// Drops.
+    MirOrdinaryMapOwnedAnyV2SetStringResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+        string_type_id: ConstIdx,
+        string_type_desc_hash: ConstIdx,
+    },
+    /// Persistent Checker selected V2 Any SetResult.  The dedicated
+    /// ComputedStringKeyOwnerChain route anchor binds the payload TypeDesc,
+    /// selection frame, operation PC, and both Result branch switches.  The
+    /// runtime token is created through the ManagedAnyPayloadV2 ABI; this is
+    /// intentionally separate from the i32-only SetResult opcode.
+    MirOrdinaryMapOwnedAnyV2SetAnyResult {
+        rd: Reg,
+        ra: Reg,
+        key: Reg,
+        value: Reg,
+        payload_type_id: ConstIdx,
+        payload_descriptor_hash: ConstIdx,
+        selection_bytes: ConstIdx,
+        selection_hash: ConstIdx,
+        payload_tag: i32,
+        payload_size: u32,
+        payload_align: u32,
     },
     MirOrdinaryMapOwnedAnyV2Clone {
         rd: Reg,
@@ -1554,7 +1645,16 @@ impl Op {
             | MirOrdinaryMapOwnerLifecycleI32StringV1Contains { rd, .. }
             | MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, .. }
             | MirOrdinaryMapOwnerLifecycleObserverV1Println { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2NewResult { rd }
+            | MirOrdinaryMapOwnedAnyV2SetResult { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2GetI32Result { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2GetAnyResult { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2GetStringResult { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2SetStringResult { rd, .. }
+            | MirOrdinaryMapOwnedAnyV2SetAnyResult { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Clone { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1NewResult { rd, .. }
+            | MirOrdinaryMapOwnedGetI32StringV1SetResult { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Remove { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1Contains { rd, .. }
             | MirOrdinaryMapOwnedGetI32StringV1GetI32 { rd, .. }
@@ -1692,7 +1792,16 @@ impl Op {
             | Op::MirOrdinaryMapOwnerLifecycleI32StringV1Contains { rd, .. }
             | Op::MirOrdinaryMapOwnerLifecycleObserverV1ToJson { rd, .. }
             | Op::MirOrdinaryMapOwnerLifecycleObserverV1Println { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2NewResult { rd }
+            | Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { rd, .. }
+            | Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1NewResult { rd, .. }
+            | Op::MirOrdinaryMapOwnedGetI32StringV1SetResult { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1Remove { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1Contains { rd, .. }
             | Op::MirOrdinaryMapOwnedGetI32StringV1GetI32 { rd, .. }
@@ -1791,6 +1900,7 @@ impl Op {
             | MirMapAnyOwnerV1New { .. }
             | MirOrdinaryMapOwnerLifecycleI32StringV1New { .. }
             | MirOrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirOrdinaryMapOwnedGetI32StringV1NewResult { .. }
             | MirOrdinaryMapOwnedAnyV2New { .. }
             | MirOrdinaryMapOwnedAnyV2NewResult { .. }
             | NewCap { .. }
@@ -1860,6 +1970,9 @@ impl Op {
             MirOrdinaryMapOwnedGetI32StringV1Set { ra, key, value, .. } => {
                 *ra == reg || *key == reg || *value == reg
             }
+            MirOrdinaryMapOwnedGetI32StringV1SetResult { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
             MirOrdinaryMapOwnerLifecycleI32StringV1Remove { ra, key, .. }
             | MirOrdinaryMapOwnerLifecycleI32StringV1Contains { ra, key, .. } => {
                 *ra == reg || *key == reg
@@ -1871,6 +1984,18 @@ impl Op {
             | MirOrdinaryMapOwnedGetI32StringV1GetAny { ra, key, .. } => *ra == reg || *key == reg,
             MirOrdinaryMapOwnedGetI32StringV1Values { ra, .. } => *ra == reg,
             MirOrdinaryMapOwnedAnyV2Set { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnedAnyV2SetResult { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnedAnyV2GetI32Result { ra, key, .. } => *ra == reg || *key == reg,
+            MirOrdinaryMapOwnedAnyV2GetAnyResult { ra, key, .. } => *ra == reg || *key == reg,
+            MirOrdinaryMapOwnedAnyV2GetStringResult { ra, key, .. } => *ra == reg || *key == reg,
+            MirOrdinaryMapOwnedAnyV2SetStringResult { ra, key, value, .. } => {
+                *ra == reg || *key == reg || *value == reg
+            }
+            MirOrdinaryMapOwnedAnyV2SetAnyResult { ra, key, value, .. } => {
                 *ra == reg || *key == reg || *value == reg
             }
             MirOrdinaryMapOwnedAnyV2Println { pair, .. } => *pair == reg,
@@ -3645,6 +3770,48 @@ fn bytecode_int_constant(function: &FunctionProto, index: ConstIdx, expected: i6
     matches!(function.constants.get(index as usize), Some(ConstValue::Int(value)) if *value == expected)
 }
 
+/// Return the runtime's canonical ManagedAnyV2 TypeDesc-closure digest for
+/// owned String. The String profile is a single leaf descriptor, but we
+/// still bind each section frame used by the native ABI instead of substituting
+/// a plain hash of `canonical_text()`.
+pub(crate) fn ordinary_map_owned_any_v2_string_type_desc_hash(
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+) -> Result<String, String> {
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    catalog.validate_owned_string(&string_type)?;
+    let descriptor = catalog
+        .get(&string_type)
+        .ok_or_else(|| "canonical String TypeDesc is absent".to_string())?;
+    if catalog
+        .resolved_type_children(&string_type)
+        .is_some_and(|children| !children.is_empty())
+        || descriptor.session_protocol.is_some()
+        || descriptor.drop_plan.is_some()
+        || descriptor.variant_drop_plan.is_some()
+    {
+        return Err("canonical String TypeDesc is not the expected leaf descriptor".into());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mimi-managed-any-payload-v2:typedesc-closure:v1\n");
+    let frame = |hasher: &mut blake3::Hasher, bytes: &[u8]| {
+        hasher.update(&(bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    };
+    frame(&mut hasher, string_type.as_str().as_bytes());
+    frame(&mut hasher, descriptor.canonical_text().as_bytes());
+    for section in [
+        b"checker".as_slice(),
+        b"layout".as_slice(),
+        b"session-protocol".as_slice(),
+        b"drop-plan".as_slice(),
+        b"variant-drop-plans".as_slice(),
+    ] {
+        frame(&mut hasher, section);
+        hasher.update(&0_u64.to_be_bytes());
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 /// Independent private snapshot for the separately versioned typed
 /// Any-owner bytecode profile. Its validation explicitly rejects legacy
 /// MapRoot operations.
@@ -3660,10 +3827,35 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     ordinary_map_owner_lifecycle_i32_string_v1:
         Option<CanonicalOrdinaryMapOwnerLifecycleBytecodeReceipt>,
     ordinary_map_owned_get_i32_string_v1: Option<CanonicalOrdinaryMapOwnedGetBytecodeReceipt>,
+    ordinary_map_owned_get_result_branch_v3_route_anchor:
+        Option<CanonicalOrdinaryMapOwnedGetResultBranchV3RouteBytecodeAnchor>,
     ordinary_map_owned_any_v2: Option<CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt>,
     /// Independent pending-L1 anchor; old V2/bare-root snapshots cannot
     /// authorize the recoverable Result opcode.
     new_result_anchor: Option<CanonicalOrdinaryMapNewResultBytecodeAnchor>,
+    /// Independent pending-L1 SetResult anchor. It seals the two Result::Ok
+    /// root extraction Moves and the complete New/SetResult bytecode graph.
+    set_result_anchor: Option<CanonicalOrdinaryMapSetResultBytecodeAnchor>,
+    /// Independent Set→Get-i32 route anchor. It binds the typed lookup op,
+    /// both root Result moves, and the complete bytecode table to the exact
+    /// Checker receipt and production route receipt.
+    set_get_i32_result_anchor: Option<CanonicalOrdinaryMapSetGetI32BytecodeAnchor>,
+    /// Independent Set→GetAny→unpack-i32 route anchor. Its generic GetAny
+    /// pair and managed Any unpack sites are sealed separately from both the
+    /// typed GetI32Result and bare CheckedGet profiles.
+    set_get_any_i32_result_anchor: Option<CanonicalOrdinaryMapSetGetAnyI32BytecodeAnchor>,
+    /// Independent bytecode authority for the exact direct-tuple Get L1
+    /// Checker receipt. It does not reuse the composite Set/GetAny route or
+    /// the old generic tuple-Get anchor.
+    direct_tuple_get_l1_anchor: Option<CanonicalDirectTupleGetL1BytecodeAnchor>,
+    /// Independent Result-valued `map_get_any` anchor. It binds the dedicated
+    /// GetAnyResult opcode and move-only envelope TypeDesc to its Checker
+    /// lineage; the legacy tuple GetAny anchor cannot authorize this site.
+    set_get_any_result_i32_anchor: Option<CanonicalOrdinaryMapSetGetAnyResultI32BytecodeAnchor>,
+    /// Independent String Set/Get route anchor. This binds the String-specific
+    /// Checker receipt, TypeDesc identity, typed opcode sites, root transfers,
+    /// route manifest, and complete bytecode table separately from i32.
+    set_get_string_result_anchor: Option<CanonicalOrdinaryMapSetGetStringBytecodeAnchor>,
     /// Independent route identity for the narrowly admitted Values field
     /// move profile. This anchor is minted only by the adapter that has
     /// validated the exact CheckedProgram/MIR pair, and binds that route
@@ -3683,6 +3875,12 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     /// profile. Its own anchor binds the Checker/MIR route manifest to the
     /// complete emitted bytecode table.
     values_local_index_i32_route_anchor: Option<CanonicalValuesLocalIndexI32RouteBytecodeAnchor>,
+    /// Independent route identity for the nested New/Set Result form of the
+    /// Values local-index i32 profile. This must remain separate from the
+    /// straight-line Values anchor because its source CFG has three mutually
+    /// exclusive ownership paths.
+    values_local_index_i32_result_branch_route_anchor:
+        Option<CanonicalValuesLocalIndexI32ResultBranchRouteBytecodeAnchor>,
     /// Independent anchor for the sorted heterogeneous Values index-one
     /// String extraction profile.
     values_heterogeneous_string_index1_route_anchor:
@@ -3752,6 +3950,11 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     /// Independent identity for the exact no-query MapSetDropControl route.
     map_set_drop_control_route_anchor:
         Option<CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlRouteBytecodeAnchor>,
+    /// Independent identity for the Result-branch MapSetDropControl route.
+    /// This is a distinct anchor from the legacy straight-line profile and
+    /// seals both Result opcode sites plus the full emitted program snapshot.
+    map_set_drop_control_result_branch_route_anchor:
+        Option<CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlResultBranchRouteBytecodeAnchor>,
     /// Independent identity for the exact branch-local persistent-Set
     /// diamond. This anchor cannot borrow the straight-line Set/drop route.
     branch_local_set_diamond_route_anchor:
@@ -3770,6 +3973,11 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     /// proves emitted sites; this route anchor binds the admitted profile to
     /// the complete bytecode table.
     direct_print_route_anchor: Option<CanonicalOrdinaryMapOwnedAnyV2DirectPrintRouteBytecodeAnchor>,
+    /// Independent route identity for the nested Result DirectPrint profile.
+    /// It owns its own receipt and site bindings; the flat DirectPrint and
+    /// generic V2 ledgers cannot authorize any of its opcodes.
+    direct_print_result_route_anchor:
+        Option<CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRouteBytecodeAnchor>,
     /// Exact primitive-Map observer profile. Its anchor binds the narrow
     /// Checker observer receipts, route receipt, operation sites, operands,
     /// entry, and full emitted program independently of the lifecycle ledger.
@@ -3781,6 +3989,233 @@ pub(crate) struct CanonicalMapAnyOwnerV1BytecodeReceipt {
     /// receipt cannot be masked by a still-valid Map snapshot.
     expected_managed_any_cfg_receipt: bool,
     managed_any_cfg: Option<CanonicalManagedAnyCfgBytecodeReceipt>,
+}
+
+/// Private VM-boundary authority for fallible owned-Get V1 New/Set. The
+/// Checker V3 receipts and route manifest are captured only by the exact
+/// CheckedProgram/MIR adapter; the complete bytecode snapshot then seals the
+/// typed Result opcodes, descriptor constants, and control-flow replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalOrdinaryMapOwnedGetResultBranchV3RouteBytecodeAnchor {
+    expected_profile: &'static str,
+    receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    expected_manifest: String,
+    expected_entry: FuncIdx,
+    expected_program: String,
+    checker_receipts:
+        BTreeMap<crate::core::NodeId, crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+    result_type_id: String,
+    result_type_desc: String,
+    result_type_desc_hash: String,
+    result_shapes_snapshot: String,
+}
+
+impl CanonicalOrdinaryMapOwnedGetResultBranchV3RouteBytecodeAnchor {
+    fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        checker_receipts: BTreeMap<
+            crate::core::NodeId,
+            crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+        >,
+        result_type_id: String,
+        result_type_desc: String,
+        result_shapes_snapshot: String,
+    ) -> Result<Self, String> {
+        let expected_profile = crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;
+        if receipt.profile != expected_profile {
+            return Err(format!(
+                "owned-Get ResultBranchV3 bytecode anchor received route profile '{}'",
+                receipt.profile
+            ));
+        }
+        let anchor = Self {
+            expected_profile,
+            receipt: receipt.clone(),
+            expected_manifest: receipt.manifest_text()?,
+            expected_entry: entry,
+            expected_program: ordinary_map_owned_get_result_branch_v3_program_snapshot(
+                entry, functions,
+            ),
+            checker_receipts,
+            result_type_desc_hash: blake3::hash(result_type_desc.as_bytes())
+                .to_hex()
+                .to_string(),
+            result_type_id,
+            result_type_desc,
+            result_shapes_snapshot,
+        };
+        anchor.validate(entry, functions)?;
+        Ok(anchor)
+    }
+
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        if self.expected_profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+            || self.receipt.profile != self.expected_profile
+            || self.result_type_id
+                != crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+                    .as_str()
+        {
+            return Err(
+                "owned-Get ResultBranchV3 bytecode profile/type identity disagrees with its anchor"
+                    .into(),
+            );
+        }
+        let replayed = self.receipt.manifest_round_trip().map_err(|message| {
+            format!("owned-Get ResultBranchV3 route manifest replay failed: {message}")
+        })?;
+        if replayed != self.receipt
+            || self.receipt.manifest_text().ok().as_deref() != Some(self.expected_manifest.as_str())
+        {
+            return Err(
+                "owned-Get ResultBranchV3 route receipt disagrees with its immutable anchor".into(),
+            );
+        }
+        if self.result_type_desc.is_empty()
+            || blake3::hash(self.result_type_desc.as_bytes())
+                .to_hex()
+                .to_string()
+                != self.result_type_desc_hash
+        {
+            return Err(
+                "owned-Get ResultBranchV3 Result TypeDesc descriptor hash is invalid".into(),
+            );
+        }
+        let (expected_new, expected_set) = checker_receipt_result_counts(&self.checker_receipts)?;
+        let (actual_new, actual_set) =
+            ordinary_map_owned_get_result_branch_v3_opcode_counts(functions);
+        if (expected_new == 0 && expected_set == 0)
+            || (expected_new, expected_set) != (actual_new, actual_set)
+            || entry != self.expected_entry
+            || ordinary_map_owned_get_result_branch_v3_program_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "owned-Get ResultBranchV3 bytecode disagrees with its exact Checker/route snapshot"
+                    .into(),
+            );
+        }
+        validate_ordinary_map_owned_get_result_branch_v3_constants(
+            functions,
+            &self.result_type_id,
+            &self.result_type_desc,
+            &self.result_shapes_snapshot,
+        )
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(functions
+            .get(function_index as usize)
+            .and_then(|function| function.code.get(pc as usize))
+            .is_some_and(|op| matches!(op, Op::Move { rd: actual_rd, rs: actual_rs } if *actual_rd == rd && *actual_rs == rs)))
+    }
+}
+
+fn checker_receipt_result_counts(
+    receipts: &BTreeMap<crate::core::NodeId, crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt>,
+) -> Result<(usize, usize), String> {
+    use crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind as Action;
+    use crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion as Profile;
+
+    let mut counts = (0, 0);
+    for (owner, receipt) in receipts {
+        if &receipt.owner != owner
+            || receipt.profile_version != Profile::ResultBranchV3
+            || receipt.result_branches.is_empty()
+        {
+            return Err(
+                "owned-Get ResultBranchV3 anchor contains a stale or non-V3 Checker receipt".into(),
+            );
+        }
+        for branch in &receipt.result_branches {
+            match branch.kind {
+                Action::New => counts.0 += 1,
+                Action::Set => counts.1 += 1,
+                _ => {}
+            }
+        }
+    }
+    Ok(counts)
+}
+
+fn ordinary_map_owned_get_result_branch_v3_opcode_counts(
+    functions: &[FunctionProto],
+) -> (usize, usize) {
+    functions
+        .iter()
+        .flat_map(|function| &function.code)
+        .fold((0, 0), |mut counts, op| {
+            match op {
+                Op::MirOrdinaryMapOwnedGetI32StringV1NewResult { .. } => counts.0 += 1,
+                Op::MirOrdinaryMapOwnedGetI32StringV1SetResult { .. } => counts.1 += 1,
+                _ => {}
+            }
+            counts
+        })
+}
+
+fn ordinary_map_owned_get_result_branch_v3_program_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    format!("entry={entry};functions={functions:?}")
+}
+
+fn validate_ordinary_map_owned_get_result_branch_v3_constants(
+    functions: &[FunctionProto],
+    result_type_id: &str,
+    result_type_desc: &str,
+    result_shapes_snapshot: &str,
+) -> Result<(), String> {
+    let mut sites = 0usize;
+    for function in functions {
+        for op in &function.code {
+            let (result_type, type_desc, shapes) = match op {
+                Op::MirOrdinaryMapOwnedGetI32StringV1NewResult {
+                    result_type,
+                    type_desc,
+                    shapes,
+                    ..
+                }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1SetResult {
+                    result_type,
+                    type_desc,
+                    shapes,
+                    ..
+                } => (*result_type, *type_desc, *shapes),
+                _ => continue,
+            };
+            sites += 1;
+            let constant = |index: ConstIdx| {
+                function.constants.get(index as usize).ok_or_else(|| {
+                    "owned-Get ResultBranchV3 opcode references an absent constant".to_string()
+                })
+            };
+            if !matches!(constant(result_type)?, ConstValue::Str(value) if value == result_type_id)
+                || !matches!(constant(type_desc)?, ConstValue::Str(value) if value == result_type_desc)
+                || !matches!(constant(shapes)?, ConstValue::VariantShapes(value) if format!("{value:?}") == result_shapes_snapshot)
+            {
+                return Err(
+                    "owned-Get ResultBranchV3 opcode descriptor/shape constants disagree with the exact anchor".into(),
+                );
+            }
+        }
+    }
+    if sites == 0 {
+        return Err("owned-Get ResultBranchV3 anchor has no New/Set result opcode".into());
+    }
+    Ok(())
 }
 
 /// Distinct private proof plus immutable emitted-program/manifest anchor.
@@ -3839,6 +4274,66 @@ pub(crate) struct CanonicalValuesLocalIndexI32RouteBytecodeAnchor {
     expected_manifest: String,
     expected_entry: FuncIdx,
     expected_program: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesLocalIndexI32ResultBranchSetAnyResultBytecodeSite {
+    pub(crate) function: FuncIdx,
+    pub(crate) set_pc: u32,
+    pub(crate) set_rd: Reg,
+    pub(crate) set_ra: Reg,
+    pub(crate) set_key: Reg,
+    pub(crate) set_value: Reg,
+    pub(crate) key_text: String,
+    pub(crate) payload_type_id: String,
+    pub(crate) payload_descriptor_hash: String,
+    pub(crate) selection_bytes_hex: String,
+    pub(crate) selection_hash: String,
+    pub(crate) payload_tag: i32,
+    pub(crate) payload_size: u32,
+    pub(crate) payload_align: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite {
+    pub(crate) function: FuncIdx,
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+}
+
+/// Private VM-boundary identity for the exact nested Result Values profile.
+/// The anchor seals both its dedicated MIR route receipt and the complete
+/// emitted program, including the two Result dispatches and path-local Drops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesLocalIndexI32ResultBranchRouteBytecodeAnchor {
+    expected_profile: &'static str,
+    receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    expected_manifest: String,
+    expected_entry: FuncIdx,
+    move_sites: Vec<(FuncIdx, u32, Reg, Reg)>,
+    values_site: CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite,
+    set_any_result_site: CanonicalValuesLocalIndexI32ResultBranchSetAnyResultBytecodeSite,
+    expected_program: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2SetAnyResultRuntimeSites {
+    pub(crate) function: FuncIdx,
+    pub(crate) set_pc: u32,
+    pub(crate) set_rd: Reg,
+    pub(crate) set_ra: Reg,
+    pub(crate) set_key: Reg,
+    pub(crate) set_value: Reg,
+    pub(crate) key_text: String,
+    pub(crate) payload_type_id: String,
+    pub(crate) payload_binding: Option<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+    pub(crate) payload_descriptor_hash: String,
+    pub(crate) selection_bytes_hex: String,
+    pub(crate) selection_hash: String,
+    pub(crate) payload_tag: i32,
+    pub(crate) payload_size: u32,
+    pub(crate) payload_align: u32,
 }
 
 /// Private VM-boundary identity for the two-entry heterogeneous Values
@@ -4004,6 +4499,52 @@ pub(crate) struct CanonicalValuesCrosscallStringCallerIndex1RouteBytecodeAnchor 
     receipt: crate::core::mir::CanonicalMirRouteReceipt,
     proofs: Vec<crate::core::mir::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerMirReceipt>,
     bindings: Vec<CanonicalValuesCrosscallStringCallerIndex1BytecodeBinding>,
+    expected_manifest: String,
+    expected_bindings: String,
+    expected_entry: FuncIdx,
+    expected_program: String,
+}
+
+/// One exact emitted instruction in the Result-branch Values producer/caller
+/// route.  This has its own type so a straight-line V1/V2 Values receipt
+/// cannot be transplanted into a Result route anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesResultCrosscallStringCallerBytecodeSite {
+    pub(crate) owner: crate::core::NodeId,
+    pub(crate) function: FuncIdx,
+    pub(crate) instruction: crate::core::mir::MirInstructionId,
+    pub(crate) pc: u32,
+    pub(crate) op: Op,
+}
+
+/// Exact bytecode binding for the Result producer plus its String caller.
+/// It seals the required MIR instruction identities and the concrete
+/// producer/caller function indices, while the route anchor snapshots the
+/// complete emitted function table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesResultCrosscallStringCallerBytecodeBinding {
+    pub(crate) producer_owner: crate::core::NodeId,
+    pub(crate) caller_owner: crate::core::NodeId,
+    pub(crate) call_target: crate::core::NodeId,
+    pub(crate) producer_function: FuncIdx,
+    pub(crate) caller_function: FuncIdx,
+    pub(crate) proof_digest: String,
+    pub(crate) caller_unpack_pc: u32,
+    pub(crate) caller_unpack_rd: Reg,
+    pub(crate) caller_unpack_ra: Reg,
+    pub(crate) caller_unpack_index: Reg,
+    pub(crate) sites: Vec<CanonicalValuesResultCrosscallStringCallerBytecodeSite>,
+}
+
+/// Dedicated bytecode/VM route anchor for a Result-branch Values producer
+/// and its cross-call String caller. V3 and V4 use distinct route profiles
+/// and the binding must match the one exact Checker/MIR proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalValuesResultCrosscallStringCallerRouteBytecodeAnchor {
+    expected_profile: &'static str,
+    receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    proofs: Vec<crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt>,
+    bindings: Vec<CanonicalValuesResultCrosscallStringCallerBytecodeBinding>,
     expected_manifest: String,
     expected_bindings: String,
     expected_entry: FuncIdx,
@@ -4245,6 +4786,54 @@ pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRoute
     expected_manifest: String,
     expected_entry: FuncIdx,
     expected_program: String,
+    /// Full Checker path authority for the explicit New/Set Result branch
+    /// shape. This is sourced from the embedded owner-chain receipt only
+    /// after the dedicated Checker/MIR replay succeeds.
+    expected_result_branch: Option<
+        crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+    >,
+    /// Exact bytecode operation/switch sites projected from the validated
+    /// MIR function. New SetAnyResult execution is impossible without this
+    /// branch-local binding.
+    result_branch_sites:
+        Option<CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites>,
+    expected_payload_selection_digest: Option<String>,
+}
+
+/// Exact branch-local executable sites for the explicit-Result
+/// ComputedStringKeyOwnerChain route. Keeping this on the existing route
+/// anchor prevents a detached bytecode-only token from authorizing a forged
+/// New/SetAnyResult graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites {
+    pub(crate) function: FuncIdx,
+    pub(crate) new_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) set_instruction: crate::core::mir::MirInstructionId,
+    pub(crate) new_pc: u32,
+    pub(crate) new_rd: Reg,
+    pub(crate) set_pc: u32,
+    pub(crate) set_rd: Reg,
+    pub(crate) set_ra: Reg,
+    pub(crate) set_key: Reg,
+    pub(crate) set_value: Reg,
+    pub(crate) key_text: String,
+    pub(crate) new_switch_start_pc: u32,
+    pub(crate) new_switch_end_pc: u32,
+    pub(crate) new_ok_target_pc: u32,
+    pub(crate) new_err_target_pc: u32,
+    pub(crate) set_switch_start_pc: u32,
+    pub(crate) set_switch_end_pc: u32,
+    pub(crate) set_ok_target_pc: u32,
+    pub(crate) set_err_target_pc: u32,
+    pub(crate) result_type_desc_digest: String,
+    pub(crate) payload_binding: CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+    pub(crate) payload_descriptor_hash: String,
+    pub(crate) selection_digest: String,
+    pub(crate) selection_bytes_hex: String,
+    pub(crate) selection_hash: String,
+    pub(crate) payload_tag: i32,
+    pub(crate) payload_size: u32,
+    pub(crate) payload_align: u32,
 }
 
 /// Private VM-boundary identity for the exact Checker-sealed CheckedGet
@@ -4342,6 +4931,18 @@ pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlRouteBytecodeAn
     expected_program: String,
 }
 
+/// Private VM-boundary identity for the exact Result-valued
+/// MapSetDropControl profile. The route receipt and full bytecode snapshot
+/// are intentionally independent from the legacy no-Result anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlResultBranchRouteBytecodeAnchor {
+    expected_profile: &'static str,
+    receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    expected_manifest: String,
+    expected_entry: FuncIdx,
+    expected_program: String,
+}
+
 /// Private VM-boundary identity for the exact Checker-sealed
 /// branch-local persistent-Set diamond. The route receipt binds the
 /// Checker/MIR proof, while the snapshot seals its complete emitted control
@@ -4389,6 +4990,139 @@ pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintRouteBytecodeAnchor {
     expected_manifest: String,
     expected_entry: FuncIdx,
     expected_program: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultNewBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetI32Binding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) key: Reg,
+    pub(crate) value: Reg,
+    pub(crate) key_text: String,
+    pub(crate) value_i32: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetStringBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) key: Reg,
+    pub(crate) value: Reg,
+    pub(crate) key_text: String,
+    pub(crate) value_text: String,
+    pub(crate) string_type_id: ConstIdx,
+    pub(crate) string_type_desc_hash: ConstIdx,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultGetAnyBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+    pub(crate) key: Reg,
+    pub(crate) key_text: String,
+    pub(crate) pair_local: crate::core::ir::ResolvedLocalId,
+    pub(crate) hit_payload: CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+    pub(crate) miss_payload: CanonicalOrdinaryMapOwnedAnyV2PayloadBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultPrintlnBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) pair: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSizeBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) ra: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRootMoveBinding {
+    pub(crate) pc: u32,
+    pub(crate) rd: Reg,
+    pub(crate) rs: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRootDropBinding {
+    pub(crate) pc: u32,
+    pub(crate) ra: Reg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultPairDropBinding {
+    pub(crate) pc: u32,
+    pub(crate) ra: Reg,
+}
+
+/// All concrete instruction sites derived from the exact MIR receipt. The
+/// adapter passes this value only after validating the whole MIR route and
+/// proving each site against its MIR instruction and emitted PC range.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultBytecodeBindings {
+    pub(crate) new_result: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultNewBinding,
+    )>,
+    pub(crate) set_i32: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetI32Binding,
+    )>,
+    pub(crate) set_string: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetStringBinding,
+    )>,
+    pub(crate) get_any: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultGetAnyBinding,
+    )>,
+    pub(crate) println: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultPrintlnBinding,
+    )>,
+    pub(crate) size: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSizeBinding,
+    )>,
+    pub(crate) root_moves: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRootMoveBinding,
+    )>,
+    pub(crate) root_drops: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRootDropBinding,
+    )>,
+    pub(crate) pair_drops: Vec<(
+        FuncIdx,
+        CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultPairDropBinding,
+    )>,
+}
+
+/// Independent full-program bytecode anchor for the exact nested Result
+/// DirectPrint route. The embedded Checker receipt and all operation/owner
+/// sites are sealed separately from the ordinary V2 action ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRouteBytecodeAnchor {
+    expected_profile: &'static str,
+    receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    proof: crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultReceipt,
+    expected_manifest: String,
+    expected_entry: FuncIdx,
+    expected_program: String,
+    bindings: CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultBytecodeBindings,
+    expected_bindings: String,
 }
 
 fn ordinary_map_owned_any_v2_direct_print_bytecode_snapshot(
@@ -4474,6 +5208,381 @@ impl CanonicalOrdinaryMapOwnedAnyV2DirectPrintRouteBytecodeAnchor {
     #[cfg(test)]
     pub(crate) fn corrupt_profile_for_test_only(&mut self) {
         self.receipt.profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND.into();
+    }
+}
+
+fn ordinary_map_owned_any_v2_direct_print_result_bytecode_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile={};version=1;entry={entry};functions={}",
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE,
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn ordinary_map_owned_any_v2_direct_print_result_bindings_digest(
+    bindings: &CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultBytecodeBindings,
+) -> String {
+    blake3::hash(format!("{bindings:?}").as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+impl CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRouteBytecodeAnchor {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        proof: &crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultReceipt,
+        bindings: CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultBytecodeBindings,
+    ) -> Result<Self, String> {
+        let expected_profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE;
+        if receipt.profile != expected_profile {
+            return Err(format!(
+                "DirectPrintResult bytecode anchor received route profile '{}'",
+                receipt.profile
+            ));
+        }
+        if proof.owner.0 != "function:main" || proof.source_body_commitment.is_empty() {
+            return Err(
+                "DirectPrintResult bytecode anchor received an incomplete Checker proof".into(),
+            );
+        }
+        let replayed = receipt.manifest_round_trip().map_err(|message| {
+            format!("DirectPrintResult route manifest replay failed: {message}")
+        })?;
+        if replayed != *receipt {
+            return Err("DirectPrintResult route receipt changed during manifest replay".into());
+        }
+        let expected_manifest = receipt.manifest_text().map_err(|message| {
+            format!("DirectPrintResult route manifest render failed: {message}")
+        })?;
+        let anchor = Self {
+            expected_profile,
+            receipt: receipt.clone(),
+            proof: proof.clone(),
+            expected_manifest,
+            expected_entry: entry,
+            expected_program: ordinary_map_owned_any_v2_direct_print_result_bytecode_snapshot(
+                entry, functions,
+            ),
+            expected_bindings: ordinary_map_owned_any_v2_direct_print_result_bindings_digest(
+                &bindings,
+            ),
+            bindings,
+        };
+        anchor.validate(entry, functions)?;
+        Ok(anchor)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.expected_profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE
+            || self.receipt.profile != self.expected_profile
+        {
+            return Err(
+                "DirectPrintResult bytecode route profile disagrees with its private anchor".into(),
+            );
+        }
+        if self.proof.owner.0 != "function:main" || self.proof.source_body_commitment.is_empty() {
+            return Err("DirectPrintResult Checker proof is incomplete".into());
+        }
+        let replayed = self.receipt.manifest_round_trip().map_err(|message| {
+            format!("DirectPrintResult route manifest replay failed at VM boundary: {message}")
+        })?;
+        if replayed != self.receipt
+            || self.receipt.manifest_text().ok().as_deref() != Some(self.expected_manifest.as_str())
+        {
+            return Err(
+                "DirectPrintResult route receipt disagrees with its immutable manifest anchor"
+                    .into(),
+            );
+        }
+        if entry != self.expected_entry
+            || ordinary_map_owned_any_v2_direct_print_result_bytecode_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "DirectPrintResult bytecode disagrees with its exact route snapshot".into(),
+            );
+        }
+        if ordinary_map_owned_any_v2_direct_print_result_bindings_digest(&self.bindings)
+            != self.expected_bindings
+        {
+            return Err("DirectPrintResult bytecode site bindings changed after capture".into());
+        }
+        self.validate_sites(entry, functions)
+    }
+
+    fn validate_sites(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let fail =
+            |message: &str| format!("DirectPrintResult bytecode site binding rejected: {message}");
+        if functions.len() != 1 || entry as usize >= functions.len() {
+            return Err(fail("route must bind exactly the main function"));
+        }
+        let expected_set_count = match &self.proof.set_payload {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::I32(_) => 1,
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::String(_) => 1,
+        };
+        if self.bindings.new_result.len() != 1
+            || self.bindings.set_i32.len() + self.bindings.set_string.len() != expected_set_count
+            || self.bindings.get_any.len() != 1
+            || self.bindings.println.len() != 1
+            || self.bindings.size.len() > 1
+            || self.bindings.root_moves.len() != 2
+            || self.bindings.root_drops.len() != 3
+            || self.bindings.pair_drops.len() != 1
+        {
+            return Err(fail(
+                "required operation and settlement site census differs",
+            ));
+        }
+        let set_payload_matches = match (
+            &self.proof.set_payload,
+            self.bindings.set_i32.as_slice(),
+            self.bindings.set_string.as_slice(),
+        ) {
+            (
+                crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::I32(expected),
+                [(_, binding)],
+                [],
+            ) => *expected == i64::from(binding.value_i32),
+            (
+                crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::String(
+                    expected,
+                ),
+                [],
+                [(_, binding)],
+            ) => expected == &binding.value_text,
+            _ => false,
+        };
+        if !set_payload_matches {
+            return Err(fail("Set payload binding disagrees with the Checker proof"));
+        }
+        if self
+            .bindings
+            .set_i32
+            .iter()
+            .any(|(_, binding)| binding.key_text != self.proof.set_key_value)
+            || self.bindings.set_string.iter().any(|(_, binding)| {
+                binding.key_text != self.proof.set_key_value
+                    || binding.value_text
+                        != match &self.proof.set_payload {
+                            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::String(value) => value,
+                            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::I32(_) => "",
+                        }
+            })
+        {
+            return Err(fail(
+                "Set key or String payload binding disagrees with the Checker proof",
+            ));
+        }
+        let mut sites = std::collections::BTreeSet::new();
+        let main = &functions[entry as usize];
+        let mut check_pc = |function: FuncIdx, pc: u32| -> Result<(), String> {
+            if function != entry || !sites.insert(pc) {
+                return Err(fail("site is outside main or duplicates another site"));
+            }
+            main.code
+                .get(pc as usize)
+                .map(|_| ())
+                .ok_or_else(|| fail("site PC is outside the bytecode body"))
+        };
+        for (function, binding) in &self.bindings.new_result {
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2NewResult { rd }) if *rd == binding.rd)
+            {
+                return Err(fail(
+                    "NewResult binding does not match its opcode/register site",
+                ));
+            }
+        }
+        for (function, binding) in &self.bindings.set_i32 {
+            if binding.key_text.is_empty() {
+                return Err(fail(
+                    "SetResult<i32> binding does not match its opcode/register site",
+                ));
+            }
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, ra, key, value }) if (*rd, *ra, *key, *value) == (binding.rd, binding.ra, binding.key, binding.value))
+            {
+                return Err(fail(
+                    "SetResult<i32> binding does not match its opcode/register site",
+                ));
+            }
+        }
+        for (function, binding) in &self.bindings.set_string {
+            let proto = if *function == entry {
+                main
+            } else {
+                return Err(fail("SetStringResult function is outside main"));
+            };
+            let expected_string =
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+            let constants_match = matches!(proto.constants.get(binding.string_type_id as usize), Some(ConstValue::Str(value)) if value == expected_string.as_str())
+                && matches!(proto.constants.get(binding.string_type_desc_hash as usize), Some(ConstValue::Str(value)) if is_canonical_digest(value));
+            if binding.key_text.is_empty() || !constants_match {
+                return Err(fail(
+                    "SetStringResult binding does not match its opcode/register/TypeDesc site",
+                ));
+            }
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2SetStringResult { rd, ra, key, value, string_type_id, string_type_desc_hash }) if (*rd, *ra, *key, *value, *string_type_id, *string_type_desc_hash) == (binding.rd, binding.ra, binding.key, binding.value, binding.string_type_id, binding.string_type_desc_hash))
+            {
+                return Err(fail(
+                    "SetStringResult binding does not match its opcode/register/TypeDesc site",
+                ));
+            }
+        }
+        let get_any = self
+            .bindings
+            .get_any
+            .first()
+            .map(|(_, binding)| binding)
+            .ok_or_else(|| fail("GetAny binding is absent"))?;
+        let (expected_hit_type, expected_hit_kind) = match &self.proof.set_payload {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::I32(_) => (
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32),
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
+            ),
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::String(_) => (
+                crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String),
+                CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String,
+            ),
+        };
+        let expected_hit_digest_matches = match &self.proof.set_payload {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::I32(_) => true,
+            crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintSetPayload::String(_) => self
+                .bindings
+                .set_string
+                .first()
+                .is_some_and(|(function, binding)| {
+                    *function == entry
+                        && matches!(
+                            main.constants.get(binding.string_type_desc_hash as usize),
+                            Some(ConstValue::Str(digest))
+                                if digest == &get_any.hit_payload.type_desc_digest
+                        )
+                }),
+        };
+        if get_any.key_text.is_empty()
+            || get_any.key_text != self.proof.get_key_value
+            || get_any.pair_local != self.proof.pair_local
+            || get_any.hit_payload.type_id != self.proof.set_payload_type
+            || get_any.hit_payload.type_id != expected_hit_type
+            || get_any.hit_payload.kind != expected_hit_kind
+            || !expected_hit_digest_matches
+            || get_any.miss_payload.type_id
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            || get_any.miss_payload.kind != CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+            || !is_canonical_digest(&get_any.hit_payload.type_desc_digest)
+            || !is_canonical_digest(&get_any.miss_payload.type_desc_digest)
+        {
+            return Err(fail(
+                "GetAny binding does not match its exact route/type site",
+            ));
+        }
+        check_pc(self.bindings.get_any[0].0, get_any.pc)?;
+        if !matches!(
+            main.code.get(get_any.pc as usize),
+            Some(Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key })
+                if (*rd, *ra, *key) == (get_any.rd, get_any.ra, get_any.key)
+        ) {
+            return Err(fail(
+                "GetAny binding does not match its exact route/type site",
+            ));
+        }
+        for (function, binding) in &self.bindings.println {
+            if binding.pair != get_any.rd {
+                return Err(fail(
+                    "Println binding does not borrow the exact GetAny pair",
+                ));
+            }
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2Println { rd, pair }) if (*rd, *pair) == (binding.rd, binding.pair))
+            {
+                return Err(fail(
+                    "Println binding does not borrow the exact GetAny pair",
+                ));
+            }
+        }
+        for (function, binding) in &self.bindings.size {
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2Size { rd, ra }) if (*rd, *ra) == (binding.rd, binding.ra))
+            {
+                return Err(fail("Size binding does not match its opcode/register site"));
+            }
+        }
+        for (function, binding) in &self.bindings.root_moves {
+            if binding.rd == binding.rs {
+                return Err(fail(
+                    "root Move binding does not match its opcode/register site",
+                ));
+            }
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::Move { rd, rs }) if (*rd, *rs) == (binding.rd, binding.rs))
+            {
+                return Err(fail(
+                    "root Move binding does not match its opcode/register site",
+                ));
+            }
+        }
+        for (function, binding) in &self.bindings.root_drops {
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::MirOrdinaryMapOwnedAnyV2Drop { ra }) if *ra == binding.ra)
+            {
+                return Err(fail(
+                    "root Drop binding does not match its opcode/register site",
+                ));
+            }
+        }
+        for (function, binding) in &self.bindings.pair_drops {
+            if binding.ra != get_any.rd {
+                return Err(fail(
+                    "pair Drop binding does not match its tuple opcode/register site",
+                ));
+            }
+            check_pc(*function, binding.pc)?;
+            if !matches!(main.code.get(binding.pc as usize), Some(Op::DropAggregate { ra, arity: 2 }) if *ra == binding.ra)
+            {
+                return Err(fail(
+                    "pair Drop binding does not match its tuple opcode/register site",
+                ));
+            }
+        }
+        let code = &main.code;
+        let count_kind =
+            |predicate: &dyn Fn(&Op) -> bool| code.iter().filter(|op| predicate(op)).count();
+        if count_kind(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. })) != 1
+            || count_kind(&|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                )
+            }) != expected_set_count
+            || count_kind(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. })) != 1
+            || count_kind(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Println { .. })) != 1
+            || count_kind(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Drop { .. })) != 3
+            || count_kind(&|op| matches!(op, Op::DropAggregate { arity: 2, .. })) != 1
+        {
+            return Err(fail(
+                "bytecode operation census differs from the nested Result route",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -4691,6 +5800,74 @@ fn map_set_drop_control_opcode_counts(functions: &[FunctionProto]) -> (usize, us
         }
     }
     (new_count, set_count, drop_count, other_v2_count)
+}
+
+fn map_set_drop_control_result_branch_bytecode_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile={};version=1;entry={entry};functions={}",
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE,
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn map_set_drop_control_result_branch_opcode_counts(
+    functions: &[FunctionProto],
+) -> (usize, usize, usize, usize) {
+    let mut new_result_count = 0;
+    let mut set_any_result_count = 0;
+    let mut root_drop_count = 0;
+    let mut other_v2_count = 0;
+    for op in functions.iter().flat_map(|function| &function.code) {
+        match op {
+            Op::MirOrdinaryMapOwnedAnyV2NewResult { .. } => new_result_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. } => set_any_result_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2Drop { .. } => root_drop_count += 1,
+            op if matches!(
+                op,
+                Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Size { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Contains { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Println { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Values { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Keys { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2IsEmpty { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2ValuesClone { .. }
+            ) =>
+            {
+                other_v2_count += 1
+            }
+            _ => {}
+        }
+    }
+    (
+        new_result_count,
+        set_any_result_count,
+        root_drop_count,
+        other_v2_count,
+    )
 }
 
 fn branch_local_set_diamond_bytecode_snapshot(
@@ -5820,6 +6997,92 @@ impl CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlRouteBytecodeAnchor {
     }
 }
 
+impl CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlResultBranchRouteBytecodeAnchor {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<Self, String> {
+        let expected_profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
+        if receipt.profile != expected_profile {
+            return Err(format!(
+                "MapSetDropControlResult bytecode anchor received route profile '{}'",
+                receipt.profile
+            ));
+        }
+        let counts = map_set_drop_control_result_branch_opcode_counts(functions);
+        if counts != (1, 1, 3, 0) {
+            return Err(format!(
+                "MapSetDropControlResult route requires exactly one NewResult, one SetAnyResult, three root Drops, and no other V2 opcode; found {counts:?}"
+            ));
+        }
+        let replayed = receipt.manifest_round_trip().map_err(|message| {
+            format!("MapSetDropControlResult manifest replay failed: {message}")
+        })?;
+        if replayed != *receipt {
+            return Err(
+                "MapSetDropControlResult route receipt changed during manifest replay".into(),
+            );
+        }
+        let expected_manifest = receipt.manifest_text().map_err(|message| {
+            format!("MapSetDropControlResult manifest render failed: {message}")
+        })?;
+        Ok(Self {
+            expected_profile,
+            receipt: receipt.clone(),
+            expected_manifest,
+            expected_entry: entry,
+            expected_program: map_set_drop_control_result_branch_bytecode_snapshot(
+                entry, functions,
+            ),
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        if self.expected_profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE
+            || self.receipt.profile != self.expected_profile
+        {
+            return Err(
+                "MapSetDropControlResult bytecode profile disagrees with its private anchor"
+                    .into(),
+            );
+        }
+        let replayed = self.receipt.manifest_round_trip().map_err(|message| {
+            format!("MapSetDropControlResult manifest replay failed at VM boundary: {message}")
+        })?;
+        if replayed != self.receipt
+            || self.receipt.manifest_text().ok().as_deref() != Some(self.expected_manifest.as_str())
+        {
+            return Err(
+                "MapSetDropControlResult route receipt disagrees with its immutable anchor".into(),
+            );
+        }
+        if entry != self.expected_entry
+            || map_set_drop_control_result_branch_opcode_counts(functions) != (1, 1, 3, 0)
+            || map_set_drop_control_result_branch_bytecode_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "MapSetDropControlResult bytecode disagrees with its exact Checker route snapshot"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_profile_for_test_only(&mut self) {
+        self.receipt.profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE.into();
+    }
+}
+
 impl CanonicalOrdinaryMapOwnedAnyV2BranchLocalSetDiamondRouteBytecodeAnchor {
     pub(crate) fn capture(
         entry: FuncIdx,
@@ -6170,6 +7433,13 @@ impl CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRouteBytecodeAncho
         entry: FuncIdx,
         functions: &[FunctionProto],
         receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        result_branch: Option<
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+        >,
+        result_branch_sites: Option<
+            CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites,
+        >,
+        payload_selection_digest: Option<String>,
     ) -> Result<Self, String> {
         let expected_profile =
             crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE;
@@ -6190,12 +7460,44 @@ impl CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRouteBytecodeAncho
         let expected_manifest = receipt.manifest_text().map_err(|message| {
             format!("ComputedStringKeyOwnerChain manifest render failed: {message}")
         })?;
+        if result_branch.is_some() != result_branch_sites.is_some()
+            || result_branch_sites.is_some() != payload_selection_digest.is_some()
+        {
+            return Err(
+                "ComputedStringKeyOwnerChain Result branch, bytecode sites, and Core selection must be bound together".into(),
+            );
+        }
+        if let Some((branch, sites)) = result_branch.as_ref().zip(result_branch_sites.as_ref()) {
+            validate_computed_string_key_owner_chain_result_bytecode_sites(
+                entry,
+                functions,
+                branch,
+                sites,
+                payload_selection_digest.as_deref(),
+            )?;
+        } else if functions.iter().any(|function| {
+            function.code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                )
+            })
+        }) {
+            return Err(
+                "ComputedStringKeyOwnerChain Result bytecode has no exact Checker branch receipt"
+                    .into(),
+            );
+        }
         Ok(Self {
             expected_profile,
             receipt: receipt.clone(),
             expected_manifest,
             expected_entry: entry,
             expected_program: computed_string_key_owner_chain_bytecode_snapshot(entry, functions),
+            expected_result_branch: result_branch,
+            result_branch_sites,
+            expected_payload_selection_digest: payload_selection_digest,
         })
     }
 
@@ -6223,6 +7525,25 @@ impl CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRouteBytecodeAncho
                 "ComputedStringKeyOwnerChain route receipt disagrees with its immutable manifest anchor"
                     .into(),
             );
+        }
+        if self.expected_result_branch.is_some() != self.result_branch_sites.is_some()
+            || self.result_branch_sites.is_some()
+                != self.expected_payload_selection_digest.is_some()
+        {
+            return Err("ComputedStringKeyOwnerChain Result branch anchor is incomplete".into());
+        }
+        if let Some((branch, sites)) = self
+            .expected_result_branch
+            .as_ref()
+            .zip(self.result_branch_sites.as_ref())
+        {
+            validate_computed_string_key_owner_chain_result_bytecode_sites(
+                entry,
+                functions,
+                branch,
+                sites,
+                self.expected_payload_selection_digest.as_deref(),
+            )?;
         }
         if entry != self.expected_entry
             || computed_string_key_owner_chain_bytecode_snapshot(entry, functions)
@@ -6253,6 +7574,355 @@ impl CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRouteBytecodeAncho
             .mir_digest
             .replace_range(..1, &replacement.to_string());
     }
+}
+
+fn computed_string_key_owner_chain_result_switch_target(code: &[Op], pc: usize) -> Option<usize> {
+    let offset = match code.get(pc)? {
+        Op::Jmp { offset } | Op::JmpIf { offset, .. } | Op::JmpIfNot { offset, .. } => {
+            i64::from(*offset)
+        }
+        _ => return None,
+    };
+    let next = i64::try_from(pc).ok()?.checked_add(1)?;
+    let target = usize::try_from(next.checked_add(offset)?).ok()?;
+    (target <= code.len()).then_some(target)
+}
+
+fn decode_computed_string_key_owner_chain_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2)
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    text.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let nibble = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            Some((nibble(pair[0])? << 4) | nibble(pair[1])?)
+        })
+        .collect()
+}
+
+fn validate_computed_string_key_owner_chain_selection_frame(
+    sites: &CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites,
+) -> Result<(), String> {
+    let fail = |message: &str| {
+        format!("ComputedStringKeyOwnerChain Core selection binding rejected: {message}")
+    };
+    if !is_canonical_digest(&sites.selection_digest)
+        || !is_canonical_digest(&sites.selection_hash)
+        || !is_canonical_digest(&sites.payload_descriptor_hash)
+        || !is_canonical_digest(&sites.payload_binding.type_desc_digest)
+        || !is_canonical_digest(&sites.result_type_desc_digest)
+    {
+        return Err(fail(
+            "one or more TypeDesc/selection digests are noncanonical",
+        ));
+    }
+    let frame = decode_computed_string_key_owner_chain_hex(&sites.selection_bytes_hex)
+        .ok_or_else(|| fail("selection frame is not lowercase hexadecimal"))?;
+    let expected_hash = decode_computed_string_key_owner_chain_hex(&sites.selection_hash)
+        .ok_or_else(|| fail("selection hash is not lowercase hexadecimal"))?;
+    let payload_hash =
+        decode_computed_string_key_owner_chain_hex(&sites.payload_descriptor_hash)
+            .ok_or_else(|| fail("payload TypeDesc closure hash is not lowercase hexadecimal"))?;
+    if expected_hash.len() != 32 || payload_hash.len() != 32 || frame.len() < 8 {
+        return Err(fail("selection header or hash has the wrong size"));
+    }
+    let version = u32::from_be_bytes(
+        frame[0..4]
+            .try_into()
+            .map_err(|_| fail("selection version is truncated"))?,
+    );
+    let count = u32::from_be_bytes(
+        frame[4..8]
+            .try_into()
+            .map_err(|_| fail("selection count is truncated"))?,
+    );
+    if version != 1 || count == 0 {
+        return Err(fail("selection frame is not a nonempty version-1 table"));
+    }
+    let mut cursor = 8_usize;
+    let mut previous_type_id: Option<Vec<u8>> = None;
+    let mut found_payload = false;
+    let mut record_bytes = Vec::new();
+    for _ in 0..count {
+        let length_end = cursor
+            .checked_add(8)
+            .ok_or_else(|| fail("frame offset overflow"))?;
+        let length_bytes = frame
+            .get(cursor..length_end)
+            .ok_or_else(|| fail("TypeId length is truncated"))?;
+        let type_id_len = usize::try_from(u64::from_be_bytes(
+            length_bytes
+                .try_into()
+                .map_err(|_| fail("TypeId length is malformed"))?,
+        ))
+        .map_err(|_| fail("TypeId length exceeds address space"))?;
+        let type_id_end = length_end
+            .checked_add(type_id_len)
+            .ok_or_else(|| fail("frame offset overflow"))?;
+        let tag_end = type_id_end
+            .checked_add(4)
+            .ok_or_else(|| fail("frame offset overflow"))?;
+        let digest_end = tag_end
+            .checked_add(32)
+            .ok_or_else(|| fail("frame offset overflow"))?;
+        let type_id = frame
+            .get(length_end..type_id_end)
+            .ok_or_else(|| fail("TypeId is truncated"))?;
+        let tag_bytes = frame
+            .get(type_id_end..tag_end)
+            .ok_or_else(|| fail("payload tag is truncated"))?;
+        let descriptor_hash = frame
+            .get(tag_end..digest_end)
+            .ok_or_else(|| fail("descriptor hash is truncated"))?;
+        let tag = i32::from_be_bytes(
+            tag_bytes
+                .try_into()
+                .map_err(|_| fail("payload tag is malformed"))?,
+        );
+        if type_id.is_empty()
+            || !matches!(tag, 1..=5)
+            || previous_type_id
+                .as_deref()
+                .is_some_and(|previous| previous >= type_id)
+        {
+            return Err(fail("selection TypeIds/tags are not canonical and unique"));
+        }
+        if type_id == sites.payload_binding.type_id.as_str().as_bytes() {
+            if tag != sites.payload_tag || descriptor_hash != payload_hash.as_slice() {
+                return Err(fail(
+                    "selected Set TypeDesc differs from its runtime ABI record",
+                ));
+            }
+            found_payload = true;
+        }
+        previous_type_id = Some(type_id.to_vec());
+        record_bytes.extend_from_slice(&frame[cursor..digest_end]);
+        cursor = digest_end;
+    }
+    if cursor != frame.len() || !found_payload {
+        return Err(fail(
+            "selection frame has trailing bytes or omits the selected payload",
+        ));
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"mimi-managed-any-payload-v2:admitted-descriptor-set:v1\n");
+    hasher.update(&record_bytes);
+    if hasher.finalize().as_bytes().as_slice() != expected_hash.as_slice() {
+        return Err(fail(
+            "selection frame digest does not match its descriptor records",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_computed_string_key_owner_chain_switch(
+    proto: &FunctionProto,
+    start_pc: u32,
+    end_pc: u32,
+    scrutinee: Reg,
+    ok_target_pc: u32,
+    err_target_pc: u32,
+    role: &str,
+) -> Result<(), String> {
+    let fail = |message: &str| {
+        format!("ComputedStringKeyOwnerChain {role} SwitchMove binding rejected: {message}")
+    };
+    let start = usize::try_from(start_pc).map_err(|_| fail("start PC exceeds address space"))?;
+    let end = usize::try_from(end_pc).map_err(|_| fail("end PC exceeds address space"))?;
+    let ok_target =
+        usize::try_from(ok_target_pc).map_err(|_| fail("Ok target PC exceeds address space"))?;
+    let err_target =
+        usize::try_from(err_target_pc).map_err(|_| fail("Err target PC exceeds address space"))?;
+    if start >= end
+        || end > proto.code.len()
+        || ok_target >= proto.code.len()
+        || err_target >= proto.code.len()
+    {
+        return Err(fail("switch range or arm target is outside the function"));
+    }
+    let mut tests = Vec::new();
+    for pc in start..end {
+        if let Op::IsVariant { ra, tag, .. } = &proto.code[pc] {
+            if *ra == scrutinee {
+                let tag = match proto.constants.get(*tag as usize) {
+                    Some(ConstValue::Str(tag)) => tag.as_str(),
+                    _ => return Err(fail("variant test has no canonical string tag")),
+                };
+                tests.push((pc, tag));
+            }
+        }
+    }
+    if tests.len() != 2 || tests[0].1 != "Ok" || tests[1].1 != "Err" {
+        return Err(fail(
+            "switch must test exactly Ok then Err on its operation result",
+        ));
+    }
+    let ok_test = tests[0].0;
+    let err_test = tests[1].0;
+    for test in [ok_test, err_test] {
+        let Some(Op::IsVariant {
+            rd: condition, ra, ..
+        }) = proto.code.get(test)
+        else {
+            return Err(fail("variant test disappeared"));
+        };
+        if *ra != scrutinee
+            || !matches!(proto.code.get(test + 1), Some(Op::JmpIfNot { ra, .. }) if ra == condition)
+        {
+            return Err(fail(
+                "variant test is not followed by its exact conditional branch",
+            ));
+        }
+    }
+    if computed_string_key_owner_chain_result_switch_target(&proto.code, ok_test + 1)
+        != Some(err_test)
+        || computed_string_key_owner_chain_result_switch_target(&proto.code, err_test + 1)
+            != Some(end)
+    {
+        return Err(fail(
+            "Ok/Err conditional targets do not match the SwitchMove range",
+        ));
+    }
+    let jump_targets = |range: std::ops::Range<usize>| -> Vec<Option<usize>> {
+        range
+            .filter(|&pc| matches!(proto.code.get(pc), Some(Op::Jmp { .. })))
+            .map(|pc| computed_string_key_owner_chain_result_switch_target(&proto.code, pc))
+            .collect()
+    };
+    if jump_targets(ok_test + 2..err_test).as_slice() != [Some(ok_target)]
+        || jump_targets(err_test + 2..end).as_slice() != [Some(err_target)]
+    {
+        return Err(fail(
+            "Ok/Err edge jumps do not resolve to their receipt targets",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_computed_string_key_owner_chain_result_bytecode_sites(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+    branch: &crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+    sites: &CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites,
+    payload_selection_digest: Option<&str>,
+) -> Result<(), String> {
+    let fail = |message: &str| {
+        format!("ComputedStringKeyOwnerChain Result bytecode site rejected: {message}")
+    };
+    if sites.function != entry
+        || branch.profile_version
+            != crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion::V1
+        || branch.map_new_operation.0.is_empty()
+        || branch.map_set_operation.0.is_empty()
+        || branch.map_new_match.0.is_empty()
+        || branch.map_set_match.0.is_empty()
+        || branch.initial_root.0 .0.is_empty()
+        || branch.populated_root.0 .0.is_empty()
+        || branch.paths.len() != 3
+        || payload_selection_digest != Some(sites.selection_digest.as_str())
+    {
+        return Err(fail("entry, Checker Result-branch, or Core selection identity differs"));
+    }
+    let expected_new_instruction = crate::core::mir::MirInstructionId::new(format!(
+        "inst:ordinary_map_owned_any_v2_new:local:{}:{}",
+        branch.initial_root.0 .0, branch.map_new_operation.0
+    ))
+    .map_err(|error| fail(&error.to_string()))?;
+    let expected_set_instruction = crate::core::mir::MirInstructionId::new(format!(
+        "inst:ordinary_map_owned_any_v2_set:local:{}:{}",
+        branch.populated_root.0 .0, branch.map_set_operation.0
+    ))
+    .map_err(|error| fail(&error.to_string()))?;
+    if sites.new_instruction != expected_new_instruction
+        || sites.set_instruction != expected_set_instruction
+        || sites.key_text.is_empty()
+        || sites.set_rd == sites.set_ra
+        || sites.set_rd == sites.set_key
+        || sites.set_rd == sites.set_value
+        || sites.set_ra == sites.set_key
+        || sites.set_ra == sites.set_value
+        || sites.set_key == sites.set_value
+        || sites.new_rd == sites.set_rd
+    {
+        return Err(fail(
+            "instruction identities or register roles disagree with the receipt",
+        ));
+    }
+    validate_computed_string_key_owner_chain_selection_frame(sites)?;
+    let function_index = usize::try_from(sites.function)
+        .map_err(|_| fail("function index exceeds address space"))?;
+    let proto = functions
+        .get(function_index)
+        .ok_or_else(|| fail("branch function is absent from bytecode"))?;
+    let constants_match = |idx: ConstIdx, expected: &str| matches!(proto.constants.get(idx as usize), Some(ConstValue::Str(actual)) if actual == expected);
+    let new_pc = usize::try_from(sites.new_pc).map_err(|_| fail("New PC overflow"))?;
+    let set_pc = usize::try_from(sites.set_pc).map_err(|_| fail("Set PC overflow"))?;
+    if !matches!(proto.code.get(new_pc), Some(Op::MirOrdinaryMapOwnedAnyV2NewResult { rd }) if *rd == sites.new_rd)
+        || !matches!(proto.code.get(set_pc), Some(Op::MirOrdinaryMapOwnedAnyV2SetAnyResult {
+            rd, ra, key, value, payload_type_id, payload_descriptor_hash, selection_bytes,
+            selection_hash, payload_tag, payload_size, payload_align,
+        }) if (*rd, *ra, *key, *value, *payload_tag, *payload_size, *payload_align)
+            == (sites.set_rd, sites.set_ra, sites.set_key, sites.set_value, sites.payload_tag, sites.payload_size, sites.payload_align)
+            && constants_match(*payload_type_id, sites.payload_binding.type_id.as_str())
+            && constants_match(*payload_descriptor_hash, &sites.payload_descriptor_hash)
+            && constants_match(*selection_bytes, &sites.selection_bytes_hex)
+            && constants_match(*selection_hash, &sites.selection_hash))
+    {
+        return Err(fail(
+            "New/SetAnyResult opcode PC, registers, or selector constants differ",
+        ));
+    }
+    let count = |predicate: &dyn Fn(&Op) -> bool| {
+        functions
+            .iter()
+            .flat_map(|function| function.code.iter())
+            .filter(|op| predicate(op))
+            .count()
+    };
+    if count(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. })) != 1
+        || count(&|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. })) != 1
+    {
+        return Err(fail(
+            "New/SetAnyResult route opcode census is not exactly one each",
+        ));
+    }
+    if !is_canonical_digest(&sites.result_type_desc_digest)
+        || !is_canonical_digest(&sites.payload_binding.type_desc_digest)
+    {
+        return Err(fail(
+            "result or selected payload TypeDesc digest is invalid",
+        ));
+    }
+    validate_computed_string_key_owner_chain_switch(
+        proto,
+        sites.new_switch_start_pc,
+        sites.new_switch_end_pc,
+        sites.new_rd,
+        sites.new_ok_target_pc,
+        sites.new_err_target_pc,
+        "map_new",
+    )?;
+    validate_computed_string_key_owner_chain_switch(
+        proto,
+        sites.set_switch_start_pc,
+        sites.set_switch_end_pc,
+        sites.set_rd,
+        sites.set_ok_target_pc,
+        sites.set_err_target_pc,
+        "map_set",
+    )?;
+    Ok(())
 }
 
 impl CanonicalValuesMixedSnapshotRouteBytecodeAnchor {
@@ -6415,6 +8085,156 @@ impl CanonicalValuesLocalIndexI32RouteBytecodeAnchor {
     #[cfg(test)]
     pub(crate) fn corrupt_manifest_for_test_only(&mut self) {
         self.receipt.mir_digest = "not-the-captured-mir-digest".into();
+    }
+}
+
+impl CanonicalValuesLocalIndexI32ResultBranchRouteBytecodeAnchor {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<Self, String> {
+        let expected_profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+        if receipt.profile != expected_profile {
+            return Err(format!(
+                "Values local-index i32 Result-branch bytecode anchor received route profile '{}'",
+                receipt.profile
+            ));
+        }
+        let counts = values_local_index_i32_result_branch_opcode_counts(functions);
+        let move_sites = values_local_index_i32_result_branch_move_sites(functions)?;
+        if counts != (1, 1, 1, 1, 3, 1, 0)
+            || !values_local_index_i32_result_branch_set_key_drop_is_exact(functions)
+        {
+            return Err(format!(
+                "Values local-index i32 Result-branch route requires one NewResult, one SetAnyResult followed by its key String Drop, one Values, one ValuesUnpack, three Map-root Drops, one Values Drop, and no other owner-v2 opcode; found {counts:?}"
+            ));
+        }
+        let replayed = receipt.manifest_round_trip().map_err(|message| {
+            format!("Values local-index i32 Result-branch manifest replay failed: {message}")
+        })?;
+        if replayed != *receipt {
+            return Err(
+                "Values local-index i32 Result-branch route receipt changed during manifest replay"
+                    .into(),
+            );
+        }
+        let expected_manifest = receipt.manifest_text().map_err(|message| {
+            format!("Values local-index i32 Result-branch manifest render failed: {message}")
+        })?;
+        let values_site = values_local_index_i32_result_branch_values_site(functions)?;
+        let set_any_result_site =
+            values_local_index_i32_result_branch_set_any_result_site(functions)?;
+        Ok(Self {
+            expected_profile,
+            receipt: receipt.clone(),
+            expected_manifest,
+            expected_entry: entry,
+            move_sites,
+            values_site,
+            set_any_result_site,
+            expected_program: values_local_index_i32_result_branch_bytecode_snapshot(
+                entry, functions,
+            ),
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        let expected_profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+        if self.expected_profile != expected_profile || self.receipt.profile != expected_profile {
+            return Err(
+                "Values local-index i32 Result-branch bytecode route profile disagrees with its private anchor".into(),
+            );
+        }
+        let replayed = self.receipt.manifest_round_trip().map_err(|message| {
+            format!("Values local-index i32 Result-branch manifest replay failed at VM boundary: {message}")
+        })?;
+        let move_sites = values_local_index_i32_result_branch_move_sites(functions)?;
+        let values_site = values_local_index_i32_result_branch_values_site(functions)?;
+        let set_any_result_site =
+            values_local_index_i32_result_branch_set_any_result_site(functions)?;
+        if replayed != self.receipt
+            || self.receipt.manifest_text().ok().as_deref() != Some(self.expected_manifest.as_str())
+        {
+            return Err(
+                "Values local-index i32 Result-branch route receipt disagrees with its immutable manifest anchor".into(),
+            );
+        }
+        if entry != self.expected_entry
+            || values_local_index_i32_result_branch_opcode_counts(functions)
+                != (1, 1, 1, 1, 3, 1, 0)
+            || self.move_sites != move_sites
+            || self.values_site != values_site
+            || self.set_any_result_site != set_any_result_site
+            || !values_local_index_i32_result_branch_set_key_drop_is_exact(functions)
+            || values_local_index_i32_result_branch_bytecode_snapshot(entry, functions)
+                != self.expected_program
+        {
+            return Err(
+                "Values local-index i32 Result-branch bytecode disagrees with its exact Checker route snapshot".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(function_index == self.expected_entry
+            && self.move_sites.contains(&(function_index, pc, rd, rs)))
+    }
+
+    fn set_any_result_site_at_pc(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+    ) -> Result<Option<CanonicalValuesLocalIndexI32ResultBranchSetAnyResultBytecodeSite>, String>
+    {
+        self.validate(entry, functions)?;
+        Ok((self.set_any_result_site.function == function_index
+            && self.set_any_result_site.set_pc == pc)
+            .then(|| self.set_any_result_site.clone()))
+    }
+
+    fn values_site_at_pc(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        ra: Reg,
+    ) -> Result<Option<CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite>, String> {
+        self.validate(entry, functions)?;
+        Ok((self.values_site.function == function_index
+            && self.values_site.pc == pc
+            && self.values_site.rd == rd
+            && self.values_site.ra == ra)
+            .then(|| self.values_site.clone()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_profile_for_test_only(&mut self) {
+        self.receipt.profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_PROFILE.into();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_manifest_for_test_only(&mut self) {
+        self.receipt.mir_digest = "not-the-captured-result-branch-mir-digest".into();
     }
 }
 
@@ -7095,6 +8915,220 @@ fn values_local_index_i32_bytecode_snapshot(entry: FuncIdx, functions: &[Functio
         let _ = write!(snapshot, "|function[{index}]={function:?}");
     }
     snapshot
+}
+
+fn values_local_index_i32_result_branch_bytecode_snapshot(
+    entry: FuncIdx,
+    functions: &[FunctionProto],
+) -> String {
+    let mut snapshot = format!(
+        "profile={};version=1;entry={entry};functions={}",
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE,
+        functions.len()
+    );
+    for (index, function) in functions.iter().enumerate() {
+        use std::fmt::Write as _;
+        let _ = write!(snapshot, "|function[{index}]={function:?}");
+    }
+    snapshot
+}
+
+fn values_local_index_i32_result_branch_move_sites(
+    functions: &[FunctionProto],
+) -> Result<Vec<(FuncIdx, u32, Reg, Reg)>, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "Values local-index Result-branch function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::Move { rd, rs } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "Values local-index Result-branch Move PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *rs));
+            }
+        }
+    }
+    Ok(sites)
+}
+
+fn values_local_index_i32_result_branch_set_any_result_site(
+    functions: &[FunctionProto],
+) -> Result<CanonicalValuesLocalIndexI32ResultBranchSetAnyResultBytecodeSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "Values local-index Result-branch function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            let Op::MirOrdinaryMapOwnedAnyV2SetAnyResult {
+                rd,
+                ra,
+                key,
+                value,
+                payload_type_id,
+                payload_descriptor_hash,
+                selection_bytes,
+                selection_hash,
+                payload_tag,
+                payload_size,
+                payload_align,
+            } = op
+            else {
+                continue;
+            };
+            let string_constant =
+                |index: ConstIdx, name: &str| match function.constants.get(index as usize) {
+                    Some(ConstValue::Str(value)) => Ok(value.clone()),
+                    _ => Err(format!(
+                    "Values local-index Result-branch SetAnyResult {name} is not a String constant"
+                )),
+                };
+            let set_pc = u32::try_from(pc).map_err(|_| {
+                "Values local-index Result-branch SetAnyResult PC exceeds bytecode ABI"
+            })?;
+            sites.push(
+                CanonicalValuesLocalIndexI32ResultBranchSetAnyResultBytecodeSite {
+                    function: function_index,
+                    set_pc,
+                    set_rd: *rd,
+                    set_ra: *ra,
+                    set_key: *key,
+                    set_value: *value,
+                    key_text: "answer".into(),
+                    payload_type_id: string_constant(*payload_type_id, "payload TypeDesc")?,
+                    payload_descriptor_hash: string_constant(
+                        *payload_descriptor_hash,
+                        "payload descriptor hash",
+                    )?,
+                    selection_bytes_hex: string_constant(*selection_bytes, "selection bytes")?,
+                    selection_hash: string_constant(*selection_hash, "selection hash")?,
+                    payload_tag: *payload_tag,
+                    payload_size: *payload_size,
+                    payload_align: *payload_align,
+                },
+            );
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(site.clone()),
+        _ => Err(format!(
+            "Values local-index Result-branch route requires one SetAnyResult bytecode site, found {}",
+            sites.len()
+        )),
+    }
+}
+
+fn values_local_index_i32_result_branch_values_site(
+    functions: &[FunctionProto],
+) -> Result<CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "Values local-index Result-branch function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            let Op::MirOrdinaryMapOwnedAnyV2Values { rd, ra } = op else {
+                continue;
+            };
+            sites.push(CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite {
+                function: function_index,
+                pc: u32::try_from(pc).map_err(|_| {
+                    "Values local-index Result-branch Values PC exceeds bytecode ABI"
+                })?,
+                rd: *rd,
+                ra: *ra,
+            });
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(site.clone()),
+        [] => Err("Values local-index Result-branch route has no Values opcode".into()),
+        _ => Err(format!(
+            "Values local-index Result-branch route has {} Values opcodes",
+            sites.len()
+        )),
+    }
+}
+
+/// Count the exact operation family authorized by the nested Result route.
+/// Result control flow and scalar glue are intentionally outside the owner-v2
+/// count; any additional owner-v2 opcode makes this profile fail closed.
+fn values_local_index_i32_result_branch_opcode_counts(
+    functions: &[FunctionProto],
+) -> (usize, usize, usize, usize, usize, usize, usize) {
+    let mut new_result_count = 0;
+    let mut set_any_result_count = 0;
+    let mut values_count = 0;
+    let mut values_unpack_count = 0;
+    let mut root_drop_count = 0;
+    let mut values_drop_count = 0;
+    let mut other_v2_count = 0;
+    for op in functions.iter().flat_map(|function| &function.code) {
+        match op {
+            Op::MirOrdinaryMapOwnedAnyV2NewResult { .. } => new_result_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. } => set_any_result_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2Values { .. } => values_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. } => values_unpack_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2Drop { .. } => root_drop_count += 1,
+            Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. } => values_drop_count += 1,
+            op if matches!(
+                op,
+                Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Size { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Contains { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Println { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2ValuesClone { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2Keys { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2KeysUnpack { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2IsEmpty { .. }
+                    | Op::MirOrdinaryMapOwnedAnyV2DynamicArg0 { .. }
+            ) =>
+            {
+                other_v2_count += 1
+            }
+            _ => {}
+        }
+    }
+    (
+        new_result_count,
+        set_any_result_count,
+        values_count,
+        values_unpack_count,
+        root_drop_count,
+        values_drop_count,
+        other_v2_count,
+    )
+}
+
+fn values_local_index_i32_result_branch_set_key_drop_is_exact(functions: &[FunctionProto]) -> bool {
+    let pairs = functions
+        .iter()
+        .flat_map(|function| function.code.windows(2))
+        .filter_map(|window| match window {
+            [Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { key, .. }, Op::Drop { ra }]
+                if key == ra =>
+            {
+                Some(())
+            }
+            _ => None,
+        })
+        .count();
+    let drops = functions
+        .iter()
+        .flat_map(|function| &function.code)
+        .filter(|op| matches!(op, Op::Drop { .. }))
+        .count();
+    pairs == 1 && drops == 1
 }
 
 fn values_heterogeneous_string_index1_bytecode_snapshot(
@@ -9176,6 +11210,323 @@ impl CanonicalValuesCrosscallStringCallerIndex1RouteBytecodeAnchor {
     }
 }
 
+pub(crate) fn values_result_crosscall_expected_instruction_sites(
+    proof: &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+) -> Result<Vec<(crate::core::NodeId, crate::core::mir::MirInstructionId)>, String> {
+    fn const_instruction(
+        value: &crate::core::mir::MirValueId,
+    ) -> Result<crate::core::mir::MirInstructionId, String> {
+        let node = value
+            .as_str()
+            .strip_prefix("expr:")
+            .filter(|node| !node.is_empty())
+            .ok_or_else(|| {
+                format!("Result Values constant '{value}' has no expression identity")
+            })?;
+        crate::core::mir::MirInstructionId::new(format!("inst:const:{node}"))
+            .map_err(|error| format!("Result Values constant identity is invalid: {error}"))
+    }
+
+    fn source_const_instruction(
+        node: &crate::core::NodeId,
+    ) -> Result<crate::core::mir::MirInstructionId, String> {
+        crate::core::mir::MirInstructionId::new(format!("inst:const:{}", node.0))
+            .map_err(|error| format!("Result Values source constant identity is invalid: {error}"))
+    }
+
+    let mut sites = std::collections::BTreeSet::new();
+    let mut push = |owner: &crate::core::NodeId, id: &crate::core::mir::MirInstructionId| {
+        sites.insert((owner.clone(), id.clone()));
+    };
+    push(&proof.producer_owner, &proof.producer_new_instruction);
+    for entry in &proof.producer_set_entries {
+        push(&proof.producer_owner, &entry.set_instruction);
+        let checker_set = proof
+            .checker_producer_result
+            .set_branches
+            .iter()
+            .filter(|set| set.operation == entry.set_operation)
+            .collect::<Vec<_>>();
+        let [checker_set] = checker_set.as_slice() else {
+            return Err(format!(
+                "Result Values Set '{}' has no unique Checker source branch",
+                entry.set_instruction
+            ));
+        };
+        push(
+            &proof.producer_owner,
+            &source_const_instruction(&checker_set.key_node)?,
+        );
+        push(
+            &proof.producer_owner,
+            &source_const_instruction(&checker_set.payload_initializer_node)?,
+        );
+        push(&proof.producer_owner, &entry.payload_binding_instruction);
+        push(&proof.producer_owner, &entry.key_drop_instruction);
+    }
+    push(&proof.producer_owner, &proof.producer_values_instruction);
+    push(
+        &proof.producer_owner,
+        &proof.producer_snapshot_binding_instruction,
+    );
+    for path in &proof.producer_path_receipts {
+        if let Some(instruction) = &path.empty_list_instruction {
+            push(&proof.producer_owner, instruction);
+        }
+        for instruction in &path.drop_instructions {
+            push(&proof.producer_owner, instruction);
+        }
+    }
+    for instruction in &proof.producer_root_drop_instructions {
+        push(&proof.producer_owner, instruction);
+    }
+    for instruction in &proof.producer_payload_drop_instructions {
+        push(&proof.producer_owner, instruction);
+    }
+    for instruction in [
+        &proof.caller_call_instruction,
+        &proof.caller_snapshot_binding_instruction,
+        &proof.caller_unpack_instruction,
+        &proof.caller_unpack_binding_instruction,
+        &proof.caller_comparison_instruction,
+        &proof.caller_boolean_binding_instruction,
+        &proof.caller_string_drop_instruction,
+        &proof.caller_snapshot_drop_instruction,
+        &proof.caller_return_instruction,
+    ] {
+        push(&proof.caller_owner, instruction);
+    }
+    push(
+        &proof.caller_owner,
+        &const_instruction(&proof.caller_index)?,
+    );
+    push(
+        &proof.caller_owner,
+        &const_instruction(&proof.caller_expected_literal)?,
+    );
+    Ok(sites.into_iter().collect())
+}
+
+impl CanonicalValuesResultCrosscallStringCallerRouteBytecodeAnchor {
+    pub(crate) fn capture(
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        proofs: Vec<
+            crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        >,
+        bindings: Vec<CanonicalValuesResultCrosscallStringCallerBytecodeBinding>,
+    ) -> Result<Self, String> {
+        let [proof] = proofs.as_slice() else {
+            return Err("Values Result cross-call route requires one unique MIR proof".into());
+        };
+        let expected_profile = match proof.checker_caller.profile_version {
+            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE
+            }
+            _ => return Err("Values Result cross-call proof has a non-Result profile".into()),
+        };
+        if receipt.profile != expected_profile || bindings.len() != 1 {
+            return Err(
+                "Values Result cross-call route profile or bytecode binding is ambiguous".into(),
+            );
+        }
+        let replayed = receipt
+            .manifest_round_trip()
+            .map_err(|message| format!("Values Result route manifest replay failed: {message}"))?;
+        if replayed != *receipt {
+            return Err("Values Result route receipt changed during manifest replay".into());
+        }
+        let expected_manifest = receipt
+            .manifest_text()
+            .map_err(|message| format!("Values Result route manifest render failed: {message}"))?;
+        let expected_bindings = format!("{bindings:?}");
+        let expected_program = ordinary_map_owned_any_v2_program_snapshot(entry, functions);
+        let anchor = Self {
+            expected_profile,
+            receipt: receipt.clone(),
+            proofs,
+            bindings,
+            expected_manifest,
+            expected_bindings,
+            expected_entry: entry,
+            expected_program,
+        };
+        anchor.validate(entry, functions)?;
+        Ok(anchor)
+    }
+
+    pub(crate) fn validate(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        let [proof] = self.proofs.as_slice() else {
+            return Err("Values Result cross-call anchor has no unique MIR proof".into());
+        };
+        let [binding] = self.bindings.as_slice() else {
+            return Err("Values Result cross-call anchor has no unique bytecode binding".into());
+        };
+        let expected_profile = match proof.checker_caller.profile_version {
+            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE
+            }
+            _ => return Err("Values Result cross-call anchor carries a non-Result profile".into()),
+        };
+        if self.expected_profile != expected_profile
+            || self.receipt.profile != expected_profile
+            || self.receipt.mir_digest != proof.mir_digest
+            || self.receipt.type_desc_digest != proof.type_desc_digest
+            || self.receipt.manifest_round_trip()? != self.receipt
+            || self.receipt.manifest_text()?.as_str() != self.expected_manifest
+            || format!("{:?}", self.bindings) != self.expected_bindings
+            || entry != self.expected_entry
+            || ordinary_map_owned_any_v2_program_snapshot(entry, functions) != self.expected_program
+            || proof.schema
+                != if proof.checker_caller.profile_version
+                    == crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3
+                {
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_SCHEMA
+                } else {
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_SCHEMA
+                }
+            || proof.profile != expected_profile
+            || proof.producer_owner != proof.checker_producer_result.owner
+            || proof.caller_owner != proof.checker_caller.caller_owner
+            || proof.call_target != proof.producer_owner
+            || proof.producer_owner == proof.caller_owner
+            || proof.checker_caller.producer_result_receipt.as_ref()
+                != Some(&proof.checker_producer_result)
+            || proof.checker_caller.index_value != proof.caller_index_value
+            || proof.checker_caller.values_element_count != proof.values_element_count
+            || proof.checker_caller.string_type != proof.string_type
+            || proof.checker_caller.boolean_type != proof.bool_type
+            || !is_canonical_digest(&proof.payload_selection_digest)
+            || !is_canonical_digest(&proof.mir_digest)
+            || !is_canonical_digest(&proof.type_desc_digest)
+        {
+            return Err(
+                "Values Result cross-call route proof disagrees with its immutable profile, receipt, or bytecode snapshot".into(),
+            );
+        }
+        binding.validate(proof, functions)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_proof_digest_for_test_only(&mut self) {
+        if let Some(binding) = self.bindings.first_mut() {
+            binding.proof_digest = "not-the-captured-result-proof-digest".into();
+        }
+    }
+}
+
+impl CanonicalValuesResultCrosscallStringCallerBytecodeBinding {
+    pub(crate) fn validate(
+        &self,
+        proof: &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        functions: &[FunctionProto],
+    ) -> Result<(), String> {
+        let expected_sites = values_result_crosscall_expected_instruction_sites(proof)?;
+        let proof_digest = blake3::hash(format!("{proof:?}").as_bytes())
+            .to_hex()
+            .to_string();
+        let producer = functions
+            .get(self.producer_function as usize)
+            .ok_or_else(|| "Values Result producer bytecode index is absent".to_string())?;
+        let caller = functions
+            .get(self.caller_function as usize)
+            .ok_or_else(|| "Values Result caller bytecode index is absent".to_string())?;
+        if self.producer_owner != proof.producer_owner
+            || self.caller_owner != proof.caller_owner
+            || self.call_target != proof.call_target
+            || self.producer_owner == self.caller_owner
+            || producer.name != self.producer_owner.0
+            || caller.name != self.caller_owner.0
+            || self.producer_function == self.caller_function
+            || self.proof_digest != proof_digest
+            || !is_canonical_digest(&self.proof_digest)
+            || proof.values_element_count != if proof.caller_index_value == 0 { 1 } else { 2 }
+            || proof.caller_index_value != if proof.checker_caller.profile_version
+                == crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3
+            {
+                0
+            } else {
+                1
+            }
+            || proof.producer_set_entries.len() != proof.values_element_count
+            || proof.caller_index_value < 0
+            || proof.caller_index_value as usize >= proof.values_element_count
+            || self.sites.len() != expected_sites.len()
+        {
+            return Err("Values Result cross-call bytecode binding disagrees with its MIR proof".into());
+        }
+        for ((owner, instruction), site) in expected_sites.iter().zip(&self.sites) {
+            let function_index = if owner == &proof.producer_owner {
+                self.producer_function
+            } else if owner == &proof.caller_owner {
+                self.caller_function
+            } else {
+                return Err("Values Result bytecode binding contains a foreign owner".into());
+            };
+            let function = functions
+                .get(function_index as usize)
+                .ok_or_else(|| "Values Result site function is absent".to_string())?;
+            if site.owner != *owner
+                || site.instruction != *instruction
+                || site.function != function_index
+                || function.code.get(site.pc as usize) != Some(&site.op)
+            {
+                return Err(format!(
+                    "Values Result site '{}' is not bound to its exact emitted opcode",
+                    instruction
+                ));
+            }
+        }
+        let unpack_site = self
+            .sites
+            .iter()
+            .find(|site| {
+                site.owner == proof.caller_owner
+                    && site.instruction == proof.caller_unpack_instruction
+            })
+            .ok_or_else(|| "Values Result caller unpack site is absent".to_string())?;
+        if unpack_site.function != self.caller_function
+            || self.caller_unpack_pc != unpack_site.pc
+            || !matches!(
+                &unpack_site.op,
+                Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { rd, ra, index }
+                    if (*rd, *ra, *index)
+                        == (self.caller_unpack_rd, self.caller_unpack_ra, self.caller_unpack_index)
+            )
+        {
+            return Err(
+                "Values Result caller unpack PC/registers differ from its exact MIR site".into(),
+            );
+        }
+        let producer_values = self
+            .sites
+            .iter()
+            .find(|site| {
+                site.owner == proof.producer_owner
+                    && site.instruction == proof.producer_values_instruction
+            })
+            .ok_or_else(|| "Values Result producer Values site is absent".to_string())?;
+        if !matches!(
+            &producer_values.op,
+            Op::MirOrdinaryMapOwnedAnyV2Values { .. }
+        ) {
+            return Err("Values Result producer receipt does not bind a Values opcode".into());
+        }
+        Ok(())
+    }
+}
+
 impl CanonicalValuesCrosscallStringCallerIndex1BytecodeBinding {
     pub(crate) fn validate(
         &self,
@@ -9820,6 +12171,24 @@ fn crosscall_const_instruction(
 }
 
 impl CanonicalMapAnyOwnerV1BytecodeReceipt {
+    #[cfg(test)]
+    pub(crate) fn transplant_values_result_crosscall_anchor_for_test_only(
+        &mut self,
+        donor: &Self,
+    ) -> bool {
+        let (Some(receiver), Some(donor)) = (
+            self.ordinary_map_owned_any_v2.as_mut(),
+            donor.ordinary_map_owned_any_v2.as_ref(),
+        ) else {
+            return false;
+        };
+        let Some(donor_anchor) = donor.values_result_crosscall_string_caller_anchor.as_ref() else {
+            return false;
+        };
+        receiver.values_result_crosscall_string_caller_anchor = Some(donor_anchor.clone());
+        true
+    }
+
     fn validate_exclusive_route_anchor(&self) -> Result<(), String> {
         if self.ordinary_map_owned_any_v2.as_ref().is_some_and(
             CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_producer_caller_bindings,
@@ -9843,10 +12212,14 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         let has_values_crosscall_index1 = self.ordinary_map_owned_any_v2.as_ref().is_some_and(
             CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_crosscall_string_caller_index1_anchor,
         );
-        if has_values_crosscall_v1 && has_values_crosscall_index1 {
-            return Err(
-                "Values cross-call String-caller V1 and Index1 anchors cannot coexist".into(),
-            );
+        let has_values_result_crosscall = self.ordinary_map_owned_any_v2.as_ref().is_some_and(
+            CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_result_crosscall_string_caller_anchor,
+        );
+        if (has_values_crosscall_v1 && has_values_crosscall_index1)
+            || (has_values_result_crosscall
+                && (has_values_crosscall_v1 || has_values_crosscall_index1))
+        {
+            return Err("Values cross-call String-caller route anchors cannot coexist".into());
         }
         if self.ordinary_map_owned_any_v2.as_ref().is_some_and(
             CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_map_root_producer_caller_bindings,
@@ -9888,12 +12261,19 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         }
         let anchors = [
             self.new_result_anchor.is_some(),
+            self.set_result_anchor.is_some(),
+            self.set_get_i32_result_anchor.is_some(),
+            self.set_get_any_i32_result_anchor.is_some(),
+            self.direct_tuple_get_l1_anchor.is_some(),
+            self.set_get_any_result_i32_anchor.is_some(),
+            self.set_get_string_result_anchor.is_some(),
             self.ordinary_map_owner_observer_v1.is_some(),
             self.empty_root_root_queries_v1_route_anchor.is_some(),
             self.values_field_move_route_anchor.is_some(),
             self.values_snapshot_replacement_route_anchor.is_some(),
             self.values_mixed_snapshot_route_anchor.is_some(),
             self.values_local_index_i32_route_anchor.is_some(),
+            self.values_local_index_i32_result_branch_route_anchor.is_some(),
             self.values_heterogeneous_string_index1_route_anchor.is_some(),
             self.keys_snapshot_route_anchor.is_some(),
             self.dynamic_keys_get_route_anchor.is_some(),
@@ -9903,6 +12283,7 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                 CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_crosscall_string_caller_anchor,
             ),
             has_values_crosscall_index1,
+            has_values_result_crosscall,
             self.map_root_producer_caller_route_anchor.is_some(),
             self.map_root_get_any_caller_route_anchor.is_some(),
             self.computed_key_get_route_anchor.is_some(),
@@ -9919,11 +12300,15 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             self.is_empty_route_anchor.is_some(),
             self.record_unit_route_anchor.is_some(),
             self.map_set_drop_control_route_anchor.is_some(),
+            self.map_set_drop_control_result_branch_route_anchor.is_some(),
+            self.ordinary_map_owned_get_result_branch_v3_route_anchor
+                .is_some(),
             self.branch_local_set_diamond_route_anchor.is_some(),
             self.clone_isolation_route_anchor.is_some(),
             self.ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor
                 .is_some(),
             self.direct_print_route_anchor.is_some(),
+            self.direct_print_result_route_anchor.is_some(),
         ]
         .into_iter()
         .filter(|present| *present)
@@ -9948,13 +12333,21 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             },
             ordinary_map_owner_lifecycle_i32_string_v1: None,
             ordinary_map_owned_get_i32_string_v1: None,
+            ordinary_map_owned_get_result_branch_v3_route_anchor: None,
             ordinary_map_owned_any_v2: None,
             new_result_anchor: None,
+            set_result_anchor: None,
+            set_get_i32_result_anchor: None,
+            set_get_any_i32_result_anchor: None,
+            direct_tuple_get_l1_anchor: None,
+            set_get_any_result_i32_anchor: None,
+            set_get_string_result_anchor: None,
             values_field_move_route_anchor: None,
             empty_root_root_queries_v1_route_anchor: None,
             values_snapshot_replacement_route_anchor: None,
             values_mixed_snapshot_route_anchor: None,
             values_local_index_i32_route_anchor: None,
+            values_local_index_i32_result_branch_route_anchor: None,
             values_heterogeneous_string_index1_route_anchor: None,
             keys_snapshot_route_anchor: None,
             dynamic_keys_get_route_anchor: None,
@@ -9972,10 +12365,12 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             is_empty_route_anchor: None,
             record_unit_route_anchor: None,
             map_set_drop_control_route_anchor: None,
+            map_set_drop_control_result_branch_route_anchor: None,
             branch_local_set_diamond_route_anchor: None,
             clone_isolation_route_anchor: None,
             ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor: None,
             direct_print_route_anchor: None,
+            direct_print_result_route_anchor: None,
             ordinary_map_owner_observer_v1: None,
             managed_any_identity: None,
             managed_any_trap_cleanup: None,
@@ -10154,6 +12549,29 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             CanonicalValuesLocalIndexI32RouteBytecodeAnchor::capture(entry, functions, receipt)?,
         );
         Ok(())
+    }
+
+    pub(crate) fn bind_values_local_index_i32_result_branch_route_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        self.validate_exclusive_route_anchor()?;
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err(
+                "Values local-index i32 Result-branch route has no emitted V2 bytecode".into(),
+            );
+        }
+        self.values_local_index_i32_result_branch_route_anchor = Some(
+            CanonicalValuesLocalIndexI32ResultBranchRouteBytecodeAnchor::capture(
+                entry, functions, receipt,
+            )?,
+        );
+        self.validate_exclusive_route_anchor()
     }
 
     pub(crate) fn bind_values_heterogeneous_string_index1_route_anchor(
@@ -10352,6 +12770,49 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         self.validate_exclusive_route_anchor()
     }
 
+    pub(crate) fn bind_values_result_crosscall_string_caller_route_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        proofs: Vec<
+            crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        >,
+        bindings: Vec<CanonicalValuesResultCrosscallStringCallerBytecodeBinding>,
+    ) -> Result<(), String> {
+        self.validate_exclusive_route_anchor()?;
+        if self.values_producer_caller_route_anchor.is_some()
+            || self.ordinary_map_owned_any_v2.as_ref().is_some_and(
+                CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_crosscall_string_caller_anchor,
+            )
+            || self.ordinary_map_owned_any_v2.as_ref().is_some_and(
+                CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_crosscall_string_caller_index1_anchor,
+            )
+            || self.ordinary_map_owned_any_v2.as_ref().is_some_and(
+                CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::has_values_result_crosscall_string_caller_anchor,
+            )
+        {
+            return Err(
+                "Values Result cross-call route cannot share another Values caller anchor".into(),
+            );
+        }
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err("Values Result cross-call route has no emitted V2 bytecode".into());
+        }
+        self.ordinary_map_owned_any_v2
+            .as_mut()
+            .ok_or_else(|| {
+                "Values Result cross-call route has no independent V2 bytecode receipt".to_string()
+            })?
+            .bind_values_result_crosscall_string_caller_anchor(
+                entry, functions, receipt, proofs, bindings,
+            )?;
+        self.validate_exclusive_route_anchor()
+    }
+
     pub(crate) fn bind_map_root_producer_caller_route_anchor(
         &mut self,
         entry: FuncIdx,
@@ -10445,6 +12906,13 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         entry: FuncIdx,
         functions: &[FunctionProto],
         receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        result_branch: Option<
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+        >,
+        result_branch_sites: Option<
+            CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites,
+        >,
+        payload_selection_digest: Option<String>,
     ) -> Result<(), String> {
         self.validate_exclusive_route_anchor()?;
         if !functions
@@ -10455,7 +12923,12 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         }
         self.computed_string_key_owner_chain_route_anchor = Some(
             CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainRouteBytecodeAnchor::capture(
-                entry, functions, receipt,
+                entry,
+                functions,
+                receipt,
+                result_branch,
+                result_branch_sites,
+                payload_selection_digest,
             )?,
         );
         self.validate_exclusive_route_anchor()
@@ -10651,6 +13124,73 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         self.validate_exclusive_route_anchor()
     }
 
+    pub(crate) fn bind_map_set_drop_control_result_branch_route_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        self.validate_exclusive_route_anchor()?;
+        if self
+            .map_set_drop_control_result_branch_route_anchor
+            .is_some()
+        {
+            return Err("MapSetDropControlResult requires a unique dedicated route anchor".into());
+        }
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err("MapSetDropControlResult route has no emitted V2 bytecode".into());
+        }
+        self.map_set_drop_control_result_branch_route_anchor = Some(
+            CanonicalOrdinaryMapOwnedAnyV2MapSetDropControlResultBranchRouteBytecodeAnchor::capture(
+                entry, functions, receipt,
+            )?,
+        );
+        self.validate_exclusive_route_anchor()
+    }
+
+    pub(crate) fn bind_ordinary_map_owned_get_result_branch_v3_route_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        checker_receipts: BTreeMap<
+            crate::core::NodeId,
+            crate::core::OrdinaryMapOwnedGetI32StringV1CfgReceipt,
+        >,
+        result_type_id: String,
+        result_type_desc: String,
+        result_shapes_snapshot: String,
+    ) -> Result<(), String> {
+        self.validate_exclusive_route_anchor()?;
+        if self
+            .ordinary_map_owned_get_result_branch_v3_route_anchor
+            .is_some()
+        {
+            return Err("owned-Get ResultBranchV3 requires a unique dedicated route anchor".into());
+        }
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_result_branch_v3_ops)
+        {
+            return Err("owned-Get ResultBranchV3 route has no New/Set result bytecode".into());
+        }
+        self.ordinary_map_owned_get_result_branch_v3_route_anchor = Some(
+            CanonicalOrdinaryMapOwnedGetResultBranchV3RouteBytecodeAnchor::capture(
+                entry,
+                functions,
+                receipt,
+                checker_receipts,
+                result_type_id,
+                result_type_desc,
+                result_shapes_snapshot,
+            )?,
+        );
+        self.validate_exclusive_route_anchor()
+    }
+
     pub(crate) fn bind_record_unit_route_anchor(
         &mut self,
         entry: FuncIdx,
@@ -10776,6 +13316,40 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
             )?,
         );
         Ok(())
+    }
+
+    pub(crate) fn bind_direct_print_result_route_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        proof: &crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultReceipt,
+        bindings: CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultBytecodeBindings,
+    ) -> Result<(), String> {
+        // This profile owns all of its authorization. Do not retain the broad
+        // action/payload ledger that the normal V2 bytecode adapter captures.
+        self.ordinary_map_owned_any_v2 = None;
+        self.validate_exclusive_route_anchor()?;
+        if self.direct_print_result_route_anchor.is_some() {
+            return Err("DirectPrintResult route anchor is already bound".into());
+        }
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+            || !functions
+                .iter()
+                .any(function_has_ordinary_map_owned_any_v2_println_ops)
+        {
+            return Err(
+                "DirectPrintResult route requires emitted V2 operations and println".into(),
+            );
+        }
+        self.direct_print_result_route_anchor = Some(
+            CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultRouteBytecodeAnchor::capture(
+                entry, functions, receipt, proof, bindings,
+            )?,
+        );
+        self.validate_exclusive_route_anchor()
     }
 
     pub(crate) fn validate_values_field_move_route_anchor(
@@ -10909,6 +13483,9 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         functions: &[FunctionProto],
     ) -> Result<bool, String> {
         self.validate_exclusive_route_anchor()?;
+        if self.validate_values_local_index_i32_result_branch_route_anchor(entry, functions)? {
+            return Ok(true);
+        }
         match &self.values_local_index_i32_route_anchor {
             Some(anchor) => {
                 if !functions
@@ -10921,6 +13498,37 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                     .as_ref()
                     .ok_or_else(|| {
                         "Values local-index i32 route anchor has no independent V2 bytecode receipt"
+                            .to_string()
+                    })?
+                    .validate(entry, functions)?;
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_values_local_index_i32_result_branch_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.values_local_index_i32_result_branch_route_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err(
+                        "Values local-index i32 Result-branch route anchor has no V2 bytecode"
+                            .into(),
+                    );
+                }
+                self.ordinary_map_owned_any_v2
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "Values local-index i32 Result-branch route anchor has no independent V2 bytecode receipt"
                             .to_string()
                     })?
                     .validate(entry, functions)?;
@@ -11194,6 +13802,45 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         Ok(true)
     }
 
+    pub(crate) fn validate_values_result_crosscall_string_caller_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        let Some(v2_receipt) = self.ordinary_map_owned_any_v2.as_ref() else {
+            return Ok(false);
+        };
+        if !v2_receipt.has_values_result_crosscall_string_caller_anchor() {
+            return Ok(false);
+        }
+        if !functions
+            .iter()
+            .any(function_has_ordinary_map_owned_any_v2_ops)
+        {
+            return Err("Values Result cross-call route anchor has no V2 bytecode".into());
+        }
+        v2_receipt.validate(entry, functions)?;
+        let anchor = v2_receipt
+            .values_result_crosscall_string_caller_anchor
+            .as_ref()
+            .ok_or_else(|| {
+                "Values Result cross-call route anchor disappeared during validation".to_string()
+            })?;
+        let [proof] = anchor.proofs.as_slice() else {
+            return Err("Values Result cross-call route has no unique MIR proof".into());
+        };
+        if v2_receipt.payload_selection_digest.as_deref()
+            != Some(proof.payload_selection_digest.as_str())
+        {
+            return Err(
+                "Values Result cross-call proof differs from the bytecode payload-selection receipt"
+                    .into(),
+            );
+        }
+        Ok(true)
+    }
+
     pub(crate) fn validate_map_root_producer_caller_route_anchor(
         &self,
         entry: FuncIdx,
@@ -11315,6 +13962,143 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
     }
 
+    /// The exact SetResult anchor permits the two `Ok(root)` payload
+    /// transfers in map_new and map_set. It is independent from and mutually
+    /// exclusive with the NewResult-only root Move whitelist.
+    pub(crate) fn authorizes_ordinary_map_set_result_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.set_result_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_ordinary_map_set_get_i32_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.set_get_i32_result_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_ordinary_map_set_get_any_i32_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.set_get_any_i32_result_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_ordinary_map_direct_tuple_get_l1_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.direct_tuple_get_l1_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_ordinary_map_set_get_any_result_i32_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.set_get_any_result_i32_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_ordinary_map_set_get_string_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_ordinary_map_owned_any_v2(entry, functions)?;
+        let Some(anchor) = self.set_get_string_result_anchor.as_ref() else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn authorizes_values_local_index_i32_result_branch_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_values_local_index_i32_result_branch_route_anchor(entry, functions)?;
+        let Some(anchor) = self
+            .values_local_index_i32_result_branch_route_anchor
+            .as_ref()
+        else {
+            return Ok(false);
+        };
+        anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+    }
+
+    pub(crate) fn values_local_index_i32_result_branch_values_site_at_pc(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        ra: Reg,
+    ) -> Result<Option<CanonicalValuesLocalIndexI32ResultBranchValuesBytecodeSite>, String> {
+        self.validate_values_local_index_i32_result_branch_route_anchor(entry, functions)?;
+        let Some(anchor) = self
+            .values_local_index_i32_result_branch_route_anchor
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        anchor.values_site_at_pc(entry, functions, function_index, pc, rd, ra)
+    }
+
     pub(crate) fn validate_computed_key_get_route_anchor(
         &self,
         entry: FuncIdx,
@@ -11367,10 +14151,135 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                     })?
                     .validate(entry, functions)?;
                 anchor.validate(entry, functions)?;
+                let set_any_sites = functions
+                    .iter()
+                    .flat_map(|function| function.code.iter())
+                    .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }))
+                    .count();
+                let expected_set_any_sites = if anchor.result_branch_sites.is_some() {
+                    1
+                } else {
+                    0
+                };
+                if set_any_sites != expected_set_any_sites {
+                    return Err(
+                        "ComputedStringKeyOwnerChain SetAnyResult opcode is not paired with its exact Result branch sites".into(),
+                    );
+                }
+                let v2 = self.ordinary_map_owned_any_v2.as_ref().ok_or_else(|| {
+                    "ComputedStringKeyOwnerChain has no Core payload selection receipt".to_string()
+                })?;
+                if v2.payload_selection_digest != anchor.expected_payload_selection_digest {
+                    return Err(
+                        "ComputedStringKeyOwnerChain bytecode anchor differs from the Core payload-selection digest".into(),
+                    );
+                }
+                if let Some(sites) = anchor.result_branch_sites.as_ref() {
+                    if v2.selected_payload_binding(&sites.payload_binding.type_id)
+                        != Some(&sites.payload_binding)
+                    {
+                        return Err(
+                            "ComputedStringKeyOwnerChain SetAnyResult does not use its Core-selected payload TypeDesc".into(),
+                        );
+                    }
+                }
                 Ok(true)
+            }
+            None if self
+                .values_local_index_i32_result_branch_route_anchor
+                .is_some() =>
+            {
+                // The Values local-index Result route carries its own
+                // Checker branch anchor and validates it in the dedicated
+                // route preflight. A SetAnyResult opcode alone must not force
+                // this unrelated ComputedStringKeyOwnerChain anchor.
+                Ok(false)
+            }
+            None if functions.iter().any(|function| {
+                function
+                    .code
+                    .iter()
+                    .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }))
+            }) =>
+            {
+                Err("SetAnyResult opcode has no exact embedded Checker branch anchor".into())
             }
             None => Ok(false),
         }
+    }
+
+    pub(crate) fn computed_string_key_owner_chain_set_any_result_sites_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBytecodeSites> {
+        let sites = self
+            .computed_string_key_owner_chain_route_anchor
+            .as_ref()?
+            .result_branch_sites
+            .as_ref()?;
+        (sites.function == function && sites.set_pc == pc).then_some(sites)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_set_any_result_sites_at_pc(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function: FuncIdx,
+        pc: u32,
+    ) -> Result<Option<CanonicalOrdinaryMapOwnedAnyV2SetAnyResultRuntimeSites>, String> {
+        self.validate_computed_string_key_owner_chain_route_anchor(entry, functions)?;
+        if let Some(sites) =
+            self.computed_string_key_owner_chain_set_any_result_sites_at_pc(function, pc)
+        {
+            return Ok(Some(
+                CanonicalOrdinaryMapOwnedAnyV2SetAnyResultRuntimeSites {
+                    function: sites.function,
+                    set_pc: sites.set_pc,
+                    set_rd: sites.set_rd,
+                    set_ra: sites.set_ra,
+                    set_key: sites.set_key,
+                    set_value: sites.set_value,
+                    key_text: sites.key_text.clone(),
+                    payload_type_id: sites.payload_binding.type_id.as_str().to_owned(),
+                    payload_binding: Some(sites.payload_binding.clone()),
+                    payload_descriptor_hash: sites.payload_descriptor_hash.clone(),
+                    selection_bytes_hex: sites.selection_bytes_hex.clone(),
+                    selection_hash: sites.selection_hash.clone(),
+                    payload_tag: sites.payload_tag,
+                    payload_size: sites.payload_size,
+                    payload_align: sites.payload_align,
+                },
+            ));
+        }
+        let Some(anchor) = self
+            .values_local_index_i32_result_branch_route_anchor
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        let Some(sites) = anchor.set_any_result_site_at_pc(entry, functions, function, pc)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            CanonicalOrdinaryMapOwnedAnyV2SetAnyResultRuntimeSites {
+                function: sites.function,
+                set_pc: sites.set_pc,
+                set_rd: sites.set_rd,
+                set_ra: sites.set_ra,
+                set_key: sites.set_key,
+                set_value: sites.set_value,
+                key_text: sites.key_text,
+                payload_type_id: sites.payload_type_id,
+                payload_binding: None,
+                payload_descriptor_hash: sites.payload_descriptor_hash,
+                selection_bytes_hex: sites.selection_bytes_hex,
+                selection_hash: sites.selection_hash,
+                payload_tag: sites.payload_tag,
+                payload_size: sites.payload_size,
+                payload_align: sites.payload_align,
+            },
+        ))
     }
 
     /// Validate the recoverable ordinary Map NewResult route anchor before
@@ -11389,6 +14298,119 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                     .any(function_has_ordinary_map_owned_any_v2_ops)
                 {
                     return Err("ordinary Map NewResult route anchor has no V2 bytecode".into());
+                }
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Validate the exact ordinary Map SetResult route anchor before
+    /// execution. This gate remains separate from NewResult-only admission.
+    pub(crate) fn validate_ordinary_map_set_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.set_result_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err("ordinary Map SetResult route anchor has no V2 bytecode".into());
+                }
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_set_get_i32_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.set_get_i32_result_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err("ordinary Map Set/Get-i32 route anchor has no V2 bytecode".into());
+                }
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_set_get_any_i32_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.set_get_any_i32_result_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err(
+                        "ordinary Map Set/GetAny-i32 route anchor has no V2 bytecode".into(),
+                    );
+                }
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_set_get_any_result_i32_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.set_get_any_result_i32_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err(
+                        "ordinary Map Set/GetAny-Result-i32 route anchor has no V2 bytecode".into(),
+                    );
+                }
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_set_get_string_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.set_get_string_result_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err(
+                        "ordinary Map Set/Get-String route anchor has no V2 bytecode".into(),
+                    );
                 }
                 anchor.validate(entry, functions)?;
                 Ok(true)
@@ -11591,6 +14613,91 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         }
     }
 
+    pub(crate) fn validate_map_set_drop_control_result_branch_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.map_set_drop_control_result_branch_route_anchor {
+            Some(anchor) => {
+                if !functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops)
+                {
+                    return Err("MapSetDropControlResult route anchor has no V2 bytecode".into());
+                }
+                self.ordinary_map_owned_any_v2
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "MapSetDropControlResult route anchor has no independent V2 bytecode receipt"
+                            .to_string()
+                    })?
+                    .validate(entry, functions)?;
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn validate_ordinary_map_owned_get_result_branch_v3_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        let has_ops = functions
+            .iter()
+            .any(function_has_ordinary_map_owned_get_result_branch_v3_ops);
+        match (
+            &self.ordinary_map_owned_get_result_branch_v3_route_anchor,
+            has_ops,
+        ) {
+            (Some(anchor), true) => {
+                self.ordinary_map_owned_get_i32_string_v1
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "owned-Get ResultBranchV3 route has no independent typed owned-Get V1 receipt"
+                            .to_string()
+                    })?
+                    .validate(entry, functions)?;
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            (None, false) => Ok(false),
+            (Some(_), false) => {
+                Err("owned-Get ResultBranchV3 route anchor has no New/Set result bytecode".into())
+            }
+            (None, true) => {
+                Err("owned-Get ResultBranchV3 bytecode has no exact Checker/route anchor".into())
+            }
+        }
+    }
+
+    pub(crate) fn has_ordinary_map_owned_get_result_branch_v3_route_anchor(&self) -> bool {
+        self.ordinary_map_owned_get_result_branch_v3_route_anchor
+            .is_some()
+    }
+
+    pub(crate) fn authorizes_ordinary_map_owned_get_result_branch_v3_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.ordinary_map_owned_get_result_branch_v3_route_anchor {
+            Some(anchor) => {
+                anchor.authorizes_root_move(entry, functions, function_index, pc, rd, rs)
+            }
+            None => Ok(false),
+        }
+    }
+
     pub(crate) fn validate_record_unit_route_anchor(
         &self,
         entry: FuncIdx,
@@ -11734,6 +14841,158 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         }
     }
 
+    pub(crate) fn has_direct_print_result_route_anchor(&self) -> bool {
+        self.direct_print_result_route_anchor.is_some()
+    }
+
+    pub(crate) fn validate_direct_print_result_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        let Some(anchor) = &self.direct_print_result_route_anchor else {
+            return Ok(false);
+        };
+        if self.ordinary_map_owned_any_v2.is_some() {
+            return Err(
+                "DirectPrintResult route cannot borrow the broad V2 action/payload receipt".into(),
+            );
+        }
+        anchor.validate(entry, functions)?;
+        Ok(true)
+    }
+
+    pub(crate) fn direct_print_result_new_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultNewBinding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .new_result
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn direct_print_result_set_i32_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetI32Binding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .set_i32
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn direct_print_result_set_string_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSetStringBinding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .set_string
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn direct_print_result_get_any_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultGetAnyBinding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .get_any
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn direct_print_result_println_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultPrintlnBinding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .println
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn direct_print_result_size_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2DirectPrintResultSizeBinding> {
+        self.direct_print_result_route_anchor
+            .as_ref()?
+            .bindings
+            .size
+            .iter()
+            .find(|(owner, binding)| *owner == function && binding.pc == pc)
+            .map(|(_, binding)| binding)
+    }
+
+    pub(crate) fn authorizes_direct_print_result_root_move(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> bool {
+        self.direct_print_result_route_anchor
+            .as_ref()
+            .is_some_and(|anchor| {
+                anchor.bindings.root_moves.iter().any(|(owner, binding)| {
+                    *owner == function && (binding.pc, binding.rd, binding.rs) == (pc, rd, rs)
+                })
+            })
+    }
+
+    pub(crate) fn authorizes_direct_print_result_root_drop(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        ra: Reg,
+    ) -> bool {
+        self.direct_print_result_route_anchor
+            .as_ref()
+            .is_some_and(|anchor| {
+                anchor.bindings.root_drops.iter().any(|(owner, binding)| {
+                    *owner == function && (binding.pc, binding.ra) == (pc, ra)
+                })
+            })
+    }
+
+    pub(crate) fn authorizes_direct_print_result_pair_drop(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        ra: Reg,
+    ) -> bool {
+        self.direct_print_result_route_anchor
+            .as_ref()
+            .is_some_and(|anchor| {
+                anchor.bindings.pair_drops.iter().any(|(owner, binding)| {
+                    *owner == function && (binding.pc, binding.ra) == (pc, ra)
+                })
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn corrupt_values_field_move_route_profile_for_test_only(&mut self) -> bool {
         let Some(anchor) = self.values_field_move_route_anchor.as_mut() else {
@@ -11825,6 +15084,43 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
     #[cfg(test)]
     pub(crate) fn clear_values_local_index_i32_route_anchor_for_test_only(&mut self) -> bool {
         self.values_local_index_i32_route_anchor.take().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_values_local_index_i32_result_branch_route_profile_for_test_only(
+        &mut self,
+    ) -> bool {
+        let Some(anchor) = self
+            .values_local_index_i32_result_branch_route_anchor
+            .as_mut()
+        else {
+            return false;
+        };
+        anchor.corrupt_profile_for_test_only();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_values_local_index_i32_result_branch_route_manifest_for_test_only(
+        &mut self,
+    ) -> bool {
+        let Some(anchor) = self
+            .values_local_index_i32_result_branch_route_anchor
+            .as_mut()
+        else {
+            return false;
+        };
+        anchor.corrupt_manifest_for_test_only();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_values_local_index_i32_result_branch_route_anchor_for_test_only(
+        &mut self,
+    ) -> bool {
+        self.values_local_index_i32_result_branch_route_anchor
+            .take()
+            .is_some()
     }
 
     #[cfg(test)]
@@ -12378,6 +15674,29 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
     }
 
     #[cfg(test)]
+    pub(crate) fn corrupt_map_set_drop_control_result_branch_route_profile_for_test_only(
+        &mut self,
+    ) -> bool {
+        let Some(anchor) = self
+            .map_set_drop_control_result_branch_route_anchor
+            .as_mut()
+        else {
+            return false;
+        };
+        anchor.corrupt_profile_for_test_only();
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_map_set_drop_control_result_branch_route_anchor_for_test_only(
+        &mut self,
+    ) -> bool {
+        self.map_set_drop_control_result_branch_route_anchor
+            .take()
+            .is_some()
+    }
+
+    #[cfg(test)]
     pub(crate) fn corrupt_branch_local_set_diamond_route_profile_for_test_only(&mut self) -> bool {
         let Some(anchor) = self.branch_local_set_diamond_route_anchor.as_mut() else {
             return false;
@@ -12549,22 +15868,28 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
 
     pub(crate) fn existing_managed_any_receipts_snapshot(&self) -> String {
         format!(
-            "map-any-owner-v1={}:{}|ordinary-map-owner={:?}|ordinary-map-owner-observer-v1={:?}|ordinary-map-owned-get={:?}|ordinary-map-owned-any-v2={:?}|values-field-move-route={:?}|values-snapshot-replacement-route={:?}|values-mixed-snapshot-route={:?}|values-local-index-i32-route={:?}|values-heterogeneous-string-index1-route={:?}|keys-snapshot-route={:?}|values-mixed-snapshot-remove-route={:?}|clone-isolation-route={:?}|persistent-root-alias-replacement-route={:?}|managed-any-identity={:?}|managed-any-trap-cleanup={:?}",
+            "map-any-owner-v1={}:{}|ordinary-map-owner={:?}|ordinary-map-owner-observer-v1={:?}|ordinary-map-owned-get={:?}|ordinary-map-owned-get-result-branch-v3={:?}|ordinary-map-owned-any-v2={:?}|values-field-move-route={:?}|values-snapshot-replacement-route={:?}|values-mixed-snapshot-route={:?}|values-local-index-i32-route={:?}|values-local-index-i32-result-branch-route={:?}|values-heterogeneous-string-index1-route={:?}|keys-snapshot-route={:?}|values-mixed-snapshot-remove-route={:?}|clone-isolation-route={:?}|persistent-root-alias-replacement-route={:?}|set-get-any-i32-route={:?}|direct-tuple-get-l1-route={:?}|set-get-any-result-i32-route={:?}|set-get-string-route={:?}|managed-any-identity={:?}|managed-any-trap-cleanup={:?}",
             self.expected_has_map_any_owner_v1,
             self.expected_program,
             self.ordinary_map_owner_lifecycle_i32_string_v1,
             self.ordinary_map_owner_observer_v1,
             self.ordinary_map_owned_get_i32_string_v1,
+            self.ordinary_map_owned_get_result_branch_v3_route_anchor,
             self.ordinary_map_owned_any_v2,
             self.values_field_move_route_anchor,
             self.values_snapshot_replacement_route_anchor,
             self.values_mixed_snapshot_route_anchor,
             self.values_local_index_i32_route_anchor,
+            self.values_local_index_i32_result_branch_route_anchor,
             self.values_heterogeneous_string_index1_route_anchor,
             self.keys_snapshot_route_anchor,
             self.values_mixed_snapshot_remove_route_anchor,
             self.clone_isolation_route_anchor,
             self.ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_anchor,
+            self.set_get_any_i32_result_anchor,
+            self.direct_tuple_get_l1_anchor,
+            self.set_get_any_result_i32_anchor,
+            self.set_get_string_result_anchor,
             self.managed_any_identity,
             self.managed_any_trap_cleanup,
         )
@@ -12675,13 +16000,85 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         functions: &[FunctionProto],
     ) -> Result<(), String> {
         self.validate_exclusive_route_anchor()?;
+        if let Some(anchor) = self.direct_tuple_get_l1_anchor.as_ref() {
+            if self.ordinary_map_owned_any_v2.is_some()
+                || self.set_get_any_i32_result_anchor.is_some()
+                || self.set_get_any_result_i32_anchor.is_some()
+            {
+                return Err(
+                    "direct tuple Get L1 anchor is mixed with a generic/composite Any receipt"
+                        .into(),
+                );
+            }
+            return anchor.validate(entry, functions);
+        }
+        if let Some(anchor) = self.direct_print_result_route_anchor.as_ref() {
+            if self.ordinary_map_owned_any_v2.is_some() {
+                return Err(
+                    "DirectPrintResult route cannot borrow the broad V2 action/payload receipt"
+                        .into(),
+                );
+            }
+            return anchor.validate(entry, functions);
+        }
+        let has_set_result = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }))
+        });
+        let has_set_get_i32_result = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }))
+        });
+        let has_set_get_any_i32_result = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+        });
+        let has_set_get_any_result_i32 = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. }))
+        });
+        let has_set_string_result = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }))
+        });
+        let has_set_get_string_result = functions.iter().any(|function| {
+            function
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }))
+        });
         let has_new_result = functions.iter().any(|function| {
             function
                 .code
                 .iter()
                 .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
         });
-        match (&self.new_result_anchor, has_new_result) {
+        match (
+            &self.new_result_anchor,
+            has_new_result
+                && !has_set_result
+                && !functions.iter().any(|function| {
+                    function
+                        .code
+                        .iter()
+                        .any(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }))
+                })
+                && !has_set_get_i32_result
+                && !has_set_get_any_i32_result
+                && !has_set_get_any_result_i32
+                && !has_set_string_result
+                && !has_set_get_string_result,
+        ) {
             (Some(anchor), true) => anchor.validate(entry, functions)?,
             (None, false) => {}
             _ => return Err(
@@ -12689,16 +16086,116 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                     .into(),
             ),
         }
+        match (
+            &self.set_result_anchor,
+            has_set_result
+                && has_new_result
+                && !has_set_get_i32_result
+                && !has_set_get_any_i32_result
+                && !has_set_get_any_result_i32
+                && !has_set_string_result
+                && !has_set_get_string_result,
+        ) {
+            (Some(anchor), true) => anchor.validate(entry, functions)?,
+            (None, false) => {}
+            _ => return Err(
+                "ordinary Map SetResult bytecode has no matching independent pending-L1 receipt"
+                    .into(),
+            ),
+        }
+        match (
+            &self.set_get_i32_result_anchor,
+            has_set_get_i32_result
+                && has_set_result
+                && has_new_result
+                && !has_set_get_any_i32_result
+                && !has_set_get_any_result_i32
+                && !has_set_string_result
+                && !has_set_get_string_result,
+        ) {
+            (Some(anchor), true) => anchor.validate(entry, functions)?,
+            (None, false) => {}
+            _ => {
+                return Err(
+                    "ordinary Map Set/Get-i32 bytecode has no matching independent Checker route anchor"
+                        .into(),
+                )
+            }
+        }
 
-        match &self.ordinary_map_owned_any_v2 {
-            Some(receipt) => receipt.validate(entry, functions),
-            None if functions
-                .iter()
-                .any(function_has_ordinary_map_owned_any_v2_ops) =>
+        match (
+            &self.set_get_any_i32_result_anchor,
+            has_set_get_any_i32_result
+                && has_set_result
+                && has_new_result
+                && !has_set_get_i32_result
+                && !has_set_get_any_result_i32
+                && !has_set_string_result
+                && !has_set_get_string_result,
+        ) {
+            (Some(anchor), true) => anchor.validate(entry, functions)?,
+            (None, false) => {}
+            _ => {
+                return Err(
+                    "ordinary Map Set/GetAny-i32 bytecode has no matching independent Checker route anchor"
+                        .into(),
+                )
+            }
+        }
+
+        match (
+            &self.set_get_any_result_i32_anchor,
+            has_set_get_any_result_i32
+                && has_set_result
+                && has_new_result
+                && !has_set_get_i32_result
+                && !has_set_get_any_i32_result
+                && !has_set_string_result
+                && !has_set_get_string_result,
+        ) {
+            (Some(anchor), true) => anchor.validate(entry, functions)?,
+            (None, false) => {}
+            _ => {
+                return Err(
+                    "ordinary Map Set/GetAny-Result-i32 bytecode has no matching independent Checker route anchor"
+                        .into(),
+                )
+            }
+        }
+
+        match (
+            &self.set_get_string_result_anchor,
+            has_set_string_result && has_set_get_string_result && has_new_result,
+        ) {
+            (Some(anchor), true) => anchor.validate(entry, functions)?,
+            (None, false) => {}
+            _ => {
+                return Err(
+                    "ordinary Map Set/Get-String bytecode has no matching independent Checker route anchor"
+                        .into(),
+                )
+            }
+        }
+
+        match (
+            &self.set_get_any_i32_result_anchor,
+            &self.ordinary_map_owned_any_v2,
+        ) {
+            // The narrow route anchor owns these GetAny/unpack sites and its
+            // separate PC bindings. Validating the broad V2 receipt here
+            // would require a generic CFG/action ledger and payload-selection
+            // table, neither of which is authority for this exact route.
+            (Some(_), _) | (None, _) if self.set_get_any_result_i32_anchor.is_some() => Ok(()),
+            (Some(_), _) => Ok(()),
+            (None, Some(receipt)) => receipt.validate(entry, functions),
+            (None, None)
+                if functions
+                    .iter()
+                    .any(function_has_ordinary_map_owned_any_v2_ops) =>
             {
                 Err("ordinary Map/Any owner-v2 bytecode has no independent Checker receipt".into())
             }
-            None => Ok(()),
+            (None, None) => Ok(()),
         }
     }
 
@@ -12713,13 +16210,819 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         if self.new_result_anchor.is_some() {
             return Err("ordinary Map NewResult bytecode anchor is already set".into());
         }
-        let receipt = core.ownership.ordinary_map_new_result_receipt().unwrap();
+        let receipt = core
+            .ownership
+            .ordinary_map_new_result_receipt()
+            .ok_or_else(|| "ordinary Map NewResult ownership receipt is missing".to_string())?;
         self.new_result_anchor = Some(CanonicalOrdinaryMapNewResultBytecodeAnchor {
             profile: crate::core::mir::ORDINARY_MAP_NEW_RESULT_PENDING_L1_PROFILE.into(),
             owner: core.owner.0.clone(),
             source_commitment: format!("{receipt:?}"),
             entry,
             root_move: ordinary_map_new_result_root_move_site(functions)?,
+            expected_program: format!("{functions:?}"),
+        });
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_result(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+    ) -> Result<(), String> {
+        crate::core::mir::validate_ordinary_map_set_result_types(core, catalog)?;
+        if self.set_result_anchor.is_some() {
+            return Err("ordinary Map SetResult bytecode anchor is already set".into());
+        }
+        let receipt = core
+            .ownership
+            .ordinary_map_set_lineage_receipt()
+            .ok_or_else(|| {
+                "ordinary Map SetResult bytecode has no Checker lineage receipt".to_string()
+            })?;
+        self.set_result_anchor = Some(CanonicalOrdinaryMapSetResultBytecodeAnchor {
+            profile: crate::core::mir::ORDINARY_MAP_SET_RESULT_PENDING_L1_PROFILE.into(),
+            owner: core.owner.0.clone(),
+            source_commitment: format!("{receipt:?}"),
+            entry,
+            root_moves: ordinary_map_set_result_root_move_sites(functions)?,
+            expected_program: format!("{functions:?}"),
+        });
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_get_i32_result(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        crate::core::mir::validate_ordinary_map_set_get_i32_result_types(core, catalog)?;
+        if self.set_get_i32_result_anchor.is_some() {
+            return Err("ordinary Map Set/Get-i32 bytecode anchor is already set".into());
+        }
+        if route_receipt.profile != crate::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE {
+            return Err(
+                "ordinary Map Set/Get-i32 bytecode anchor has the wrong execution profile".into(),
+            );
+        }
+        let receipt = core
+            .ownership
+            .ordinary_map_set_get_i32_lineage_receipt()
+            .ok_or_else(|| {
+                "ordinary Map Set/Get-i32 bytecode has no Checker lineage receipt".to_string()
+            })?;
+        let manifest = route_receipt.manifest_text()?;
+        if route_receipt.manifest_round_trip()? != *route_receipt {
+            return Err("ordinary Map Set/Get-i32 route manifest did not round-trip".into());
+        }
+        self.set_get_i32_result_anchor = Some(CanonicalOrdinaryMapSetGetI32BytecodeAnchor {
+            profile: route_receipt.profile.clone(),
+            owner: core.owner.0.clone(),
+            source_commitment: format!("{receipt:?}"),
+            route_receipt: route_receipt.clone(),
+            manifest,
+            entry,
+            root_moves: ordinary_map_set_result_root_move_sites(functions)?,
+            get_i32_result: ordinary_map_set_get_i32_result_site(functions)?,
+            expected_program: format!("{functions:?}"),
+        });
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_get_any_i32_result(
+        &mut self,
+        checked: &crate::core::CheckedProgram,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        if self.set_get_any_i32_result_anchor.is_some() {
+            return Err("ordinary Map Set/GetAny-i32 bytecode anchor is already set".into());
+        }
+        if route_receipt.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+        {
+            return Err(
+                "ordinary Map Set/GetAny-i32 bytecode anchor has the wrong execution profile"
+                    .into(),
+            );
+        }
+        let receipt = core
+            .ownership
+            .ordinary_map_set_get_any_i32_lineage_receipt()
+            .ok_or_else(|| {
+                "ordinary Map Set/GetAny-i32 bytecode has no independent Checker lineage receipt"
+                    .to_string()
+            })?;
+        let source_attempt_census = ordinary_map_set_get_any_i32_source_attempt_census_parts(
+            &receipt.operations,
+            &receipt.new_operation,
+            &receipt.set_operation,
+            &receipt.get_operation,
+            &receipt.unpack_operation,
+        )?;
+        let unpack_source_commitment = ordinary_map_set_get_any_i32_cast_builtin_commitment(
+            checked,
+            &receipt.owner,
+            &receipt.unpack_operation,
+            &receipt.unpack_argument,
+            receipt.unpack_conversion_kind,
+            &receipt.unpack_source_type,
+            &receipt.unpack_target_type,
+        )?;
+        let manifest = route_receipt.manifest_text()?;
+        if route_receipt.manifest_round_trip()? != *route_receipt {
+            return Err("ordinary Map Set/GetAny-i32 route manifest did not round-trip".into());
+        }
+        self.set_get_any_i32_result_anchor = Some(CanonicalOrdinaryMapSetGetAnyI32BytecodeAnchor {
+            profile: route_receipt.profile.clone(),
+            owner: core.owner.0.clone(),
+            source_commitment: format!("{receipt:?}"),
+            source_attempt_census,
+            source_operations: receipt.operations.clone(),
+            new_operation: receipt.new_operation.clone(),
+            set_operation: receipt.set_operation.clone(),
+            get_operation: receipt.get_operation.clone(),
+            unpack_operation: receipt.unpack_operation.clone(),
+            unpack_source_commitment,
+            set_key_value: receipt.set_key_value.clone(),
+            set_i32_value: receipt.set_i32_value,
+            get_key_value: receipt.get_key_value.clone(),
+            route_receipt: route_receipt.clone(),
+            manifest,
+            entry,
+            root_moves: ordinary_map_set_result_root_move_sites(functions)?,
+            new_result: ordinary_map_set_get_any_i32_new_result_site(functions)?,
+            set_result: ordinary_map_set_get_any_i32_set_site(
+                functions,
+                &receipt.set_key_value,
+                receipt.set_i32_value,
+            )?,
+            get_any: ordinary_map_set_get_any_i32_get_site(functions, &receipt.get_key_value)?,
+            unpack_i32: ordinary_map_set_get_any_i32_unpack_i32_site(functions)?,
+            get_any_binding: None,
+            selected_payload_binding: None,
+            unpack_binding: None,
+            core_unpack_receipt: None,
+            expected_binding_snapshot: String::new(),
+            expected_program: format!("{functions:?}"),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn bind_direct_tuple_get_l1(
+        &mut self,
+        checked: &crate::core::CheckedProgram,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        program: &crate::core::mir::reference::MirProgram,
+        core: &crate::core::mir::MirFunction,
+        instruction_pc_ranges: &BTreeMap<crate::core::mir::MirInstructionId, (usize, usize)>,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        if self.direct_tuple_get_l1_anchor.is_some() {
+            return Err("direct tuple Get L1 bytecode anchor is already set".into());
+        }
+        if self.ordinary_map_owned_any_v2.is_some()
+            || self.set_get_any_i32_result_anchor.is_some()
+            || self.set_get_any_result_i32_anchor.is_some()
+        {
+            return Err(
+                "direct tuple Get L1 bytecode authority cannot coexist with a generic or composite Any anchor".into(),
+            );
+        }
+        self.direct_tuple_get_l1_anchor = Some(CanonicalDirectTupleGetL1BytecodeAnchor::capture(
+            checked,
+            entry,
+            functions,
+            program,
+            core,
+            instruction_pc_ranges,
+            route_receipt,
+        )?);
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_get_any_result_i32_result(
+        &mut self,
+        checked: &crate::core::CheckedProgram,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        if self.set_get_any_result_i32_anchor.is_some() {
+            return Err("ordinary Map Set/GetAny-Result-i32 bytecode anchor is already set".into());
+        }
+        if route_receipt.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE
+        {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 bytecode anchor has the wrong execution profile"
+                    .into(),
+            );
+        }
+        let source_receipt = core
+            .ownership
+            .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+            .ok_or_else(|| {
+                "ordinary Map Set/GetAny-Result-i32 bytecode has no Checker lineage receipt"
+                    .to_string()
+            })?;
+        if source_receipt.profile_version
+            != crate::core::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion::V1
+            || source_receipt.get_api != crate::core::OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+        {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 bytecode receipt is outside the MapGetAnyResult profile"
+                    .into(),
+            );
+        }
+        let checked_source = checked
+            .callable(&core.owner)
+            .and_then(|callable| {
+                callable
+                    .resources
+                    .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt
+                    .as_ref()
+            })
+            .ok_or_else(|| {
+                "ordinary Map Set/GetAny-Result-i32 CheckedProgram has no source receipt"
+                    .to_string()
+            })?;
+        if checked_source != source_receipt {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 MIR receipt is detached from CheckedProgram"
+                    .into(),
+            );
+        }
+        let catalog =
+            crate::core::mir::types::MirTypeCatalog::for_ordinary_map_set_get_any_result_i32(
+                checked,
+                source_receipt,
+            )
+            .map_err(|errors| errors.join("; "))?;
+        let envelope_type_id =
+            crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+        let envelope_descriptor = catalog.get(&envelope_type_id).ok_or_else(|| {
+            "ordinary Map GetAnyResult bytecode anchor has no dedicated envelope TypeDesc"
+                .to_string()
+        })?;
+        catalog.validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+            &envelope_type_id,
+            crate::core::mir::types::MirGlueOperation::MoveOut,
+        )?;
+        let envelope_descriptor_digest =
+            blake3::hash(envelope_descriptor.canonical_text().as_bytes())
+                .to_hex()
+                .to_string();
+        let manifest = route_receipt.manifest_text()?;
+        if route_receipt.manifest_round_trip()? != *route_receipt {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 route manifest did not round-trip".into(),
+            );
+        }
+        self.set_get_any_result_i32_anchor =
+            Some(CanonicalOrdinaryMapSetGetAnyResultI32BytecodeAnchor {
+                profile: route_receipt.profile.clone(),
+                owner: core.owner.0.clone(),
+                source_receipt: source_receipt.clone(),
+                source_commitment: format!("{source_receipt:?}"),
+                route_receipt: route_receipt.clone(),
+                manifest,
+                entry,
+                root_moves: ordinary_map_set_get_any_result_i32_root_move_sites(functions)?,
+                new_result: ordinary_map_set_get_any_i32_new_result_site(functions)?,
+                set_result: ordinary_map_set_get_any_i32_set_site(
+                    functions,
+                    &source_receipt.set_key_value,
+                    source_receipt.set_i32_value,
+                )?,
+                get_any_result: ordinary_map_set_get_any_result_i32_get_site(
+                    functions,
+                    &source_receipt.get_key_value,
+                )?,
+                unpack: ordinary_map_set_get_any_result_i32_unpack_site(functions)?,
+                unpack_binding: None,
+                selected_payload_binding: None,
+                expected_binding_snapshot: String::new(),
+                envelope_type_id: envelope_type_id.as_str().to_string(),
+                envelope_descriptor_digest,
+                expected_program: format!("{functions:?}"),
+            });
+        self.bind_ordinary_map_set_get_any_result_i32_unpack_binding(
+            entry, functions, core, &catalog,
+        )?;
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    fn bind_ordinary_map_set_get_any_result_i32_unpack_binding(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+    ) -> Result<(), String> {
+        let anchor = self.set_get_any_result_i32_anchor.as_mut().ok_or_else(|| {
+            "ordinary Map Set/GetAny-Result-i32 unpack has no dedicated route anchor".to_string()
+        })?;
+        if anchor.unpack_binding.is_some() || anchor.selected_payload_binding.is_some() {
+            return Err("ordinary Map Set/GetAny-Result-i32 unpack binding is already set".into());
+        }
+        let source = &anchor.source_receipt;
+        let pair =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.get_ok_pair_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let get_result =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.get_result_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let unpack_result =
+            crate::core::mir::MirValueId::new(format!("expr:{}", source.get_unpack_operation.0))
+                .map_err(|error| error.to_string())?;
+        let root =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.updated_root_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let key = crate::core::mir::MirValueId::new(format!("literal:{}", source.get_key.0))
+            .map_err(|error| error.to_string())?;
+        let get_instruction_id = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:get_any_result:{}",
+            source.get_operation.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let unpack_instruction_id = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:unpack_i32:{}",
+            source.get_unpack_operation.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let get_instructions = core
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        let [get_instruction] = get_instructions.as_slice() else {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 must have exactly one MIR GetAnyResult instruction"
+                    .into(),
+            );
+        };
+        match &get_instruction.kind {
+            crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult {
+                result,
+                root: actual_root,
+                key: actual_key,
+            } if get_instruction.id == get_instruction_id
+                && result == &get_result
+                && actual_root == &root
+                && actual_key == &key => {}
+            _ => {
+                return Err(
+                    "ordinary Map GetAnyResult bytecode anchor disagrees with its exact MIR/Checker source identity".into(),
+                )
+            }
+        }
+        let unpack_instructions = core
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        let [unpack_instruction] = unpack_instructions.as_slice() else {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 must have exactly one MIR Any unpack instruction"
+                    .into(),
+            );
+        };
+        match &unpack_instruction.kind {
+            crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair: actual_pair,
+                projection,
+            } if unpack_instruction.id == unpack_instruction_id
+                && result == &unpack_result
+                && actual_pair == &pair
+                && projection == &source.get_pair_payload_projection => {}
+            _ => {
+                return Err(
+                    "ordinary Map GetAnyResult unpack bytecode anchor disagrees with its exact MIR/Checker pair projection".into(),
+                )
+            }
+        }
+        let drop_point = source.get_ok_pair_payload_settlement.clone();
+        let expected_drop_instruction = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:drop_pair:{}",
+            drop_point.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let pair_drops = core
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::Drop { value }
+                        if value == &pair
+                )
+            })
+            .collect::<Vec<_>>();
+        let [pair_drop] = pair_drops.as_slice() else {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 must have exactly one pair settlement instruction"
+                    .into(),
+            );
+        };
+        if pair_drop.id != expected_drop_instruction {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 pair settlement instruction differs from its Checker source site".into(),
+            );
+        }
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        if source.get_unpack_conversion_kind
+            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+            || source.get_unpack_target_type != i32_type
+            || core.values.get(&pair).map(|value| &value.ty)
+                != Some(&crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id())
+            || core.values.get(&unpack_result).map(|value| &value.ty) != Some(&i32_type)
+            || core.values.get(&get_result).map(|value| &value.ty)
+                != Some(&crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id())
+        {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 unpack source/target TypeDesc differs from its Checker receipt".into(),
+            );
+        }
+        let target_desc = catalog
+            .get(&i32_type)
+            .ok_or_else(|| "canonical i32 TypeDesc is absent from MIR catalog".to_string())?;
+        catalog.validate_copy_scalar(&i32_type)?;
+        let target_type_desc_digest = blake3::hash(target_desc.canonical_text().as_bytes())
+            .to_hex()
+            .to_string();
+        let selected_payload_binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+            type_id: i32_type.clone(),
+            type_desc_digest: target_type_desc_digest.clone(),
+            kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
+        };
+        let (function, pc, rd, ra) = anchor.unpack;
+        if function != entry || rd == ra {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 unpack bytecode uses an invalid entry/register binding".into(),
+            );
+        }
+        let payload_source = if source.get_key_value == source.set_key_value {
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+        } else {
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+        };
+        let unpack_binding = CanonicalOrdinaryMapOwnedAnyV2UnpackBinding {
+            owner: source.owner.clone(),
+            operation: source.get_operation.clone(),
+            instruction: unpack_instruction.id.clone(),
+            projection: source.get_pair_payload_projection.clone(),
+            cast: source.get_unpack_operation.clone(),
+            conversion_kind: source.get_unpack_conversion_kind,
+            conversion_from: source.get_unpack_source_type.clone(),
+            conversion_to: source.get_unpack_target_type.clone(),
+            payload_source,
+            pair: pair.clone(),
+            pair_local: source.get_ok_pair_local.clone(),
+            result: unpack_result,
+            target_type: i32_type.clone(),
+            target_type_desc_digest: target_type_desc_digest.clone(),
+            get_any_instruction: get_instruction.id.clone(),
+            settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+            settlement_point: drop_point,
+            settlement_instruction: pair_drop.id.clone(),
+            miss_payload_type: i32_type.clone(),
+            payload_selection_digest: anchor.route_receipt.mir_digest.clone(),
+            pc,
+            rd,
+            ra,
+        };
+        anchor.unpack_binding = Some(unpack_binding);
+        anchor.selected_payload_binding = Some(selected_payload_binding);
+        anchor.expected_binding_snapshot = format!(
+            "selected_payload={:?}|unpack={:?}",
+            anchor.selected_payload_binding, anchor.unpack_binding
+        );
+        anchor.validate(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_get_any_i32_bindings_from_core_receipts(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        core_unpack_receipt: crate::core::mir::OrdinaryMapOwnedAnyV2SetGetAnyI32UnpackResultReceipt,
+    ) -> Result<(), String> {
+        let anchor = self.set_get_any_i32_result_anchor.as_mut().ok_or_else(|| {
+            "ordinary Map Set/GetAny-i32 bindings have no dedicated route anchor".to_string()
+        })?;
+        if anchor.get_any_binding.is_some()
+            || anchor.selected_payload_binding.is_some()
+            || anchor.unpack_binding.is_some()
+            || anchor.core_unpack_receipt.is_some()
+        {
+            return Err("ordinary Map Set/GetAny-i32 Core bindings are already set".into());
+        }
+        let source = core
+            .ownership
+            .ordinary_map_set_get_any_i32_lineage_receipt()
+            .ok_or("ordinary Map Set/GetAny-i32 Core function has no Checker lineage receipt")?;
+        core_unpack_receipt.validate_payload_selection_commitment()?;
+        let get_any_site = ordinary_map_set_get_any_i32_get_site(functions, &source.get_key_value)?;
+        let unpack_site = ordinary_map_set_get_any_i32_unpack_i32_site(functions)?;
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let expected_key =
+            crate::core::mir::MirValueId::new(format!("literal:{}", source.get_key.0))
+                .map_err(|error| error.to_string())?;
+        let expected_root =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.updated_root_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let expected_pair =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.get_result_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let expected_unpack =
+            crate::core::mir::MirValueId::new(format!("expr:{}", source.unpack_operation.0))
+                .map_err(|error| error.to_string())?;
+        let get_any_instruction = core
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| instruction.id == core_unpack_receipt.get_any_instruction)
+            .collect::<Vec<_>>();
+        let [get_any_instruction] = get_any_instruction.as_slice() else {
+            return Err(
+                "Result-aware GetAny bytecode binding has no unique MIR instruction".into(),
+            );
+        };
+        let unpack_instruction = core
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| instruction.id == core_unpack_receipt.unpack_instruction)
+            .collect::<Vec<_>>();
+        let [unpack_instruction] = unpack_instruction.as_slice() else {
+            return Err(
+                "Result-aware unpack bytecode binding has no unique MIR instruction".into(),
+            );
+        };
+        match &get_any_instruction.kind {
+            crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                result,
+                root,
+                key,
+            } if result == &core_unpack_receipt.pair_binding
+                && root == &core_unpack_receipt.updated_root_local
+                && key == &core_unpack_receipt.get_any_key_value
+                && key == &expected_key => {}
+            _ => return Err(
+                "Result-aware GetAny bytecode binding disagrees with its exact MIR root/key/pair"
+                    .into(),
+            ),
+        }
+        match &unpack_instruction.kind {
+            crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection,
+            } if result == &core_unpack_receipt.unpack_result_expression
+                && result == &expected_unpack
+                && pair == &core_unpack_receipt.pair_binding
+                && projection == &core_unpack_receipt.pair_payload_projection => {}
+            _ => {
+                return Err(
+                    "Result-aware unpack bytecode binding disagrees with its exact MIR Cast/pair/projection".into(),
+                )
+            }
+        }
+        if core.owner != core_unpack_receipt.owner
+            || core_unpack_receipt.profile
+                != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+            || core_unpack_receipt.route_receipt != anchor.route_receipt
+            || core_unpack_receipt.source_receipt_commitment != anchor.source_commitment
+            || core_unpack_receipt.get_any_operation != source.get_operation
+            || core_unpack_receipt.get_any_key_value != expected_key
+            || core_unpack_receipt.pair_binding != expected_pair
+            || core_unpack_receipt.set_operation != source.set_operation
+            || core_unpack_receipt.set_key_value
+                != crate::core::mir::MirValueId::new(format!("literal:{}", source.set_key.0))
+                    .map_err(|error| error.to_string())?
+            || core_unpack_receipt.set_payload_value
+                != crate::core::mir::MirValueId::new(format!("literal:{}", source.set_value.0))
+                    .map_err(|error| error.to_string())?
+            || core_unpack_receipt.set_payload_type_desc_id != i32_type
+            || core_unpack_receipt.set_payload_type_desc_digest
+                != core_unpack_receipt.miss_payload_type_desc_digest
+            || core_unpack_receipt.key_type_desc_id != source.get_key_type
+            || core_unpack_receipt.key_type_desc_id
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+            || !is_canonical_digest(&core_unpack_receipt.payload_selection_digest)
+            || !is_canonical_digest(&core_unpack_receipt.set_payload_type_desc_digest)
+            || !is_canonical_digest(&core_unpack_receipt.key_type_desc_digest)
+            || core_unpack_receipt.unpack_source_node != source.unpack_operation
+            || core_unpack_receipt.unpack_target_type != i32_type
+            || core_unpack_receipt.miss_payload_type_desc_id != i32_type
+            || core_unpack_receipt.miss_value != 0
+            || core_unpack_receipt.query_key != source.get_key_value
+            || core_unpack_receipt.stored_key != source.set_key_value
+            || core_unpack_receipt.stored_i32 != source.set_i32_value
+            || core_unpack_receipt.query_hits_stored_key
+                != (source.get_key_value == source.set_key_value)
+            || core.values.get(&expected_root).map(|value| &value.ty)
+                != Some(&crate::core::mir::types::ordinary_map_owned_any_v2_type_id())
+            || core.values.get(&expected_pair).map(|value| &value.ty)
+                != Some(&core_unpack_receipt.pair_type_desc_id)
+            || core.values.get(&expected_unpack).map(|value| &value.ty) != Some(&i32_type)
+            || core_unpack_receipt.pair_type_desc_id
+                != crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id()
+            || core_unpack_receipt.any_payload_type_desc_id
+                != crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id()
+            || core_unpack_receipt.unpack_source_type != source.unpack_source_type
+            || core_unpack_receipt.unpack_conversion_kind
+                != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+            || core_unpack_receipt.unpack_callsite_callee != "unpack_i32"
+            || core_unpack_receipt.unpack_callsite_owner != core.owner.0
+            || core_unpack_receipt.unpack_callsite_arity != 1
+            || core_unpack_receipt.unpack_resolved_builtin != "unpack_i32"
+            || core_unpack_receipt.graph_digest != anchor.route_receipt.mir_digest
+            || core_unpack_receipt.type_catalog_digest != anchor.route_receipt.type_desc_digest
+            || core_unpack_receipt.found_projection != source.pair_found_projection
+            || core_unpack_receipt.found_binding
+                != crate::core::mir::MirValueId::new(format!("local:{}", source.found_local.0 .0))
+                    .map_err(|error| error.to_string())?
+            || core_unpack_receipt.updated_root_local != expected_root
+            || core_unpack_receipt.updated_root_drop_point != source.updated_root_get_drop
+            || core_unpack_receipt.miss_token
+                != crate::core::mir::MirValueId::new(format!(
+                    "literal:{}",
+                    source.found_false_arm.0
+                ))
+                .map_err(|error| error.to_string())?
+            || core_unpack_receipt.pair_drop_point != source.pair_drop
+            || core_unpack_receipt.payload_source
+                != if source.get_key_value == source.set_key_value {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+                } else {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+                }
+        {
+            return Err(
+                "Result-aware GetAny dedicated receipt differs from the Checker, route, or TypeDesc anchor".into(),
+            );
+        }
+        let (get_function, get_pc, get_rd, get_ra, key_reg) = get_any_site;
+        let get_any_binding = CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding {
+            owner: source.owner.clone(),
+            operation: source.get_operation.clone(),
+            instruction: core_unpack_receipt.get_any_instruction.clone(),
+            source_node: source.get_receiver.clone(),
+            source_local: source.get_receiver_local.clone(),
+            root: expected_root,
+            checker_source_type: source.updated_root_type.clone(),
+            key_node: source.get_key.clone(),
+            key: core_unpack_receipt.get_any_key_value.clone(),
+            checker_key_type: source.get_key_type.clone(),
+            checker_key_local: None,
+            result: core_unpack_receipt.pair_binding.clone(),
+            checker_result_type: source.get_result_type.clone(),
+            mir_result_type: core_unpack_receipt.pair_type_desc_id.clone(),
+            binding_local: source.get_result_local.clone(),
+            binding: core_unpack_receipt.pair_binding.clone(),
+            settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+            settlement_point: core_unpack_receipt.pair_drop_point.clone(),
+            settlement_instruction: core_unpack_receipt.pair_drop_instruction.clone(),
+            temporary_root: None,
+            miss_payload_type: core_unpack_receipt.miss_payload_type_desc_id.clone(),
+            miss_payload_type_desc_digest: core_unpack_receipt
+                .miss_payload_type_desc_digest
+                .clone(),
+            pc: get_pc,
+            rd: get_rd,
+            ra: get_ra,
+            key_reg,
+        };
+        let selected_payload_binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+            type_id: core_unpack_receipt.set_payload_type_desc_id.clone(),
+            type_desc_digest: core_unpack_receipt.set_payload_type_desc_digest.clone(),
+            kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
+        };
+        let (unpack_function, unpack_pc, unpack_rd, unpack_ra) = unpack_site;
+        if get_function != entry || unpack_function != entry {
+            return Err(
+                "Result-aware GetAny bytecode bindings use a different entry function".into(),
+            );
+        }
+        let unpack_binding = CanonicalOrdinaryMapOwnedAnyV2UnpackBinding {
+            owner: core_unpack_receipt.owner.clone(),
+            operation: core_unpack_receipt.get_any_operation.clone(),
+            instruction: core_unpack_receipt.unpack_instruction.clone(),
+            projection: core_unpack_receipt.pair_payload_projection.clone(),
+            cast: core_unpack_receipt.unpack_source_node.clone(),
+            conversion_kind: core_unpack_receipt.unpack_conversion_kind,
+            conversion_from: core_unpack_receipt.unpack_source_type.clone(),
+            conversion_to: core_unpack_receipt.unpack_target_type.clone(),
+            payload_source: core_unpack_receipt.payload_source,
+            pair: core_unpack_receipt.pair_binding.clone(),
+            pair_local: source.get_result_local.clone(),
+            result: core_unpack_receipt.unpack_result_expression.clone(),
+            target_type: core_unpack_receipt.unpack_target_type.clone(),
+            target_type_desc_digest: core_unpack_receipt.miss_payload_type_desc_digest.clone(),
+            get_any_instruction: core_unpack_receipt.get_any_instruction.clone(),
+            settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+            settlement_point: core_unpack_receipt.pair_drop_point.clone(),
+            settlement_instruction: core_unpack_receipt.pair_drop_instruction.clone(),
+            miss_payload_type: core_unpack_receipt.miss_payload_type_desc_id.clone(),
+            payload_selection_digest: core_unpack_receipt.payload_selection_digest.clone(),
+            pc: unpack_pc,
+            rd: unpack_rd,
+            ra: unpack_ra,
+        };
+        anchor.get_any_binding = Some(get_any_binding);
+        anchor.selected_payload_binding = Some(selected_payload_binding);
+        anchor.unpack_binding = Some(unpack_binding);
+        anchor.core_unpack_receipt = Some(core_unpack_receipt);
+        anchor.expected_binding_snapshot = format!(
+            "core={:?}|get_any={:?}|selected_payload={:?}|unpack={:?}",
+            anchor.core_unpack_receipt,
+            anchor.get_any_binding,
+            anchor.selected_payload_binding,
+            anchor.unpack_binding
+        );
+        anchor.validate(entry, functions)?;
+        self.validate_ordinary_map_owned_any_v2(entry, functions)
+    }
+
+    pub(crate) fn bind_ordinary_map_set_get_string_result(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        core: &crate::core::mir::MirFunction,
+        catalog: &crate::core::mir::types::MirTypeCatalog,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), String> {
+        crate::core::mir::validate_ordinary_map_set_get_string_result_types(core, catalog)?;
+        if self.set_get_string_result_anchor.is_some() {
+            return Err("ordinary Map Set/Get-String bytecode anchor is already set".into());
+        }
+        if route_receipt.profile != crate::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE
+        {
+            return Err(
+                "ordinary Map Set/Get-String bytecode anchor has the wrong execution profile"
+                    .into(),
+            );
+        }
+        let receipt = core
+            .ownership
+            .ordinary_map_set_get_string_lineage_receipt()
+            .ok_or_else(|| {
+                "ordinary Map Set/Get-String bytecode has no independent Checker lineage receipt"
+                    .to_string()
+            })?;
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        catalog.validate_owned_string(&string_type)?;
+        let string_type_desc_hash = ordinary_map_owned_any_v2_string_type_desc_hash(catalog)?;
+        let string_type_id = string_type.as_str().to_owned();
+        let manifest = route_receipt.manifest_text()?;
+        if route_receipt.manifest_round_trip()? != *route_receipt {
+            return Err("ordinary Map Set/Get-String route manifest did not round-trip".into());
+        }
+        self.set_get_string_result_anchor = Some(CanonicalOrdinaryMapSetGetStringBytecodeAnchor {
+            profile: route_receipt.profile.clone(),
+            owner: core.owner.0.clone(),
+            source_commitment: format!("{receipt:?}"),
+            route_receipt: route_receipt.clone(),
+            manifest,
+            entry,
+            root_moves: ordinary_map_set_get_string_move_sites(functions)?,
+            set_string_result: ordinary_map_set_get_string_set_site(
+                functions,
+                &string_type_id,
+                &string_type_desc_hash,
+            )?,
+            get_string_result: ordinary_map_set_get_string_get_site(
+                functions,
+                &string_type_id,
+                &string_type_desc_hash,
+            )?,
+            string_type_id,
+            string_type_desc_hash,
             expected_program: format!("{functions:?}"),
         });
         self.validate_ordinary_map_owned_any_v2(entry, functions)
@@ -12925,6 +17228,217 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
         self.ordinary_map_owned_any_v2
             .as_ref()?
             .selected_payload_binding(type_id)
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_selected_payload_binding_by_type_id_str(
+        &self,
+        type_id: &str,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        self.ordinary_map_owned_any_v2
+            .as_ref()?
+            .selected_payload_bindings
+            .iter()
+            .find_map(|(candidate, binding)| (candidate.as_str() == type_id).then_some(binding))
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_i32_selected_payload_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        if let Some(anchor) = self.set_get_any_i32_result_anchor.as_ref() {
+            if function != 0
+                || !matches!(
+                    anchor.get_any_binding.as_ref(),
+                    Some(binding) if binding.pc == pc
+                ) && !matches!(
+                    anchor.unpack_binding.as_ref(),
+                    Some(binding) if binding.pc == pc
+                )
+            {
+                return None;
+            }
+            let binding = anchor.selected_payload_binding.as_ref()?;
+            return (binding.type_id == *type_id).then_some(binding);
+        }
+        self.ordinary_map_owned_any_v2_selected_payload_binding(type_id)
+    }
+
+    pub(crate) fn has_ordinary_map_direct_tuple_get_l1_route_anchor(&self) -> bool {
+        self.direct_tuple_get_l1_anchor.is_some()
+    }
+
+    pub(crate) fn validate_ordinary_map_direct_tuple_get_l1_route_anchor(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+    ) -> Result<bool, String> {
+        self.validate_exclusive_route_anchor()?;
+        match &self.direct_tuple_get_l1_anchor {
+            Some(anchor) => {
+                anchor.validate(entry, functions)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    pub(crate) fn ordinary_map_direct_tuple_get_l1_set_key_at_pc(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function: FuncIdx,
+        pc: u32,
+        key_reg: Reg,
+    ) -> Result<Option<String>, String> {
+        if !self.validate_ordinary_map_direct_tuple_get_l1_route_anchor(entry, functions)? {
+            return Ok(None);
+        }
+        let anchor = self
+            .direct_tuple_get_l1_anchor
+            .as_ref()
+            .ok_or_else(|| "direct tuple Get L1 route anchor disappeared".to_string())?;
+        let (set_function, set_pc, _, _, set_key_reg, _) = anchor.set_result;
+        if (function, pc, key_reg) != (set_function, set_pc, set_key_reg) {
+            return Err(
+                "direct tuple Get L1 SetResult does not match its exact Checker-bound PC/register binding"
+                    .into(),
+            );
+        }
+        anchor
+            .source_receipt
+            .sets
+            .first()
+            .map(|set| Some(set.key_value.clone()))
+            .ok_or_else(|| "direct tuple Get L1 source receipt has no Set key".to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn corrupt_direct_tuple_get_l1_manifest_for_test_only(&mut self) -> bool {
+        let Some(anchor) = self.direct_tuple_get_l1_anchor.as_mut() else {
+            return false;
+        };
+        anchor.manifest.push_str(";tampered");
+        true
+    }
+
+    pub(crate) fn ordinary_map_direct_tuple_get_l1_get_any_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding> {
+        let anchor = self.direct_tuple_get_l1_anchor.as_ref()?;
+        if function != anchor.entry {
+            return None;
+        }
+        let binding = anchor.get_any_binding.as_ref()?;
+        (binding.pc == pc).then_some(binding)
+    }
+
+    pub(crate) fn ordinary_map_direct_tuple_get_l1_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2UnpackBinding> {
+        let anchor = self.direct_tuple_get_l1_anchor.as_ref()?;
+        if function != anchor.entry {
+            return None;
+        }
+        let binding = anchor.unpack_binding.as_ref()?;
+        (binding.pc == pc).then_some(binding)
+    }
+
+    pub(crate) fn ordinary_map_direct_tuple_get_l1_selected_payload_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        let anchor = self.direct_tuple_get_l1_anchor.as_ref()?;
+        if function != anchor.entry
+            || !matches!(anchor.get_any_binding.as_ref(), Some(binding) if binding.pc == pc)
+                && !matches!(anchor.unpack_binding.as_ref(), Some(binding) if binding.pc == pc)
+        {
+            return None;
+        }
+        let binding = anchor.selected_payload_binding.as_ref()?;
+        (binding.type_id == *type_id).then_some(binding)
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_i32_get_any_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding> {
+        let anchor = self.set_get_any_i32_result_anchor.as_ref()?;
+        if function != 0 {
+            return None;
+        }
+        let binding = anchor.get_any_binding.as_ref()?;
+        (binding.pc == pc).then_some(binding)
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_i32_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2UnpackBinding> {
+        let anchor = self.set_get_any_i32_result_anchor.as_ref()?;
+        if function != 0 {
+            return None;
+        }
+        let binding = anchor.unpack_binding.as_ref()?;
+        (binding.pc == pc).then_some(binding)
+    }
+
+    pub(crate) fn has_ordinary_map_set_get_any_i32_result_route_anchor(&self) -> bool {
+        self.set_get_any_i32_result_anchor.is_some()
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_result_i32_site_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<(Reg, Reg, Reg)> {
+        let anchor = self.set_get_any_result_i32_anchor.as_ref()?;
+        match anchor.get_any_result {
+            (site_function, site_pc, rd, ra, key) if site_function == function && site_pc == pc => {
+                Some((rd, ra, key))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_result_i32_unpack_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2UnpackBinding> {
+        let anchor = self.set_get_any_result_i32_anchor.as_ref()?;
+        if function != 0 {
+            return None;
+        }
+        let binding = anchor.unpack_binding.as_ref()?;
+        (binding.pc == pc).then_some(binding)
+    }
+
+    pub(crate) fn ordinary_map_set_get_any_result_i32_selected_payload_binding_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+        type_id: &crate::core::ResolvedTypeId,
+    ) -> Option<&CanonicalOrdinaryMapOwnedAnyV2PayloadBinding> {
+        let anchor = self.set_get_any_result_i32_anchor.as_ref()?;
+        if function != 0 || anchor.unpack_binding.as_ref()?.pc != pc {
+            return None;
+        }
+        let binding = anchor.selected_payload_binding.as_ref()?;
+        (binding.type_id == *type_id).then_some(binding)
+    }
+
+    pub(crate) fn has_ordinary_map_set_get_any_result_i32_route_anchor(&self) -> bool {
+        self.set_get_any_result_i32_anchor.is_some()
     }
 
     pub(crate) fn ordinary_map_owned_any_v2_get_any_binding(
@@ -13135,6 +17649,68 @@ impl CanonicalMapAnyOwnerV1BytecodeReceipt {
                     && site.owner == proof.caller_owner
                     && site.instruction == proof.caller_unpack_instruction
                     && matches!(&site.op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. })
+            });
+        let site = sites.next()?;
+        sites.next().is_none().then_some((proof, site))
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_result_crosscall_string_caller_unpack_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<(
+        &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        &CanonicalValuesResultCrosscallStringCallerBytecodeSite,
+    )> {
+        let anchor = self
+            .ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_result_crosscall_string_caller_anchor
+            .as_ref()?;
+        let [proof] = anchor.proofs.as_slice() else {
+            return None;
+        };
+        let mut sites = anchor
+            .bindings
+            .iter()
+            .flat_map(|binding| binding.sites.iter())
+            .filter(|site| {
+                site.function == function
+                    && site.pc == pc
+                    && site.owner == proof.caller_owner
+                    && site.instruction == proof.caller_unpack_instruction
+                    && matches!(&site.op, Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. })
+            });
+        let site = sites.next()?;
+        sites.next().is_none().then_some((proof, site))
+    }
+
+    pub(crate) fn ordinary_map_owned_any_v2_values_result_crosscall_string_caller_snapshot_drop_at_pc(
+        &self,
+        function: FuncIdx,
+        pc: u32,
+    ) -> Option<(
+        &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        &CanonicalValuesResultCrosscallStringCallerBytecodeSite,
+    )> {
+        let anchor = self
+            .ordinary_map_owned_any_v2
+            .as_ref()?
+            .values_result_crosscall_string_caller_anchor
+            .as_ref()?;
+        let [proof] = anchor.proofs.as_slice() else {
+            return None;
+        };
+        let mut sites = anchor
+            .bindings
+            .iter()
+            .flat_map(|binding| binding.sites.iter())
+            .filter(|site| {
+                site.function == function
+                    && site.pc == pc
+                    && site.owner == proof.caller_owner
+                    && site.instruction == proof.caller_snapshot_drop_instruction
+                    && matches!(&site.op, Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. })
             });
         let site = sites.next()?;
         sites.next().is_none().then_some((proof, site))
@@ -13772,6 +18348,9 @@ pub(crate) fn function_has_ordinary_map_owner_observer_v1_ops(function: &Functio
 pub(crate) fn function_has_ordinary_map_owned_get_i32_string_v1_ops(
     function: &FunctionProto,
 ) -> bool {
+    // This predicate is only the legacy typed owned-Get v1 admission marker.
+    // `MirManagedAnyOp` is shared by unrelated owner-v2 routes (including the
+    // dedicated GetAnyResult route), so it cannot activate this old receipt.
     function.code.iter().any(|op| {
         matches!(
             op,
@@ -13785,8 +18364,19 @@ pub(crate) fn function_has_ordinary_map_owned_get_i32_string_v1_ops(
                 | Op::MirOrdinaryMapOwnedGetI32StringV1GetString { .. }
                 | Op::MirOrdinaryMapOwnedGetI32StringV1GetAny { .. }
                 | Op::MirOrdinaryMapOwnedGetI32StringV1Values { .. }
-                | Op::MirManagedAnyOp { .. }
                 | Op::MirOrdinaryMapOwnedGetI32StringV1Drop { .. }
+        )
+    })
+}
+
+pub(crate) fn function_has_ordinary_map_owned_get_result_branch_v3_ops(
+    function: &FunctionProto,
+) -> bool {
+    function.code.iter().any(|op| {
+        matches!(
+            op,
+            Op::MirOrdinaryMapOwnedGetI32StringV1NewResult { .. }
+                | Op::MirOrdinaryMapOwnedGetI32StringV1SetResult { .. }
         )
     })
 }
@@ -13797,6 +18387,12 @@ pub(crate) fn function_has_ordinary_map_owned_any_v2_ops(function: &FunctionProt
             op,
             Op::MirOrdinaryMapOwnedAnyV2New { .. }
                 | Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }
+                | Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. }
                 | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
                 | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
                 | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
@@ -14244,6 +18840,10 @@ pub(crate) struct CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
     /// Exact separate V2 route for the two-entry literal-index-one caller.
     values_crosscall_string_caller_index1_anchor:
         Option<CanonicalValuesCrosscallStringCallerIndex1RouteBytecodeAnchor>,
+    /// Independent V3/V4 Result-branch Values producer/caller route. This is
+    /// separate from the older straight-line cross-call route anchors.
+    values_result_crosscall_string_caller_anchor:
+        Option<CanonicalValuesResultCrosscallStringCallerRouteBytecodeAnchor>,
     /// Exact Map-root owner transfers returned through the dedicated
     /// producer→caller route, sealed independently from Values snapshots.
     map_root_producer_caller_bindings: Vec<CanonicalMapRootProducerCallerBytecodeBinding>,
@@ -14623,6 +19223,7 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
             expected_values_producer_caller_bindings: String::new(),
             values_crosscall_string_caller_anchor: None,
             values_crosscall_string_caller_index1_anchor: None,
+            values_result_crosscall_string_caller_anchor: None,
             map_root_producer_caller_bindings: Vec::new(),
             expected_map_root_producer_caller_bindings: String::new(),
             map_root_get_any_caller_bindings: Vec::new(),
@@ -14876,6 +19477,40 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
         Ok(())
     }
 
+    pub(crate) fn bind_values_result_crosscall_string_caller_anchor(
+        &mut self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+        proofs: Vec<
+            crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+        >,
+        bindings: Vec<CanonicalValuesResultCrosscallStringCallerBytecodeBinding>,
+    ) -> Result<(), String> {
+        if self.values_result_crosscall_string_caller_anchor.is_some() {
+            return Err(
+                "Values Result cross-call String-caller route anchor is already bound".into(),
+            );
+        }
+        if self.values_crosscall_string_caller_anchor.is_some()
+            || self.values_crosscall_string_caller_index1_anchor.is_some()
+        {
+            return Err(
+                "Values Result and straight-line cross-call String-caller anchors cannot coexist"
+                    .into(),
+            );
+        }
+        let anchor = CanonicalValuesResultCrosscallStringCallerRouteBytecodeAnchor::capture(
+            entry,
+            functions,
+            route_receipt,
+            proofs,
+            bindings,
+        )?;
+        self.values_result_crosscall_string_caller_anchor = Some(anchor);
+        Ok(())
+    }
+
     pub(crate) fn bind_map_root_producer_caller_bindings(
         &mut self,
         bindings: Vec<CanonicalMapRootProducerCallerBytecodeBinding>,
@@ -14929,6 +19564,10 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
 
     fn has_values_crosscall_string_caller_index1_anchor(&self) -> bool {
         self.values_crosscall_string_caller_index1_anchor.is_some()
+    }
+
+    fn has_values_result_crosscall_string_caller_anchor(&self) -> bool {
+        self.values_result_crosscall_string_caller_anchor.is_some()
     }
 
     fn has_map_root_producer_caller_bindings(&self) -> bool {
@@ -15146,6 +19785,7 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                 && self.values_producer_caller_bindings.is_empty()
                 && self.values_crosscall_string_caller_anchor.is_none()
                 && self.values_crosscall_string_caller_index1_anchor.is_none()
+                && self.values_result_crosscall_string_caller_anchor.is_none()
                 && self.map_root_producer_caller_bindings.is_empty()
                 && self.map_root_get_any_caller_bindings.is_empty()
                 && self.println_anchor.is_none()
@@ -15192,17 +19832,14 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
             }
             None => {}
         }
-        match &self.values_crosscall_string_caller_anchor {
-            Some(anchor) => {
-                anchor.validate(entry, functions, self.payload_selection_digest.as_deref())?
-            }
-            None => {}
+        if let Some(anchor) = &self.values_crosscall_string_caller_anchor {
+            anchor.validate(entry, functions, self.payload_selection_digest.as_deref())?
         }
-        match &self.values_crosscall_string_caller_index1_anchor {
-            Some(anchor) => {
-                anchor.validate(entry, functions, self.payload_selection_digest.as_deref())?
-            }
-            None => {}
+        if let Some(anchor) = &self.values_crosscall_string_caller_index1_anchor {
+            anchor.validate(entry, functions, self.payload_selection_digest.as_deref())?
+        }
+        if let Some(anchor) = &self.values_result_crosscall_string_caller_anchor {
+            anchor.validate(entry, functions)?;
         }
         let has_values_sites = functions.iter().any(|function| {
             function.code.iter().any(|op| {
@@ -15217,7 +19854,8 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
         if (has_values_sites
             || !self.values_bindings.is_empty()
             || !self.values_producer_caller_bindings.is_empty()
-            || self.values_crosscall_string_caller_anchor.is_some())
+            || self.values_crosscall_string_caller_anchor.is_some()
+            || self.values_result_crosscall_string_caller_anchor.is_some())
             && format!("{:?}", self.values_bindings) != self.expected_values_bindings
         {
             return Err(
@@ -15313,7 +19951,8 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
         if (has_values_unpack_sites
             || !self.values_unpack_bindings.is_empty()
             || self.values_crosscall_string_caller_anchor.is_some()
-            || self.values_crosscall_string_caller_index1_anchor.is_some())
+            || self.values_crosscall_string_caller_index1_anchor.is_some()
+            || self.values_result_crosscall_string_caller_anchor.is_some())
             && format!("{:?}", self.values_unpack_bindings) != self.expected_values_unpack_bindings
         {
             return Err(
@@ -15332,7 +19971,13 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
             let set_count = function
                 .code
                 .iter()
-                .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Set { .. }))
+                .filter(|op| {
+                    matches!(
+                        op,
+                        Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                            | Op::MirOrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                    )
+                })
                 .count();
             let function_index = FuncIdx::try_from(function_index)
                 .map_err(|_| "ordinary Map/Any owner-v2 function index exceeds u32 ABI")?;
@@ -15885,6 +20530,20 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                 .collect::<Vec<_>>();
             let crosscall_index1_proof =
                 crosscall_index1_anchor.and_then(|anchor| anchor.proofs.first());
+            let result_crosscall_anchor =
+                self.values_result_crosscall_string_caller_anchor.as_ref();
+            let result_crosscall_producer_bindings = result_crosscall_anchor
+                .into_iter()
+                .flat_map(|anchor| anchor.bindings.iter())
+                .filter(|binding| binding.producer_function == function_index)
+                .collect::<Vec<_>>();
+            let result_crosscall_caller_bindings = result_crosscall_anchor
+                .into_iter()
+                .flat_map(|anchor| anchor.bindings.iter())
+                .filter(|binding| binding.caller_function == function_index)
+                .collect::<Vec<_>>();
+            let result_crosscall_proof =
+                result_crosscall_anchor.and_then(|anchor| anchor.proofs.first());
             let mut route_values_pcs = std::collections::BTreeSet::new();
             for binding in &route_producer_bindings {
                 let values_pc = usize::try_from(binding.producer_values_pc)
@@ -15968,6 +20627,30 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                 {
                     return Err(format!(
                         "ordinary Map/Any owner-v2 Index1 producer Values at function {function_index} is not the exact route-bound source-owner site"
+                    ));
+                }
+            }
+            for binding in &result_crosscall_producer_bindings {
+                let proof = result_crosscall_proof.ok_or_else(|| {
+                    "Values Result cross-call producer binding has no proof".to_string()
+                })?;
+                let values_site = binding
+                    .sites
+                    .iter()
+                    .find(|site| site.instruction == proof.producer_values_instruction)
+                    .ok_or_else(|| {
+                        "Values Result cross-call producer has no exact Values site".to_string()
+                    })?;
+                if binding.producer_owner.0 != function.name
+                    || binding.call_target != binding.producer_owner
+                    || values_site.owner != binding.producer_owner
+                    || values_site.function != function_index
+                    || function.code.get(values_site.pc as usize) != Some(&values_site.op)
+                    || !matches!(&values_site.op, Op::MirOrdinaryMapOwnedAnyV2Values { .. })
+                    || !route_values_pcs.insert(values_site.pc)
+                {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 Result producer Values at function {function_index} is not its exact route-bound source-owner site"
                     ));
                 }
             }
@@ -16077,6 +20760,33 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                 {
                     return Err(format!(
                         "ordinary Map/Any owner-v2 Index1 caller snapshot Drop at function {function_index} is not the exact route-bound owner settlement"
+                    ));
+                }
+            }
+            for binding in &result_crosscall_caller_bindings {
+                let proof = result_crosscall_proof.ok_or_else(|| {
+                    "Values Result cross-call caller binding has no proof".to_string()
+                })?;
+                let snapshot_drop = binding
+                    .sites
+                    .iter()
+                    .find(|site| site.instruction == proof.caller_snapshot_drop_instruction)
+                    .ok_or_else(|| {
+                        "Values Result cross-call caller has no exact snapshot Drop site"
+                            .to_string()
+                    })?;
+                if binding.caller_owner.0 != function.name
+                    || snapshot_drop.owner != binding.caller_owner
+                    || snapshot_drop.function != function_index
+                    || function.code.get(snapshot_drop.pc as usize) != Some(&snapshot_drop.op)
+                    || !matches!(
+                        &snapshot_drop.op,
+                        Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { .. }
+                    )
+                    || !expected_drop_pcs.insert(snapshot_drop.pc)
+                {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 Result caller snapshot Drop at function {function_index} is not the exact route-bound owner settlement"
                     ));
                 }
             }
@@ -16267,6 +20977,32 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
                 {
                     return Err(format!(
                         "ordinary Map/Any owner-v2 Index1 caller unpack at function {function_index} is not the exact route-bound site"
+                    ));
+                }
+            }
+            for binding in &result_crosscall_caller_bindings {
+                let proof = result_crosscall_proof.ok_or_else(|| {
+                    "Values Result cross-call caller binding has no proof".to_string()
+                })?;
+                let unpack_site = binding
+                    .sites
+                    .iter()
+                    .find(|site| site.instruction == proof.caller_unpack_instruction)
+                    .ok_or_else(|| {
+                        "Values Result cross-call caller has no exact unpack site".to_string()
+                    })?;
+                if binding.caller_owner.0 != function.name
+                    || unpack_site.owner != binding.caller_owner
+                    || unpack_site.function != function_index
+                    || function.code.get(unpack_site.pc as usize) != Some(&unpack_site.op)
+                    || !matches!(
+                        &unpack_site.op,
+                        Op::MirOrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                    )
+                    || !crosscall_unpack_pcs.insert(unpack_site.pc)
+                {
+                    return Err(format!(
+                        "ordinary Map/Any owner-v2 Result caller unpack at function {function_index} is not the exact route-bound site"
                     ));
                 }
             }
@@ -16922,7 +21658,8 @@ impl CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt {
             || !self.values_producer_caller_bindings.is_empty()
             || !self.values_unpack_bindings.is_empty()
             || self.values_crosscall_string_caller_anchor.is_some()
-            || self.values_crosscall_string_caller_index1_anchor.is_some();
+            || self.values_crosscall_string_caller_index1_anchor.is_some()
+            || self.values_result_crosscall_string_caller_anchor.is_some();
         if (!self.payload_bindings.is_empty() && self.payload_selection_digest.is_none())
             || (self.payload_bindings.is_empty()
                 && self.payload_selection_digest.is_some()
@@ -17464,6 +22201,104 @@ mod tests {
             .unwrap_err()
             .contains("source-plan snapshot"));
     }
+
+    #[test]
+    fn direct_print_result_preflight_scopes_broad_receipt_rejection_to_real_anchor() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_i32.mimi"
+        );
+        let mut registry = crate::span::SourceRegistry::default();
+        let source_id = registry
+            .register(crate::span::SourceRecord::new(
+                crate::span::SourceKey::new("mir_ordinary_map_any_owner_v2_direct_print_hit_i32")
+                    .expect("stable DirectPrintResult source key"),
+                crate::span::SourceTextOrigin::Memory,
+            ))
+            .expect("register DirectPrintResult source key");
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("lex DirectPrintResult fixture");
+        let file = crate::parser::Parser::new_with_source_registry(tokens, source_id, registry)
+            .parse_file()
+            .expect("parse DirectPrintResult fixture");
+        let checked = crate::core::check_program(&file).expect("check DirectPrintResult fixture");
+        let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+            .expect("materialize DirectPrintResult route");
+        assert!(route.materialized_ordinary_map_owned_any_v2_direct_print_result_candidate);
+        let bytecode =
+            crate::interp::bytecode::mir::compile_mir_program_with_ordinary_map_owned_any_v2_direct_print_result_route(
+                &checked,
+                &route.program,
+            )
+            .expect("compile bytecode with its production DirectPrintResult anchor");
+        let carrier = bytecode
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .expect("canonical Map/Any receipt carrier");
+        assert!(carrier.has_direct_print_result_route_anchor());
+        assert!(carrier.ordinary_map_owned_any_v2.is_none());
+
+        let mut real_anchor_with_broad_receipt = carrier.clone();
+        real_anchor_with_broad_receipt.ordinary_map_owned_any_v2 = Some(
+            super::CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::capture(
+                bytecode.entry,
+                &bytecode.functions,
+            ),
+        );
+        let conflict = real_anchor_with_broad_receipt
+            .validate_direct_print_result_route_anchor(bytecode.entry, &bytecode.functions)
+            .expect_err("a real DirectPrintResult anchor cannot borrow the broad V2 receipt");
+        assert_eq!(
+            conflict,
+            "DirectPrintResult route cannot borrow the broad V2 action/payload receipt"
+        );
+
+        let mut conflicting_bytecode = bytecode.clone();
+        {
+            let program = std::sync::Arc::make_mut(&mut conflicting_bytecode);
+            let broad_receipt = super::CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::capture(
+                program.entry,
+                &program.functions,
+            );
+            let carrier = program
+                .canonical_map_any_owner_v1_receipt
+                .as_mut()
+                .expect("canonical Map/Any receipt carrier");
+            carrier.ordinary_map_owned_any_v2 = Some(broad_receipt);
+        }
+        let mut vm = crate::interp::bytecode::vm::BytecodeVM::new(conflicting_bytecode);
+        let vm_error = vm
+            .run_value()
+            .expect_err("VM preflight rejects a real anchor plus broad V2 receipt");
+        assert!(
+            vm_error.message().contains(
+                "DirectPrintResult route cannot borrow the broad V2 action/payload receipt"
+            ),
+            "the VM rejects the route conflict before execution: {vm_error}"
+        );
+        assert!(
+            vm.take_stdout().is_empty(),
+            "preflight rejection precedes println"
+        );
+
+        let mut no_anchor_with_broad_receipt =
+            CanonicalMapAnyOwnerV1BytecodeReceipt::capture(bytecode.entry, &bytecode.functions);
+        no_anchor_with_broad_receipt.ordinary_map_owned_any_v2 = Some(
+            super::CanonicalOrdinaryMapOwnedAnyV2BytecodeReceipt::capture(
+                bytecode.entry,
+                &bytecode.functions,
+            ),
+        );
+        assert_eq!(
+            no_anchor_with_broad_receipt
+                .validate_direct_print_result_route_anchor(
+                    bytecode.entry,
+                    &bytecode.functions,
+                ),
+            Ok(false),
+            "without a DirectPrintResult anchor, the unrelated broad receipt is not preflight evidence for this route"
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -17473,6 +22308,760 @@ struct CanonicalOrdinaryMapNewResultBytecodeAnchor {
     source_commitment: String,
     entry: FuncIdx,
     root_move: (FuncIdx, u32, Reg, Reg),
+    expected_program: String,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalOrdinaryMapSetResultBytecodeAnchor {
+    profile: String,
+    owner: String,
+    source_commitment: String,
+    entry: FuncIdx,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    expected_program: String,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalOrdinaryMapSetGetI32BytecodeAnchor {
+    profile: String,
+    owner: String,
+    source_commitment: String,
+    route_receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    manifest: String,
+    entry: FuncIdx,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    get_i32_result: (FuncIdx, u32, Reg, Reg, Reg),
+    expected_program: String,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalOrdinaryMapSetGetAnyI32BytecodeAnchor {
+    profile: String,
+    owner: String,
+    source_commitment: String,
+    source_attempt_census: String,
+    source_operations: std::collections::BTreeSet<crate::core::OrdinaryMapOwnedAnyV2Attempt>,
+    new_operation: crate::core::NodeId,
+    set_operation: crate::core::NodeId,
+    get_operation: crate::core::NodeId,
+    unpack_operation: crate::core::NodeId,
+    unpack_source_commitment: String,
+    set_key_value: String,
+    set_i32_value: i64,
+    get_key_value: String,
+    route_receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    manifest: String,
+    entry: FuncIdx,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    new_result: (FuncIdx, u32, Reg),
+    set_result: (FuncIdx, u32, Reg, Reg, Reg, Reg),
+    get_any: (FuncIdx, u32, Reg, Reg, Reg),
+    unpack_i32: OrdinaryMapSetGetAnyI32UnpackSite,
+    /// This route owns its exact GetAny, selected i32 payload, and unpack
+    /// PC bindings. They deliberately do not enter the broad V2 selection or
+    /// action tables, whose receipts describe a different source profile.
+    get_any_binding: Option<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>,
+    selected_payload_binding: Option<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+    unpack_binding: Option<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>,
+    core_unpack_receipt:
+        Option<crate::core::mir::OrdinaryMapOwnedAnyV2SetGetAnyI32UnpackResultReceipt>,
+    expected_binding_snapshot: String,
+    expected_program: String,
+}
+
+/// Independent bytecode identity for the executable Core L1 projection of
+/// the exact Checker receipt for direct `map_get -> (bool, Any)` unpacking.
+/// The only DynamicAny field exposure authorized by this anchor is the
+/// source-receipted i32 unpack site; it does not authorize generic TupleGet.
+#[derive(Debug, Clone)]
+struct CanonicalDirectTupleGetL1BytecodeAnchor {
+    profile: String,
+    source_receipt: crate::core::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackReceipt,
+    source_commitment: String,
+    route_receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    manifest: String,
+    mir_digest: String,
+    entry: FuncIdx,
+    type_desc_digests: Vec<(crate::core::ResolvedTypeId, String)>,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    new_result: (FuncIdx, u32, Reg),
+    set_result: (FuncIdx, u32, Reg, Reg, Reg, Reg),
+    get_any: (FuncIdx, u32, Reg, Reg, Reg),
+    unpack: (FuncIdx, u32, Reg, Reg),
+    unpacked_move: (FuncIdx, u32, Reg, Reg),
+    cleanup_sites: Vec<(crate::core::mir::MirInstructionId, u32, u32, Vec<Op>)>,
+    get_any_binding: Option<CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding>,
+    selected_payload_binding: Option<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+    unpack_binding: Option<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>,
+    expected_binding_snapshot: String,
+    expected_program: String,
+}
+
+impl CanonicalDirectTupleGetL1BytecodeAnchor {
+    fn capture(
+        checked: &crate::core::CheckedProgram,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        program: &crate::core::mir::reference::MirProgram,
+        core: &crate::core::mir::MirFunction,
+        instruction_pc_ranges: &BTreeMap<crate::core::mir::MirInstructionId, (usize, usize)>,
+        route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<Self, String> {
+        use crate::core::{
+            OrdinaryMapOwnedAnyV2DirectTupleGetUnpackPayload as Payload,
+            OrdinaryMapOwnedAnyV2DirectTupleGetUnpackProfileVersion as ProfileVersion,
+        };
+
+        let source_receipt = core
+            .ownership
+            .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+            .cloned()
+            .ok_or_else(|| "direct tuple Get L1 MIR has no Checker receipt".to_string())?;
+        let checked_source = checked
+            .callable(&source_receipt.owner)
+            .and_then(|callable| {
+                callable
+                    .resources
+                    .ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt
+                    .as_ref()
+            })
+            .ok_or_else(|| {
+                "CheckedProgram has no direct tuple Get L1 Checker receipt".to_string()
+            })?;
+        if checked_source != &source_receipt
+            || source_receipt.profile_version != ProfileVersion::V1
+            || source_receipt.owner != core.owner
+            || source_receipt.owner.0 != "function:main"
+            || source_receipt.sets.len() != 1
+            || source_receipt.selected_winning_set.as_ref()
+                != source_receipt.sets.first().map(|set| &set.operation)
+            || !matches!(
+                source_receipt.sets.first().map(|set| &set.payload),
+                Some(Payload::I32(_))
+            )
+            || source_receipt.unpack_conversion_kind
+                != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+            || source_receipt.unpack_target_type
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            || source_receipt
+                .sets
+                .first()
+                .is_none_or(|set| set.output_root_local != source_receipt.get_receiver_local)
+        {
+            return Err(
+                "direct tuple Get L1 bytecode anchor is outside the exact selected-i32 Checker receipt"
+                    .into(),
+            );
+        }
+        if route_receipt.profile
+            != crate::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+        {
+            return Err(
+                "direct tuple Get L1 bytecode anchor has the wrong Core route profile".into(),
+            );
+        }
+        let exact_route = program
+            .route_receipt(crate::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE);
+        if route_receipt != &exact_route {
+            return Err("direct tuple Get L1 bytecode route differs from the MIR identity".into());
+        }
+        route_receipt.validate_against_program(program)?;
+        let manifest = route_receipt.manifest_text()?;
+        if route_receipt.manifest_round_trip()? != *route_receipt {
+            return Err("direct tuple Get L1 Core route manifest did not round-trip".into());
+        }
+
+        let set = source_receipt
+            .sets
+            .first()
+            .ok_or_else(|| "direct tuple Get L1 source receipt has no selected Set".to_string())?;
+        let new_result = ordinary_map_set_get_any_i32_new_result_site(functions)?;
+        let set_value = match &set.payload {
+            Payload::I32(value) => *value,
+            Payload::String(_) => {
+                return Err("direct tuple Get L1 bytecode only supports selected i32 Set".into())
+            }
+        };
+        let set_result =
+            ordinary_map_set_get_any_i32_set_site(functions, &set.key_value, set_value)?;
+        let get_any =
+            ordinary_map_set_get_any_i32_get_site(functions, &source_receipt.get_key_value)?;
+        let unpack = ordinary_map_set_get_any_i32_unpack_i32_site(functions)?;
+        if [new_result.0, set_result.0, get_any.0, unpack.0]
+            .into_iter()
+            .any(|function| function != entry)
+        {
+            return Err(
+                "direct tuple Get L1 bytecode sites do not belong to the entry function".into(),
+            );
+        }
+
+        let instruction_id = |name: &str, point: &crate::core::NodeId| {
+            crate::core::mir::MirInstructionId::new(format!(
+                "inst:direct_tuple_get_unpack_l1:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())
+        };
+        let new_instruction = instruction_id("new", &source_receipt.new_operation)?;
+        let set_instruction = instruction_id("set_result", &set.operation)?;
+        let get_instruction = instruction_id("get_tuple", &source_receipt.get_operation)?;
+        let unpack_instruction = instruction_id("unpack_i32", &source_receipt.unpack_operation)?;
+        let unpack_move_instruction =
+            instruction_id("bind_unpacked_i32", &source_receipt.unpack_operation)?;
+        let exact_instruction_site = |id: &crate::core::mir::MirInstructionId,
+                                      expected_pc: u32|
+         -> Result<(usize, usize), String> {
+            let (start, end) = instruction_pc_ranges.get(id).copied().ok_or_else(|| {
+                format!("direct tuple Get L1 MIR instruction '{id}' has no bytecode PC range")
+            })?;
+            let start_u32 = u32::try_from(start)
+                .map_err(|_| "direct tuple Get L1 bytecode PC exceeds ABI".to_string())?;
+            if start_u32 != expected_pc || end != start.saturating_add(1) {
+                return Err(format!(
+                    "direct tuple Get L1 MIR instruction '{id}' does not bind to its exact single-opcode site"
+                ));
+            }
+            Ok((start, end))
+        };
+        let (new_start, _) = exact_instruction_site(&new_instruction, new_result.1)?;
+        let (set_start, _) = exact_instruction_site(&set_instruction, set_result.1)?;
+        let (get_start, _) = exact_instruction_site(&get_instruction, get_any.1)?;
+        let (unpack_start, _) = exact_instruction_site(&unpack_instruction, unpack.1)?;
+        let (unpack_move_start, _) = instruction_pc_ranges
+            .get(&unpack_move_instruction)
+            .copied()
+            .ok_or_else(|| {
+                "direct tuple Get L1 MIR unpacked-value Move has no bytecode PC range".to_string()
+            })
+            .and_then(|(start, end)| {
+                if end != start.saturating_add(1) {
+                    Err("direct tuple Get L1 unpacked-value Move is not one bytecode opcode".into())
+                } else {
+                    Ok((start, end))
+                }
+            })?;
+        let function = functions
+            .get(entry as usize)
+            .ok_or_else(|| "direct tuple Get L1 bytecode entry function is absent".to_string())?;
+        if function
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::TupleGet { idx: 1, .. }))
+        {
+            return Err(
+                "direct tuple Get L1 bytecode cannot use generic tuple field-1 projection for dynamic Any"
+                    .into(),
+            );
+        }
+        if !matches!(function.code.get(new_start), Some(Op::MirOrdinaryMapOwnedAnyV2NewResult { rd }) if *rd == new_result.2)
+            || !matches!(function.code.get(set_start), Some(Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, ra, key, value }) if (*rd, *ra, *key, *value) == (set_result.2, set_result.3, set_result.4, set_result.5))
+            || !matches!(function.code.get(get_start), Some(Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key }) if (*rd, *ra, *key) == (get_any.2, get_any.3, get_any.4))
+            || !matches!(function.code.get(unpack_start), Some(Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra }) if (*rd, *ra) == (unpack.2, unpack.3))
+            || !matches!(function.code.get(unpack_move_start), Some(Op::Mov { .. }))
+        {
+            return Err(format!(
+                "direct tuple Get L1 bytecode sites disagree with their exact MIR instruction ranges: new={:?}, set={:?}, get={:?}, unpack={:?}, unpack-move={:?}",
+                function.code.get(new_start),
+                function.code.get(set_start),
+                function.code.get(get_start),
+                function.code.get(unpack_start),
+                function.code.get(unpack_move_start),
+            ));
+        }
+
+        let unpacked_move = match function.code[unpack_move_start] {
+            Op::Mov { rd, rs } => (
+                entry,
+                u32::try_from(unpack_move_start)
+                    .map_err(|_| "direct tuple Get L1 unpack copy PC exceeds ABI".to_string())?,
+                rd,
+                rs,
+            ),
+            _ => unreachable!("checked as Mov above"),
+        };
+        let all_moves = function
+            .code
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, op)| match op {
+                Op::Move { rd, rs } => u32::try_from(pc).ok().map(|pc| (entry, pc, *rd, *rs)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let root_moves = all_moves.clone();
+        if all_moves.len() != 2 || root_moves.len() != 2 {
+            return Err(format!(
+                "direct tuple Get L1 bytecode requires exactly two root Moves and one copied i32 unpack value, observed {} owning Move(s)",
+                all_moves.len()
+            ));
+        }
+
+        let mut cleanup_sites = Vec::new();
+        for (name, point) in [
+            ("drop_set_key", &set.key_node),
+            ("drop_old_root_ok", &set.ok_input_drop),
+            ("drop_get_key", &source_receipt.get_key_node),
+            ("drop_get_root", &source_receipt.root_get_drop),
+            ("drop_pair", &source_receipt.pair_drop),
+            ("drop_old_root_err", &set.error_input_drop),
+        ] {
+            let id = instruction_id(name, point)?;
+            let (start, end) = instruction_pc_ranges.get(&id).copied().ok_or_else(|| {
+                format!("direct tuple Get L1 cleanup instruction '{id}' has no bytecode range")
+            })?;
+            let ops = function
+                .code
+                .get(start..end)
+                .ok_or_else(|| format!("direct tuple Get L1 cleanup instruction '{id}' has an invalid bytecode range"))?
+                .to_vec();
+            if ops.len() != 1 {
+                return Err(format!(
+                    "direct tuple Get L1 cleanup instruction '{id}' is not one opcode"
+                ));
+            }
+            cleanup_sites.push((
+                id,
+                u32::try_from(start)
+                    .map_err(|_| "direct tuple Get L1 cleanup PC exceeds ABI".to_string())?,
+                u32::try_from(end)
+                    .map_err(|_| "direct tuple Get L1 cleanup end PC exceeds ABI".to_string())?,
+                ops,
+            ));
+        }
+
+        let type_catalog = program.type_catalog();
+        let mut type_ids = std::collections::BTreeSet::new();
+        type_ids.insert(crate::core::mir::types::ordinary_map_owned_any_v2_type_id());
+        type_ids.insert(crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id());
+        type_ids.insert(crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id());
+        type_ids.insert(crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id());
+        type_ids.insert(crate::core::ir::primitive_type_id(
+            crate::core::PrimitiveType::Bool,
+        ));
+        type_ids.insert(crate::core::ir::primitive_type_id(
+            crate::core::PrimitiveType::I32,
+        ));
+        type_ids.insert(crate::core::ir::primitive_type_id(
+            crate::core::PrimitiveType::String,
+        ));
+        type_ids.insert(source_receipt.new_result_type.clone());
+        type_ids.insert(source_receipt.initial_root_type.clone());
+        type_ids.insert(source_receipt.pair_type.clone());
+        type_ids.insert(source_receipt.unpack_source_type.clone());
+        type_ids.insert(source_receipt.unpack_target_type.clone());
+        for set in &source_receipt.sets {
+            type_ids.insert(set.result_type.clone());
+            type_ids.insert(set.payload_type.clone());
+        }
+        let type_desc_digests = type_ids
+            .into_iter()
+            .map(|type_id| {
+                let descriptor = type_catalog.get(&type_id).ok_or_else(|| {
+                    format!(
+                        "direct tuple Get L1 TypeDesc '{:?}' is absent from the MIR catalog",
+                        type_id
+                    )
+                })?;
+                Ok((
+                    type_id,
+                    blake3::hash(descriptor.canonical_text().as_bytes())
+                        .to_hex()
+                        .to_string(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if type_desc_digests.iter().any(|(type_id, _)| {
+            crate::core::mir::types::ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_type_descs()
+                .iter()
+                .any(|proof_desc| proof_desc.id == *type_id)
+        }) {
+            return Err("direct tuple Get L1 bytecode anchor contains an L2 proof-only TypeDesc".into());
+        }
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let i32_desc = type_catalog
+            .get(&i32_type)
+            .ok_or_else(|| "direct tuple Get L1 canonical i32 TypeDesc is absent".to_string())?;
+        type_catalog.validate_copy_scalar(&i32_type)?;
+        let i32_digest = blake3::hash(i32_desc.canonical_text().as_bytes())
+            .to_hex()
+            .to_string();
+        let pair =
+            crate::core::mir::MirValueId::new(format!("local:{}", source_receipt.pair_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let root =
+            crate::core::mir::MirValueId::new(format!("local:{}", set.output_root_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let key =
+            crate::core::mir::MirValueId::new(format!("literal:{}", source_receipt.get_key_node.0))
+                .map_err(|error| error.to_string())?;
+        let unpack_result = crate::core::mir::MirValueId::new(format!(
+            "expr:{}",
+            source_receipt.unpack_operation.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let pair_drop_instruction = instruction_id("drop_pair", &source_receipt.pair_drop)?;
+        let get_any_binding = CanonicalOrdinaryMapOwnedAnyV2GetAnyBinding {
+            owner: source_receipt.owner.clone(),
+            operation: source_receipt.get_operation.clone(),
+            instruction: get_instruction.clone(),
+            source_node: source_receipt.get_operation.clone(),
+            source_local: source_receipt.get_receiver_local.clone(),
+            root: root.clone(),
+            checker_source_type: source_receipt.initial_root_type.clone(),
+            key_node: source_receipt.get_key_node.clone(),
+            key: key.clone(),
+            checker_key_type: crate::core::ir::primitive_type_id(
+                crate::core::PrimitiveType::String,
+            ),
+            checker_key_local: None,
+            result: pair.clone(),
+            checker_result_type: source_receipt.pair_type.clone(),
+            mir_result_type: crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id(
+            ),
+            binding_local: source_receipt.pair_local.clone(),
+            binding: pair.clone(),
+            settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+            settlement_point: source_receipt.pair_drop.clone(),
+            settlement_instruction: pair_drop_instruction.clone(),
+            temporary_root: None,
+            miss_payload_type: i32_type.clone(),
+            miss_payload_type_desc_digest: i32_digest.clone(),
+            pc: get_any.1,
+            rd: get_any.2,
+            ra: get_any.3,
+            key_reg: get_any.4,
+        };
+        let selected_payload_binding = CanonicalOrdinaryMapOwnedAnyV2PayloadBinding {
+            type_id: i32_type.clone(),
+            type_desc_digest: i32_digest.clone(),
+            kind: CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32,
+        };
+        let unpack_binding = CanonicalOrdinaryMapOwnedAnyV2UnpackBinding {
+            owner: source_receipt.owner.clone(),
+            operation: source_receipt.get_operation.clone(),
+            instruction: unpack_instruction,
+            projection: source_receipt.pair_payload_projection.clone(),
+            cast: source_receipt.unpack_operation.clone(),
+            conversion_kind: source_receipt.unpack_conversion_kind,
+            conversion_from: source_receipt.unpack_source_type.clone(),
+            conversion_to: source_receipt.unpack_target_type.clone(),
+            payload_source: if source_receipt.get_key_value == set.key_value {
+                crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+            } else {
+                crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+            },
+            pair: pair.clone(),
+            pair_local: source_receipt.pair_local.clone(),
+            result: unpack_result,
+            target_type: i32_type.clone(),
+            target_type_desc_digest: i32_digest.clone(),
+            get_any_instruction: get_instruction.clone(),
+            settlement: crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+            settlement_point: source_receipt.pair_drop.clone(),
+            settlement_instruction: pair_drop_instruction,
+            miss_payload_type: i32_type.clone(),
+            payload_selection_digest: route_receipt.mir_digest.clone(),
+            pc: unpack.1,
+            rd: unpack.2,
+            ra: unpack.3,
+        };
+        let binding_errors = [
+            (get_any_binding.root != root).then_some("GetAny root"),
+            (get_any_binding.key != key).then_some("GetAny key"),
+            (get_any_binding.binding != pair).then_some("GetAny result binding"),
+            (core.values.get(&pair).map(|value| &value.ty)
+                != Some(&crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id()))
+            .then_some("GetAny result TypeDesc"),
+            (core
+                .values
+                .get(&unpack_binding.result)
+                .map(|value| &value.ty)
+                != Some(&i32_type))
+            .then_some("unpacked result TypeDesc"),
+            (unpack_binding.conversion_kind
+                != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack)
+                .then_some("dynamic Any conversion kind"),
+            (unpack_binding.payload_selection_digest != route_receipt.mir_digest)
+                .then_some("payload-selection MIR digest"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        if !binding_errors.is_empty() {
+            return Err(
+                format!(
+                    "direct tuple Get L1 bytecode bindings differ from the exact Core MIR values/types: {}",
+                    binding_errors.join(", ")
+                ),
+            );
+        }
+
+        let mut anchor = Self {
+            profile: route_receipt.profile.clone(),
+            source_commitment: format!("{source_receipt:?}"),
+            source_receipt,
+            route_receipt: route_receipt.clone(),
+            manifest,
+            mir_digest: route_receipt.mir_digest.clone(),
+            entry,
+            type_desc_digests,
+            root_moves,
+            new_result,
+            set_result,
+            get_any,
+            unpack,
+            unpacked_move,
+            cleanup_sites,
+            get_any_binding: Some(get_any_binding),
+            selected_payload_binding: Some(selected_payload_binding),
+            unpack_binding: Some(unpack_binding),
+            expected_binding_snapshot: String::new(),
+            expected_program: format!("{functions:?}"),
+        };
+        anchor.expected_binding_snapshot = anchor.binding_snapshot();
+        anchor.validate(entry, functions)?;
+        Ok(anchor)
+    }
+
+    fn binding_snapshot(&self) -> String {
+        format!(
+            "profile={}|source={:?}|source_commitment={}|route={:?}|manifest={}|mir={}|types={:?}|entry={}|root_moves={:?}|new={:?}|set={:?}|get={:?}|unpack={:?}|unpacked_move={:?}|cleanup={:?}|get_binding={:?}|payload={:?}|unpack_binding={:?}",
+            self.profile,
+            self.source_receipt,
+            self.source_commitment,
+            self.route_receipt,
+            self.manifest,
+            self.mir_digest,
+            self.type_desc_digests,
+            self.entry,
+            self.root_moves,
+            self.new_result,
+            self.set_result,
+            self.get_any,
+            self.unpack,
+            self.unpacked_move,
+            self.cleanup_sites,
+            self.get_any_binding,
+            self.selected_payload_binding,
+            self.unpack_binding,
+        )
+    }
+
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let source = &self.source_receipt;
+        let Some(set) = source.sets.first() else {
+            return Err("direct tuple Get L1 bytecode anchor has no selected Set".into());
+        };
+        if self.profile
+            != crate::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+            || self.entry != entry
+            || source.owner.0 != "function:main"
+            || source.sets.len() != 1
+            || source.selected_winning_set.as_ref() != Some(&set.operation)
+            || !matches!(&set.payload, crate::core::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackPayload::I32(_))
+            || source.unpack_conversion_kind
+                != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+            || source.unpack_target_type
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            || self.source_commitment != format!("{source:?}")
+            || self.route_receipt.profile != self.profile
+            || self.route_receipt.mir_digest != self.mir_digest
+            || self.route_receipt.manifest_text()? != self.manifest
+            || self.route_receipt.manifest_round_trip()? != self.route_receipt
+            || !is_canonical_digest(&self.mir_digest)
+            || !is_canonical_digest(&self.route_receipt.type_desc_digest)
+            || self.type_desc_digests.is_empty()
+            || self.type_desc_digests.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || self.type_desc_digests.iter().any(|(type_id, digest)| {
+                !is_canonical_digest(digest)
+                    || crate::core::mir::types::ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_type_descs()
+                        .iter()
+                        .any(|proof_desc| proof_desc.id == *type_id)
+            })
+            || self.expected_program != format!("{functions:?}")
+            || self.expected_binding_snapshot != self.binding_snapshot()
+        {
+            return Err(
+                "direct tuple Get L1 bytecode anchor disagrees with its exact Checker, route, TypeDesc, or binding snapshot"
+                    .into(),
+            );
+        }
+        if ordinary_map_set_get_any_i32_new_result_site(functions)? != self.new_result
+            || ordinary_map_set_get_any_i32_set_site(
+                functions,
+                &set.key_value,
+                match &set.payload {
+                    crate::core::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackPayload::I32(value) => {
+                        *value
+                    }
+                    crate::core::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackPayload::String(_) => {
+                        return Err("direct tuple Get L1 selected Set payload is not i32".into())
+                    }
+                },
+            )? != self.set_result
+            || ordinary_map_set_get_any_i32_get_site(functions, &source.get_key_value)?
+                != self.get_any
+            || ordinary_map_set_get_any_i32_unpack_i32_site(functions)? != self.unpack
+        {
+            return Err(
+                "direct tuple Get L1 bytecode operation sites changed after capture".into(),
+            );
+        }
+        let function = functions
+            .get(entry as usize)
+            .ok_or_else(|| "direct tuple Get L1 bytecode entry function is absent".to_string())?;
+        if function
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::TupleGet { idx: 1, .. }))
+        {
+            return Err(
+                "direct tuple Get L1 bytecode cannot use generic tuple field-1 projection for dynamic Any"
+                    .into(),
+            );
+        }
+        let all_moves = function
+            .code
+            .iter()
+            .enumerate()
+            .filter_map(|(pc, op)| match op {
+                Op::Move { rd, rs } => u32::try_from(pc).ok().map(|pc| (entry, pc, *rd, *rs)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if all_moves.len() != 2
+            || self.root_moves.len() != 2
+            || self.root_moves.iter().any(|site| !all_moves.contains(site))
+            || self.unpacked_move.0 != entry
+            || self.unpacked_move.1 as usize >= function.code.len()
+            || !matches!(function.code.get(self.unpacked_move.1 as usize), Some(Op::Mov { rd, rs }) if (*rd, *rs) == (self.unpacked_move.2, self.unpacked_move.3))
+        {
+            return Err(
+                "direct tuple Get L1 root Move or unpack-copy sites changed after capture".into(),
+            );
+        }
+        for (_, start, end, expected_ops) in &self.cleanup_sites {
+            let start = *start as usize;
+            let end = *end as usize;
+            if start >= end || function.code.get(start..end) != Some(expected_ops.as_slice()) {
+                return Err(
+                    "direct tuple Get L1 cleanup bytecode sites changed after capture".into(),
+                );
+            }
+        }
+        let get_binding = self
+            .get_any_binding
+            .as_ref()
+            .ok_or_else(|| "direct tuple Get L1 has no dedicated GetAny binding".to_string())?;
+        let unpack_binding = self
+            .unpack_binding
+            .as_ref()
+            .ok_or_else(|| "direct tuple Get L1 has no dedicated unpack binding".to_string())?;
+        let payload_binding = self.selected_payload_binding.as_ref().ok_or_else(|| {
+            "direct tuple Get L1 has no selected payload TypeDesc binding".to_string()
+        })?;
+        if (
+            get_binding.pc,
+            get_binding.rd,
+            get_binding.ra,
+            get_binding.key_reg,
+        ) != (
+            self.get_any.1,
+            self.get_any.2,
+            self.get_any.3,
+            self.get_any.4,
+        ) || (unpack_binding.pc, unpack_binding.rd, unpack_binding.ra)
+            != (self.unpack.1, self.unpack.2, self.unpack.3)
+            || get_binding.operation != source.get_operation
+            || get_binding.source_local != source.get_receiver_local
+            || get_binding.checker_source_type != source.initial_root_type
+            || get_binding.checker_key_type
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+            || get_binding.checker_result_type != source.pair_type
+            || get_binding.mir_result_type
+                != crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id()
+            || get_binding.binding_local != source.pair_local
+            || get_binding.settlement_point != source.pair_drop
+            || unpack_binding.operation != source.get_operation
+            || unpack_binding.cast != source.unpack_operation
+            || unpack_binding.projection != source.pair_payload_projection
+            || unpack_binding.conversion_from != source.unpack_source_type
+            || unpack_binding.conversion_to != source.unpack_target_type
+            || unpack_binding.pair_local != source.pair_local
+            || unpack_binding.settlement_point != source.pair_drop
+            || unpack_binding.target_type
+                != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            || unpack_binding.payload_source
+                != if source.get_key_value == set.key_value {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+                } else {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+                }
+            || payload_binding.type_id != unpack_binding.target_type
+            || payload_binding.kind != CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+            || !is_canonical_digest(&payload_binding.type_desc_digest)
+            || self.cleanup_sites.len() != 6
+        {
+            return Err("direct tuple Get L1 Core bindings disagree with their source receipt or bytecode sites".into());
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(function_index == self.entry && self.root_moves.contains(&(function_index, pc, rd, rs)))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalOrdinaryMapSetGetAnyResultI32BytecodeAnchor {
+    profile: String,
+    owner: String,
+    source_receipt: crate::core::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageReceipt,
+    source_commitment: String,
+    route_receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    manifest: String,
+    entry: FuncIdx,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    new_result: (FuncIdx, u32, Reg),
+    set_result: (FuncIdx, u32, Reg, Reg, Reg, Reg),
+    /// Dedicated `GetAnyResult` site. This is intentionally a different
+    /// opcode/site type from the legacy tuple-valued GetAny profile.
+    get_any_result: (FuncIdx, u32, Reg, Reg, Reg),
+    /// Dedicated pair unpack site derived from the `map_get_any` Ok arm and
+    /// its own Checker conversion receipt. It does not reuse the legacy
+    /// tuple-valued GetAny unpack anchor.
+    unpack: OrdinaryMapSetGetAnyResultI32UnpackSite,
+    unpack_binding: Option<CanonicalOrdinaryMapOwnedAnyV2UnpackBinding>,
+    selected_payload_binding: Option<CanonicalOrdinaryMapOwnedAnyV2PayloadBinding>,
+    expected_binding_snapshot: String,
+    envelope_type_id: String,
+    envelope_descriptor_digest: String,
+    expected_program: String,
+}
+
+#[derive(Debug, Clone)]
+struct CanonicalOrdinaryMapSetGetStringBytecodeAnchor {
+    profile: String,
+    owner: String,
+    source_commitment: String,
+    route_receipt: crate::core::mir::CanonicalMirRouteReceipt,
+    manifest: String,
+    entry: FuncIdx,
+    root_moves: Vec<(FuncIdx, u32, Reg, Reg)>,
+    set_string_result: OrdinaryMapSetGetStringSetSite,
+    get_string_result: OrdinaryMapSetGetStringGetSite,
+    string_type_id: String,
+    string_type_desc_hash: String,
     expected_program: String,
 }
 
@@ -17495,6 +23084,577 @@ fn ordinary_map_new_result_root_move_site(
         [site] => Ok(*site),
         _ => Err("ordinary Map NewResult must lower to exactly one root payload Move site".into()),
     }
+}
+
+fn ordinary_map_set_result_root_move_sites(
+    functions: &[FunctionProto],
+) -> Result<Vec<(FuncIdx, u32, Reg, Reg)>, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map SetResult function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::Move { rd, rs } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map SetResult Move PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *rs));
+            }
+        }
+    }
+    if sites.len() != 2 {
+        return Err(format!(
+            "ordinary Map SetResult must lower to exactly two root payload Move sites, observed {}",
+            sites.len()
+        ));
+    }
+    Ok(sites)
+}
+
+/// The Result-valued Set/GetAny-i32 canonical graph lowers three ownership
+/// transfers for the persistent root. Keep this profile separate from the
+/// older SetResult route's two-site contract.
+fn ordinary_map_set_get_any_result_i32_root_move_sites(
+    functions: &[FunctionProto],
+) -> Result<Vec<(FuncIdx, u32, Reg, Reg)>, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map GetAnyResult function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::Move { rd, rs } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map GetAnyResult Move PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *rs));
+            }
+        }
+    }
+    if sites.len() != 3 {
+        return Err(format!(
+            "ordinary Map Set/GetAny-Result-i32 must lower to exactly three canonical root Move sites, observed {}",
+            sites.len()
+        ));
+    }
+    Ok(sites)
+}
+
+fn ordinary_map_set_get_i32_result_site(
+    functions: &[FunctionProto],
+) -> Result<(FuncIdx, u32, Reg, Reg, Reg), String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/Get-i32 function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2GetI32Result { rd, ra, key } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/Get-i32 Get PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *ra, *key));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/Get-i32 must lower to exactly one typed Get result site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+/// Bind the MIR unpack's source identity to both the exact ResolvedBody Cast
+/// and the Checker-retained builtin callsite at that same NodeId. Checked
+/// `unpack_i32(x)` is lowered to a DynamicAnyUnpack Cast, so the callsite is
+/// intentionally read from CheckedProgram's catalog rather than inferred
+/// from a MIR opcode name.
+fn ordinary_map_set_get_any_i32_cast_builtin_commitment(
+    checked: &crate::core::CheckedProgram,
+    owner: &crate::core::NodeId,
+    unpack_operation: &crate::core::NodeId,
+    unpack_argument: &crate::core::NodeId,
+    unpack_conversion_kind: crate::core::CheckedConversionKind,
+    unpack_source_type: &crate::core::ResolvedTypeId,
+    unpack_target_type: &crate::core::ResolvedTypeId,
+) -> Result<String, String> {
+    use crate::core::ir::{CheckedConversionKind, ResolvedCallee, ResolvedExprKind};
+    use crate::core::ResolvedCallKind;
+
+    let body = checked.resolved_body(owner).ok_or_else(|| {
+        "ordinary Map Set/GetAny-i32 unpack has no Checked ResolvedBody".to_string()
+    })?;
+    let casts = body
+        .cast_expressions(checked.resolved_types(), checked.resolved_type_targets())
+        .map_err(|errors| {
+            format!("ordinary Map Set/GetAny-i32 unpack ResolvedBody failed validation: {errors:?}")
+        })?;
+    let cast = casts.get(unpack_operation).ok_or_else(|| {
+        "ordinary Map Set/GetAny-i32 receipt does not name a ResolvedBody Cast".to_string()
+    })?;
+    let ResolvedExprKind::Cast { value, conversion } = &cast.kind else {
+        return Err("ordinary Map Set/GetAny-i32 unpack identity is not a Cast".into());
+    };
+    if cast.node_id != *unpack_operation
+        || value.node_id != *unpack_argument
+        || conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+        || conversion.kind != unpack_conversion_kind
+        || &conversion.from != unpack_source_type
+        || &conversion.to != unpack_target_type
+        || &value.ty != unpack_source_type
+        || &cast.ty != unpack_target_type
+    {
+        return Err(
+            "ordinary Map Set/GetAny-i32 Cast differs from its exact Checker unpack receipt".into(),
+        );
+    }
+
+    let callsite = checked.call_sites().get(unpack_operation).ok_or_else(|| {
+        String::from("ordinary Map Set/GetAny-i32 Cast has no same-NodeId Checker builtin callsite")
+    })?;
+    let unpack_sites = checked
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| site.owner == owner.0 && site.callee == "unpack_i32")
+        .collect::<Vec<_>>();
+    let expected_builtin = crate::core::ir::BuiltinId::new("unpack_i32")
+        .map_err(|error| format!("canonical unpack_i32 builtin identity is invalid: {error}"))?;
+    if unpack_sites.len() != 1
+        || unpack_sites[0].node_id != *unpack_operation
+        || callsite.node_id != *unpack_operation
+        || callsite.owner != owner.0
+        || callsite.callee != "unpack_i32"
+        || callsite.kind != ResolvedCallKind::Builtin
+        || callsite.argc != 1
+        || !callsite.arity_matches()
+        || crate::core::builtins::builtin_arity(&callsite.callee) != Some(callsite.argc)
+        || callsite.resolved_callee != Some(ResolvedCallee::Builtin(expected_builtin.clone()))
+    {
+        return Err(
+            "ordinary Map Set/GetAny-i32 unpack Cast is not bound to its unique exact Checker `unpack_i32` builtin callsite"
+                .into(),
+        );
+    }
+
+    Ok(format!(
+        "cast_node={:?}|cast_kind={:?}|cast_from={:?}|cast_to={:?}|argument_node={:?}|callsite_node={:?}|owner={}|callee={}|argc={}|expected_argc={:?}|builtin_arity={:?}|kind={:?}|resolved_callee={:?}",
+        cast.node_id,
+        conversion.kind,
+        conversion.from,
+        conversion.to,
+        value.node_id,
+        callsite.node_id,
+        callsite.owner,
+        callsite.callee,
+        callsite.argc,
+        callsite.expected_argc,
+        crate::core::builtins::builtin_arity(&callsite.callee),
+        callsite.kind,
+        callsite.resolved_callee,
+    ))
+}
+
+fn ordinary_map_set_get_any_i32_source_attempt_census_parts(
+    operations: &std::collections::BTreeSet<crate::core::OrdinaryMapOwnedAnyV2Attempt>,
+    new_operation: &crate::core::NodeId,
+    set_operation: &crate::core::NodeId,
+    get_operation: &crate::core::NodeId,
+    unpack_operation: &crate::core::NodeId,
+) -> Result<String, String> {
+    use crate::core::OrdinaryMapOwnedAnyV2AttemptKind as Attempt;
+
+    if operations.len() != 3 {
+        return Err(format!(
+            "ordinary Map Set/GetAny-i32 Checker source attempt census must contain exactly three calls, observed {}",
+            operations.len()
+        ));
+    }
+    let expected = [
+        (Attempt::New, new_operation),
+        (Attempt::Set, set_operation),
+        (Attempt::GetAny, get_operation),
+    ];
+    for (kind, point) in expected {
+        if operations
+            .iter()
+            .filter(|attempt| attempt.kind == kind && &attempt.point == point)
+            .count()
+            != 1
+        {
+            return Err(format!(
+                "ordinary Map Set/GetAny-i32 Checker attempt census does not bind exactly one {kind:?} call at {point:?}"
+            ));
+        }
+    }
+    if operations.iter().any(|attempt| {
+        !expected
+            .iter()
+            .any(|(kind, point)| attempt.kind == *kind && &attempt.point == *point)
+    }) {
+        return Err(
+            "ordinary Map Set/GetAny-i32 Checker attempt census contains an unbound operation"
+                .into(),
+        );
+    }
+    Ok(format!(
+        "operations={operations:?}|new={new_operation:?}|set={set_operation:?}|get_any={get_operation:?}|unpack_i32={unpack_operation:?}"
+    ))
+}
+
+fn ordinary_map_set_get_any_i32_constant_before(
+    function: &FunctionProto,
+    pc: usize,
+    register: Reg,
+) -> Result<ConstValue, String> {
+    let mut register = register;
+    for op in function.code.get(..pc).unwrap_or_default().iter().rev() {
+        if op.dest_reg() != Some(register) {
+            continue;
+        }
+        match op {
+            Op::LoadConst { idx, .. } => {
+                return function
+                    .constants
+                    .get(*idx as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "ordinary Map Set/GetAny-i32 operand constant index is out of range".into()
+                    });
+            }
+            Op::Mov { rs, .. } => register = *rs,
+            _ => {
+                return Err(
+                    "ordinary Map Set/GetAny-i32 direct source operand is not a constant load"
+                        .into(),
+                )
+            }
+        }
+    }
+    Err("ordinary Map Set/GetAny-i32 operand has no dominating constant load".into())
+}
+
+type OrdinaryMapSetGetAnyI32SetSite = (FuncIdx, u32, Reg, Reg, Reg, Reg);
+type OrdinaryMapSetGetAnyI32GetSite = (FuncIdx, u32, Reg, Reg, Reg);
+type OrdinaryMapSetGetAnyI32UnpackSite = (FuncIdx, u32, Reg, Reg);
+
+fn ordinary_map_set_get_any_i32_new_result_site(
+    functions: &[FunctionProto],
+) -> Result<(FuncIdx, u32, Reg), String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/GetAny-i32 function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2NewResult { rd } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/GetAny-i32 NewResult PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-i32 must lower to exactly one NewResult site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_any_i32_set_site(
+    functions: &[FunctionProto],
+    expected_key: &str,
+    expected_value: i64,
+) -> Result<OrdinaryMapSetGetAnyI32SetSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/GetAny-i32 function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2SetResult { rd, ra, key, value } = op {
+                if !matches!(
+                    ordinary_map_set_get_any_i32_constant_before(function, pc, *key),
+                    Ok(ConstValue::Str(value)) if value == expected_key
+                ) || !matches!(
+                    ordinary_map_set_get_any_i32_constant_before(function, pc, *value),
+                    Ok(ConstValue::Int(value)) if value == expected_value
+                ) {
+                    return Err(
+                        "ordinary Map Set/GetAny-i32 Set key or payload differs from direct Checker identities"
+                            .into(),
+                    );
+                }
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/GetAny-i32 Set PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *ra, *key, *value));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-i32 must lower to exactly one SetResult site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_any_i32_get_site(
+    functions: &[FunctionProto],
+    expected_key: &str,
+) -> Result<OrdinaryMapSetGetAnyI32GetSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/GetAny-i32 function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2GetAny { rd, ra, key } = op {
+                if !matches!(
+                    ordinary_map_set_get_any_i32_constant_before(function, pc, *key),
+                    Ok(ConstValue::Str(value)) if value == expected_key
+                ) {
+                    return Err(
+                        "ordinary Map Set/GetAny-i32 GetAny key differs from its direct Checker identity"
+                            .into(),
+                    );
+                }
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/GetAny-i32 GetAny PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *ra, *key));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-i32 must lower to exactly one GetAny site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+type OrdinaryMapSetGetAnyResultI32GetSite = (FuncIdx, u32, Reg, Reg, Reg);
+type OrdinaryMapSetGetAnyResultI32UnpackSite = (FuncIdx, u32, Reg, Reg);
+
+fn ordinary_map_set_get_any_result_i32_get_site(
+    functions: &[FunctionProto],
+    expected_key: &str,
+) -> Result<OrdinaryMapSetGetAnyResultI32GetSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map GetAnyResult function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { rd, ra, key } = op {
+                if !matches!(
+                    ordinary_map_set_get_any_i32_constant_before(function, pc, *key),
+                    Ok(ConstValue::Str(value)) if value == expected_key
+                ) {
+                    return Err(
+                        "ordinary Map GetAnyResult key differs from its direct Checker identity"
+                            .into(),
+                    );
+                }
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map GetAnyResult PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *ra, *key));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-Result-i32 must lower to exactly one dedicated GetAnyResult site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_any_result_i32_unpack_site(
+    functions: &[FunctionProto],
+) -> Result<OrdinaryMapSetGetAnyResultI32UnpackSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map GetAnyResult function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map GetAnyResult unpack PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *ra));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-Result-i32 must lower to exactly one dedicated Any unpack site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_any_i32_unpack_i32_site(
+    functions: &[FunctionProto],
+) -> Result<OrdinaryMapSetGetAnyI32UnpackSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/GetAny-i32 function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2Unpack { rd, ra } = op {
+                let pc = u32::try_from(pc).map_err(|_| {
+                    "ordinary Map Set/GetAny-i32 DynamicAnyUnpack PC exceeds bytecode ABI"
+                })?;
+                sites.push((function_index, pc, *rd, *ra));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [site] => Ok(*site),
+        _ => Err(format!(
+            "ordinary Map Set/GetAny-i32 must lower to exactly one dedicated DynamicAnyUnpack site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+type OrdinaryMapSetGetStringSetSite = (FuncIdx, u32, Reg, Reg, Reg, Reg, ConstIdx, ConstIdx);
+type OrdinaryMapSetGetStringGetSite = (FuncIdx, u32, Reg, Reg, Reg, ConstIdx, ConstIdx);
+
+fn ordinary_map_set_get_string_set_site(
+    functions: &[FunctionProto],
+    expected_type_id: &str,
+    expected_type_desc_hash: &str,
+) -> Result<OrdinaryMapSetGetStringSetSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/Get-String function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2SetStringResult {
+                rd,
+                ra,
+                key,
+                value,
+                string_type_id,
+                string_type_desc_hash,
+            } = op
+            {
+                let type_id_matches = matches!(
+                    function.constants.get(*string_type_id as usize),
+                    Some(ConstValue::Str(value)) if value == expected_type_id
+                );
+                let type_desc_hash_matches = matches!(
+                    function.constants.get(*string_type_desc_hash as usize),
+                    Some(ConstValue::Str(value)) if value == expected_type_desc_hash
+                );
+                if !type_id_matches || !type_desc_hash_matches {
+                    return Err(
+                        "ordinary Map Set/Get-String Set TypeDesc constants disagree with the canonical String descriptor".into(),
+                    );
+                }
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/Get-String Set PC exceeds bytecode ABI")?;
+                sites.push((
+                    function_index,
+                    pc,
+                    *rd,
+                    *ra,
+                    *key,
+                    *value,
+                    *string_type_id,
+                    *string_type_desc_hash,
+                ));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [(function, pc, rd, ra, key, value, type_id, type_desc_hash)] => {
+            Ok((*function, *pc, *rd, *ra, *key, *value, *type_id, *type_desc_hash))
+        }
+        _ => Err(format!(
+            "ordinary Map Set/Get-String must lower to exactly one String Set result site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_string_get_site(
+    functions: &[FunctionProto],
+    expected_type_id: &str,
+    expected_type_desc_hash: &str,
+) -> Result<OrdinaryMapSetGetStringGetSite, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/Get-String function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::MirOrdinaryMapOwnedAnyV2GetStringResult {
+                rd,
+                ra,
+                key,
+                string_type_id,
+                string_type_desc_hash,
+            } = op
+            {
+                let type_id_matches = matches!(
+                    function.constants.get(*string_type_id as usize),
+                    Some(ConstValue::Str(value)) if value == expected_type_id
+                );
+                let type_desc_hash_matches = matches!(
+                    function.constants.get(*string_type_desc_hash as usize),
+                    Some(ConstValue::Str(value)) if value == expected_type_desc_hash
+                );
+                if !type_id_matches || !type_desc_hash_matches {
+                    return Err(
+                        "ordinary Map Set/Get-String Get TypeDesc constants disagree with the canonical String descriptor".into(),
+                    );
+                }
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/Get-String Get PC exceeds bytecode ABI")?;
+                sites.push((
+                    function_index,
+                    pc,
+                    *rd,
+                    *ra,
+                    *key,
+                    *string_type_id,
+                    *string_type_desc_hash,
+                ));
+            }
+        }
+    }
+    match sites.as_slice() {
+        [(function, pc, rd, ra, key, type_id, type_desc_hash)] => {
+            Ok((*function, *pc, *rd, *ra, *key, *type_id, *type_desc_hash))
+        }
+        _ => Err(format!(
+            "ordinary Map Set/Get-String must lower to exactly one String Get result site, observed {}",
+            sites.len()
+        )),
+    }
+}
+
+fn ordinary_map_set_get_string_move_sites(
+    functions: &[FunctionProto],
+) -> Result<Vec<(FuncIdx, u32, Reg, Reg)>, String> {
+    let mut sites = Vec::new();
+    for (function_index, function) in functions.iter().enumerate() {
+        let function_index = FuncIdx::try_from(function_index)
+            .map_err(|_| "ordinary Map Set/Get-String function index exceeds bytecode ABI")?;
+        for (pc, op) in function.code.iter().enumerate() {
+            if let Op::Move { rd, rs } = op {
+                let pc = u32::try_from(pc)
+                    .map_err(|_| "ordinary Map Set/Get-String Move PC exceeds bytecode ABI")?;
+                sites.push((function_index, pc, *rd, *rs));
+            }
+        }
+    }
+    if sites.len() != 3 {
+        return Err(format!(
+            "ordinary Map Set/Get-String must lower to exactly three owned payload Moves (two root transfers and one String result), observed {}",
+            sites.len()
+        ));
+    }
+    Ok(sites)
 }
 
 impl CanonicalOrdinaryMapNewResultBytecodeAnchor {
@@ -17543,5 +23703,642 @@ impl CanonicalOrdinaryMapNewResultBytecodeAnchor {
     ) -> Result<bool, String> {
         self.validate(entry, functions)?;
         Ok(self.root_move == (function_index, pc, rd, rs))
+    }
+}
+
+impl CanonicalOrdinaryMapSetResultBytecodeAnchor {
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let root_moves = ordinary_map_set_result_root_move_sites(functions)?;
+        let set_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }))
+            .count();
+        let new_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
+            .count();
+        if self.profile != crate::core::mir::ORDINARY_MAP_SET_RESULT_PENDING_L1_PROFILE
+            || self.entry != entry
+            || entry != 0
+            || functions.len() != 1
+            || functions[0].name != self.owner
+            || self.source_commitment.is_empty()
+            || self.expected_program != format!("{functions:?}")
+            || set_result_count != 1
+            || new_result_count != 1
+            || self.root_moves != root_moves
+            || functions[0].code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+        {
+            return Err(
+                "ordinary Map SetResult bytecode disagrees with its independent Checker lineage anchor"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(self.root_moves.contains(&(function_index, pc, rd, rs)))
+    }
+}
+
+impl CanonicalOrdinaryMapSetGetI32BytecodeAnchor {
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let root_moves = ordinary_map_set_result_root_move_sites(functions)?;
+        let get_i32_result = ordinary_map_set_get_i32_result_site(functions)?;
+        let set_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }))
+            .count();
+        let new_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
+            .count();
+        if self.profile != crate::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE
+            || self.route_receipt.profile != self.profile
+            || self.route_receipt.manifest_round_trip()? != self.route_receipt
+            || self.route_receipt.manifest_text()? != self.manifest
+            || self.entry != entry
+            || entry != 0
+            || functions.len() != 1
+            || functions[0].name != self.owner
+            || self.source_commitment.is_empty()
+            || self.expected_program != format!("{functions:?}")
+            || set_result_count != 1
+            || new_result_count != 1
+            || self.root_moves != root_moves
+            || self.get_i32_result != get_i32_result
+            || functions[0].code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+        {
+            return Err(
+                "ordinary Map Set/Get-i32 bytecode disagrees with its Checker and execution-route anchor"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(self.root_moves.contains(&(function_index, pc, rd, rs)))
+    }
+}
+
+impl CanonicalOrdinaryMapSetGetAnyI32BytecodeAnchor {
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let source_attempt_census = ordinary_map_set_get_any_i32_source_attempt_census_parts(
+            &self.source_operations,
+            &self.new_operation,
+            &self.set_operation,
+            &self.get_operation,
+            &self.unpack_operation,
+        )?;
+        let root_moves = ordinary_map_set_result_root_move_sites(functions)?;
+        let new_result = ordinary_map_set_get_any_i32_new_result_site(functions)?;
+        let set_result = ordinary_map_set_get_any_i32_set_site(
+            functions,
+            &self.set_key_value,
+            self.set_i32_value,
+        )?;
+        let get_any = ordinary_map_set_get_any_i32_get_site(functions, &self.get_key_value)?;
+        let unpack_i32 = ordinary_map_set_get_any_i32_unpack_i32_site(functions)?;
+        let set_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }))
+            .count();
+        let new_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
+            .count();
+        let generic_unpack_i32_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| {
+                matches!(
+                    op,
+                    Op::MirManagedAnyOp {
+                        operation: crate::core::mir::MirManagedAnyOperation::UnpackI32,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let get_any_binding = self
+            .get_any_binding
+            .as_ref()
+            .ok_or("ordinary Map Set/GetAny-i32 route has no exact GetAny PC binding")?;
+        let selected_payload_binding = self
+            .selected_payload_binding
+            .as_ref()
+            .ok_or("ordinary Map Set/GetAny-i32 route has no exact selected-payload TypeDesc")?;
+        let unpack_binding = self
+            .unpack_binding
+            .as_ref()
+            .ok_or("ordinary Map Set/GetAny-i32 route has no exact unpack PC binding")?;
+        let core_unpack_receipt = self
+            .core_unpack_receipt
+            .as_ref()
+            .ok_or("ordinary Map Set/GetAny-i32 route has no dedicated Core unpack receipt")?;
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let (get_any_function, get_any_pc, get_any_rd, get_any_ra, get_any_key) = self.get_any;
+        let (unpack_function, unpack_pc, unpack_rd, unpack_ra) = self.unpack_i32;
+        let bindings_snapshot = format!(
+            "core={:?}|get_any={:?}|selected_payload={:?}|unpack={:?}",
+            self.core_unpack_receipt,
+            self.get_any_binding,
+            self.selected_payload_binding,
+            self.unpack_binding
+        );
+        let binding_sites_match = get_any_function == 0
+            && unpack_function == 0
+            && get_any_binding.owner.0 == self.owner
+            && get_any_binding.operation.0 == self.get_operation.0
+            && get_any_binding.pc == get_any_pc
+            && get_any_binding.rd == get_any_rd
+            && get_any_binding.ra == get_any_ra
+            && get_any_binding.key_reg == get_any_key
+            && get_any_binding.key.as_str() == format!("literal:{}", get_any_binding.key_node.0)
+            && get_any_binding.checker_key_local.is_none()
+            && get_any_binding.checker_key_type
+                == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+            && get_any_binding.mir_result_type
+                == crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id()
+            && get_any_binding.binding_local == unpack_binding.pair_local
+            && get_any_binding.binding == unpack_binding.pair
+            && get_any_binding.instruction == unpack_binding.get_any_instruction
+            && get_any_binding.settlement == unpack_binding.settlement
+            && get_any_binding.settlement_point == unpack_binding.settlement_point
+            && get_any_binding.settlement_instruction == unpack_binding.settlement_instruction
+            && get_any_binding.miss_payload_type == i32_type
+            && get_any_binding.miss_payload_type_desc_digest
+                == unpack_binding.target_type_desc_digest
+            && get_any_binding.temporary_root.is_none()
+            && selected_payload_binding.type_id == i32_type
+            && selected_payload_binding.kind == CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+            && selected_payload_binding.type_desc_digest
+                == core_unpack_receipt.miss_payload_type_desc_digest
+            && unpack_binding.owner.0 == self.owner
+            && unpack_binding.operation == get_any_binding.operation
+            && unpack_binding.instruction.as_str().trim() != ""
+            && unpack_binding.projection.0.trim() != ""
+            && unpack_binding.cast.0 == self.unpack_operation.0
+            && unpack_binding.conversion_kind
+                == crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+            && unpack_binding.conversion_to == i32_type
+            && unpack_binding.target_type == i32_type
+            && unpack_binding.payload_source == core_unpack_receipt.payload_source
+            && unpack_binding.result.as_str() == format!("expr:{}", unpack_binding.cast.0)
+            && unpack_binding.pair == get_any_binding.binding
+            && unpack_binding.pair_local == get_any_binding.binding_local
+            && unpack_binding.get_any_instruction == get_any_binding.instruction
+            && unpack_binding.pc == unpack_pc
+            && unpack_binding.rd == unpack_rd
+            && unpack_binding.ra == unpack_ra
+            && unpack_binding.miss_payload_type == i32_type
+            && unpack_binding.settlement
+                == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            && unpack_binding.settlement == get_any_binding.settlement
+            && unpack_binding.settlement_point == get_any_binding.settlement_point
+            && unpack_binding.settlement_instruction == get_any_binding.settlement_instruction
+            && is_canonical_digest(&unpack_binding.target_type_desc_digest)
+            && is_canonical_digest(&unpack_binding.payload_selection_digest)
+            && selected_payload_binding.type_desc_digest == unpack_binding.target_type_desc_digest
+            && core_unpack_receipt.schema
+                == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_UNPACK_RESULT_SCHEMA
+            && core_unpack_receipt.profile == self.profile
+            && core_unpack_receipt.owner.0 == self.owner
+            && core_unpack_receipt.source_receipt_commitment == self.source_commitment
+            && core_unpack_receipt.graph_digest == self.route_receipt.mir_digest
+            && core_unpack_receipt.type_catalog_digest == self.route_receipt.type_desc_digest
+            && core_unpack_receipt.route_receipt == self.route_receipt
+            && core_unpack_receipt.get_any_operation == self.get_operation
+            && core_unpack_receipt.get_any_instruction == get_any_binding.instruction
+            && core_unpack_receipt.get_any_key_value == get_any_binding.key
+            && core_unpack_receipt.set_operation == self.set_operation
+            && is_canonical_digest(&core_unpack_receipt.payload_selection_digest)
+            && core_unpack_receipt.set_payload_type_desc_id == i32_type
+            && core_unpack_receipt.set_payload_type_desc_digest
+                == selected_payload_binding.type_desc_digest
+            && core_unpack_receipt.set_payload_value.as_str().trim() != ""
+            && core_unpack_receipt.set_instruction.as_str().trim() != ""
+            && core_unpack_receipt.key_type_desc_id
+                == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+            && is_canonical_digest(&core_unpack_receipt.key_type_desc_digest)
+            && core_unpack_receipt.pair_binding == get_any_binding.binding
+            && core_unpack_receipt.pair_type_desc_id == get_any_binding.mir_result_type
+            && is_canonical_digest(&core_unpack_receipt.pair_type_desc_digest)
+            && core_unpack_receipt.any_payload_type_desc_id
+                == crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id()
+            && is_canonical_digest(&core_unpack_receipt.any_payload_type_desc_digest)
+            && core_unpack_receipt.unpack_source_node == unpack_binding.cast
+            && core_unpack_receipt.unpack_callsite_callee == "unpack_i32"
+            && core_unpack_receipt.unpack_callsite_owner == self.owner
+            && core_unpack_receipt.unpack_callsite_arity == 1
+            && core_unpack_receipt.unpack_resolved_builtin == "unpack_i32"
+            && core_unpack_receipt.unpack_instruction == unpack_binding.instruction
+            && core_unpack_receipt.unpack_result_expression == unpack_binding.result
+            && core_unpack_receipt.unpack_conversion_kind == unpack_binding.conversion_kind
+            && core_unpack_receipt.unpack_source_type == unpack_binding.conversion_from
+            && core_unpack_receipt.unpack_target_type == unpack_binding.target_type
+            && core_unpack_receipt.pair_drop_point == unpack_binding.settlement_point
+            && core_unpack_receipt.pair_drop_instruction == unpack_binding.settlement_instruction
+            && core_unpack_receipt.miss_value == 0
+            && core_unpack_receipt.miss_payload_type_desc_id == i32_type
+            && is_canonical_digest(&core_unpack_receipt.miss_payload_type_desc_digest)
+            && core_unpack_receipt.miss_payload_type_desc_digest
+                == unpack_binding.target_type_desc_digest
+            && core_unpack_receipt.payload_selection_digest
+                == unpack_binding.payload_selection_digest
+            && core_unpack_receipt.query_key == self.get_key_value
+            && core_unpack_receipt.stored_key == self.set_key_value
+            && core_unpack_receipt.query_hits_stored_key
+                == (core_unpack_receipt.query_key == core_unpack_receipt.stored_key)
+            && core_unpack_receipt.payload_source
+                == if core_unpack_receipt.query_hits_stored_key {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+                } else {
+                    crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+                }
+            && core_unpack_receipt.stored_i32 == self.set_i32_value
+            && core_unpack_receipt
+                .validate_payload_selection_commitment()
+                .is_ok()
+            && self.expected_binding_snapshot == bindings_snapshot;
+        if self.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+            || self.route_receipt.profile != self.profile
+            || self.route_receipt.manifest_round_trip()? != self.route_receipt
+            || self.route_receipt.manifest_text()? != self.manifest
+            || self.entry != entry
+            || entry != 0
+            || functions.len() != 1
+            || functions[0].name != self.owner
+            || self.source_commitment.is_empty()
+            || self.unpack_source_commitment.is_empty()
+            || !self.unpack_source_commitment.contains(&format!(
+                "cast_node={:?}|cast_kind=DynamicAnyUnpack",
+                self.unpack_operation
+            ))
+            || !self.unpack_source_commitment.contains(&format!(
+                "callsite_node={:?}|owner={}|callee=unpack_i32|argc=1",
+                self.unpack_operation, self.owner
+            ))
+            || !self
+                .unpack_source_commitment
+                .contains("|argc=1|expected_argc=")
+            || !self
+                .unpack_source_commitment
+                .contains("|builtin_arity=Some(1)|kind=Builtin|resolved_callee=Some(Builtin(BuiltinId(\"unpack_i32\")))")
+            || self.source_attempt_census != source_attempt_census
+            || self.expected_program != format!("{functions:?}")
+            || !binding_sites_match
+            || set_result_count != 1
+            || new_result_count != 1
+            || generic_unpack_i32_count != 0
+            || self.root_moves != root_moves
+            || self.new_result != new_result
+            || self.set_result != set_result
+            || self.get_any != get_any
+            || self.unpack_i32 != unpack_i32
+            || functions[0].code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                )
+            })
+        {
+            return Err(
+                "ordinary Map Set/GetAny-i32 bytecode disagrees with its independent Checker and execution-route anchor"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(self.root_moves.contains(&(function_index, pc, rd, rs)))
+    }
+}
+
+impl CanonicalOrdinaryMapSetGetAnyResultI32BytecodeAnchor {
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let source = &self.source_receipt;
+        let root_moves = ordinary_map_set_get_any_result_i32_root_move_sites(functions)?;
+        let new_result = ordinary_map_set_get_any_i32_new_result_site(functions)?;
+        let set_result = ordinary_map_set_get_any_i32_set_site(
+            functions,
+            &source.set_key_value,
+            source.set_i32_value,
+        )?;
+        let get_any_result =
+            ordinary_map_set_get_any_result_i32_get_site(functions, &source.get_key_value)?;
+        let unpack = ordinary_map_set_get_any_result_i32_unpack_site(functions)?;
+        let get_any_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAnyResult { .. }))
+            .count();
+        let old_tuple_get_any_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }))
+            .count();
+        let unpack_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }))
+            .count();
+        let set_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }))
+            .count();
+        let new_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
+            .count();
+        let canonical_envelope_type =
+            crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+        let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let expected_get_any_instruction = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:get_any_result:{}",
+            source.get_operation.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let expected_unpack_instruction = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:unpack_i32:{}",
+            source.get_unpack_operation.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let expected_pair =
+            crate::core::mir::MirValueId::new(format!("local:{}", source.get_ok_pair_local.0 .0))
+                .map_err(|error| error.to_string())?;
+        let expected_unpack_result =
+            crate::core::mir::MirValueId::new(format!("expr:{}", source.get_unpack_operation.0))
+                .map_err(|error| error.to_string())?;
+        let expected_pair_drop_instruction = crate::core::mir::MirInstructionId::new(format!(
+            "inst:ordinary_map_set_get_any_result_i32_lineage:drop_pair:{}",
+            source.get_ok_pair_payload_settlement.0
+        ))
+        .map_err(|error| error.to_string())?;
+        let expected_payload_source = if source.get_key_value == source.set_key_value {
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::SelectedSetPayload
+        } else {
+            crate::core::mir::OrdinaryMapOwnedAnyV2UnpackPayloadSource::CanonicalI32Miss
+        };
+        let expected_binding_snapshot = format!(
+            "selected_payload={:?}|unpack={:?}",
+            self.selected_payload_binding, self.unpack_binding
+        );
+        let unpack_binding_valid = self.unpack_binding.as_ref().is_some_and(|binding| {
+            binding.owner == source.owner
+                && binding.operation == source.get_operation
+                && binding.instruction == expected_unpack_instruction
+                && binding.projection == source.get_pair_payload_projection
+                && binding.cast == source.get_unpack_operation
+                && binding.conversion_kind == source.get_unpack_conversion_kind
+                && binding.conversion_from == source.get_unpack_source_type
+                && binding.conversion_to == source.get_unpack_target_type
+                && binding.payload_source == expected_payload_source
+                && binding.pair == expected_pair
+                && binding.pair_local == source.get_ok_pair_local
+                && binding.result == expected_unpack_result
+                && binding.target_type == i32_type
+                && is_canonical_digest(&binding.target_type_desc_digest)
+                && binding.get_any_instruction == expected_get_any_instruction
+                && binding.settlement
+                    == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                && binding.settlement_point == source.get_ok_pair_payload_settlement
+                && binding.settlement_instruction == expected_pair_drop_instruction
+                && binding.miss_payload_type == i32_type
+                && binding.payload_selection_digest == self.route_receipt.mir_digest
+                && binding.pc == unpack.1
+                && binding.rd == unpack.2
+                && binding.ra == unpack.3
+        });
+        let selected_payload_valid =
+            self.selected_payload_binding
+                .as_ref()
+                .is_some_and(|binding| {
+                    binding.type_id == i32_type
+                        && is_canonical_digest(&binding.type_desc_digest)
+                        && self.unpack_binding.as_ref().is_some_and(|unpack| {
+                            binding.type_desc_digest == unpack.target_type_desc_digest
+                        })
+                        && binding.kind == CanonicalOrdinaryMapOwnedAnyV2PayloadKind::I32
+                });
+        if self.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE
+            || self.route_receipt.profile != self.profile
+            || self.route_receipt.manifest_round_trip()? != self.route_receipt
+            || self.route_receipt.manifest_text()? != self.manifest
+            || self.entry != entry
+            || entry != 0
+            || functions.len() != 1
+            || functions[0].name != self.owner
+            || source.owner.0 != self.owner
+            || source.profile_version
+                != crate::core::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion::V1
+            || source.get_api != crate::core::OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+            || self.source_commitment != format!("{source:?}")
+            || source.set_key_value.is_empty()
+            || source.get_key_value.is_empty()
+            || self.envelope_type_id != canonical_envelope_type.as_str()
+            || !is_canonical_digest(&self.envelope_descriptor_digest)
+            || self.expected_program != format!("{functions:?}")
+            || root_moves != self.root_moves
+            || new_result != self.new_result
+            || set_result != self.set_result
+            || get_any_result != self.get_any_result
+            || get_any_result_count != 1
+            || old_tuple_get_any_count != 0
+            || unpack_count != 1
+            || unpack != self.unpack
+            || !unpack_binding_valid
+            || !selected_payload_valid
+            || self.expected_binding_snapshot != expected_binding_snapshot
+            || set_result_count != 1
+            || new_result_count != 1
+            || functions[0].code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetStringResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2SetStringResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                )
+            })
+        {
+            return Err(
+                "ordinary Map Set/GetAny-Result-i32 bytecode disagrees with its independent Checker, TypeDesc, and execution-route anchor"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(self.root_moves.contains(&(function_index, pc, rd, rs)))
+    }
+}
+
+impl CanonicalOrdinaryMapSetGetStringBytecodeAnchor {
+    fn validate(&self, entry: FuncIdx, functions: &[FunctionProto]) -> Result<(), String> {
+        let expected_type_id =
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let root_moves = ordinary_map_set_get_string_move_sites(functions)?;
+        let set_site = ordinary_map_set_get_string_set_site(
+            functions,
+            &self.string_type_id,
+            &self.string_type_desc_hash,
+        )?;
+        let get_site = ordinary_map_set_get_string_get_site(
+            functions,
+            &self.string_type_id,
+            &self.string_type_desc_hash,
+        )?;
+        let new_result_count = functions
+            .iter()
+            .flat_map(|function| &function.code)
+            .filter(|op| matches!(op, Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }))
+            .count();
+        if self.profile != crate::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE
+            || self.route_receipt.profile != self.profile
+            || self.route_receipt.manifest_round_trip()? != self.route_receipt
+            || self.route_receipt.manifest_text()? != self.manifest
+            || self.entry != entry
+            || entry != 0
+            || functions.len() != 1
+            || functions[0].name != self.owner
+            || self.source_commitment.is_empty()
+            || self.expected_program != format!("{functions:?}")
+            || self.string_type_id != expected_type_id.as_str()
+            || !is_canonical_digest(&self.string_type_desc_hash)
+            || self.root_moves != root_moves
+            || self.set_string_result != set_site
+            || self.get_string_result != get_site
+            || new_result_count != 1
+            || functions[0].code.iter().any(|op| {
+                matches!(
+                    op,
+                    Op::MirOrdinaryMapOwnedAnyV2New { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetI32Result { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Clone { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Set { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Remove { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetAny { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
+                        | Op::MirOrdinaryMapOwnedAnyV2Unpack { .. }
+                )
+            })
+        {
+            return Err(
+                "ordinary Map Set/Get-String bytecode disagrees with its independent Checker, TypeDesc, and execution-route anchor"
+                    .into(),
+            );
+        }
+        let (_, _, set_rd, set_ra, set_key, set_value, _, _) = self.set_string_result;
+        let (_, _, get_rd, get_ra, get_key, _, _) = self.get_string_result;
+        if set_rd == set_ra
+            || set_rd == set_key
+            || set_rd == set_value
+            || set_ra == set_key
+            || set_ra == set_value
+            || set_key == set_value
+            || get_rd == get_ra
+            || get_rd == get_key
+            || get_ra == get_key
+        {
+            return Err("ordinary Map Set/Get-String opcode registers alias unsafely".into());
+        }
+        Ok(())
+    }
+
+    fn authorizes_root_move(
+        &self,
+        entry: FuncIdx,
+        functions: &[FunctionProto],
+        function_index: FuncIdx,
+        pc: u32,
+        rd: Reg,
+        rs: Reg,
+    ) -> Result<bool, String> {
+        self.validate(entry, functions)?;
+        Ok(self.root_moves.contains(&(function_index, pc, rd, rs)))
     }
 }

@@ -1,4 +1,15 @@
 use super::*;
+use crate::interp::SharedString;
+
+fn run_non_scalar_helper(src: &str, helper: &str) -> Result<interp::Value, String> {
+    let main_value = run_source_result(src)?;
+    if main_value != interp::Value::Int(0) {
+        return Err(format!(
+            "valid main must invoke {helper} before returning its process status; got {main_value:?}"
+        ));
+    }
+    bytecode_call_named(src, helper, Vec::new())
+}
 
 #[test]
 fn requires_passes() {
@@ -172,12 +183,21 @@ func append_world(s: string) -> string {
     return s + "world";
 }
 
-func main() -> string {
+func old_string_snapshot_value() -> string {
     append_world("hello")
 }
+
+func main() -> i32 {
+    old_string_snapshot_value()
+    0
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("helloworld".to_string())));
+    let v = run_non_scalar_helper(src, "old_string_snapshot_value")
+        .expect("old string snapshot helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("helloworld".to_string()))
+    );
 }
 
 #[test]
@@ -314,12 +334,21 @@ func append_world(s: string) -> string {
     return s + "world";
 }
 
-func main() -> string {
+func old_string_concat_snapshot_value() -> string {
     append_world("hello")
 }
+
+func main() -> i32 {
+    old_string_concat_snapshot_value()
+    0
+}
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("helloworld".to_string())));
+    let v = run_non_scalar_helper(src, "old_string_concat_snapshot_value")
+        .expect("old string concat snapshot helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("helloworld".to_string()))
+    );
 }
 
 #[test]

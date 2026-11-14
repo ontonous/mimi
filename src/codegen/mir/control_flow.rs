@@ -3,6 +3,27 @@
 use super::*;
 
 impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
+    fn emit_main_managed_any_v2_list_guard(&self, subject: &str) -> Result<(), NativeMirError> {
+        if self.function.owner.0 != "function:main" {
+            return Ok(());
+        }
+        let guard = self
+            .generator
+            .module
+            .get_function("mimi_mir_assert_no_live_managed_any_v2_lists")
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject,
+                    "canonical MIR main is missing the Values-list lifecycle guard",
+                )
+            })?;
+        self.generator
+            .builder
+            .build_call(guard, &[], "mir_main_values_list_guard")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(())
+    }
+
     pub(super) fn emit_terminator(
         &mut self,
         terminator: &MirTerminator,
@@ -58,6 +79,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 self.emit_switch_move(scrutinee, arms, subject)?;
             }
             MirTerminator::Return { value } => {
+                self.emit_main_managed_any_v2_list_guard(&subject.to_string())?;
                 if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
                     let value = value.as_ref().ok_or_else(|| {
                         NativeMirError::new(
@@ -119,8 +141,192 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
     ) -> Result<(), NativeMirError> {
         let scrutinee_value = self.value(scrutinee, &subject.to_string())?;
         let scrutinee_ty = self.value_type(scrutinee, &subject.to_string())?;
-        let (variant_abi, _) =
-            native_variant_abi(self.program.type_catalog(), &scrutinee_ty, true)?;
+        let is_ordinary_map_set_result = self.ordinary_map_set_result_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_set_lineage_receipt()
+                .is_some();
+        let is_ordinary_map_set_get_i32_result = self.ordinary_map_set_get_i32_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_set_get_i32_lineage_receipt()
+                .is_some();
+        let is_ordinary_map_set_get_any_i32_result = self
+            .ordinary_map_set_get_any_i32_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_set_get_any_i32_lineage_receipt()
+                .is_some();
+        let is_ordinary_map_set_get_any_result_i32 = self
+            .ordinary_map_set_get_any_result_i32_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+                .is_some();
+        let is_ordinary_map_set_get_string_result = self.ordinary_map_set_get_string_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_set_get_string_lineage_receipt()
+                .is_some();
+        let is_ordinary_map_new_result = self.ordinary_map_new_result_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_new_result_receipt()
+                .is_some();
+        let is_ordinary_map_direct_tuple_get_l1_result = self
+            .ordinary_map_direct_tuple_get_unpack_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                .is_some();
+        let is_ordinary_map_direct_print_result = self.ordinary_map_direct_print_result_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_direct_print_result_receipt()
+                .is_some();
+        let computed_owner_chain_result_ty =
+            crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let is_values_local_index_i32_result_branch = self
+            .values_local_index_i32_result_branch_l1_authorized
+            && scrutinee_ty == computed_owner_chain_result_ty
+            && self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_cfg_receipt()
+                .and_then(|receipt| {
+                    receipt
+                        .values_local_index_i32_result_branch_receipt
+                        .as_ref()
+                })
+                .is_some();
+        let is_computed_string_key_owner_chain_result = self
+            .computed_string_key_owner_chain_l1_authorized
+            && scrutinee_ty == computed_owner_chain_result_ty;
+        if is_computed_string_key_owner_chain_result {
+            self.validate_computed_string_key_owner_chain_switch_move(
+                scrutinee,
+                arms,
+                &scrutinee_ty,
+                subject,
+            )?;
+        }
+        if scrutinee_ty == computed_owner_chain_result_ty
+            && !is_computed_string_key_owner_chain_result
+            && !is_ordinary_map_set_get_any_result_i32
+            && !is_ordinary_map_set_result
+            && !is_ordinary_map_new_result
+            && !is_ordinary_map_direct_print_result
+            && !is_values_local_index_i32_result_branch
+        {
+            return Err(NativeMirError::new(
+                subject.to_string(),
+                "synthetic Result<owner-v2 root, i32> SwitchMove requires one of its exact CheckedProgram-bound branch routes",
+            ));
+        }
+        if is_ordinary_map_direct_print_result {
+            self.validate_nested_direct_print_result_switch_move(
+                scrutinee,
+                arms,
+                &scrutinee_ty,
+                subject,
+            )?;
+        }
+        let (variant_abi, _) = if is_computed_string_key_owner_chain_result {
+            super::native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_direct_print_result {
+            let (variant_abi, _result_llvm_type) =
+                super::ordinary_map_owned_any_v2::native_direct_print_result_root_result_abi(
+                    self.generator.context,
+                    self.function,
+                    self.program.type_catalog(),
+                    &scrutinee_ty,
+                    subject.as_str(),
+                )?;
+            // This branch returns the concrete LLVM struct layout; the other
+            // native variant helpers return the canonical MIR type identity.
+            // SwitchMove uses only the variant ABI, so normalize the ignored
+            // second tuple item to the same identity contract as those helpers.
+            (variant_abi, scrutinee_ty.clone())
+        } else if is_values_local_index_i32_result_branch {
+            super::ordinary_map_owned_any_v2::native_values_local_index_i32_result_branch_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_set_get_any_result_i32 {
+            if scrutinee_ty
+                == crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+            {
+                super::native_ordinary_map_set_get_any_result_i32_root_variant_abi(
+                    self.function,
+                    self.program.type_catalog(),
+                    &scrutinee_ty,
+                )?
+            } else if scrutinee_ty
+                == crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id()
+            {
+                super::native_ordinary_map_set_get_any_result_i32_variant_abi(
+                    self.function,
+                    self.program.type_catalog(),
+                    &scrutinee_ty,
+                )?
+            } else {
+                return Err(NativeMirError::new(
+                    subject.to_string(),
+                    "Result-valued GetAny SwitchMove has an unauthorized Result TypeDesc",
+                ));
+            }
+        } else if is_ordinary_map_set_get_any_i32_result {
+            super::native_ordinary_map_set_get_any_i32_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_set_get_i32_result {
+            super::native_ordinary_map_set_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_set_get_string_result {
+            super::native_ordinary_map_set_get_string_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_set_result {
+            super::native_ordinary_map_set_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_new_result {
+            super::native_ordinary_map_new_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else if is_ordinary_map_direct_tuple_get_l1_result {
+            super::native_ordinary_map_direct_tuple_get_l1_result_variant_abi(
+                self.function,
+                self.program.type_catalog(),
+                &scrutinee_ty,
+            )?
+        } else {
+            native_variant_abi(self.program.type_catalog(), &scrutinee_ty, true)?
+        };
         let tag = self
             .generator
             .builder
@@ -277,6 +483,209 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         &subject.to_string(),
                     )?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Bind the current SwitchMove to the exact Checker branch receipt before
+    /// the synthetic Result<root, i32> ABI is selected. The full MIR route
+    /// replay checks both Result arm projections and all CFG edges; this local
+    /// check makes the emitter prove that this block consumes the corresponding
+    /// branch operation, rather than admitting the TypeDesc globally.
+    fn validate_computed_string_key_owner_chain_switch_move(
+        &self,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        scrutinee_ty: &crate::core::ResolvedTypeId,
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        use crate::core::ownership::{
+            OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion as ChainVersion,
+            OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion as BranchVersion,
+        };
+        use crate::core::{cfg::Terminator, ownership::ManagedAnyCfgMatchCase};
+
+        let fail = |message: &str| {
+            NativeMirError::new(
+                subject.to_string(),
+                format!(
+                    "ComputedStringKeyOwnerChain SwitchMove is not bound to its exact branch receipt: {message}"
+                ),
+            )
+        };
+        let expected_result_ty =
+            crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+        if scrutinee_ty != &expected_result_ty {
+            return Err(fail("scrutinee is not Result<synthetic root, i32>"));
+        }
+        let source_result_ty =
+            crate::core::mir::types::ordinary_map_owned_any_v2_source_result_type_id()
+                .map_err(|message| fail(&message))?;
+        self.program
+            .type_catalog()
+            .validate_ordinary_map_owned_any_v2_root_result(&expected_result_ty, &source_result_ty)
+            .map_err(|message| fail(&message))?;
+
+        let cfg = self
+            .function
+            .ownership
+            .ordinary_map_owned_any_v2_cfg_receipt()
+            .ok_or_else(|| fail("function has no Checker-owned owner-v2 CFG receipt"))?;
+        if cfg.owner != self.function.owner || arms.len() != 2 {
+            return Err(fail("owner or Result arm count differs"));
+        }
+        let branches = cfg
+            .result_receipts
+            .iter()
+            .filter_map(|receipt| {
+                receipt
+                    .computed_string_key_owner_chain
+                    .as_deref()
+                    .and_then(|chain| chain.result_branch.as_deref().map(|branch| (chain, branch)))
+            })
+            .collect::<Vec<_>>();
+        let [(chain, branch)] = branches.as_slice() else {
+            return Err(fail(
+                "there is not exactly one embedded Result-branch receipt",
+            ));
+        };
+        if chain.owner != self.function.owner
+            || branch.owner != self.function.owner
+            || chain.profile_version != ChainVersion::V1
+            || branch.profile_version != BranchVersion::V1
+            || branch.map_new_operation != chain.map_new.point
+            || branch.map_set_operation != chain.map_set.point
+            || branch.initial_root != chain.map_new.local
+            || branch.populated_root != chain.map_set.local
+        {
+            return Err(fail(
+                "receipt owner, profile, or New/Set operation identity differs",
+            ));
+        }
+
+        let new_value = MirValueId::new(format!("expr:{}", branch.map_new_operation.0))
+            .map_err(|error| fail(&error.to_string()))?;
+        let set_value = MirValueId::new(format!("expr:{}", branch.map_set_operation.0))
+            .map_err(|error| fail(&error.to_string()))?;
+        let (match_node, operation, ok_arm, err_arm) = if scrutinee == &new_value {
+            (
+                &branch.map_new_match,
+                &branch.map_new_operation,
+                &branch.map_new_ok_arm,
+                &branch.map_new_err_arm,
+            )
+        } else if scrutinee == &set_value {
+            (
+                &branch.map_set_match,
+                &branch.map_set_operation,
+                &branch.map_set_ok_arm,
+                &branch.map_set_err_arm,
+            )
+        } else {
+            return Err(fail("scrutinee does not name the exact New or Set result"));
+        };
+        if self
+            .function
+            .values
+            .get(scrutinee)
+            .is_none_or(|value| value.ty != expected_result_ty)
+        {
+            return Err(fail("scrutinee value has a different result TypeDesc"));
+        }
+
+        crate::core::mir::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_mir_route(
+            self.program,
+        )
+        .map_err(|message| fail(&message))?;
+
+        let wanted_arms = std::collections::BTreeSet::from([ok_arm.clone(), err_arm.clone()]);
+        let dispatches = branch
+            .cfg
+            .match_arms
+            .iter()
+            .filter(|(block_id, source_arms)| {
+                let observed = source_arms
+                    .iter()
+                    .map(|arm| arm.source_arm.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let Some(source_block) = branch.cfg.reachable_blocks.get(*block_id) else {
+                    return false;
+                };
+                let match_node_is_exact = source_block.source.node == *match_node
+                    || source_block
+                        .points
+                        .iter()
+                        .any(|point| point.source.node == *match_node);
+                let match_scrutinee_is_exact = matches!(
+                    &source_block.terminator,
+                    Terminator::Match { scrutinee, .. } if scrutinee == operation
+                );
+                observed == wanted_arms && match_node_is_exact && match_scrutinee_is_exact
+            })
+            .collect::<Vec<_>>();
+        let [(dispatch, source_arms)] = dispatches.as_slice() else {
+            return Err(fail(
+                "source match does not have one exact Checker dispatch block",
+            ));
+        };
+        let dispatch_id =
+            MirBlockId::new(dispatch.0 .0.clone()).map_err(|error| fail(&error.to_string()))?;
+        if subject != &dispatch_id
+            || source_arms.len() != 2
+            || arms.iter().any(|arm| {
+                !matches!(
+                    &arm.case,
+                    MirSwitchCase::Variant(variant)
+                        if variant == &crate::core::NodeId("builtin:variant:Result::Ok".into())
+                            || variant == &crate::core::NodeId("builtin:variant:Result::Err".into())
+                )
+            })
+        {
+            return Err(fail(
+                "MIR switch block or Result::Ok/Err case census differs",
+            ));
+        }
+        for (source_arm_id, expected_case) in [
+            (
+                ok_arm,
+                crate::core::NodeId("builtin:variant:Result::Ok".into()),
+            ),
+            (
+                err_arm,
+                crate::core::NodeId("builtin:variant:Result::Err".into()),
+            ),
+        ] {
+            let source_arm = source_arms
+                .iter()
+                .find(|arm| arm.source_arm == *source_arm_id)
+                .ok_or_else(|| fail("branch arm ID is absent from the Checker receipt"))?;
+            if source_arm.guarded
+                || source_arm.case != ManagedAnyCfgMatchCase::Variant(expected_case.clone())
+            {
+                return Err(fail("Checker Result arm variant or guard differs"));
+            }
+            let edge = branch
+                .cfg
+                .reachable_edges
+                .get(&source_arm.edge)
+                .ok_or_else(|| fail("Checker arm edge is absent"))?;
+            let expected_edge = crate::core::mir::MirEdgeId::new(source_arm.edge.0 .0.clone())
+                .map_err(|error| fail(&error.to_string()))?;
+            let expected_target =
+                MirBlockId::new(edge.to.0 .0.clone()).map_err(|error| fail(&error.to_string()))?;
+            let matching = arms
+                .iter()
+                .filter(|arm| {
+                    arm.edge == expected_edge
+                        && arm.target == expected_target
+                        && arm.case == MirSwitchCase::Variant(expected_case.clone())
+                })
+                .count();
+            if matching != 1 {
+                return Err(fail(
+                    "MIR Result arm edge or target differs from the Checker path",
+                ));
             }
         }
         Ok(())
@@ -629,6 +1038,137 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         Ok(())
     }
 
+    fn validate_nested_direct_print_result_switch_move(
+        &self,
+        scrutinee: &MirValueId,
+        arms: &[MirSwitchArm],
+        scrutinee_ty: &crate::core::ResolvedTypeId,
+        subject: &MirBlockId,
+    ) -> Result<(), NativeMirError> {
+        let receipt = self
+            .function
+            .ownership
+            .ordinary_map_owned_any_v2_direct_print_result_receipt()
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    subject.to_string(),
+                    "nested Result DirectPrint receipt disappeared during SwitchMove",
+                )
+            })?;
+        let (
+            operation,
+            expected_dispatch,
+            ok_edge,
+            ok_target,
+            ok_local,
+            err_edge,
+            err_target,
+            err_local,
+        ) = if subject.as_str() == receipt.new_dispatch.0 .0 {
+            (
+                &receipt.new_operation,
+                &receipt.new_dispatch,
+                &receipt.new_ok_edge,
+                &receipt.new_ok_target,
+                &receipt.initial_root_local,
+                &receipt.new_error_edge,
+                &receipt.new_error_target,
+                &receipt.new_error_local,
+            )
+        } else if subject.as_str() == receipt.set_dispatch.0 .0 {
+            (
+                &receipt.set_operation,
+                &receipt.set_dispatch,
+                &receipt.set_ok_edge,
+                &receipt.set_ok_target,
+                &receipt.updated_root_local,
+                &receipt.set_error_edge,
+                &receipt.set_error_target,
+                &receipt.set_error_local,
+            )
+        } else {
+            return Err(NativeMirError::new(
+                subject.to_string(),
+                "nested Result DirectPrint SwitchMove is outside its two receipted Result dispatches",
+            ));
+        };
+        let expected_scrutinee = MirValueId::new(format!("expr:{}", operation.0))
+            .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+        let expected_root = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+        let expected_result_type =
+            crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let nominal = crate::core::NominalTypeId::new("builtin:type:Result")
+            .map_err(|error| NativeMirError::new(subject.to_string(), error.to_string()))?;
+        let matches_arm = |arm: &MirSwitchArm,
+                           variant_name: &str,
+                           edge: &crate::core::cfg::EdgeId,
+                           target: &crate::core::cfg::BasicBlockId,
+                           local: &crate::core::ir::ResolvedLocalId,
+                           field_ty: &crate::core::ResolvedTypeId,
+                           ownership: crate::core::mir::types::MirOwnership,
+                           move_out_glue: crate::core::mir::types::MirGlueKind|
+         -> bool {
+            let variant = crate::core::NodeId(format!("builtin:variant:Result::{variant_name}"));
+            let field =
+                crate::core::NodeId(format!("builtin:variant:Result::{variant_name}/payload:0"));
+            let expected_parameter = MirValueId::new(format!("local:{}", local.0 .0)).ok();
+            arm.edge.as_str() == edge.0 .0
+                && arm.target.as_str() == target.0 .0
+                && arm.arguments.is_empty()
+                && arm.case == MirSwitchCase::Variant(variant.clone())
+                && matches!(arm.bindings.as_slice(), [binding]
+                    if Some(&binding.parameter) == expected_parameter.as_ref()
+                        && binding.nested_tuple.is_none()
+                        && binding.projection.nominal == nominal
+                        && binding.projection.variant == variant
+                        && binding.projection.field == field
+                        && binding.projection.field_index == 0
+                        && binding.projection.arity == 1
+                        && binding.projection.field_ty == *field_ty
+                        && binding.projection.ownership == ownership
+                        && binding.projection.move_out_glue == move_out_glue)
+        };
+        let ok_matches = arms.iter().filter(|arm| {
+            matches_arm(
+                arm,
+                "Ok",
+                ok_edge,
+                ok_target,
+                ok_local,
+                &expected_root,
+                crate::core::mir::types::MirOwnership::Move,
+                crate::core::mir::types::MirGlueKind::OrdinaryMapOwnedAnyV2,
+            )
+        });
+        let err_matches = arms.iter().filter(|arm| {
+            matches_arm(
+                arm,
+                "Err",
+                err_edge,
+                err_target,
+                err_local,
+                &i32_ty,
+                crate::core::mir::types::MirOwnership::Copy,
+                crate::core::mir::types::MirGlueKind::Noop,
+            )
+        });
+        if self.function.owner != receipt.owner
+            || expected_dispatch.0 .0 != subject.as_str()
+            || scrutinee != &expected_scrutinee
+            || scrutinee_ty != &expected_result_type
+            || arms.len() != 2
+            || ok_matches.count() != 1
+            || err_matches.count() != 1
+        {
+            return Err(NativeMirError::new(
+                subject.to_string(),
+                "nested Result DirectPrint switch scrutinee, Result arms, payload locals, or projection contracts differ from the dedicated Checker receipt",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn queue_variant_edge(
         &mut self,
         target: &MirBlockId,
@@ -875,6 +1415,83 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         &mut self,
         subject: &str,
     ) -> Result<(), NativeMirError> {
+        let has_computed_string_key_owner_chain_result_branch = self
+            .computed_string_key_owner_chain_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_cfg_receipt()
+                .is_some_and(|cfg| {
+                    use crate::core::ownership::{
+                        OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion as ChainVersion,
+                        OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion as BranchVersion,
+                    };
+
+                    if cfg.owner != self.function.owner {
+                        return false;
+                    }
+                    let branches = cfg
+                        .result_receipts
+                        .iter()
+                        .filter_map(|receipt| {
+                            receipt
+                                .computed_string_key_owner_chain
+                                .as_deref()
+                                .and_then(|chain| {
+                                    chain
+                                        .result_branch
+                                        .as_deref()
+                                        .map(|branch| (chain, branch))
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    let [(chain, branch)] = branches.as_slice() else {
+                        return false;
+                    };
+                    let Ok(new_result) = MirValueId::new(format!(
+                        "expr:{}",
+                        branch.map_new_operation.0
+                    )) else {
+                        return false;
+                    };
+                    let Ok(set_result) = MirValueId::new(format!(
+                        "expr:{}",
+                        branch.map_set_operation.0
+                    )) else {
+                        return false;
+                    };
+                    let expected_result_ty =
+                        crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                    let new_result_is_exact = self
+                        .function
+                        .values
+                        .get(&new_result)
+                        .is_some_and(|value| value.ty == expected_result_ty);
+                    let set_result_is_exact = self
+                        .function
+                        .values
+                        .get(&set_result)
+                        .is_some_and(|value| value.ty == expected_result_ty);
+                    chain.owner == self.function.owner
+                        && branch.owner == self.function.owner
+                        && chain.profile_version == ChainVersion::V1
+                        && branch.profile_version == BranchVersion::V1
+                        && branch.map_new_operation == chain.map_new.point
+                        && branch.map_set_operation == chain.map_set.point
+                        && branch.initial_root == chain.map_new.local
+                        && branch.populated_root == chain.map_set.local
+                        && chain.map_set.source_local.as_ref() == Some(&branch.initial_root)
+                        && new_result_is_exact
+                        && set_result_is_exact
+                });
+        let has_values_local_index_i32_result_branch = self
+            .values_local_index_i32_result_branch_l1_authorized
+            && self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_cfg_receipt()
+                .and_then(|cfg| cfg.values_local_index_i32_result_branch_receipt.as_ref())
+                .is_some();
         if !self
             .function
             .ownership
@@ -887,6 +1504,38 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .function
                 .ownership
                 .has_checker_ordinary_map_owned_any_v2_actions()
+            && !(self.ordinary_map_new_result_l1_authorized
+                && self
+                    .function
+                    .ownership
+                    .ordinary_map_new_result_receipt()
+                    .is_some())
+            && !(self.ordinary_map_set_result_l1_authorized
+                && self
+                    .function
+                    .ownership
+                    .ordinary_map_set_lineage_receipt()
+                    .is_some())
+            && !(self.ordinary_map_set_get_i32_l1_authorized
+                && self
+                    .function
+                    .ownership
+                    .ordinary_map_set_get_i32_lineage_receipt()
+                    .is_some())
+            && !(self.ordinary_map_set_get_any_i32_l1_authorized
+                && self
+                    .function
+                    .ownership
+                    .ordinary_map_set_get_any_i32_lineage_receipt()
+                    .is_some())
+            && !(self.ordinary_map_set_get_any_result_i32_l1_authorized
+                && self
+                    .function
+                    .ownership
+                    .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+                    .is_some())
+            && !has_values_local_index_i32_result_branch
+            && !has_computed_string_key_owner_chain_result_branch
         {
             return Ok(());
         }
@@ -941,11 +1590,51 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result }
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { result, .. }
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
-                | MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
                 | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { result, .. }
                 | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { result, .. } => {
                     live_roots.push(result.clone());
                 }
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+                    if !((self.ordinary_map_new_result_l1_authorized
+                        && self
+                            .function
+                            .ownership
+                            .ordinary_map_new_result_receipt()
+                            .is_some())
+                        || (self.ordinary_map_set_result_l1_authorized
+                            && self
+                                .function
+                                .ownership
+                                .ordinary_map_set_lineage_receipt()
+                                .is_some())
+                        || (self.ordinary_map_set_get_i32_l1_authorized
+                            && self
+                                .function
+                                .ownership
+                                .ordinary_map_set_get_i32_lineage_receipt()
+                                .is_some())
+                        || (self.ordinary_map_set_get_any_i32_l1_authorized
+                            && self
+                                .function
+                                .ownership
+                                .ordinary_map_set_get_any_i32_lineage_receipt()
+                                .is_some())
+                        || (self.ordinary_map_set_get_any_result_i32_l1_authorized
+                            && self
+                                .function
+                                .ownership
+                                .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+                                .is_some())
+                        || has_values_local_index_i32_result_branch
+                        || has_computed_string_key_owner_chain_result_branch) =>
+                {
+                    live_roots.push(result.clone());
+                }
+                // Synthetic Result carriers are not owner-v2 Map roots. The
+                // exact branch receipts keep the live source root in the
+                // current block parameters, which this cleanup tracks and
+                // drops on a trap.
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult { .. } => {}
                 MirInstructionKind::Clone { result, .. }
                     if self.function.values.get(result).is_some_and(|value| {
                         value.ty == crate::core::mir::types::ordinary_map_owner_lifecycle_i32_string_v1_type_id()
@@ -1053,6 +1742,45 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 function,
                 &[BasicMetadataValueEnum::from(message.as_pointer_value())],
                 "mir_trap",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_unreachable()
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        Ok(())
+    }
+
+    /// Emit a terminal runtime abort without running ordinary Map cleanup.
+    ///
+    /// Receipt-proven failures such as a statically out-of-bounds Values
+    /// index must report their canonical error before touching any Map owner
+    /// state. The process terminates at the abort, so draining unrelated live
+    /// roots here would both violate that ordering and risk masking the
+    /// receipt-proven error with a cleanup failure.
+    pub(super) fn emit_abort_without_cleanup_with_message(
+        &mut self,
+        message: &str,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        if super::actor_status::is_actor_tagged(self.program, &self.function.owner) {
+            return Err(NativeMirError::new(
+                subject,
+                "cleanup-free runtime abort is unsupported by the Actor finite-turn status ABI",
+            ));
+        }
+        let function = self.generator.get_or_declare_abort_fn();
+        let message = self
+            .generator
+            .builder
+            .build_global_string_ptr(message, "mir_trap_message")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                function,
+                &[BasicMetadataValueEnum::from(message.as_pointer_value())],
+                "mir_trap_without_cleanup",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         self.generator

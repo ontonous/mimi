@@ -2,6 +2,17 @@
 // Focus: genuine boundary conditions, complex scenarios, robustness
 
 use super::*;
+use crate::interp::SharedString;
+
+fn run_non_scalar_helper(src: &str, helper: &str) -> interp::Value {
+    assert_eq!(
+        run_source(src),
+        interp::Value::Int(0),
+        "valid main must invoke {helper} before returning its process status"
+    );
+    bytecode_call_named(src, helper, Vec::new())
+        .unwrap_or_else(|error| panic!("named helper {helper} failed: {error}"))
+}
 
 #[test]
 fn read_lines_each_propagates_callback_errors() {
@@ -65,10 +76,21 @@ fn stress_deeply_nested_arithmetic() {
 #[test]
 fn stress_long_chain_addition() {
     // Long string concatenation chain — tests string handling under load
-    let v = run_source("func main() -> string { \"a\" + \"b\" + \"c\" + \"d\" + \"e\" + \"f\" + \"g\" + \"h\" + \"i\" + \"j\" + \"k\" + \"l\" + \"m\" + \"n\" + \"o\" + \"p\" }");
+    let v = run_non_scalar_helper(
+        r#"
+func long_chain_value() -> string {
+    "a" + "b" + "c" + "d" + "e" + "f" + "g" + "h" + "i" + "j" + "k" + "l" + "m" + "n" + "o" + "p"
+}
+func main() -> i32 {
+    long_chain_value()
+    0
+}
+"#,
+        "long_chain_value",
+    );
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("abcdefghijklmnop".to_string()))
+        interp::Value::String(SharedString::new("abcdefghijklmnop".to_string()))
     );
 }
 
@@ -117,7 +139,7 @@ func main() -> i32 {
 #[test]
 fn stress_enum_with_mixed_payloads() {
     // Enum with different payload types — tests pattern matching completeness
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
 type Value {
     Int(i32)
@@ -133,12 +155,20 @@ func describe(v: Value) -> string {
         Empty => "empty"
     }
 }
-func main() -> string {
+func enum_description_value() -> string {
     describe(Int(42))
 }
+func main() -> i32 {
+    enum_description_value()
+    0
+}
 "#,
+        "enum_description_value",
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("int:42".to_string())));
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("int:42".to_string()))
+    );
 }
 
 // ====== Control Flow Edge Cases ======
@@ -167,7 +197,7 @@ func main() -> i32 {
 #[test]
 fn stress_match_with_guard_complex() {
     // Match guards with complex conditions — tests guard evaluation
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
 func classify(n: i32) -> string {
     match n {
@@ -178,12 +208,20 @@ func classify(n: i32) -> string {
         _ => "large"
     }
 }
-func main() -> string {
+func guarded_match_value() -> string {
     classify(5)
 }
+func main() -> i32 {
+    guarded_match_value()
+    0
+}
 "#,
+        "guarded_match_value",
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("small".to_string())));
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("small".to_string()))
+    );
 }
 
 #[test]
@@ -211,11 +249,10 @@ fn stress_chain_error_propagation() {
     // Multiple ? operators in chain — tests error propagation depth
     let v = run_source(
         r#"
-type Res { Ok(i32) Err(string) }
-func step1(x: i32) -> Res { if x > 0 { Ok(x * 2) } else { Err("step1 failed") } }
-func step2(x: i32) -> Res { if x < 100 { Ok(x + 10) } else { Err("step2 failed") } }
-func step3(x: i32) -> Res { if x != 0 { Ok(x / 2) } else { Err("step3 failed") } }
-func pipeline(x: i32) -> Res {
+func step1(x: i32) -> Result<i32, string> { if x > 0 { Ok(x * 2) } else { Err("step1 failed") } }
+func step2(x: i32) -> Result<i32, string> { if x < 100 { Ok(x + 10) } else { Err("step2 failed") } }
+func step3(x: i32) -> Result<i32, string> { if x != 0 { Ok(x / 2) } else { Err("step3 failed") } }
+func pipeline(x: i32) -> Result<i32, string> {
     let a = step1(x)?
     let b = step2(a)?
     let c = step3(b)?
@@ -235,21 +272,29 @@ func main() -> i32 {
 #[test]
 fn stress_error_at_different_stages() {
     // Error at each stage of pipeline — tests error message preservation
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
 type Res { Ok(i32) Err(string) }
 func step1(x: i32) -> Res { if x > 0 { Ok(x) } else { Err("bad input") } }
 func step2(x: i32) -> Res { if x < 100 { Ok(x) } else { Err("too large") } }
-func main() -> string {
+func error_stage_value() -> string {
     let r = step1(-1)
     match r {
         Ok(v) => "ok",
         Err(e) => e
     }
 }
+func main() -> i32 {
+    error_stage_value()
+    0
+}
 "#,
+        "error_stage_value",
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("bad input".to_string())));
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("bad input".to_string()))
+    );
 }
 
 // ====== String Edge Cases ======
@@ -472,7 +517,16 @@ fn stress_negative_arithmetic() {
 #[test]
 fn stress_float_precision() {
     // Float precision edge case — tests floating point handling
-    let v = run_source("func main() -> f64 { 0.1 + 0.2 }");
+    let v = run_non_scalar_helper(
+        r#"
+func float_precision_value() -> f64 { 0.1 + 0.2 }
+func main() -> i32 {
+    float_precision_value()
+    0
+}
+"#,
+        "float_precision_value",
+    );
     match v {
         interp::Value::Float(f) => assert!((f - 0.3).abs() < 0.0001, "got {}", f),
         _ => panic!("expected Float"),
@@ -594,7 +648,7 @@ func main() -> i32 {
 #[test]
 fn stress_html_escape_simulation() {
     // Simulates HTML escaping — tests string replacement chains
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
 func escape_html(s: string) -> string {
     let mut r = str_replace(s, "&", "&amp;")
@@ -602,14 +656,19 @@ func escape_html(s: string) -> string {
     r = str_replace(r, ">", "&gt;")
     r
 }
-func main() -> string {
+func html_escape_value() -> string {
     escape_html("<div class=\"test\">&hello</div>")
 }
+func main() -> i32 {
+    html_escape_value()
+    0
+}
 "#,
+        "html_escape_value",
     );
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new(
+        interp::Value::String(SharedString::new(
             "&lt;div class=\"test\"&gt;&amp;hello&lt;/div&gt;".to_string()
         ))
     );
@@ -639,18 +698,23 @@ func main() -> i32 {
 #[test]
 fn stress_json_builder_simulation() {
     // Simulates manual JSON building — tests string concatenation under load
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
 func kv(key: string, val: string) -> string { "\"" + key + "\":\"" + val + "\"" }
-func main() -> string {
+func json_builder_value() -> string {
     let json = "{" + kv("name", "mimi") + "," + kv("version", "1.0") + "," + kv("lang", "mimi") + "}"
     json
 }
+func main() -> i32 {
+    json_builder_value()
+    0
+}
 "#,
+        "json_builder_value",
     );
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new(
+        interp::Value::String(SharedString::new(
             "{\"name\":\"mimi\",\"version\":\"1.0\",\"lang\":\"mimi\"}".to_string()
         ))
     );
@@ -682,18 +746,26 @@ func main() -> i32 {
 #[test]
 fn stress_path_operations_chain() {
     // Chain multiple path operations — tests path utility robustness
-    let v = run_source(
+    let v = run_non_scalar_helper(
         r#"
-func main() -> string {
+func path_operation_value() -> string {
     let base = "/usr/local"
     let sub = "bin"
     let file = "mimi"
     let full = path_join(path_join(base, sub), file)
     path_basename(full)
 }
+func main() -> i32 {
+    path_operation_value()
+    0
+}
 "#,
+        "path_operation_value",
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("mimi".to_string())));
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("mimi".to_string()))
+    );
 }
 
 #[test]

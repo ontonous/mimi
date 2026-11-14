@@ -10,6 +10,8 @@
 pub mod actor_domain;
 mod any_owner;
 mod blake3;
+pub mod capability_scope;
+pub mod cost;
 mod epoch;
 pub mod flow_domain;
 mod handle;
@@ -20,8 +22,10 @@ mod managed_any_payload_v2;
 mod map_any_owner_prototype;
 mod map_any_snapshot;
 mod mir_map_root;
+mod mir_string_list;
 mod ordinary_map_domain;
 pub mod profiler;
+mod string_abi;
 pub use epoch::{
     mimi_flow_bump_epoch, mimi_flow_check_epoch, mimi_flow_drop, mimi_flow_epoch,
     mimi_flow_last_error, mimi_flow_pack, mimi_flow_pack_count, mimi_flow_reject_bare_record,
@@ -41,6 +45,11 @@ pub use list_string::{
     LIST_STRING_ABI_VERSION, MIMI_ERR_OLD_STRING_ABI, MIMI_STR_MAGIC,
 };
 pub(crate) use map_any_snapshot::ordinary_map_string_concat_checkpoint;
+#[cfg(test)]
+pub(crate) use map_any_snapshot::{
+    managed_any_v2_list_count_for_test, ordinary_map_owned_any_v2_root_publish_attempts_for_test,
+    with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
+};
 pub use map_any_snapshot::{
     mimi_any_payload_v2_clone, mimi_any_payload_v2_drop, mimi_any_payload_v2_new,
     mimi_any_payload_v2_unpack, mimi_mir_managed_any_i32_string_v1_clone,
@@ -55,6 +64,7 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_any_owner_v2_record_set_label,
     mimi_mir_ordinary_map_any_owner_v2_record_size, mimi_mir_ordinary_map_any_owner_v2_set_i32,
     mimi_mir_ordinary_map_any_owner_v2_set_label,
+    mimi_mir_ordinary_map_owned_any_v2_keys_unpack_copy_string,
     mimi_mir_ordinary_map_owned_any_v2_unpack_copy_string,
     mimi_mir_ordinary_map_owned_any_v2_values_unpack_copy_string,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_clone,
@@ -64,9 +74,12 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_owned_get_i32_string_v1_get_i32,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_get_string,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_new,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_new_result,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_remove,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32_result,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string,
+    mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string_result,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_size,
     mimi_mir_ordinary_map_owned_get_i32_string_v1_values,
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_clone,
@@ -76,28 +89,44 @@ pub use map_any_snapshot::{
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_remove,
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_i32,
     mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_set_string,
-    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size, mimi_ordinary_map_owned_any_v2_clone,
-    mimi_ordinary_map_owned_any_v2_contains, mimi_ordinary_map_owned_any_v2_drop,
-    mimi_ordinary_map_owned_any_v2_get, mimi_ordinary_map_owned_any_v2_is_empty,
-    mimi_ordinary_map_owned_any_v2_new, mimi_ordinary_map_owned_any_v2_remove,
-    mimi_ordinary_map_owned_any_v2_set, mimi_ordinary_map_owned_any_v2_size,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size,
+    mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_to_json,
+    mimi_ordinary_map_owned_any_v2_clone, mimi_ordinary_map_owned_any_v2_contains,
+    mimi_ordinary_map_owned_any_v2_drop, mimi_ordinary_map_owned_any_v2_get,
+    mimi_ordinary_map_owned_any_v2_get_i32_result,
+    mimi_ordinary_map_owned_any_v2_get_string_result, mimi_ordinary_map_owned_any_v2_is_empty,
+    mimi_ordinary_map_owned_any_v2_keys_list, mimi_ordinary_map_owned_any_v2_new,
+    mimi_ordinary_map_owned_any_v2_remove, mimi_ordinary_map_owned_any_v2_set,
+    mimi_ordinary_map_owned_any_v2_set_i32_result,
+    mimi_ordinary_map_owned_any_v2_set_string_result, mimi_ordinary_map_owned_any_v2_size,
     mimi_ordinary_map_owned_any_v2_values_list, MimiMapAnyOwnerV2Label,
     MIMI_MAP_ANY_OWNER_V2_CAPACITY, MIMI_MAP_ANY_OWNER_V2_DESTROYED,
     MIMI_MAP_ANY_OWNER_V2_INVALID_HANDLE, MIMI_MAP_ANY_OWNER_V2_INVALID_INPUT,
     MIMI_MAP_ANY_OWNER_V2_OK, MIMI_MAP_ANY_OWNER_V2_REENTRANT, MIMI_MAP_ANY_OWNER_V2_STALE,
-    ORDINARY_MAP_OWNED_ANY_V2_OK, ORDINARY_MAP_OWNED_GET_CAPACITY, ORDINARY_MAP_OWNED_GET_MISSING,
-    ORDINARY_MAP_OWNED_GET_OK, ORDINARY_MAP_OWNED_GET_TYPE_MISMATCH,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_I32_CAPACITY, ORDINARY_MAP_OWNED_ANY_V2_GET_I32_INTERNAL_ERROR,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_I32_MISSING, ORDINARY_MAP_OWNED_ANY_V2_GET_I32_OK,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_I32_TYPE_MISMATCH, ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_CAPACITY,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_INTERNAL_ERROR,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_MISSING, ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_OK,
+    ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_TYPE_MISMATCH, ORDINARY_MAP_OWNED_ANY_V2_OK,
+    ORDINARY_MAP_OWNED_ANY_V2_SET_CAPACITY, ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_CAPACITY,
+    ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_INVALID_INPUT, ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_OK,
+    ORDINARY_MAP_OWNED_ANY_V2_SET_STRING_TYPE_MISMATCH, ORDINARY_MAP_OWNED_GET_CAPACITY,
+    ORDINARY_MAP_OWNED_GET_MISSING, ORDINARY_MAP_OWNED_GET_OK,
+    ORDINARY_MAP_OWNED_GET_TYPE_MISMATCH,
 };
 #[cfg(test)]
 pub(crate) use map_any_snapshot::{
     ordinary_map_owned_any_v2_get_any_publish_attempts_for_test,
     ordinary_map_owned_any_v2_get_any_publish_checkpoint_for_test,
-    ordinary_map_owned_any_v2_root_publish_attempts_for_test,
     ordinary_map_owned_any_v2_root_publish_checkpoint_for_test,
     ordinary_map_owned_any_v2_string_copy_attempts_for_test,
     ordinary_map_owned_any_v2_string_copy_checkpoint_for_test,
     ordinary_map_owned_any_v2_unpack_attempts_for_test,
     ordinary_map_owned_any_v2_unpack_checkpoint_for_test,
+    ordinary_map_owned_any_v2_values_clone_capacity_attempts_for_test,
+    ordinary_map_owned_any_v2_values_clone_capacity_checkpoint_for_test,
+    ordinary_map_owned_any_v2_values_clone_capacity_failure_triggered_for_test,
     ordinary_map_owned_any_v2_values_publish_attempts_for_test,
     ordinary_map_owned_any_v2_values_publish_checkpoint_for_test,
     ordinary_map_owned_any_v2_values_unpack_owner_attempts_for_test,
@@ -107,11 +136,13 @@ pub(crate) use map_any_snapshot::{
     ordinary_map_owned_get_allocation_attempts_for_test,
     ordinary_map_owned_get_allocation_checkpoint_for_test,
     ordinary_map_owned_get_allocation_failure_triggered_for_test,
+    ordinary_map_owned_get_result_root_publish_checkpoint_for_test,
     ordinary_map_string_concat_attempts_for_test,
     with_ordinary_map_owned_any_v2_get_any_publish_failure_for_test,
-    with_ordinary_map_owned_any_v2_root_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_string_copy_failure_for_test,
     with_ordinary_map_owned_any_v2_unpack_failure_for_test,
+    with_ordinary_map_owned_any_v2_values_clone_capacity_failure_for_test,
+    with_ordinary_map_owned_any_v2_values_clone_failure_at_for_test,
     with_ordinary_map_owned_any_v2_values_publish_failure_for_test,
     with_ordinary_map_owned_any_v2_values_unpack_owner_failure_for_test,
     with_ordinary_map_owned_any_v2_values_unpack_string_clone_failure_for_test,
@@ -131,11 +162,23 @@ pub use mir_map_root::{
     mimi_mir_map_root_new, mimi_mir_map_root_remove, mimi_mir_map_root_set,
     mimi_mir_map_root_set_string, mimi_mir_map_root_size,
 };
-pub use ordinary_map_domain::mimi_mir_ordinary_map_domain_own_string;
+pub use mir_string_list::{
+    mimi_mir_list_clone_string, mimi_mir_list_drop_string, mimi_mir_list_new_string,
+    mimi_mir_list_push_string,
+};
+pub(crate) use ordinary_map_domain::{drop_managed_any_v2_token, unpack_managed_any_v2_i32};
+pub use ordinary_map_domain::{
+    mimi_mir_ordinary_map_domain_own_string, mimi_mir_ordinary_map_domain_register_shutdown,
+};
 #[cfg(test)]
 pub(crate) use ordinary_map_domain::{
     ordinary_map_domain_live_counts_for_test, OrdinaryMapDomainLiveCounts,
 };
+#[cfg(test)]
+pub(crate) use ordinary_map_domain::{
+    root_reserve_overflow_observation_for_test, with_root_reserve_overflow_for_test,
+};
+pub(crate) use ordinary_map_domain::{OwnedAnyV2Root, OwnedAnyV2RootError, OwnedAnyV2RootSetError};
 //
 // Items 1/4/6/9 from the C runtime audit are eliminated:
 //   - Item 1: Thread pool TOCTOU — use Rust `Mutex` + `Condvar` (already fixed in ffi/runtime.rs)
@@ -594,6 +637,9 @@ const _: () = assert!(std::mem::size_of::<MapHandle>() == std::mem::size_of::<i6
 /// - 不能混用 libc::free 和 mimi_free
 #[inline]
 pub fn mimi_alloc(size: usize) -> *mut std::ffi::c_void {
+    // K-05: only active cost regions are counted; startup/VM allocator
+    // traffic remains outside the language-visible measurement boundary.
+    cost::record_alloc(size);
     #[cfg(miri)]
     {
         // Miri 模式：使用 Rust 分配器 + size header
@@ -634,6 +680,7 @@ pub fn mimi_free(ptr: *mut std::ffi::c_void) {
     if ptr.is_null() {
         return;
     }
+    cost::record_release(0);
     // Canonical ordinary-Map String receipts follow the original creator,
     // including a normal free performed by another thread. Forget before
     // releasing the allocation; no execution-domain lock spans the free.
@@ -817,6 +864,11 @@ fn alloc_list_data(cap: i64) -> *mut *mut std::ffi::c_char {
         Some(s) => s,
         None => return std::ptr::null_mut(),
     };
+    // K-01/K-05: list storage is a program-visible allocation even though it
+    // uses the ABI-compatible libc allocator directly (the hidden capacity
+    // header cannot use `mimi_alloc`'s Miri header).  Record it in the same
+    // explicit measurement region as the primary runtime allocator.
+    cost::record_alloc(sz);
     // SAFETY: `cap > 0` so the allocation size is non-zero; result is checked for null.
     let alloc = unsafe { libc::malloc(sz) as *mut i64 };
     if alloc.is_null() {
@@ -859,6 +911,8 @@ fn realloc_list_data(old: *mut *mut std::ffi::c_char, new_cap: i64) -> *mut *mut
     if old.is_null() {
         return alloc_list_data(new_cap);
     }
+    cost::record_event(cost::RuntimeCostEvent::Resize, 1);
+    cost::record_alloc(sz);
     // SAFETY: `old` came from `alloc_list_data`/`realloc_list_data`, so `old - 1` is the valid allocation base.
     let base = unsafe { (old as *mut i64).offset(-1) };
     // SAFETY: `base` points to the valid allocation base; `sz` is the new total size.
@@ -1520,6 +1574,37 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
     if list.is_null() {
         return;
     }
+    let receipt_id = match map_any_snapshot::begin_managed_any_v2_list_retirement(
+        list,
+        map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+    ) {
+        Ok(receipt_id) => receipt_id,
+        Err(()) => mir_list_abort(b"[E0800] canonical ManagedAny V2 List is already retiring\0"),
+    };
+    // SAFETY: an optional V2 receipt was atomically claimed above before any
+    // list field is read. Non-V2 MimiLists retain their historical ABI path.
+    unsafe { mimi_list_free_inner(list, free_elements, receipt_id) };
+}
+
+/// Destroy a list after its public entry point has atomically claimed any V2
+/// receipt. The internal trap-drain caller passes its already-owned receipt
+/// through this function and never re-enters the public claim operation.
+unsafe fn mimi_list_free_inner(list: *mut MimiList, free_elements: bool, receipt_id: Option<u64>) {
+    if list.is_null() {
+        return;
+    }
+    if let Some(receipt_id) = receipt_id {
+        if !map_any_snapshot::managed_any_v2_list_retirement_matches(list, receipt_id) {
+            managed_any_v2_list_lifecycle_fail_closed();
+        }
+    }
+    let registered_v2_list = map_any_snapshot::managed_any_v2_list_is_registered(
+        list,
+        map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+    );
+    if registered_v2_list != receipt_id.is_some() {
+        mir_list_abort(b"[E0800] canonical ManagedAny V2 List receipt is invalid\0");
+    }
     // SAFETY: list is non-null (checked above) and points to a valid
     // MimiList allocated by mimi_list_alloc. RT-H6: copy fields out before
     // any free so we never hold a live `&*list` across `Box::from_raw`.
@@ -1529,10 +1614,6 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         let list_len = (*list).len;
         let element_kind = (*list).element_kind;
         let string_abi = (*list).string_abi;
-        let registered_v2_list = map_any_snapshot::managed_any_v2_list_is_registered(
-            list,
-            map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
-        );
         if registered_v2_list != (element_kind == ListElementKind::ManagedAnyV2) {
             mir_list_abort(b"[E0800] MimiList ownership domain does not match its receipt\0");
         }
@@ -1568,6 +1649,12 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
             mir_list_abort(b"[E0800] canonical ManagedAny List drop omitted owner release\0");
         }
         if element_kind == ListElementKind::ManagedAnyV2 && !free_elements {
+            let Some(receipt_id) = receipt_id else {
+                mir_list_abort(b"[E0800] canonical ManagedAny V2 List receipt is invalid\0");
+            };
+            if !map_any_snapshot::cancel_managed_any_v2_list_retirement(receipt_id) {
+                managed_any_v2_list_lifecycle_fail_closed();
+            }
             mir_list_abort(b"[E0800] canonical ManagedAny V2 List drop omitted owner release\0");
         }
         let should_free_elements =
@@ -1582,14 +1669,6 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
         }
         if element_kind == ListElementKind::ManagedAnyV2 && !managed_any_v2_list_is_valid(&*list) {
             mir_list_abort(b"[E0800] canonical ManagedAny V2 List ownership is invalid\0");
-        }
-        if element_kind == ListElementKind::ManagedAnyV2
-            && !map_any_snapshot::forget_managed_any_v2_list(
-                list,
-                map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
-            )
-        {
-            mir_list_abort(b"[E0800] canonical ManagedAny V2 List receipt is invalid\0");
         }
         if free_elements && element_kind == ListElementKind::ManagedAny {
             for i in 0..safe_count {
@@ -1636,10 +1715,20 @@ pub unsafe extern "C" fn mimi_list_free(list: *mut MimiList, free_elements: bool
                 libc::free(data_ptr as *mut std::ffi::c_void);
             }
         }
+        if let Some(receipt_id) = receipt_id {
+            if !map_any_snapshot::detach_managed_any_v2_list_pointer(receipt_id) {
+                managed_any_v2_list_lifecycle_fail_closed();
+            }
+        }
         // C1 fix: The MimiList struct was allocated via Box::new()/Box::into_raw() in
         // all runtime functions (mimi_str_split, mimi_map_keys, etc.).
         // Using libc::free here would be UB on musl/macOS (allocator mismatch).
         drop(Box::from_raw(list));
+        if let Some(receipt_id) = receipt_id {
+            if !map_any_snapshot::finish_managed_any_v2_list_retirement(receipt_id) {
+                managed_any_v2_list_lifecycle_fail_closed();
+            }
+        }
     }
 }
 
@@ -1994,7 +2083,51 @@ pub unsafe extern "C" fn mimi_mir_list_clone_managed_any_v2(
     if clone.is_null() {
         return std::ptr::null_mut();
     }
+
+    // Reserve output storage before cloning any owner. Empty Values snapshots
+    // still reserve one slot, so they have the same fallible output-capacity
+    // stage as Reference and bytecode rather than relying only on an
+    // infallible zero-element loop.
+    #[cfg(test)]
+    if map_any_snapshot::ordinary_map_owned_any_v2_values_clone_capacity_checkpoint_for_test()
+        .is_err()
+    {
+        // SAFETY: the just-created list has a live exact receipt and contains
+        // no owner slots or backing storage yet.
+        unsafe { mimi_mir_list_drop_managed_any_v2(clone) };
+        return std::ptr::null_mut();
+    }
+    #[cfg(test)]
+    if map_any_snapshot::ordinary_map_owned_get_allocation_checkpoint_for_test().is_err() {
+        // SAFETY: the just-created list has a live exact receipt and contains
+        // no owner slots or backing storage yet.
+        unsafe { mimi_mir_list_drop_managed_any_v2(clone) };
+        return std::ptr::null_mut();
+    }
+
+    let reserve_count = source.len.max(1);
+    // SAFETY: `clone` is a fresh registered ManagedAnyV2 list with len zero;
+    // the reservation helper leaves len unchanged and only installs a
+    // headered data buffer. Its capacity includes every source owner, or one
+    // slot for the empty-list output case.
+    let reserved = unsafe { !mimi_list_push_grow(clone, reserve_count).is_null() };
+    if !reserved {
+        // SAFETY: the fresh output list has no cloned owner yet, and the
+        // receipt-carrying destructor releases its shell and any buffer.
+        unsafe { mimi_mir_list_drop_managed_any_v2(clone) };
+        return std::ptr::null_mut();
+    }
     for index in 0..source.len as usize {
+        #[cfg(test)]
+        if map_any_snapshot::ordinary_map_owned_any_v2_values_clone_capacity_checkpoint_for_test()
+            .is_err()
+        {
+            // A stage-indexed test failure may occur after an owner prefix
+            // has been cloned. Retire the receipt-carrying List so the prefix
+            // and its storage are both released before E0800 reaches MIR.
+            unsafe { mimi_mir_list_drop_managed_any_v2(clone) };
+            return std::ptr::null_mut();
+        }
         // SAFETY: the source contract supplies `len` initialized i64 slots.
         let owner = unsafe { *(source.data as *const i64).add(index) };
         let mut cloned_owner = 0i64;
@@ -2024,12 +2157,37 @@ pub unsafe extern "C" fn mimi_mir_list_drop_managed_any_v2(list: *mut MimiList) 
     if list.is_null() {
         return;
     }
-    // SAFETY: caller owns the list; validate every element before the common
-    // deallocator starts consuming any descriptor-pinned owner.
+    let receipt_id = match map_any_snapshot::begin_managed_any_v2_list_retirement(
+        list,
+        map_any_snapshot::ManagedAnyV2ListDomain::CanonicalOwnerListV2,
+    ) {
+        Ok(Some(receipt_id)) => receipt_id,
+        Ok(None) | Err(()) => {
+            mir_list_abort(b"[E0800] canonical ManagedAny V2 List receipt is invalid\0")
+        }
+    };
+    // SAFETY: the public entry point claimed this exact list before reading
+    // its shape; the private destructor carries the receipt through teardown.
+    unsafe { mimi_mir_list_drop_managed_any_v2_claimed(list, receipt_id) };
+}
+
+/// Drop a V2 list whose caller already owns the exact receipt claim. This is
+/// shared by public explicit Drop and creator-thread trap draining, but is not
+/// exported through the native ABI.
+pub(super) unsafe fn mimi_mir_list_drop_managed_any_v2_claimed(
+    list: *mut MimiList,
+    receipt_id: u64,
+) {
+    if list.is_null() || !map_any_snapshot::managed_any_v2_list_retirement_matches(list, receipt_id)
+    {
+        managed_any_v2_list_lifecycle_fail_closed();
+    }
+    // SAFETY: the exact Retiring receipt was checked before this dereference.
     if !managed_any_v2_list_is_valid(unsafe { &*list }) {
         mir_list_abort(b"[E0800] canonical ManagedAny V2 List shape is invalid\0");
     }
-    unsafe { mimi_list_free(list, true) };
+    // SAFETY: the receipt remains claimed and the list shape was prevalidated.
+    unsafe { mimi_list_free_inner(list, true, Some(receipt_id)) };
 }
 
 /// Read the number of live V2 owners in a canonical owner list.
@@ -4098,13 +4256,11 @@ pub extern "C" fn mimi_map_size(handle: MapHandle) -> i64 {
     handle::with_map(handle, 0, |m| m.inner.len() as i64)
 }
 
-/// Phase D (0.39.71): global unique token id for the native backend. Each call
-/// returns a distinct monotonic id shared across the process.
-static MIMI_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 #[no_mangle]
 pub extern "C" fn mimi_make_token() -> i64 {
-    MIMI_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64
+    // The integer remains an opaque SystemToken ABI value.  Scope metadata is
+    // issued by the host-owned registry rather than encoded in the integer.
+    capability_scope::issue_unrestricted()
 }
 
 ///
@@ -5242,6 +5398,53 @@ pub unsafe extern "C" fn mimi_str_char_at_ll(
             c"str_char_at: index out of bounds".as_ptr() as *const std::ffi::c_char
         ),
     }
+}
+
+/// Length-aware character-index (Unicode scalar) `char_at` with the exact
+/// UTF-8 byte length returned through `out_len`. This preserves U+0000, whose
+/// payload byte cannot be recovered with `strlen`.
+///
+/// # Safety
+/// For positive `s_len`, `s` must point to `s_len` readable bytes. `out_len`
+/// must point to one writable `i64`. The source bytes must be valid UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn mimi_str_char_at_ll_with_len(
+    s: *const std::ffi::c_char,
+    s_len: i64,
+    index: i64,
+    out_len: *mut i64,
+) -> *mut std::ffi::c_char {
+    if out_len.is_null() {
+        mimi_runtime_abort(c"str_char_at: missing output length".as_ptr());
+    }
+    if s_len < 0 || index < 0 {
+        mimi_runtime_abort(c"str_char_at: index out of bounds".as_ptr());
+    }
+    let bytes = if s.is_null() || s_len == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller promises that `s` is readable for `s_len` bytes.
+        unsafe { std::slice::from_raw_parts(s.cast::<u8>(), s_len as usize) }
+    };
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => mimi_runtime_abort(c"str_char_at: invalid UTF-8".as_ptr()),
+    };
+    let Some(character) = text.chars().nth(index as usize) else {
+        mimi_runtime_abort(c"str_char_at: index out of bounds".as_ptr());
+    };
+    let mut buffer = [0u8; 4];
+    let encoded = character.encode_utf8(&mut buffer);
+    // `alloc_c_string` deliberately appends another NUL even when the payload
+    // itself is U+0000, so the returned pointer is still safely freeable and
+    // the explicit length remains authoritative.
+    let result = alloc_c_string(encoded);
+    if result.is_null() {
+        mimi_runtime_abort(c"str_char_at: allocation failed".as_ptr());
+    }
+    // SAFETY: `out_len` is required to point to one writable i64 above.
+    unsafe { *out_len = encoded.len() as i64 };
+    result
 }
 
 /// Boxed Mimi string returned by runtime string helpers: `{ data_ptr, byte_len }`.
@@ -25658,6 +25861,40 @@ fn trap_write_code(code: &'static str) {
     trap_write_static(b"] ");
 }
 
+fn managed_any_v2_list_lifecycle_fail_closed_with_message(message: &'static [u8]) -> ! {
+    extern "C" {
+        fn write(fd: i32, buffer: *const std::ffi::c_void, count: usize) -> isize;
+        fn _exit(status: i32) -> !;
+    }
+    // SAFETY: the diagnostic is a static byte string and `_exit` does not
+    // unwind or re-enter list cleanup after a lifecycle invariant failure.
+    unsafe {
+        let _ = write(2, message.as_ptr().cast(), message.len());
+        _exit(97);
+    }
+}
+
+fn managed_any_v2_list_lifecycle_fail_closed() -> ! {
+    managed_any_v2_list_lifecycle_fail_closed_with_message(
+        b"MIR L3 fail-closed: ManagedAnyV2 list receipt teardown invariant failed\n",
+    )
+}
+
+/// Runtime assertion used by canonical MIR main and orderly trap shutdown.
+/// Retiring receipts remain counted until the complete list destructor returns.
+#[no_mangle]
+pub extern "C" fn mimi_mir_assert_no_live_managed_any_v2_lists() {
+    match map_any_snapshot::current_thread_managed_any_v2_list_count() {
+        Some(0) => {}
+        Some(_) => managed_any_v2_list_lifecycle_fail_closed_with_message(
+            b"MIR L3 fail-closed: creator has live ManagedAnyV2 Values-list receipts\n",
+        ),
+        None => managed_any_v2_list_lifecycle_fail_closed_with_message(
+            b"MIR L3 fail-closed: creator ManagedAnyV2 Values-list registry is unavailable\n",
+        ),
+    }
+}
+
 /// 0.39.136 (L1 parity): orderly trap shutdown — flush every open stdio
 /// output stream so output printed before the trap survives, then exit with
 /// status 1. Mirrors the bytecode VM's trap semantics (clean rc=1 +
@@ -25674,6 +25911,7 @@ fn trap_exit() -> ! {
         fn _exit(status: i32) -> !;
     }
     ordinary_map_domain::drain_current_thread_roots();
+    mimi_mir_assert_no_live_managed_any_v2_lists();
     // `_exit` deliberately bypasses C `atexit` handlers. Release the
     // descriptor registry after every current-thread root and token has run
     // its pinned Drop glue so an orderly typed trap remains Memcheck-clean.
@@ -27911,6 +28149,7 @@ mod string_concat_capacity_tests {
     fn length_aware_concat_preserves_embedded_nul_and_checks_capacity() {
         let left = b"nul\0";
         let right = "雪".as_bytes();
+        // SAFETY: both byte arrays are live and readable for their supplied lengths.
         let result = unsafe {
             mimi_str_concat_ll(
                 left.as_ptr().cast(),
@@ -27920,12 +28159,20 @@ mod string_concat_capacity_tests {
             )
         };
         assert!(!result.is_null());
+        // SAFETY: concatenation returned seven payload bytes and a trailing NUL.
         let bytes = unsafe { std::slice::from_raw_parts(result.cast::<u8>(), 8) };
         assert_eq!(bytes, "nul\0雪\0".as_bytes());
+        // SAFETY: result is the sole owned allocation returned by the runtime.
         unsafe { mimi_string_free(result) };
 
+        // SAFETY: invalid lengths/null inputs are rejected before any dereference.
         assert!(unsafe { mimi_str_concat_ll(std::ptr::null(), -1, std::ptr::null(), 0) }.is_null());
+        // SAFETY: null inputs with positive lengths must be rejected before any dereference.
+        assert!(unsafe { mimi_str_concat_ll(std::ptr::null(), 1, std::ptr::null(), 0) }.is_null());
+        // SAFETY: null inputs with positive lengths must be rejected before any dereference.
+        assert!(unsafe { mimi_str_concat_ll(std::ptr::null(), 0, std::ptr::null(), 1) }.is_null());
         assert!(
+            // SAFETY: overflowing lengths/null inputs are rejected before dereference.
             unsafe { mimi_str_concat_ll(std::ptr::null(), i64::MAX, std::ptr::null(), 1) }
                 .is_null()
         );
@@ -27935,7 +28182,9 @@ mod string_concat_capacity_tests {
     fn allocation_checkpoint_returns_null_before_publishing_a_buffer() {
         let (result, allocation_attempts, publication_attempts) =
             with_ordinary_map_string_concat_failure_for_test(0, || {
+                // SAFETY: null pointers with zero lengths denote valid empty inputs.
                 let result =
+                    // SAFETY: both null pointers represent zero-length empty inputs.
                     unsafe { mimi_str_concat_ll(std::ptr::null(), 0, std::ptr::null(), 0) };
                 (
                     result,
@@ -27946,5 +28195,69 @@ mod string_concat_capacity_tests {
         assert!(result.is_null());
         assert_eq!(allocation_attempts, 1);
         assert_eq!(publication_attempts, 0);
+    }
+
+    #[test]
+    fn invalid_length_and_pointer_matrix_is_rejected_before_allocation() {
+        let byte = b"x";
+        let pointer = byte.as_ptr().cast();
+        for (left, left_len, right, right_len) in [
+            (pointer, -1, pointer, 1),
+            (pointer, 1, pointer, -1),
+            (std::ptr::null(), 1, pointer, 1),
+            (pointer, 1, std::ptr::null(), 1),
+            (pointer, i64::MAX, pointer, 1),
+            (pointer, i64::MAX, pointer, i64::MAX),
+        ] {
+            let (result, attempts) = with_ordinary_map_string_concat_failure_for_test(-1, || {
+                // SAFETY: malformed lengths/null ranges must be rejected by
+                // validation before any pointer is read or allocation requested.
+                let result = unsafe { mimi_str_concat_ll(left, left_len, right, right_len) };
+                (result, ordinary_map_string_concat_attempts_for_test(0))
+            });
+            assert!(result.is_null(), "invalid concat input must return null");
+            assert_eq!(attempts, 0, "validation must precede allocation staging");
+        }
+        // SAFETY: null zero-length ranges represent valid empty input strings.
+        let empty = unsafe { mimi_str_concat_ll(std::ptr::null(), 0, std::ptr::null(), 0) };
+        assert!(!empty.is_null());
+        // SAFETY: even empty concatenation allocates its trailing NUL byte.
+        assert_eq!(unsafe { *empty }, 0);
+        // SAFETY: empty is the sole allocation returned by the runtime.
+        unsafe { mimi_string_free(empty) };
+    }
+
+    #[test]
+    fn publication_checkpoint_keeps_complete_result_owned_until_caller_cleanup() {
+        let left = b"nul\0";
+        let right = "雪".as_bytes();
+        let (result, status, allocation_attempts, publication_attempts) =
+            with_ordinary_map_string_concat_failure_for_test(1, || {
+                // SAFETY: both pointers provide their exact readable byte ranges.
+                let result = unsafe {
+                    mimi_str_concat_ll(
+                        left.as_ptr().cast(),
+                        left.len() as i64,
+                        right.as_ptr().cast(),
+                        right.len() as i64,
+                    )
+                };
+                let status = mimi_mir_string_concat_checkpoint(1);
+                (
+                    result,
+                    status,
+                    ordinary_map_string_concat_attempts_for_test(0),
+                    ordinary_map_string_concat_attempts_for_test(1),
+                )
+            });
+        assert_eq!(status, 3, "publication failure is capacity/E0800");
+        assert_eq!((allocation_attempts, publication_attempts), (1, 1));
+        assert!(!result.is_null());
+        // SAFETY: the result contains seven payload bytes plus a terminator;
+        // a failed publication checkpoint does not invalidate caller ownership.
+        let bytes = unsafe { std::slice::from_raw_parts(result.cast::<u8>(), 8) };
+        assert_eq!(bytes, "nul\0雪\0".as_bytes());
+        // SAFETY: release the unpublished, still-owned result exactly once.
+        unsafe { mimi_string_free(result) };
     }
 }

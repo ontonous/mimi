@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use super::{
     lower::ResolvedDeclarationExpressionKind, PrimitiveType, ResolvedBodyError, ResolvedLocalId,
     ResolvedParameterId, ResolvedType, ResolvedTypeId, TypedCallEffectAuthority,
-    TypedCallExecutionDisposition, TypedProofScopeFrame,
+    TypedCallExecutionDisposition, TypedMatchPathReceipt, TypedProofScopeFrame,
 };
 use crate::core::{CheckedProgram, EffectId, NodeId, ResolvedExternFunc};
 use crate::span::Span;
@@ -165,6 +165,9 @@ pub struct ResolvedFfiVariadicArgument {
     /// C's default promotion is a separate physical ABI conversion and must
     /// not overwrite this source-level fact.
     pub conversion: super::CheckedConversion,
+    /// Checker-authenticated source nodes evaluated eagerly for this exact
+    /// argument. Latent closure/compile-time bodies are excluded.
+    pub eager_source_nodes: Vec<NodeId>,
     pub promotion: ResolvedFfiPromotionState,
 }
 
@@ -188,6 +191,7 @@ pub struct ResolvedFfiTypedCallContext<'a> {
     pub source_order: u64,
     pub source_scope: Vec<TypedProofScopeFrame>,
     pub source_guards: Vec<(NodeId, bool)>,
+    pub source_match_path: Vec<TypedMatchPathReceipt>,
     pub source_disposition: TypedCallExecutionDisposition,
     /// Extern calls have no checker-authenticated no-write receipt; this
     /// remains UnknownMayReadWrite even if `effects` is empty.
@@ -602,6 +606,9 @@ impl ResolvedFfiDeclarationContract {
                     synthetic_parameter,
                     source_type: argument.value.ty.clone(),
                     conversion: argument.conversion.clone(),
+                    eager_source_nodes: argument
+                        .value
+                        .eager_source_nodes_with_place_inputs(&body.place_inputs),
                     promotion: c_default_argument_promotion(program, &argument.value.ty),
                 });
             }
@@ -611,6 +618,7 @@ impl ResolvedFfiDeclarationContract {
             &expression.node_id,
             &self.declaration,
             call,
+            &body.place_inputs,
             signature,
             self.invocation.variadic,
             &variadic_tail,
@@ -679,6 +687,7 @@ impl ResolvedFfiDeclarationContract {
             source_order: call_event.order,
             source_scope: call_event.scope.clone(),
             source_guards,
+            source_match_path: call_event.match_path.clone(),
             source_disposition: call_event.disposition.clone(),
             source_effect_authority: call_event.effect.authority,
             inputs,
@@ -722,7 +731,7 @@ impl ResolvedFfiDeclarationContract {
                 "TOOL-RESOLUTION-001: typed FFI call lookup target is not a call expression",
             )]);
         }
-        self.call_context(program, body, *expression)
+        self.call_context(program, body, expression)
     }
 
     /// Validate typed root/signature identity without reading extern source
@@ -767,7 +776,7 @@ impl ResolvedFfiDeclarationContract {
                 return Err(fail(
                     &self.declaration,
                     "Deferred extern signature has no reason",
-                ))
+                ));
             }
         };
         if let Some(signature) = signature {
@@ -811,7 +820,7 @@ impl ResolvedFfiDeclarationContract {
                     return Err(fail(
                         &self.declaration,
                         "Deferred extern contract has no reason",
-                    ))
+                    ));
                 }
                 ResolvedFfiContractRoot::Ready { node_id } => node_id,
             };
@@ -864,7 +873,10 @@ impl ResolvedFfiDeclarationContract {
                     if local.0 .0 != format!("{}/local", parameter.id.0 .0)
                         || body.locals.get(local).map(|local| &local.ty) != Some(&parameter.ty)
                     {
-                        return Err(fail(node, "extern contract parameter identity/type disagrees with its declaration"));
+                        return Err(fail(
+                            node,
+                            "extern contract parameter identity/type disagrees with its declaration",
+                        ));
                     }
                 }
                 if kind == ResolvedDeclarationExpressionKind::ExternEnsures {
@@ -933,6 +945,7 @@ fn validate_variadic_tail_receipts(
     call_node: &NodeId,
     declaration: &NodeId,
     call: &super::ResolvedCall,
+    place_inputs: &BTreeMap<NodeId, super::ResolvedExpr>,
     signature: &ResolvedFfiSignature,
     variadic: bool,
     receipts: &[ResolvedFfiVariadicArgument],
@@ -971,6 +984,10 @@ fn validate_variadic_tail_receipts(
             || receipt.synthetic_parameter != expected_parameter
             || receipt.source_type != argument.value.ty
             || receipt.conversion != argument.conversion
+            || receipt.eager_source_nodes
+                != argument
+                    .value
+                    .eager_source_nodes_with_place_inputs(place_inputs)
             || argument.parameter != expected_parameter
             || argument.conversion.kind != super::CheckedConversionKind::Identity
             || argument.conversion.from != argument.value.ty
@@ -1198,24 +1215,23 @@ mod tests {
             }
             func main() -> i32 {
                 let flag: bool = true
-                let small: i8 = 1
-                let single: f32 = 1.0
+                let single: f32 = 1.0 as f32
                 let word: i32 = 8
                 let wide: i64 = 2
                 let double: f64 = 3.0
                 let text: string = "deferred"
-                foreign(7, flag, small, single, word, wide, double, text)
+                foreign(7, flag, single, word, wide, double, text)
             }
         "#,
         )
     }
 
-    fn variadic_context_parts<'a>(
-        program: &'a CheckedProgram,
+    fn variadic_context_parts(
+        program: &CheckedProgram,
     ) -> (
-        &'a ResolvedFfiDeclarationContract,
-        &'a super::super::ResolvedBody,
-        &'a super::super::ResolvedExpr,
+        &ResolvedFfiDeclarationContract,
+        &super::super::ResolvedBody,
+        &super::super::ResolvedExpr,
     ) {
         let declaration = program
             .ffi_declarations()
@@ -1582,7 +1598,7 @@ func main() -> i32 {{ 0 }}"#
             panic!("variadic call expression");
         };
         let receipts = context.variadic_tail();
-        assert_eq!(receipts.len(), 7);
+        assert_eq!(receipts.len(), 6);
         assert!(context
             .pending_effects
             .contains(&ResolvedFfiPendingEffect::VariadicAbiAndPromotions));
@@ -1590,10 +1606,6 @@ func main() -> i32 {{ 0 }}"#
         let i32_type = super::super::primitive_type_id(PrimitiveType::I32);
         let f64_type = super::super::primitive_type_id(PrimitiveType::F64);
         let expected = [
-            ResolvedFfiPromotionState::Ready {
-                target_type: i32_type.clone(),
-                kind: ResolvedFfiDefaultPromotionKind::IntegerPromotionToI32,
-            },
             ResolvedFfiPromotionState::Ready {
                 target_type: i32_type.clone(),
                 kind: ResolvedFfiDefaultPromotionKind::IntegerPromotionToI32,
@@ -1662,7 +1674,7 @@ func main() -> i32 {{ 0 }}"#
             r#"
             extern "C" { func foreign(head: i32 ...) -> i32; }
             func main() -> i32 {
-                let single: f32 = 1.0
+                let single: f32 = 1.0 as f32
                 foreign(7, single)
             }
         "#,
@@ -1742,6 +1754,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             true,
             &canonical,
@@ -1752,6 +1765,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             false,
             &canonical,
@@ -1768,6 +1782,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             true,
             &forged_source,
@@ -1786,6 +1801,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             true,
             &forged_promotion,
@@ -1799,6 +1815,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             true,
             &forged_ordinal,
@@ -1812,6 +1829,7 @@ func main() -> i32 {{ 0 }}"#
             &expression.node_id,
             &declaration.declaration,
             call,
+            &body.place_inputs,
             signature,
             true,
             &incomplete,

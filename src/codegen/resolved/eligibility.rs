@@ -1,9 +1,66 @@
+#[cfg(test)]
+use crate::core::ResolvedFunction;
 use crate::core::{
     CheckedConversionKind, CheckedProgram, NodeId, Origin, PrimitiveType, ResolvedBlock,
-    ResolvedCallable, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFunction,
+    ResolvedCallSite, ResolvedCallable, ResolvedCallee, ResolvedExpr, ResolvedExprKind,
     ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedStmtKind, ResolvedType,
     ResolvedTypeId,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachableCallTarget<'a> {
+    Function(&'a NodeId),
+    Closed,
+    Unknown,
+}
+
+/// Read the canonical call identity before considering surface resolution.
+/// A stale syntax target may only fill in a missing canonical identity; it
+/// must never override a known non-function callee such as an Actor/Protocol
+/// method or local closure.
+fn reachable_call_target(site: &ResolvedCallSite) -> ReachableCallTarget<'_> {
+    use crate::core::ResolvedCallKind::{Builtin, Extern, Function, Method, Unknown};
+
+    match site.resolved_callee.as_ref() {
+        Some(ResolvedCallee::Function(target))
+            if matches!(site.kind, Function | Method | Unknown)
+                && site.target_function.as_ref() == Some(target) =>
+        {
+            ReachableCallTarget::Function(target)
+        }
+        Some(ResolvedCallee::Function(_)) => ReachableCallTarget::Unknown,
+        Some(
+            ResolvedCallee::Builtin(_) | ResolvedCallee::Extern(_) | ResolvedCallee::Constructor(_),
+        ) => ReachableCallTarget::Closed,
+        Some(
+            ResolvedCallee::LocalClosure(_)
+            | ResolvedCallee::ActorMethod { .. }
+            | ResolvedCallee::ProtocolMethod { .. }
+            | ResolvedCallee::Transition(_),
+        ) => ReachableCallTarget::Unknown,
+        None if matches!(site.kind, Function | Method | Unknown) => site
+            .target_function
+            .as_ref()
+            .map(ReachableCallTarget::Function)
+            .unwrap_or(ReachableCallTarget::Unknown),
+        None if matches!(site.kind, Extern | Builtin) => ReachableCallTarget::Closed,
+        None => ReachableCallTarget::Unknown,
+    }
+}
+
+/// Whether a call site leaves dispatch open after consulting its canonical
+/// Checker identity. Surface spellings may include a module alias and must not
+/// override an exact function target.
+fn call_site_has_uncertain_dispatch(
+    site: &ResolvedCallSite,
+    is_live_function: impl FnOnce(&NodeId) -> bool,
+) -> bool {
+    match reachable_call_target(site) {
+        ReachableCallTarget::Function(target) => !is_live_function(target),
+        ReachableCallTarget::Closed => false,
+        ReachableCallTarget::Unknown => true,
+    }
+}
 
 /// Structured per-function resolved/legacy dispatch statistics (0.34.40,
 /// AF-4 前置 1 度量门禁). Emitted as JSON when `MIMI_STAT=1`.
@@ -95,32 +152,52 @@ impl UnsupportedResolvedNode {
 /// Dispatch statistics use only the `main` roots; native DynamicAny preflight
 /// also supplies C exports, selected subset bodies, or all shared-object
 /// callables as external roots.
-fn reachable_function_ids(
+pub(super) fn reachable_function_ids(
     program: &CheckedProgram,
     additional_roots: &std::collections::BTreeSet<NodeId>,
 ) -> std::collections::BTreeSet<NodeId> {
-    use std::collections::{BTreeSet, HashMap, VecDeque};
+    use std::collections::{BTreeSet, VecDeque};
 
-    let mut by_qualified: HashMap<String, Vec<NodeId>> = HashMap::new();
-    let mut by_bare: HashMap<String, Vec<NodeId>> = HashMap::new();
-    for function in program.functions().values() {
-        if function.is_comptime {
-            continue;
+    fn all_non_comptime_callable_ids(program: &CheckedProgram) -> BTreeSet<NodeId> {
+        program
+            .functions()
+            .values()
+            .filter(|function| !function.is_comptime)
+            .map(|function| function.node_id.clone())
+            .chain(
+                program
+                    .callables()
+                    .keys()
+                    .filter(|owner| {
+                        !program
+                            .functions()
+                            .get(*owner)
+                            .is_some_and(|function| function.is_comptime)
+                    })
+                    .cloned(),
+            )
+            .collect()
+    }
+
+    fn checked_callable_target<'a>(
+        program: &CheckedProgram,
+        site: &'a crate::core::ResolvedCallSite,
+    ) -> ReachableCallTarget<'a> {
+        match reachable_call_target(site) {
+            ReachableCallTarget::Function(target)
+                if program.callable(target).is_some()
+                    && !program
+                        .functions()
+                        .get(target)
+                        .is_some_and(|function| function.is_comptime) =>
+            {
+                ReachableCallTarget::Function(target)
+            }
+            ReachableCallTarget::Function(_) | ReachableCallTarget::Unknown => {
+                ReachableCallTarget::Unknown
+            }
+            ReachableCallTarget::Closed => ReachableCallTarget::Closed,
         }
-        by_qualified
-            .entry(function.qualified_name.clone())
-            .or_default()
-            .push(function.node_id.clone());
-        let bare = function
-            .qualified_name
-            .rsplit("::")
-            .next()
-            .unwrap_or(&function.qualified_name)
-            .to_string();
-        by_bare
-            .entry(bare)
-            .or_default()
-            .push(function.node_id.clone());
     }
 
     let mut reachable = BTreeSet::new();
@@ -153,52 +230,36 @@ fn reachable_function_ids(
     // No entry found: conservative fallback treats every non-comptime function
     // as reachable, so the experimental stats never drop real codegen targets.
     if reachable.is_empty() {
-        for function in program.functions().values() {
-            if !function.is_comptime {
-                reachable.insert(function.node_id.clone());
-            }
-        }
-        return reachable;
+        return all_non_comptime_callable_ids(program);
     }
 
     while let Some(owner) = queue.pop_front() {
-        let owner_fn = match program.functions().get(&owner) {
-            Some(function) => function,
-            None => continue,
+        let Some(owner_callable) = program.callable(&owner) else {
+            return all_non_comptime_callable_ids(program);
         };
-        let owner_key = format!("function:{}", owner_fn.qualified_name);
+        let owner_key = owner_callable.owner.0.as_str();
         for site in program.call_sites_sorted() {
             if site.owner != owner_key {
                 continue;
             }
-            let callee = site.callee.as_str();
-            let candidates: Vec<NodeId> = if callee.contains("::") {
-                by_qualified.get(callee).cloned().unwrap_or_default()
-            } else {
-                let mut found = by_qualified.get(callee).cloned().unwrap_or_default();
-                if found.is_empty() {
-                    found = by_bare.get(callee).cloned().unwrap_or_default();
+            match checked_callable_target(program, site) {
+                ReachableCallTarget::Function(target) => {
+                    if reachable.insert(target.clone()) {
+                        queue.push_back(target.clone());
+                    }
                 }
-                found
-            };
-            for id in candidates {
-                if reachable.insert(id.clone()) {
-                    queue.push_back(id);
+                ReachableCallTarget::Unknown => {
+                    // A reachable callable with no exact target may dispatch
+                    // to any body. Surface spellings are not authoritative:
+                    // module aliases, shadowing, and overloaded methods can
+                    // all differ from the selected Checker identity.
+                    return all_non_comptime_callable_ids(program);
                 }
+                ReachableCallTarget::Closed => {}
             }
         }
     }
     reachable
-}
-
-/// Find an unchecked Any-to-concrete conversion in a callable reachable from
-/// a Mimi entry or any external native entry root. The legacy emitter has the
-/// same erased-i64 ABI as the resolved emitter, so an eligibility miss alone
-/// would merely route the unsafe conversion to legacy.
-pub(super) fn first_reachable_dynamic_any_unpack(
-    program: &CheckedProgram,
-) -> Option<(NodeId, NodeId)> {
-    first_reachable_dynamic_any_unpack_from_roots(program, &std::collections::BTreeSet::new())
 }
 
 /// Variant for consumers that emit an explicitly selected subset (and for
@@ -252,29 +313,14 @@ pub(super) fn first_reachable_dynamic_any_unpack_from_roots(
         .map(|function| format!("function:{}", function.qualified_name))
         .collect::<std::collections::BTreeSet<_>>();
     uncertain_dispatch |= program.call_sites_sorted().into_iter().any(|site| {
-        if !reachable_owner_keys.contains(&site.owner) {
-            return false;
-        }
-        match site.kind {
-            crate::core::ResolvedCallKind::Unknown => true,
-            crate::core::ResolvedCallKind::Function | crate::core::ResolvedCallKind::Method => {
-                let callee = site.callee.as_str();
-                let qualified_match = program
-                    .functions()
-                    .values()
-                    .any(|function| function.qualified_name == callee);
-                let bare_match = !callee.contains("::")
-                    && program.functions().values().any(|function| {
-                        function
-                            .qualified_name
-                            .rsplit("::")
-                            .next()
-                            .is_some_and(|bare| bare == callee)
-                    });
-                !qualified_match && !bare_match
-            }
-            crate::core::ResolvedCallKind::Extern | crate::core::ResolvedCallKind::Builtin => false,
-        }
+        reachable_owner_keys.contains(&site.owner)
+            && call_site_has_uncertain_dispatch(site, |target| {
+                program.callable(target).is_some()
+                    && !program
+                        .functions()
+                        .get(target)
+                        .is_some_and(|function| function.is_comptime)
+            })
     });
 
     // The checker call-site directory cannot close a target for a local
@@ -558,10 +604,92 @@ fn scan_dynamic_any_unpack_callable(callable: &ResolvedCallable) -> DynamicAnyUn
     scan
 }
 
+/// A scalar cohort does not need the whole-program generic TypeDesc catalog.
+/// Inspect exact typed Function targets, including defaults and place inputs,
+/// so a real generic edge still enters the strict instance materializer.
+pub(super) fn cohort_has_generic_function_call(
+    program: &CheckedProgram,
+    cohort: &std::collections::BTreeSet<NodeId>,
+) -> bool {
+    cohort.iter().any(|owner| {
+        program.callable(owner).is_some_and(|callable| {
+            scan_dynamic_any_unpack_callable(callable)
+                .direct_calls
+                .iter()
+                .any(|target| {
+                    program
+                        .callable(target)
+                        .is_some_and(|callee| !callee.signature.generic_parameters.is_empty())
+                        || program
+                            .functions()
+                            .get(target)
+                            .is_some_and(|function| !function.generics.is_empty())
+                })
+        })
+    })
+}
+
 pub(super) fn require_resolved_native_program(
     program: &CheckedProgram,
 ) -> Result<(), UnsupportedResolvedNode> {
-    if let Some((owner, node)) = first_dynamic_any_unpack_in_program(program) {
+    require_resolved_native_program_with_cohort(program, None)
+}
+
+/// Production executable cohort. Only dormant bodies from the exact
+/// checker-owned maps source may escape the strict all-callable validation.
+/// Other dormant helpers retain the strict boundary even though they will
+/// not be emitted. The caller separately proves that the Map admission
+/// signal comes entirely from those dormant maps bodies.
+pub(super) fn require_resolved_native_reachable_program(
+    program: &CheckedProgram,
+    cohort: &std::collections::BTreeSet<NodeId>,
+) -> Result<(), UnsupportedResolvedNode> {
+    require_resolved_native_program_with_cohort(program, Some(cohort))
+}
+
+pub(super) fn is_std_maps_callable(program: &CheckedProgram, owner: &NodeId) -> bool {
+    program.callable(owner).is_some()
+        && program
+            .node_meta()
+            .get(owner)
+            .map(|meta| &meta.origin)
+            .or_else(|| {
+                program
+                    .functions()
+                    .get(owner)
+                    .map(|function| &function.origin)
+            })
+            .and_then(|origin| program.source_registry().key(origin.user_span().source_id))
+            .is_some_and(|key| key.as_str() == "stdlib:maps.mimi")
+}
+
+fn require_resolved_native_program_with_cohort(
+    program: &CheckedProgram,
+    cohort: Option<&std::collections::BTreeSet<NodeId>>,
+) -> Result<(), UnsupportedResolvedNode> {
+    let dormant_maps = |owner: &NodeId| {
+        cohort.is_some_and(|selected| {
+            !selected.contains(owner) && is_std_maps_callable(program, owner)
+        })
+    };
+    let first_unpack = if cohort.is_none() {
+        first_dynamic_any_unpack_in_program(program)
+    } else {
+        program.callables().iter().find_map(|(owner, callable)| {
+            if dormant_maps(owner)
+                || program
+                    .functions()
+                    .get(owner)
+                    .is_some_and(|function| function.is_comptime)
+            {
+                return None;
+            }
+            scan_dynamic_any_unpack_callable(callable)
+                .first_unpack
+                .map(|node| (owner.clone(), node))
+        })
+    };
+    if let Some((owner, node)) = first_unpack {
         return Err(UnsupportedResolvedNode::new(
             &owner,
             &node,
@@ -573,12 +701,39 @@ pub(super) fn require_resolved_native_program(
         .values()
         .filter(|flow| matches!(flow.origin, crate::core::Origin::User(_)))
         .count();
+    let dormant_maps_declaration = |origin: &Origin, methods: &[NodeId]| {
+        cohort.is_some()
+            && program
+                .source_registry()
+                .key(origin.user_span().source_id)
+                .is_some_and(|key| key.as_str() == "stdlib:maps.mimi")
+            && !methods.is_empty()
+            && methods.iter().all(dormant_maps)
+    };
     if user_flow_count != 0
         || !program.actors().is_empty()
         || !program.sessions().is_empty()
         || !program.capabilities().is_empty()
-        || !program.traits().is_empty()
-        || !program.impls().is_empty()
+        || program.traits().values().any(|declaration| {
+            // Trait slots have no executable body of their own. Their exact
+            // maps impl methods below must all be dormant too.
+            !cohort.is_some_and(|_| {
+                program
+                    .source_registry()
+                    .key(declaration.origin.user_span().source_id)
+                    .is_some_and(|key| key.as_str() == "stdlib:maps.mimi")
+                    && program.impls().values().any(|implementation| {
+                        implementation.trait_name == declaration.qualified_name
+                            && dormant_maps_declaration(
+                                &implementation.origin,
+                                &implementation.method_owners,
+                            )
+                    })
+            })
+        })
+        || program.impls().values().any(|declaration| {
+            !dormant_maps_declaration(&declaration.origin, &declaration.method_owners)
+        })
         || !program.extern_blocks().is_empty()
     {
         let owner = program
@@ -634,7 +789,7 @@ pub(super) fn require_resolved_native_program(
         }
     }
     for function in program.functions().values() {
-        if function.is_comptime {
+        if function.is_comptime || dormant_maps(&function.node_id) {
             continue;
         }
         // P1-1 fix: non-User-origin functions (imported from stdlib or
@@ -661,7 +816,7 @@ pub(super) fn require_resolved_native_program(
         // call-site instances are materialized into canonical MIR before the
         // resolved emitter runs, so an unsubstituted template is not emitted
         // as an executable body here.
-        if !function.generics.is_empty() {
+        if !function.generics.is_empty() && cohort.is_none() {
             continue;
         }
         if function.qualified_name.contains("::") {
@@ -679,6 +834,45 @@ pub(super) fn require_resolved_native_program(
             )
         })?;
         require_resolved_native_callable(program, callable)?;
+    }
+    if let Some(cohort) = cohort {
+        for (owner, callable) in program.callables() {
+            if dormant_maps(owner)
+                || program
+                    .functions()
+                    .get(owner)
+                    .is_some_and(|function| function.is_comptime)
+            {
+                continue;
+            }
+            if cohort.contains(owner) && !program.functions().contains_key(owner) {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    owner,
+                    "selected callable has no plain-function native emission contract",
+                ));
+            }
+            // Place inputs/defaults are typed executable subtrees outside
+            // root. Validate all of them before declaring the selected cohort.
+            for expression in callable
+                .body
+                .place_inputs
+                .values()
+                .chain(callable.body.default_values.values())
+            {
+                require_expr(program, owner, expression, None, &callable.body.locals)?;
+            }
+            require_resolved_native_callable(program, callable)?;
+        }
+        for owner in cohort {
+            if program.callable(owner).is_none() {
+                return Err(UnsupportedResolvedNode::new(
+                    owner,
+                    owner,
+                    "selected callable is missing",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -983,13 +1177,6 @@ fn require_resolved_native_callable_with_source(
     entry_source: Option<crate::span::SourceId>,
     verify_contracts: bool,
 ) -> Result<(), UnsupportedResolvedNode> {
-    if tail_comptime_calls_comptime_function(program, &callable.body.root) {
-        return Err(UnsupportedResolvedNode::new(
-            &callable.owner,
-            &callable.body.root.node_id,
-            "tail comptime call to comptime function requires compatibility folding",
-        ));
-    }
     // 0.34.41 (AF-4 前置 2①): contracts enter the resolved slice.
     // 第一档: verify_contracts=false (default) admits them via erasure — the
     // Contract arm is a no-op, exactly matching legacy's default erasure.
@@ -1020,32 +1207,6 @@ fn require_resolved_native_callable_with_source(
         entry_source,
         &callable.body.locals,
     )
-}
-
-/// A direct-return comptime block that calls an omitted `comptime func` needs
-/// the compatibility codegen's constant-fold setup. The resolved emitter
-/// supports comptime blocks generally, but this precise tail shape otherwise
-/// tries to emit a runtime call to a comptime function that has no native body.
-fn tail_comptime_calls_comptime_function(program: &CheckedProgram, root: &ResolvedBlock) -> bool {
-    let Some(tail) = root.result.as_deref() else {
-        return false;
-    };
-    let ResolvedExprKind::Comptime(block) = &tail.kind else {
-        return false;
-    };
-    let Some(result) = block.result.as_deref() else {
-        return false;
-    };
-    let ResolvedExprKind::Call(call) = &result.kind else {
-        return false;
-    };
-    let ResolvedCallee::Function(callee) = &call.callee else {
-        return false;
-    };
-    program
-        .functions()
-        .get(callee)
-        .is_some_and(|function| function.is_comptime)
 }
 
 fn require_scalar_type(
@@ -1410,7 +1571,7 @@ fn require_block(
                     owner,
                     &statement.node_id,
                     format!("statement {other:?} is not in the resolved native slice"),
-                ))
+                ));
             }
         }
     }
@@ -1585,7 +1746,7 @@ fn require_expr(
                         owner,
                         &expression.node_id,
                         format!("value projection {other:?} is not in the resolved native slice"),
-                    ))
+                    ));
                 }
             }
             require_expr(program, owner, value, entry_source, locals)
@@ -2224,6 +2385,7 @@ fn require_list_iterable_type(
 /// 0.1.8 Phase 0: Flow / Session / spawn / linear callees must not silently
 /// fall back to the legacy emitter. A fallback on these is a hard error
 /// carrying the function name and reason.
+#[cfg(test)]
 pub(super) fn is_core_kernel_function(
     program: &CheckedProgram,
     function: &ResolvedFunction,
@@ -2248,6 +2410,7 @@ pub(super) fn is_core_kernel_function(
     block_is_core_kernel(program, &callable.body.root)
 }
 
+#[cfg(test)]
 fn type_id_is_core_kernel(program: &CheckedProgram, id: &ResolvedTypeId) -> bool {
     match program.resolved_types().get(id) {
         Some(ResolvedType::Nominal {
@@ -2289,6 +2452,7 @@ fn type_id_is_core_kernel(program: &CheckedProgram, id: &ResolvedTypeId) -> bool
     }
 }
 
+#[cfg(test)]
 fn block_is_core_kernel(program: &CheckedProgram, block: &ResolvedBlock) -> bool {
     if block
         .statements
@@ -2303,6 +2467,7 @@ fn block_is_core_kernel(program: &CheckedProgram, block: &ResolvedBlock) -> bool
         .is_some_and(|expr| expr_is_core_kernel(program, expr))
 }
 
+#[cfg(test)]
 fn stmt_is_core_kernel(program: &CheckedProgram, kind: &ResolvedStmtKind) -> bool {
     match kind {
         ResolvedStmtKind::Bind { initializer, .. } => initializer
@@ -2352,6 +2517,7 @@ fn stmt_is_core_kernel(program: &CheckedProgram, kind: &ResolvedStmtKind) -> boo
     }
 }
 
+#[cfg(test)]
 fn expr_is_core_kernel(program: &CheckedProgram, expr: &ResolvedExpr) -> bool {
     if type_id_is_core_kernel(program, &expr.ty) {
         return true;
@@ -2441,5 +2607,90 @@ fn expr_is_core_kernel(program: &CheckedProgram, expr: &ResolvedExpr) -> bool {
         }),
         ResolvedExprKind::Lambda(lambda) => block_is_core_kernel(program, &lambda.body),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod reachable_call_target_tests {
+    use super::*;
+
+    fn call_site(
+        resolved_callee: ResolvedCallee,
+        kind: crate::core::ResolvedCallKind,
+        target_function: NodeId,
+    ) -> ResolvedCallSite {
+        ResolvedCallSite {
+            node_id: NodeId("call:target-classification".into()),
+            owner: "function:main".into(),
+            callee: "left.read".into(),
+            method_receiver: None,
+            argc: 0,
+            expected_argc: Some(0),
+            effects: Vec::new(),
+            ret: Some("i32".into()),
+            kind,
+            target_function: Some(target_function),
+            resolved_callee: Some(resolved_callee),
+            origin: Origin::User(crate::span::Span::UNKNOWN),
+        }
+    }
+
+    #[test]
+    fn actor_method_identity_never_adopts_stale_import_syntax_target() {
+        let stale_import = NodeId("function:apps::left::read".into());
+        let actor_method = call_site(
+            ResolvedCallee::ActorMethod {
+                actor: NodeId("actor:Counter".into()),
+                method: crate::core::MethodId::new("read").expect("valid method id"),
+            },
+            crate::core::ResolvedCallKind::Method,
+            stale_import.clone(),
+        );
+        assert_eq!(
+            reachable_call_target(&actor_method),
+            ReachableCallTarget::Unknown,
+            "actor method dispatch must remain conservative despite a stale alias target"
+        );
+        assert!(call_site_has_uncertain_dispatch(&actor_method, |_| true));
+
+        let builtin = call_site(
+            ResolvedCallee::Builtin(crate::core::BuiltinId::new("len").expect("valid builtin id")),
+            crate::core::ResolvedCallKind::Unknown,
+            stale_import,
+        );
+        assert_eq!(
+            reachable_call_target(&builtin),
+            ReachableCallTarget::Closed,
+            "a resolved builtin is terminal; its stale syntax target is ignored"
+        );
+    }
+
+    #[test]
+    fn exact_module_alias_target_ignores_surface_spelling_but_missing_targets_stay_open() {
+        let target = NodeId("function:apps::left::read".into());
+        let mut alias = call_site(
+            ResolvedCallee::Function(target.clone()),
+            crate::core::ResolvedCallKind::Function,
+            target.clone(),
+        );
+        alias.callee = "left::read".into();
+        assert!(
+            !call_site_has_uncertain_dispatch(&alias, |candidate| candidate == &target),
+            "an exact live Checker target closes an alias-qualified call"
+        );
+
+        assert!(
+            call_site_has_uncertain_dispatch(&alias, |_| false),
+            "a function target absent from the live callable directory remains conservative"
+        );
+
+        let mut unknown = alias;
+        unknown.resolved_callee = None;
+        unknown.target_function = None;
+        unknown.kind = crate::core::ResolvedCallKind::Unknown;
+        assert!(
+            call_site_has_uncertain_dispatch(&unknown, |_| true),
+            "an unknown or indirect call remains conservative"
+        );
     }
 }

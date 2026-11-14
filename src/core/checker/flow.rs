@@ -33,6 +33,31 @@ pub struct FlowAcc {
     /// a stable NodeId before returning the owned artifact.
     pub(crate) zonked_expr_types:
         BTreeMap<crate::core::NodeId, BTreeMap<crate::core::resolved::ExpressionTypeKey, ZonkedTy>>,
+    /// Provisional direct `pair.1 as bool` candidates. The resolved
+    /// finalizer consumes these only when the same callable owns an exact
+    /// Map/Any GetAny Bool-unpack receipt.
+    pub(crate) ordinary_map_owned_any_v2_bool_cast_candidates: BTreeMap<
+        crate::core::NodeId,
+        std::collections::BTreeSet<crate::core::resolved::ExpressionTypeKey>,
+    >,
+    /// DynamicAny casts with non-primitive targets await an exact supported
+    /// Map/Any or Values receipt at CheckedProgram finalization.
+    pub(crate) ordinary_map_owned_any_v2_nonprimitive_cast_candidates: BTreeMap<
+        crate::core::NodeId,
+        std::collections::BTreeSet<crate::core::resolved::ExpressionTypeKey>,
+    >,
+    /// Narrow source-level checked unpack calls awaiting their exact owner-v2
+    /// GetAny receipt at `CheckedProgram` finalization.
+    pub(crate) ordinary_map_owned_any_v2_checked_unpack_candidates: BTreeMap<
+        crate::core::NodeId,
+        std::collections::BTreeSet<crate::core::resolved::ExpressionTypeKey>,
+    >,
+    /// Provisional bare-List indexed String casts, requiring the exact
+    /// cross-call Values receipt during CheckedProgram finalization.
+    pub(crate) ordinary_map_owned_any_v2_values_crosscall_string_candidates: BTreeMap<
+        crate::core::NodeId,
+        std::collections::BTreeSet<crate::core::resolved::ExpressionTypeKey>,
+    >,
     /// Session residual changes captured while the checker still owns the
     /// surface session algebra. `CheckedProgram` replaces the temporary keys
     /// and AST residuals before crossing its owned boundary.
@@ -46,6 +71,15 @@ pub struct FlowAcc {
     pub trait_method_generics: HashMap<(String, String), Vec<String>>,
     /// Checker-owned finite effect summaries (E-01..E-03).
     pub effect_summaries: HashMap<String, crate::core::effects::EffectSummary>,
+}
+
+/// Source-level branch state for Flow identity checks and the `?` ordering
+/// guard. Both are may-consume facts: alternatives start from one snapshot,
+/// then the continuation conservatively joins facts from reachable paths.
+#[derive(Debug, Clone)]
+pub(crate) struct FlowConsumptionSnapshot {
+    consumed_flow_vars: HashMap<String, String>,
+    linear_consumed_before_try: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +175,53 @@ impl<'a> CheckerState<'a> {
     }
 }
 
+impl<'a> Checker<'a> {
+    /// Snapshot source-level consumption facts used by Flow identity and `?`
+    /// ordering checks.
+    ///
+    /// Transition calls are inferred while the checker walks the source AST,
+    /// so mutually exclusive branches must each start from the same map. The
+    /// CFG ownership pass remains responsible for path-exact leak checks;
+    /// this map only prevents a later syntactic use from reusing a state that
+    /// may already have been consumed.
+    pub(crate) fn flow_consumption_snapshot(&self) -> FlowConsumptionSnapshot {
+        FlowConsumptionSnapshot {
+            consumed_flow_vars: self.consumed_flow_vars.clone(),
+            linear_consumed_before_try: self.linear_consumed_before_try,
+        }
+    }
+
+    /// Restore branch-local consumption facts before checking an alternative.
+    pub(crate) fn restore_flow_consumption_snapshot(&mut self, snapshot: &FlowConsumptionSnapshot) {
+        self.consumed_flow_vars
+            .clone_from(&snapshot.consumed_flow_vars);
+        self.linear_consumed_before_try = snapshot.linear_consumed_before_try;
+    }
+
+    /// Join alternative branches conservatively. A name consumed on any path
+    /// stays unavailable to the source-level use-after-transition check, and
+    /// linear consumption before `?` is retained if any reaching path consumed
+    /// a resource. The typed CFG separately diagnoses path-dependent ownership
+    /// and leak behavior.
+    /// `baseline` is retained even when no branch reaches the join.
+    pub(crate) fn merge_flow_consumption_snapshots(
+        &mut self,
+        baseline: FlowConsumptionSnapshot,
+        branches: impl IntoIterator<Item = FlowConsumptionSnapshot>,
+    ) {
+        let mut merged = baseline.consumed_flow_vars;
+        let mut linear_consumed_before_try = baseline.linear_consumed_before_try;
+        for branch in branches {
+            linear_consumed_before_try |= branch.linear_consumed_before_try;
+            for (name, transition) in branch.consumed_flow_vars {
+                merged.entry(name).or_insert(transition);
+            }
+        }
+        self.consumed_flow_vars = merged;
+        self.linear_consumed_before_try = linear_consumed_before_try;
+    }
+}
+
 /// Extract deduplicated errors and warnings from the checker.
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
     // v0.31.2: Finalize zonked function types before extraction.
@@ -160,6 +241,18 @@ fn extract_acc(checker: &mut Checker) -> FlowAcc {
         zonked_func_types: std::mem::take(&mut checker.zonked_func_types),
         zonked_nested_func_types: std::mem::take(&mut checker.zonked_nested_func_types),
         zonked_expr_types: std::mem::take(&mut checker.zonked_expr_types),
+        ordinary_map_owned_any_v2_bool_cast_candidates: std::mem::take(
+            &mut checker.ordinary_map_owned_any_v2_bool_cast_candidates,
+        ),
+        ordinary_map_owned_any_v2_nonprimitive_cast_candidates: std::mem::take(
+            &mut checker.ordinary_map_owned_any_v2_nonprimitive_cast_candidates,
+        ),
+        ordinary_map_owned_any_v2_checked_unpack_candidates: std::mem::take(
+            &mut checker.ordinary_map_owned_any_v2_checked_unpack_candidates,
+        ),
+        ordinary_map_owned_any_v2_values_crosscall_string_candidates: std::mem::take(
+            &mut checker.ordinary_map_owned_any_v2_values_crosscall_string_candidates,
+        ),
         session_actions: std::mem::take(&mut checker.session_actions),
         trait_method_generics: std::mem::take(&mut checker.trait_method_generics),
         effect_summaries: std::mem::take(&mut checker.effect_summaries),

@@ -377,40 +377,104 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .type_catalog()
             .validate_copy_scalar(&i32_ty)
             .map_err(|message| NativeMirError::new(subject, message))?;
+        let out_size = self
+            .generator
+            .builder
+            .build_alloca(
+                self.generator.context.i32_type(),
+                "mir_ordinary_map_size_out",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         let size_fn = self
             .generator
-            .get_runtime_fn("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size")
+            .get_runtime_fn("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_size_status")
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        let size = call_try_basic_value(
+        let status = call_try_basic_value(
             &self
                 .generator
                 .builder
                 .build_call(
                     size_fn,
-                    &[BasicMetadataValueEnum::from(
-                        self.value(root, subject)?.into_int_value(),
-                    )],
-                    "mir_ordinary_map_size",
+                    &[
+                        BasicMetadataValueEnum::from(self.value(root, subject)?.into_int_value()),
+                        BasicMetadataValueEnum::from(out_size),
+                    ],
+                    "mir_ordinary_map_size_status",
                 )
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
         )
-        .ok_or_else(|| NativeMirError::new(subject, "ordinary Map Size returned void"))?
+        .ok_or_else(|| NativeMirError::new(subject, "ordinary Map Size status returned void"))?
         .into_int_value();
-        let valid = self
+
+        let success = self
             .generator
             .builder
             .build_int_compare(
-                IntPredicate::SGE,
-                size,
+                IntPredicate::EQ,
+                status,
                 self.generator.context.i32_type().const_zero(),
-                "mir_ordinary_map_size_valid",
+                "mir_ordinary_map_size_status_success",
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
-        self.emit_ordinary_map_root_guard(
-            valid,
-            "[E0800] ordinary Map lifecycle Size failed",
+        let success_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_size_success");
+        let classify_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_size_classify_failure");
+        self.generator
+            .builder
+            .build_conditional_branch(success, success_block, classify_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(classify_block);
+        let overflow = self
+            .generator
+            .builder
+            .build_int_compare(
+                IntPredicate::EQ,
+                status,
+                self.generator.context.i32_type().const_int(1, false),
+                "mir_ordinary_map_size_status_overflow",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let overflow_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_size_overflow");
+        let failure_block = self
+            .generator
+            .context
+            .append_basic_block(self.llvm_function, "mir_ordinary_map_size_failure");
+        self.generator
+            .builder
+            .build_conditional_branch(overflow, overflow_block, failure_block)
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        self.generator.builder.position_at_end(overflow_block);
+        self.emit_abort_with_message(
+            "[E0802] ordinary Map owner lifecycle v1 size overflows i32",
             subject,
         )?;
+        self.generator.builder.position_at_end(failure_block);
+        self.emit_abort_with_message("[E0800] ordinary Map lifecycle Size failed", subject)?;
+
+        // The runtime writes this out parameter only for status=success. Keep
+        // the load in the success block so failure statuses never expose an
+        // uninitialized output value.
+        self.generator.builder.position_at_end(success_block);
+        let size = self
+            .generator
+            .builder
+            .build_load(
+                self.generator.context.i32_type(),
+                out_size,
+                "mir_ordinary_map_size",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?
+            .into_int_value();
         Ok(size.into())
     }
 
@@ -481,6 +545,192 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             )
             .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
         Ok(boolean.into())
+    }
+
+    fn ordinary_map_observer_callsite_is_valid(
+        callsite: &crate::core::NodeId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        if callsite.0.trim().is_empty() {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map observer has an empty Checker callsite identity",
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_ordinary_map_observer_json_buffer(
+        &mut self,
+        root: &MirValueId,
+        subject: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>, NativeMirError> {
+        let root_handle = self.emit_live_ordinary_map_root(root, subject)?;
+        let to_json = self
+            .generator
+            .get_runtime_fn("mimi_mir_ordinary_map_owner_lifecycle_i32_string_v1_to_json")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let json = call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(
+                    to_json,
+                    &[root_handle.into()],
+                    "mir_ordinary_map_observer_json",
+                )
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .ok_or_else(|| {
+            NativeMirError::new(subject, "ordinary Map lifecycle JSON helper returned void")
+        })?
+        .into_pointer_value();
+        let valid = self
+            .generator
+            .builder
+            .build_is_not_null(json, "mir_ordinary_map_observer_json_nonnull")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.emit_ordinary_map_root_guard(
+            valid,
+            "[E0800] ordinary Map lifecycle JSON observation failed",
+            subject,
+        )?;
+        Ok(json)
+    }
+
+    fn ordinary_map_observer_json_length(
+        &mut self,
+        json: inkwell::values::PointerValue<'ctx>,
+        subject: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>, NativeMirError> {
+        // The runtime helper returns a detached NUL-terminated C allocation.
+        // JSON string escaping guarantees the payload contains no raw NUL, so
+        // strlen recovers the exact UTF-8 byte length for Mimi's fat String ABI.
+        let strlen = self
+            .generator
+            .get_runtime_fn("strlen")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        call_try_basic_value(
+            &self
+                .generator
+                .builder
+                .build_call(strlen, &[json.into()], "mir_ordinary_map_observer_json_len")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+        )
+        .map(BasicValueEnum::into_int_value)
+        .ok_or_else(|| NativeMirError::new(subject, "strlen returned void for Map JSON"))
+    }
+
+    pub(super) fn emit_ordinary_map_observer_to_json(
+        &mut self,
+        result: &MirValueId,
+        root: &MirValueId,
+        callsite: &crate::core::NodeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        Self::ordinary_map_observer_callsite_is_valid(callsite, subject)?;
+        let result_type = self.value_type(result, subject)?;
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        if result_type != string_type {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map to_json result is not the canonical owned String TypeDesc",
+            ));
+        }
+        self.program
+            .type_catalog()
+            .validate_owned_string(&result_type)
+            .map_err(|message| NativeMirError::new(subject, message))?;
+
+        let json = self.emit_ordinary_map_observer_json_buffer(root, subject)?;
+        let length = self.ordinary_map_observer_json_length(json, subject)?;
+        let handle = self
+            .generator
+            .builder
+            .build_ptr_to_int(
+                json,
+                self.generator.context.i64_type(),
+                "mir_ordinary_map_observer_json_handle",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        // This adopts the runtime allocation as a normal Mimi String: it
+        // registers the pointer with the ordinary Map String owner domain,
+        // and subsequent canonical String Drop frees it exactly once.
+        self.emit_owned_string_from_handle(handle, length, subject)
+    }
+
+    pub(super) fn emit_ordinary_map_observer_println(
+        &mut self,
+        result: &MirValueId,
+        root: &MirValueId,
+        callsite: &crate::core::NodeId,
+        subject: &str,
+    ) -> Result<(), NativeMirError> {
+        Self::ordinary_map_observer_callsite_is_valid(callsite, subject)?;
+        let unit_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Unit);
+        let result_type = self.value_type(result, subject)?;
+        if result_type != unit_type
+            || !self
+                .program
+                .type_catalog()
+                .get(&result_type)
+                .is_some_and(MirTypeDesc::is_canonical_ffi_unit)
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map println result is not the canonical Unit TypeDesc",
+            ));
+        }
+
+        // This is a borrowed observer. The JSON allocation remains a local
+        // scratch buffer and is freed here after writing the exact bytes and
+        // newline; the Map root is neither cloned nor consumed.
+        let json = self.emit_ordinary_map_observer_json_buffer(root, subject)?;
+        let length = self.ordinary_map_observer_json_length(json, subject)?;
+        let print_bytes = self
+            .generator
+            .get_runtime_fn("mimi_print_bytes")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                print_bytes,
+                &[json.into(), length.into()],
+                "mir_ordinary_map_observer_print_bytes",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let newline = self
+            .generator
+            .builder
+            .build_global_string_ptr("\n", "mir_ordinary_map_observer_newline")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                print_bytes,
+                &[
+                    newline.as_pointer_value().into(),
+                    self.generator.context.i64_type().const_int(1, false).into(),
+                ],
+                "mir_ordinary_map_observer_print_newline",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let free = self
+            .generator
+            .get_runtime_fn("mimi_string_free")
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        self.generator
+            .builder
+            .build_call(
+                free,
+                &[json.into()],
+                "mir_ordinary_map_observer_scratch_free",
+            )
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+
+        // Unit has no physical LLVM value. The MIR result remains only in the
+        // ownership/type ledger, matching other effectful native instructions.
+        Ok(())
     }
 
     pub(super) fn emit_ordinary_map_drop(

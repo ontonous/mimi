@@ -12,10 +12,10 @@ proptest::proptest! {
     fn fuzz_codegen_no_panic(src in arb_mimi_program()) {
         if let Ok(tokens) = lexer::Lexer::new(&src).tokenize() {
             if let Ok(file) = parser::Parser::new(tokens).parse_file() {
-                if core::check(&file).is_ok() {
+                if let Ok(checked) = core::check_program(&file) {
                     let context = inkwell::context::Context::create();
                     let mut codegen = crate::codegen::CodeGenerator::new(&context, "fuzz_test");
-                    let _ = codegen.compile_file(&file);
+                    let _ = codegen.compile_checked(&checked);
                 }
             }
         }
@@ -88,7 +88,8 @@ fn test_codegen_ir_emission() {
     }
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "ir_test");
-    assert!(codegen.compile_file(&file).is_ok());
+    let checked = core::check_program(&file).expect("check");
+    assert!(codegen.compile_checked(&checked).is_ok());
     let ir_str = codegen.module.print_to_string().to_string();
     assert!(!ir_str.is_empty(), "LLVM IR should not be empty");
     assert!(

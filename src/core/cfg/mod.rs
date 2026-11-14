@@ -22,7 +22,22 @@ pub use lower::lower_file;
 pub use resolved_lower::lower_resolved_bodies;
 pub use resource_lower::analyze_resolved_bodies;
 pub(crate) use resource_lower::{
-    collect_ordinary_map_owned_get_i32_string_cfg, OrdinaryMapOwnedGetI32StringCfgCollection,
+    analyze_resolved_bodies_with_declaration_expressions,
+    collect_ordinary_map_owned_get_i32_string_cfg,
+    validate_ordinary_map_owned_any_v2_direct_print_result_receipt,
+    validate_ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt,
+    validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_receipt,
+    validate_ordinary_map_owned_any_v2_new_result_receipt,
+    validate_ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_set_get_any_string_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_set_get_i32_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_set_get_string_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_set_lineage_receipt,
+    validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_receipt,
+    validate_ordinary_map_owned_any_v2_values_unpack_result_branch_receipt,
+    validate_ordinary_map_owned_get_any_tuple_result_v1_receipt,
+    OrdinaryMapOwnedGetI32StringCfgCollection,
 };
 pub use validate::validate_cfg;
 

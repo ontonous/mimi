@@ -143,9 +143,13 @@ func consume(c: cap FileCap) -> i32 {
     1
 }
 
-func main(c: cap FileCap) -> i32 {
+func consume_aggregate_projection(c: cap FileCap) -> i32 {
     let alias = c;
     consume([alias][0])
+}
+
+func main() -> i32 {
+    consume_aggregate_projection(FileCap)
 }
 "#;
     let result = check_source(src);
@@ -162,9 +166,13 @@ func consume(c: cap FileCap) -> i32 {
     1
 }
 
-func main(c: cap FileCap, choose_left: bool) -> i32 {
+func consume_if_expression(c: cap FileCap, choose_left: bool) -> i32 {
     let alias = c;
     consume(if choose_left { alias } else { alias })
+}
+
+func main() -> i32 {
+    consume_if_expression(FileCap, true)
 }
 "#;
     let result = check_source(src);

@@ -4,10 +4,12 @@ use std::path::Path;
 
 use crate::resolve_path;
 use mimi::ast::{self, File};
-use mimi::core::BackendProfile;
+use mimi::core::resolved::BackendProfile;
 use mimi::{ffi, lexer};
 
-pub(crate) fn checked_component_input(file: &File) -> Result<mimi::core::CheckedProgram, String> {
+pub(crate) fn checked_component_input(
+    file: &File,
+) -> Result<mimi::core::resolved::CheckedProgram, String> {
     let checked = mimi::core::check_program(file).map_err(|diagnostics| {
         let messages = diagnostics
             .iter()
@@ -30,12 +32,12 @@ pub(crate) fn checked_component_input(file: &File) -> Result<mimi::core::Checked
 }
 
 pub(crate) fn resolved_extern_funcs(
-    checked: &mimi::core::CheckedProgram,
+    checked: &mimi::core::resolved::CheckedProgram,
 ) -> Result<Vec<ast::ExternFunc>, String> {
     let mut symbols = std::collections::HashSet::new();
     let mut funcs = Vec::new();
     for block in checked.extern_blocks_sorted() {
-        for signature in mimi::core::CheckedProgram::extern_signatures_sorted(block) {
+        for signature in mimi::core::resolved::CheckedProgram::extern_signatures_sorted(block) {
             if !symbols.insert(signature.name.clone()) {
                 return Err(format!(
                     "component extern symbol '{}' is declared more than once",
@@ -82,7 +84,7 @@ pub(crate) fn resolved_extern_funcs(
 }
 
 pub(crate) fn resolved_exported_funcs(
-    checked: &mimi::core::CheckedProgram,
+    checked: &mimi::core::resolved::CheckedProgram,
     extern_funcs: &[ast::ExternFunc],
 ) -> Result<Vec<ast::FuncDef>, String> {
     let mut symbols = extern_funcs
@@ -139,7 +141,7 @@ pub(crate) fn resolved_exported_funcs(
 }
 
 pub(crate) fn resolved_type_defs(
-    checked: &mimi::core::CheckedProgram,
+    checked: &mimi::core::resolved::CheckedProgram,
 ) -> Result<HashMap<String, ast::TypeDef>, String> {
     let mut definitions = checked.type_defs().values().collect::<Vec<_>>();
     definitions.sort_by(|left, right| left.qualified_name.cmp(&right.qualified_name));

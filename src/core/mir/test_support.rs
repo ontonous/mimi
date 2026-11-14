@@ -14,6 +14,94 @@ use crate::core::NodeId;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 
+/// Model a lowering bug *before* the generic ManagedAny full-body seal is
+/// produced: source contains a Label alias, but its Clone/Move/Drop disappear.
+/// The independent source-use commitment must survive the final body seal.
+/// The returned function is deliberately not yet a validated MirProgram.
+pub(crate) fn ordinary_map_values_label_erased_alias_fixture() -> (
+    crate::core::resolved::CheckedProgram,
+    BTreeMap<NodeId, MirFunction>,
+    crate::core::mir::types::MirTypeCatalog,
+) {
+    let source = r#"
+type Label { text: string }
+func main() -> i32 {
+    let label = Label { text: "source-use commitment" }
+    let empty = map_new()
+    let root = map_set(empty, "label", label)
+    let snapshot = values(root)
+    let item = snapshot[0] as Label
+    let alias = item
+    drop(alias)
+    drop(item)
+    drop(snapshot)
+    drop(root)
+    drop(empty)
+    drop(label)
+    0
+}
+"#;
+    let file = Parser::new(Lexer::new(source).tokenize().expect("lex alias fixture"))
+        .parse_file()
+        .expect("parse alias fixture");
+    let checked = crate::core::check_program(&file).expect("Label alias source checks");
+    let catalog = crate::core::mir::types::MirTypeCatalog::from_checked_program(&checked)
+        .expect("Label alias TypeDesc catalog");
+    let mut functions = super::lower::lower_program_with_type_catalog(&checked, &catalog)
+        .expect("lower source before program receipt validation");
+    let owner = NodeId("function:main".into());
+    let alias = checked
+        .resolved_body(&owner)
+        .expect("resolved main")
+        .locals
+        .values()
+        .find(|local| local.display_name == "alias")
+        .expect("alias source local");
+    let alias_value = MirValueId::new(format!("local:{}", alias.id.0 .0)).expect("alias MIR value");
+    let function = functions.get_mut(&owner).expect("main MIR");
+    let alias_temporary = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::Move { result, source } if result == &alias_value => {
+                Some(source.clone())
+            }
+            _ => None,
+        })
+        .expect("alias initializer Clone temporary");
+    let previous_seal = function
+        .ownership
+        .checker_managed_any
+        .as_ref()
+        .expect("original body seal")
+        .clone();
+    let instruction_origins = previous_seal
+        .instructions
+        .iter()
+        .map(|(_, origin, instruction)| (instruction.id.clone(), origin.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for block in function.blocks.values_mut() {
+        block.instructions.retain(|instruction| {
+            !matches!(&instruction.kind, MirInstructionKind::Clone { result, .. } if result == &alias_temporary)
+                && !matches!(&instruction.kind, MirInstructionKind::Move { result, .. } if result == &alias_value)
+                && !matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == &alias_value)
+        });
+    }
+    function.values.remove(&alias_temporary);
+    function.values.remove(&alias_value);
+    // This uses the actual lowering seal constructor and the unchanged exact
+    // origins/CFG. It does not falsify an unrelated stale body/value seal.
+    function.ownership.checker_managed_any = super::managed_any::refresh_checked_lowering(
+        function,
+        &catalog,
+        &instruction_origins,
+        &previous_seal,
+    );
+    assert!(function.ownership.checker_managed_any.is_some());
+    (checked, functions, catalog)
+}
+
 /// A small canonical program used by backend tests for the direct variant
 /// projection island.  The source only seeds the checker-owned Option<i32>
 /// TypeDesc; the test replaces one already-canonical function body with the

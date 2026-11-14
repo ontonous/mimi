@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn interp_list_access() {
@@ -49,14 +50,16 @@ func main() -> i32 {
 #[test]
 fn interp_list_of_strings() {
     let src = r#"
-func main() -> string {
+func list_of_strings_result() -> string {
     let words = ["hello", " ", "world"];
     words[0] + words[1] + words[2]
 }
+func main() -> i32 { 0 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
+        bytecode_call_named(src, "list_of_strings_result", vec![])
+            .expect("list-of-strings helper should run"),
+        interp::Value::String(SharedString::new("hello world".to_string()))
     );
 }
 

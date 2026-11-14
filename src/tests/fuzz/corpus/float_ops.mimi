@@ -1,5 +1,10 @@
-func main() -> f64 {
+func combined_float_operations() -> f64 {
     let a = 3.14;
     let b = 2.71;
     a * b + a / b
+}
+
+func main() -> i32 {
+    println(combined_float_operations());
+    0
 }

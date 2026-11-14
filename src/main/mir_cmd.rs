@@ -64,7 +64,7 @@ pub(crate) fn mir(path: Option<&Path>, all: bool, receipt: bool) -> Result<(), S
     let prelude_source_text = mimi::loader::merge_prelude_into_with_source_text(&mut file);
     let checker_source_snapshot = (all && receipt).then(|| {
         checker_inspection_source_snapshot(
-            &file.sources.records()[..],
+            file.sources.records(),
             &path,
             &source,
             &imported_source_texts,
@@ -250,7 +250,7 @@ fn checker_inspection_source_snapshot(
 /// sorted source bytes only; it deliberately has no MIR digest, materialized
 /// Checker-program digest, or executable-route fields.
 fn checker_inspection_receipt_manifest(
-    checked: &mimi::core::CheckedProgram,
+    checked: &mimi::core::resolved::CheckedProgram,
     sources: &[(String, mimi::span::SourceId, Vec<u8>)],
 ) -> Result<String, String> {
     let admission =

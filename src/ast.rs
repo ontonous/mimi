@@ -126,12 +126,10 @@ pub enum Item {
         ty: Option<Type>,
         value: Expr,
         pub_: bool,
-        /// When `Some(abi)`, this constant is exported as a C-visible data
-        /// symbol (`extern "C" const NAME: T = V`). The native backend emits an
-        /// `External`-linkage module global so a `--shared` build exposes `NAME`
-        /// to dlopen/dlsym consumers — this closes M-004 (component data API,
-        /// e.g. `clap_entry`). Plain `const` items are inlined and never emit a
-        /// global.
+        /// When `Some(abi)`, this constant requests a C-visible data symbol
+        /// (`extern "C" const NAME: T = V`). The current native export slice
+        /// supports i32, i64, f32, f64, and bool scalar literal initializers;
+        /// plain `const` items are inlined and never emit a global.
         extern_abi: Option<String>,
     },
     Flow(FlowDef),

@@ -1,11 +1,121 @@
 use super::{
     derive_typed_loop_proof_receipt, ContractKind, EffectId, Permission, ResolvedBlock,
-    ResolvedBody, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLocalId,
-    ResolvedParameterId, ResolvedStmtKind, ResolvedTypeId, ResolvedTypeTable,
-    TypedLoopProofReceipt,
+    ResolvedBody, ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLiteral, ResolvedLocalId,
+    ResolvedParameterId, ResolvedPatternKind, ResolvedStmtKind, ResolvedTypeId, ResolvedTypeTable,
+    TypedLoopFfiCallPath, TypedLoopProofReceipt,
 };
-use crate::core::{cfg::CallableCfg, NodeId, Origin, ResourceAnalysis};
+use crate::core::{
+    cfg::{BasicBlockId, CallableCfg, EdgeId, EdgeKind, Terminator},
+    NodeId, Origin, ResourceAnalysis,
+};
 use std::collections::{BTreeMap, BTreeSet};
+
+fn exact_result_domain_literals(
+    expression: &ResolvedExpr,
+    result_local: &ResolvedLocalId,
+) -> Option<Vec<i64>> {
+    match &expression.kind {
+        ResolvedExprKind::Binary {
+            op: super::ResolvedBinaryOp::LogicalOr,
+            left,
+            right,
+        } => {
+            let mut values = exact_result_domain_literals(left, result_local)?;
+            values.extend(exact_result_domain_literals(right, result_local)?);
+            Some(values)
+        }
+        ResolvedExprKind::Binary {
+            op: super::ResolvedBinaryOp::Equal,
+            left,
+            right,
+        } => {
+            let (result, literal) = match (&left.kind, &right.kind) {
+                (
+                    ResolvedExprKind::Load(place),
+                    ResolvedExprKind::Literal(ResolvedLiteral::Int(value)),
+                )
+                | (
+                    ResolvedExprKind::Literal(ResolvedLiteral::Int(value)),
+                    ResolvedExprKind::Load(place),
+                ) => (place, *value),
+                _ => return None,
+            };
+            (result.base == *result_local && result.projections.is_empty()).then_some(vec![literal])
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn set_get_any_i32_contract_is_direct_result_domain(
+    condition: &ResolvedExpr,
+    owner: &NodeId,
+    query_key: &str,
+) -> bool {
+    let result_local = ResolvedLocalId(NodeId(format!("{}/contract-result/local", owner.0)));
+    let Some(values) = exact_result_domain_literals(condition, &result_local) else {
+        return false;
+    };
+    let observed = values.iter().copied().collect::<BTreeSet<_>>();
+    if observed.len() != values.len() {
+        return false;
+    }
+    let hit = query_key == "answer";
+    let accepted = if hit {
+        [
+            BTreeSet::from([42, 2, 3]),
+            BTreeSet::from([0, 2, 3]),
+            BTreeSet::from([42]),
+        ]
+    } else if query_key == "absent" {
+        [
+            BTreeSet::from([0, 2, 3]),
+            BTreeSet::from([42, 2, 3]),
+            BTreeSet::from([0]),
+        ]
+    } else {
+        return false;
+    };
+    accepted.iter().any(|domain| domain == &observed)
+}
+
+/// Validate the Result-valued GetAny verifier slice's direct postcondition
+/// shape without deciding its truth. The caller must be a finite disjunction
+/// of distinct `result == status` comparisons drawn from the route's observed
+/// i32 outcomes; the verifier then proves or disproves the actual claim.
+pub(crate) fn set_get_any_result_i32_contract_is_direct_result_domain(
+    condition: &ResolvedExpr,
+    owner: &NodeId,
+) -> bool {
+    let result_local = ResolvedLocalId(NodeId(format!("{}/contract-result/local", owner.0)));
+    let Some(values) = exact_result_domain_literals(condition, &result_local) else {
+        return false;
+    };
+    let observed = values.iter().copied().collect::<BTreeSet<_>>();
+    !observed.is_empty()
+        && observed.len() == values.len()
+        && observed
+            .iter()
+            .all(|value| matches!(*value, 0 | 2 | 3 | 4 | 42))
+}
+
+/// Validate the nested fallible New/Set Values route's direct postcondition
+/// shape. The route's reachable result domain is the selected payload 41,
+/// Set failure 2, or New failure 3. A proper subset remains a well-formed
+/// claim for the verifier to prove or disprove; values outside this closed
+/// domain are rejected before verification.
+pub(crate) fn values_local_index_i32_result_branch_contract_is_direct_result_domain(
+    condition: &ResolvedExpr,
+    owner: &NodeId,
+) -> bool {
+    let result_local = ResolvedLocalId(NodeId(format!("{}/contract-result/local", owner.0)));
+    let Some(values) = exact_result_domain_literals(condition, &result_local) else {
+        return false;
+    };
+    let observed = values.iter().copied().collect::<BTreeSet<_>>();
+    !observed.is_empty()
+        && observed.len() == values.len()
+        && observed.iter().all(|value| matches!(*value, 2 | 3 | 41))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedParameter {
@@ -82,6 +192,338 @@ impl ResolvedCallable {
         !self.contracts.is_empty() || self.body.has_proof_obligations()
     }
 
+    /// The String Set/Get verifier slice keeps its three calls in the typed
+    /// call census, while the Result-match arms do not yet have executable
+    /// proof operations.  This narrowly authenticates the source shape whose
+    /// unmatched arm calls may be retained as proof-only boundary events.
+    /// The MIR consumer must still bind each call to its canonical operation
+    /// and preserve the complete owner census before accepting the worklist.
+    pub(crate) fn has_exact_string_set_get_match_worklist(
+        &self,
+        worklist: &TypedProofPointWorklist,
+    ) -> bool {
+        let Some(receipt) = self
+            .resources
+            .ordinary_map_owned_any_v2_set_get_string_lineage_receipt
+            .as_ref()
+        else {
+            return false;
+        };
+        if !worklist.validate_against(self)
+            || worklist.owner != receipt.owner
+            || self.owner != receipt.owner
+            || receipt.proof_ensures.is_none()
+            || receipt.proof_ensures_expression.is_none()
+            || !matches!(
+                self.body.root.result.as_deref(),
+                Some(ResolvedExpr {
+                    node_id,
+                    kind: ResolvedExprKind::Match { .. },
+                    ..
+                }) if node_id == &receipt.outer_match
+            )
+        {
+            return false;
+        }
+
+        let expected_calls = BTreeSet::from([
+            receipt.new_operation.clone(),
+            receipt.set_operation.clone(),
+            receipt.get_operation.clone(),
+        ]);
+        let actual_calls = worklist
+            .calls
+            .iter()
+            .map(|call| call.call_node.clone())
+            .collect::<BTreeSet<_>>();
+        if worklist.calls.len() != expected_calls.len()
+            || actual_calls != expected_calls
+            || !worklist.points.is_empty()
+            || !worklist.loop_invariant_points().is_empty()
+            || !worklist.deferred_calls.is_empty()
+            || worklist.default_roots.iter().any(|root| {
+                !root.points.is_empty() || !root.calls.is_empty() || !root.boundaries.is_empty()
+            })
+        {
+            return false;
+        }
+
+        let direct_contracts = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| matches!(&statement.kind, ResolvedStmtKind::Contract { .. }))
+            .collect::<Vec<_>>();
+        let Some(ensures) = direct_contracts
+            .first()
+            .copied()
+            .filter(|_| direct_contracts.len() == 1)
+        else {
+            return false;
+        };
+        let ResolvedStmtKind::Contract {
+            kind: ContractKind::Ensures,
+            condition,
+        } = &ensures.kind
+        else {
+            return false;
+        };
+        if receipt.proof_ensures.as_ref() != Some(&ensures.node_id)
+            || receipt.proof_ensures_expression.as_ref() != Some(&condition.node_id)
+            || !set_get_any_i32_contract_is_direct_result_domain(
+                condition,
+                &self.owner,
+                &receipt.get_key_value,
+            )
+        {
+            return false;
+        }
+
+        let allowed_boundary_reasons = [
+            "proof root or effect is nested in an unsupported expression form",
+            "block result call/effect needs a typed return-value receipt",
+        ];
+        let boundary_reasons = worklist
+            .boundaries
+            .iter()
+            .filter(|boundary| boundary.point == receipt.outer_match)
+            .map(|boundary| boundary.reason.as_str())
+            .collect::<BTreeSet<_>>();
+        worklist.boundaries.len() <= allowed_boundary_reasons.len()
+            && boundary_reasons.len() == worklist.boundaries.len()
+            && worklist
+                .boundaries
+                .iter()
+                .all(|boundary| allowed_boundary_reasons.contains(&boundary.reason.as_str()))
+            && matches!(
+                worklist.root.operations.as_slice(),
+                [TypedProofOperation::Call(call)]
+                    if call.call_node == receipt.new_operation
+            )
+    }
+
+    /// The fallible New/Set plus generic GetAny i32-unpack profile has two
+    /// Result matches and three exact effect calls. Its Checker worklist may
+    /// fully model those effects or retain only the narrowly admitted result
+    /// match boundaries; it does not authorize other Result matches or
+    /// arbitrary nested effect expressions.
+    pub(crate) fn has_exact_set_get_any_i32_match_worklist(
+        &self,
+        worklist: &TypedProofPointWorklist,
+    ) -> bool {
+        let Some(receipt) = self
+            .resources
+            .ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt
+            .as_ref()
+        else {
+            return false;
+        };
+        if !worklist.validate_against(self)
+            || worklist.owner != receipt.owner
+            || self.owner != receipt.owner
+            || !matches!(
+                self.body.root.result.as_deref(),
+                Some(ResolvedExpr {
+                    node_id,
+                    kind: ResolvedExprKind::Match { .. },
+                    ..
+                }) if node_id == &receipt.outer_match
+            )
+        {
+            return false;
+        }
+        let expected_calls = BTreeSet::from([
+            receipt.new_operation.clone(),
+            receipt.set_operation.clone(),
+            receipt.get_operation.clone(),
+        ]);
+        let actual_calls = worklist
+            .calls
+            .iter()
+            .map(|call| call.call_node.clone())
+            .collect::<BTreeSet<_>>();
+        if worklist.calls.len() != expected_calls.len()
+            || actual_calls != expected_calls
+            || !worklist.points.is_empty()
+            || !worklist.loop_invariant_points().is_empty()
+            || !worklist.deferred_calls.is_empty()
+            || worklist.default_roots.iter().any(|root| {
+                !root.points.is_empty() || !root.calls.is_empty() || !root.boundaries.is_empty()
+            })
+        {
+            return false;
+        }
+        let contracts = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| matches!(&statement.kind, ResolvedStmtKind::Contract { .. }))
+            .collect::<Vec<_>>();
+        if contracts.len() != 1
+            || !matches!(
+                contracts[0].kind,
+                ResolvedStmtKind::Contract {
+                    kind: ContractKind::Ensures,
+                    ..
+                }
+            )
+        {
+            return false;
+        }
+        let allowed_boundary_reasons = [
+            "proof root or effect is nested in an unsupported expression form",
+            "block result call/effect needs a typed return-value receipt",
+        ];
+        worklist.boundaries.len() <= allowed_boundary_reasons.len() * 2
+            && worklist.boundaries.iter().all(|boundary| {
+                (boundary.point == receipt.outer_match || boundary.point == receipt.set_match)
+                    && allowed_boundary_reasons.contains(&boundary.reason.as_str())
+            })
+    }
+
+    /// The Result-valued `map_get_any` slice may retain only the exact three
+    /// fallible Map call points and the three source Result-match boundaries
+    /// named by its independent Checker receipt. This does not reuse the
+    /// tuple-valued GetAny receipt or authorize any additional Map call.
+    pub(crate) fn has_exact_set_get_any_result_i32_match_worklist(
+        &self,
+        worklist: &TypedProofPointWorklist,
+    ) -> bool {
+        let Some(receipt) = self
+            .resources
+            .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt
+            .as_ref()
+        else {
+            return false;
+        };
+        if !worklist.validate_against(self)
+            || worklist.owner != receipt.owner
+            || self.owner != receipt.owner
+            || receipt.profile_version
+                != crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion::V1
+            || receipt.get_api != crate::core::ownership::OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+            || self
+                .resources
+                .ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt
+                .is_some()
+            || receipt.new_operation == receipt.set_operation
+            || receipt.new_operation == receipt.get_operation
+            || receipt.set_operation == receipt.get_operation
+            || receipt.operations
+                != BTreeSet::from([
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+                        kind: crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::New,
+                        point: receipt.new_operation.clone(),
+                        arguments: Vec::new(),
+                        receiver_local: None,
+                        result_local: Some(receipt.new_result_local.clone()),
+                    },
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+                        kind: crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::Set,
+                        point: receipt.set_operation.clone(),
+                        arguments: vec![
+                            receipt.set_receiver.clone(),
+                            receipt.set_key.clone(),
+                            receipt.set_value.clone(),
+                        ],
+                        receiver_local: Some(receipt.initial_root_local.clone()),
+                        result_local: Some(receipt.set_result_local.clone()),
+                    },
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+                        kind: crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind::GetAny,
+                        point: receipt.get_operation.clone(),
+                        arguments: vec![
+                            receipt.get_receiver.clone(),
+                            receipt.get_key.clone(),
+                        ],
+                        receiver_local: Some(receipt.updated_root_local.clone()),
+                        result_local: Some(receipt.get_result_local.clone()),
+                    },
+                ])
+            || !matches!(
+                self.body.root.result.as_deref(),
+                Some(ResolvedExpr {
+                    node_id,
+                    kind: ResolvedExprKind::Match { .. },
+                    ..
+                }) if node_id == &receipt.new_match
+            )
+        {
+            return false;
+        }
+
+        let expected_calls = BTreeSet::from([
+            receipt.new_operation.clone(),
+            receipt.set_operation.clone(),
+            receipt.get_operation.clone(),
+        ]);
+        let actual_calls = worklist
+            .calls
+            .iter()
+            .map(|call| call.call_node.clone())
+            .collect::<BTreeSet<_>>();
+        if worklist.calls.len() != 3
+            || expected_calls.len() != 3
+            || actual_calls != expected_calls
+            || actual_calls.len() != 3
+            || !worklist.points.is_empty()
+            || !worklist.loop_invariant_points().is_empty()
+            || !worklist.deferred_calls.is_empty()
+            || worklist.default_roots.iter().any(|root| {
+                !root.points.is_empty() || !root.calls.is_empty() || !root.boundaries.is_empty()
+            })
+        {
+            return false;
+        }
+
+        let direct_contracts = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| matches!(&statement.kind, ResolvedStmtKind::Contract { .. }))
+            .collect::<Vec<_>>();
+        let [ensures] = direct_contracts.as_slice() else {
+            return false;
+        };
+        let ResolvedStmtKind::Contract {
+            kind: ContractKind::Ensures,
+            condition,
+        } = &ensures.kind
+        else {
+            return false;
+        };
+        if receipt.proof_ensures.as_ref() != Some(&ensures.node_id)
+            || receipt.proof_ensures_expression.as_ref() != Some(&condition.node_id)
+            || !set_get_any_result_i32_contract_is_direct_result_domain(condition, &self.owner)
+        {
+            return false;
+        }
+
+        let allowed_points = BTreeSet::from([
+            receipt.new_match.clone(),
+            receipt.set_match.clone(),
+            receipt.get_match.clone(),
+        ]);
+        let allowed_reasons = [
+            "proof root or effect is nested in an unsupported expression form",
+            "block result call/effect needs a typed return-value receipt",
+        ];
+        let retained = worklist
+            .boundaries
+            .iter()
+            .map(|boundary| (boundary.point.clone(), boundary.reason.clone()))
+            .collect::<BTreeSet<_>>();
+        retained.len() == worklist.boundaries.len()
+            && retained.len() <= allowed_points.len() * allowed_reasons.len()
+            && worklist.boundaries.iter().all(|boundary| {
+                allowed_points.contains(&boundary.point)
+                    && allowed_reasons.contains(&boundary.reason.as_str())
+            })
+    }
+
     /// These roots are a proof census, not unconditional function assumptions.
     /// Nested contracts and math are supported only when the typed worklist
     /// gives them an ordered program point and lexical control path.
@@ -91,6 +533,23 @@ impl ResolvedCallable {
             return false;
         }
         let worklist = self.proof_point_worklist();
+        let exact_new_result_boundary = self
+            .resources
+            .ordinary_map_owned_any_v2_new_result_receipt
+            .as_ref()
+            .is_some_and(|receipt| {
+                matches!(
+                    worklist.boundaries.as_slice(),
+                    [boundary]
+                        if boundary.point == receipt.match_node
+                            && boundary.reason
+                                == "proof root or effect is nested in an unsupported expression form"
+                )
+            });
+        let exact_string_set_get_match_worklist =
+            self.has_exact_string_set_get_match_worklist(&worklist);
+        let exact_set_get_any_result_i32_match_worklist =
+            self.has_exact_set_get_any_result_i32_match_worklist(&worklist);
         let direct = self
             .body
             .root
@@ -125,7 +584,10 @@ impl ResolvedCallable {
             .math_nodes
             .iter()
             .any(|node| !math_points.contains(node) && !default_math_points.contains(node))
-            || !worklist.boundaries.is_empty()
+            || (!worklist.boundaries.is_empty()
+                && !exact_new_result_boundary
+                && !exact_string_set_get_match_worklist
+                && !exact_set_get_any_result_i32_match_worklist)
             || worklist.default_roots.iter().any(|root| {
                 !root.boundaries.is_empty()
                     || (!root.points.is_empty() && !root.supports_local_only_profile(self))
@@ -158,8 +620,10 @@ impl ResolvedCallable {
             boundaries: Vec::new(),
             points: Vec::new(),
             calls: Vec::new(),
+            match_path: Vec::new(),
             scope: Vec::new(),
             guards: Vec::new(),
+            active_loop_call_paths: Vec::new(),
             next_order: 0,
             root_contracts,
             proof_requested,
@@ -176,8 +640,10 @@ impl ResolvedCallable {
             boundaries: Vec::new(),
             points: Vec::new(),
             calls: Vec::new(),
+            match_path: Vec::new(),
             scope: Vec::new(),
             guards: Vec::new(),
+            active_loop_call_paths: Vec::new(),
             next_order: 0,
             root_contracts: BTreeSet::new(),
             proof_requested: false,
@@ -264,11 +730,13 @@ impl ResolvedCallable {
             boundaries: Vec::new(),
             points: Vec::new(),
             calls: Vec::new(),
+            match_path: Vec::new(),
             scope: vec![TypedProofScopeFrame::Default {
                 parameter: parameter.clone(),
                 expression: expression.node_id.clone(),
             }],
             guards: Vec::new(),
+            active_loop_call_paths: Vec::new(),
             next_order: 0,
             root_contracts: BTreeSet::new(),
             proof_requested: true,
@@ -337,9 +805,51 @@ pub enum TypedProofScopeFrame {
     PlaceInput(NodeId),
 }
 
+/// One arm in the checker-authenticated source selection for a narrow scalar
+/// integer match.  The complete ordered arm vector is carried with each
+/// selected literal arm so MIR consumers can compare the entire dispatch,
+/// including the final wildcard, instead of trusting one matching edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedMatchArmSelection {
+    pub arm: NodeId,
+    pub cfg_edge: EdgeId,
+    pub cfg_target: BasicBlockId,
+    pub case: TypedMatchCase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedMatchCase {
+    Integer(i64),
+    Wildcard,
+}
+
+/// Source/CFG receipt for one exact literal match arm containing a call.
+/// This carries no solver fact: the verifier must still execute the matching
+/// MIR `Switch` and derive the literal equality from that selected edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedMatchPathReceipt {
+    /// Exact call expression for which the Checker issued this selection
+    /// receipt. The same match arm may contain several calls, so an arm-only
+    /// receipt must never be reusable at a neighboring callsite.
+    pub call_node: Option<NodeId>,
+    pub match_expression: NodeId,
+    pub scrutinee_expression: NodeId,
+    pub scrutinee_local: super::ResolvedLocalId,
+    pub scrutinee_type: ResolvedTypeId,
+    pub cfg_dispatch: BasicBlockId,
+    pub arms: Vec<TypedMatchArmSelection>,
+    pub selected_arm: NodeId,
+    /// Commitment to the identical ownership ledger at the dispatch exit and
+    /// every arm-entry edge.  A path receipt is withheld if selection itself
+    /// changes ownership state or performs an edge-associated action.
+    pub ownership_state_fingerprint: [u8; 32],
+}
+
 #[derive(Debug, Clone)]
 pub struct TypedMathProofPoint {
     pub id: TypedProofPointId,
+    /// Exact source span of the enclosing `math: { ... }` statement.
+    pub statement_span: crate::span::Span,
     /// Monotone expression/statement evaluation event order within `owner`.
     /// Call points share this counter, so consumers can split proven facts at
     /// the exact call boundary instead of treating a body as one environment.
@@ -368,6 +878,10 @@ pub struct TypedCallProofPoint {
     /// Boolean path conditions for `if` arms and short-circuit RHS terms.
     /// `Deferred` points retain their guard/census but cannot authorize proof.
     pub guards: Vec<TypedCallGuard>,
+    /// Exact nested scalar Match selections enclosing this call. Wildcard
+    /// calls and unsupported patterns deliberately carry no selection receipt
+    /// and remain Deferred.
+    pub match_path: Vec<TypedMatchPathReceipt>,
     pub disposition: TypedCallExecutionDisposition,
     pub expression: ResolvedExpr,
     /// Every call defaults to unknown host/state mutation. An empty source
@@ -603,7 +1117,7 @@ impl TypedProofPointWorklist {
 
     fn compute_witness(&self) -> blake3::Hash {
         let material = format!(
-            "typed-proof-worklist-v3\nowner={:?}\nbody={}\nroot={:#?}\npoints={:#?}\ncalls={:#?}\ndefault_roots={:#?}\ndefault_uses={:#?}\ndeferred_calls={:#?}\nboundaries={:#?}",
+            "typed-proof-worklist-v4\nowner={:?}\nbody={}\nroot={:#?}\npoints={:#?}\ncalls={:#?}\ndefault_roots={:#?}\ndefault_uses={:#?}\ndeferred_calls={:#?}\nboundaries={:#?}",
             self.owner,
             self.source_body_fingerprint,
             self.root,
@@ -770,7 +1284,7 @@ impl TypedCallProofPoint {
 
     fn compute_witness(&self) -> blake3::Hash {
         let material = format!(
-            "typed-call-proof-point-v2\nbody_owner={:?}\nowner={:?}\nstatement={:?}\ncall_node={:?}\norder={}\nscope={:?}\nguards={:#?}\ndisposition={:?}\nexpression={:#?}\neffect={:#?}\nbody={}",
+            "typed-call-proof-point-v3\nbody_owner={:?}\nowner={:?}\nstatement={:?}\ncall_node={:?}\norder={}\nscope={:?}\nguards={:#?}\nmatch_path={:#?}\ndisposition={:?}\nexpression={:#?}\neffect={:#?}\nbody={}",
             self.body_owner,
             self.owner,
             self.statement,
@@ -778,6 +1292,7 @@ impl TypedCallProofPoint {
             self.order,
             self.scope,
             self.guards,
+            self.match_path,
             self.disposition,
             self.expression,
             self.effect,
@@ -1007,8 +1522,12 @@ struct ProofPointBuilder<'a> {
     boundaries: Vec<TypedProofBoundary>,
     points: Vec<TypedMathProofPoint>,
     calls: Vec<TypedCallProofPoint>,
+    match_path: Vec<TypedMatchPathReceipt>,
     scope: Vec<TypedProofScopeFrame>,
     guards: Vec<TypedCallGuard>,
+    /// A loop-local call can be executable only when its exact checker loop
+    /// receipt carries the narrow immutable at-most-once FFI call profile.
+    active_loop_call_paths: Vec<(NodeId, Option<TypedLoopFfiCallPath>)>,
     next_order: u64,
     root_contracts: BTreeSet<NodeId>,
     /// Once a callable has a proof root, every executable statement that can
@@ -1019,6 +1538,16 @@ struct ProofPointBuilder<'a> {
 }
 
 impl ProofPointBuilder<'_> {
+    fn exact_new_result_match(&self, expression: &ResolvedExpr) -> bool {
+        matches!(&expression.kind, ResolvedExprKind::Match { .. })
+            && self
+                .callable
+                .resources
+                .ordinary_map_owned_any_v2_new_result_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.match_node == expression.node_id)
+    }
+
     fn defer(&mut self, point: &NodeId, reason: &str) {
         self.boundaries.push(TypedProofBoundary {
             point: point.clone(),
@@ -1045,6 +1574,29 @@ impl ProofPointBuilder<'_> {
         let ResolvedExprKind::Call(call) = &expression.kind else {
             return;
         };
+        let loop_call_supported = {
+            let active_loops = self
+                .scope
+                .iter()
+                .filter_map(|frame| match frame {
+                    TypedProofScopeFrame::Loop(loop_node) => Some(loop_node),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if let [loop_node] = active_loops.as_slice() {
+                self.active_loop_call_paths
+                    .last()
+                    .filter(|(active_loop, _)| active_loop == *loop_node)
+                    .and_then(|(_, profile)| profile.as_ref())
+                    .is_some_and(|profile| {
+                        profile.loop_node == **loop_node
+                            && profile.call_statement == *statement
+                            && profile.call_node == expression.node_id
+                    })
+            } else {
+                false
+            }
+        };
         let disposition = if let Some(reason) = deferred {
             TypedCallExecutionDisposition::Deferred(reason.to_owned())
         } else if self
@@ -1052,23 +1604,49 @@ impl ProofPointBuilder<'_> {
             .iter()
             .any(|frame| matches!(frame, TypedProofScopeFrame::Default { .. }))
         {
-            TypedCallExecutionDisposition::Deferred(
-                "default expression call requires exact omitted-argument expansion".into(),
-            )
+            let reason = if self
+                .scope
+                .iter()
+                .any(|frame| matches!(frame, TypedProofScopeFrame::Block(_)))
+            {
+                // A block embedded in a declaration default has a lexical
+                // DefaultArgument receipt, but no transfer timeline for its
+                // internal execution calls. Keep those calls in the census
+                // without allowing an active default use to execute them.
+                "nested expression block has no transfer timeline"
+            } else {
+                "default expression call requires exact omitted-argument expansion"
+            };
+            TypedCallExecutionDisposition::Deferred(reason.into())
         } else if self
             .scope
             .iter()
             .any(|frame| matches!(frame, TypedProofScopeFrame::Loop(_)))
         {
-            TypedCallExecutionDisposition::Deferred(
-                "loop call point lacks a validated induction/effect receipt".into(),
-            )
-        } else if self.guards.is_empty() {
+            if loop_call_supported {
+                // A loop call is conditional on the real condition-true CFG
+                // edge even if its lexical `if` guard list is empty.
+                TypedCallExecutionDisposition::Guarded
+            } else {
+                TypedCallExecutionDisposition::Deferred(
+                    "loop call point lacks an exact immutable at-most-once FFI path receipt".into(),
+                )
+            }
+        } else if self.guards.is_empty() && self.match_path.is_empty() {
             TypedCallExecutionDisposition::Unconditional
         } else {
             TypedCallExecutionDisposition::Guarded
         };
         let event_order = self.next_event_order();
+        let match_path = self
+            .match_path
+            .iter()
+            .cloned()
+            .map(|mut receipt| {
+                receipt.call_node = Some(expression.node_id.clone());
+                receipt
+            })
+            .collect::<Vec<_>>();
         let mut point = TypedCallProofPoint {
             body_owner: self.owner.clone(),
             owner: owner.clone(),
@@ -1077,6 +1655,7 @@ impl ProofPointBuilder<'_> {
             order: event_order,
             scope: self.scope.clone(),
             guards: self.guards.clone(),
+            match_path,
             disposition,
             expression: expression.clone(),
             effect: TypedCallEffectReceipt {
@@ -1090,6 +1669,146 @@ impl ProofPointBuilder<'_> {
         };
         point.private_witness = point.compute_witness();
         self.calls.push(point);
+    }
+
+    /// Mint a Checker receipt only for a complete signed-i32/i64 scalar
+    /// dispatch.  The CFG edge and resource-state checks happen here, while
+    /// the matching MIR Switch and call reachability are independently
+    /// checked by the MIR/FFI receipt validator.
+    fn literal_match_path_receipts(
+        &self,
+        expression: &ResolvedExpr,
+        scrutinee: &ResolvedExpr,
+        arms: &[super::MatchArm],
+    ) -> Option<Vec<TypedMatchPathReceipt>> {
+        if arms.len() < 2 || arms.iter().any(|arm| arm.guard.is_some()) {
+            return None;
+        }
+        let (local_id, scrutinee_type) = match &scrutinee.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                (place.base.clone(), scrutinee.ty.clone())
+            }
+            _ => return None,
+        };
+        let local = self.callable.body.locals.get(&local_id)?;
+        if local.ty != scrutinee_type {
+            return None;
+        }
+        let is_i32 = scrutinee_type == super::primitive_type_id(super::PrimitiveType::I32);
+        let is_i64 = scrutinee_type == super::primitive_type_id(super::PrimitiveType::I64);
+        if !is_i32 && !is_i64 {
+            return None;
+        }
+
+        let mut seen_literals = BTreeSet::new();
+        let mut cases = Vec::with_capacity(arms.len());
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.pattern.kind {
+                ResolvedPatternKind::Literal(ResolvedLiteral::Int(value))
+                    if index + 1 < arms.len()
+                        && (!is_i32 || i32::try_from(*value).is_ok())
+                        && seen_literals.insert(*value) =>
+                {
+                    cases.push(TypedMatchCase::Integer(*value));
+                }
+                ResolvedPatternKind::Wildcard if index + 1 == arms.len() => {
+                    cases.push(TypedMatchCase::Wildcard);
+                }
+                _ => return None,
+            }
+        }
+        if cases.last() != Some(&TypedMatchCase::Wildcard)
+            || cases[..cases.len() - 1]
+                .iter()
+                .any(|case| !matches!(case, TypedMatchCase::Integer(_)))
+        {
+            return None;
+        }
+
+        let mut dispatches = self.callable.cfg.blocks.values().filter(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Match { scrutinee: candidate, .. }
+                    if candidate == &scrutinee.node_id
+            )
+        });
+        let dispatch = dispatches.next()?;
+        if dispatches.next().is_some() || !self.callable.cfg.reachable.contains(&dispatch.id) {
+            return None;
+        }
+        let Terminator::Match {
+            scrutinee: cfg_scrutinee,
+            arms: cfg_edges,
+        } = &dispatch.terminator
+        else {
+            return None;
+        };
+        if cfg_scrutinee != &scrutinee.node_id || cfg_edges.len() != arms.len() {
+            return None;
+        }
+
+        let dispatch_state = self.callable.resources.out_states.get(&dispatch.id)?;
+        let mut selections = Vec::with_capacity(arms.len());
+        let mut seen_edges = BTreeSet::new();
+        let mut seen_targets = BTreeSet::new();
+        for ((arm, edge_id), case) in arms.iter().zip(cfg_edges).zip(&cases) {
+            if !seen_edges.insert(edge_id.clone()) {
+                return None;
+            }
+            let edge = self.callable.cfg.edges.get(edge_id)?;
+            if edge.id != *edge_id
+                || edge.from != dispatch.id
+                || edge.kind != EdgeKind::MatchArm
+                || edge.source.node != arm.node_id
+                || edge.source.origin != arm.origin
+                || !self.callable.cfg.reachable.contains(&edge.to)
+                || !seen_targets.insert(edge.to.clone())
+                || self
+                    .callable
+                    .resources
+                    .actions
+                    .iter()
+                    .any(|action| action.location.edge.as_ref() == Some(edge_id))
+                || self.callable.resources.in_states.get(&edge.to)? != dispatch_state
+            {
+                return None;
+            }
+            selections.push(TypedMatchArmSelection {
+                arm: arm.node_id.clone(),
+                cfg_edge: edge_id.clone(),
+                cfg_target: edge.to.clone(),
+                case: case.clone(),
+            });
+        }
+        if selections.len() != arms.len() {
+            return None;
+        }
+
+        let mut ownership_material = format!(
+            "typed-match-selection-ownership-v1\nowner={:?}\nmatch={:?}\ndispatch={:?}\nstate={:#?}",
+            self.callable.owner, expression.node_id, dispatch.id, dispatch_state
+        );
+        for selection in &selections {
+            ownership_material.push_str(&format!("\narm={selection:#?}"));
+        }
+        let ownership_state_fingerprint = *blake3::hash(ownership_material.as_bytes()).as_bytes();
+        Some(
+            selections
+                .iter()
+                .filter(|selection| matches!(&selection.case, TypedMatchCase::Integer(_)))
+                .map(|selection| TypedMatchPathReceipt {
+                    call_node: None,
+                    match_expression: expression.node_id.clone(),
+                    scrutinee_expression: scrutinee.node_id.clone(),
+                    scrutinee_local: local_id.clone(),
+                    scrutinee_type: scrutinee_type.clone(),
+                    cfg_dispatch: dispatch.id.clone(),
+                    arms: selections.clone(),
+                    selected_arm: selection.arm.clone(),
+                    ownership_state_fingerprint,
+                })
+                .collect(),
+        )
     }
 
     /// Collect calls in Mimi's left-to-right expression order. The visitor
@@ -1250,6 +1969,8 @@ impl ProofPointBuilder<'_> {
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.expression_calls(owner, statement, scrutinee, deferred);
+                let selection_receipts =
+                    self.literal_match_path_receipts(expression, scrutinee, arms);
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
                         self.expression_calls(
@@ -1259,12 +1980,43 @@ impl ProofPointBuilder<'_> {
                             Some("match arm guard requires pattern-selection receipt"),
                         );
                     }
-                    self.expression_calls(
-                        owner,
-                        &arm.node_id,
-                        &arm.body,
-                        Some("match arm requires typed pattern-selection path receipt"),
-                    );
+                    let selection = selection_receipts.as_ref().and_then(|receipts| {
+                        receipts
+                            .iter()
+                            .find(|receipt| receipt.selected_arm == arm.node_id)
+                            .cloned()
+                    });
+                    let arm_deferred = if deferred.is_some() {
+                        deferred
+                    } else if selection.is_some() {
+                        None
+                    } else {
+                        Some(
+                            "wildcard or unsupported match arm has no executable pattern-selection receipt",
+                        )
+                    };
+                    let pushed_selection = selection.is_some();
+                    if let Some(selection) = selection {
+                        self.match_path.push(selection);
+                    }
+                    if let Some(call) = arm_deferred
+                        .is_none()
+                        .then(|| direct_scalar_ffi_match_arm_call(&arm.body))
+                        .flatten()
+                    {
+                        // The parser represents even an expression-bodied match
+                        // arm as a value-producing block. Its exact typed shape
+                        // (no statements, one direct scalar FFI call as the
+                        // result) is a complete transfer timeline: record the
+                        // call at the arm identity, without inventing a block
+                        // boundary whose effects have not been analyzed.
+                        self.expression_calls(owner, &arm.node_id, call, None);
+                    } else {
+                        self.expression_calls(owner, &arm.node_id, &arm.body, arm_deferred);
+                    }
+                    if pushed_selection {
+                        self.match_path.pop();
+                    }
                 }
             }
             ResolvedExprKind::Range { start, end } => {
@@ -1516,6 +2268,7 @@ impl ProofPointBuilder<'_> {
                                 statement: statement.node_id.clone(),
                                 ordinal: ordinal as u32,
                             },
+                            statement_span: statement.origin.user_span(),
                             order,
                             scope: self.scope.clone(),
                             condition: condition.clone(),
@@ -1594,20 +2347,27 @@ impl ProofPointBuilder<'_> {
                     // root-only callables without loops are unaffected.
                     let loop_proof_requested =
                         self.proof_requested || !self.root_contracts.is_empty();
-                    if loop_proof_requested
+                    let ffi_call_path = receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.ffi_call_path.clone());
+                    let induction_profile_missing = ffi_call_path.is_none()
                         && (invariants.is_empty()
                             || receipt.is_none()
                             || receipt.as_ref().is_some_and(|receipt| {
                                 !receipt.call_nodes.is_empty() || !receipt.effect_nodes.is_empty()
-                            })
-                            || !proof_expression_is_pure(condition))
+                            }));
+                    if loop_proof_requested
+                        && (induction_profile_missing || !proof_expression_is_pure(condition))
                     {
                         self.defer(
                             &statement.node_id,
-                            "loop needs a valid induction receipt, a leading invariant, pure typed values, and no unmodeled calls or effects",
+                            "loop needs either a valid induction receipt or the exact immutable at-most-once FFI call profile, with pure typed values and no unmodeled effects",
                         );
                     }
+                    self.active_loop_call_paths
+                        .push((statement.node_id.clone(), ffi_call_path));
                     let body_block = self.block(body, &consumed);
+                    self.active_loop_call_paths.pop();
                     self.scope.pop();
                     if expression_contains_proof_root(condition) {
                         self.defer(
@@ -1628,6 +2388,7 @@ impl ProofPointBuilder<'_> {
                 ResolvedStmtKind::Expr(expression) => {
                     let call_start = self.calls.len();
                     let operation = self.expression(expression, &statement.node_id);
+                    let exact_new_result_match = self.exact_new_result_match(expression);
                     self.append_current_scope_calls(&mut output, call_start);
                     if let Some(operation) = operation {
                         output.operations.push(operation);
@@ -1639,6 +2400,7 @@ impl ProofPointBuilder<'_> {
                     } else if self.proof_requested
                         && !proof_expression_is_pure(expression)
                         && !standalone_checked_call(expression)
+                        && !exact_new_result_match
                     {
                         self.defer(
                             &statement.node_id,
@@ -1832,13 +2594,18 @@ impl ProofPointBuilder<'_> {
         if let Some(result) = &block.result {
             let call_start = self.calls.len();
             let operation = self.expression(result, &block.node_id);
+            let exact_new_result_match = self.exact_new_result_match(result);
             self.append_current_scope_calls(&mut output, call_start);
-            if operation.is_none() && expression_contains_proof_root(result) {
+            if operation.is_none()
+                && !exact_new_result_match
+                && expression_contains_proof_root(result)
+            {
                 self.defer(
                     &result.node_id,
                     "block result embeds a proof root without an evaluation-order receipt",
                 );
             } else if operation.is_none()
+                && !exact_new_result_match
                 && self.proof_requested
                 && !proof_expression_is_pure(result)
                 && !standalone_checked_call(result)
@@ -1867,6 +2634,51 @@ impl ProofPointBuilder<'_> {
         statement: &NodeId,
     ) -> Option<TypedProofOperation> {
         match &expression.kind {
+            ResolvedExprKind::Match { .. } if self.exact_new_result_match(expression) => {
+                let call_start = self.calls.len();
+                self.expression_calls(self.owner, statement, expression, None);
+                if self.proof_requested {
+                    self.defer(
+                        &expression.node_id,
+                        "proof root or effect is nested in an unsupported expression form",
+                    );
+                    let receipt = self
+                        .callable
+                        .resources
+                        .ordinary_map_owned_any_v2_new_result_receipt
+                        .as_ref()?;
+                    let [size_call] = &self.calls[call_start..] else {
+                        self.defer(
+                            &expression.node_id,
+                            "NewResult match proof calls do not have one exact size-call scope",
+                        );
+                        return None;
+                    };
+                    if size_call.call_node != receipt.size_operation
+                        || size_call.scope.get(..self.scope.len()) != Some(self.scope.as_slice())
+                    {
+                        self.defer(
+                            &expression.node_id,
+                            "NewResult match proof call is detached from its exact checked scope",
+                        );
+                        return None;
+                    }
+                    let [TypedProofScopeFrame::Block(arm_block)] =
+                        &size_call.scope[self.scope.len()..]
+                    else {
+                        self.defer(
+                            &expression.node_id,
+                            "NewResult match proof call has an unsupported nested scope shape",
+                        );
+                        return None;
+                    };
+                    return Some(TypedProofOperation::Scope(TypedProofBlock {
+                        id: arm_block.clone(),
+                        operations: vec![TypedProofOperation::Call(size_call.clone())],
+                    }));
+                }
+                None
+            }
             ResolvedExprKind::If {
                 condition,
                 then_block,
@@ -1963,6 +2775,47 @@ fn standalone_checked_call(expression: &ResolvedExpr) -> bool {
     call.arguments
         .iter()
         .all(|argument| proof_expression_is_pure(&argument.value))
+}
+
+fn direct_scalar_ffi_match_arm_call(arm_body: &ResolvedExpr) -> Option<&ResolvedExpr> {
+    let ResolvedExprKind::Block(block) = &arm_body.kind else {
+        return None;
+    };
+    if !block.statements.is_empty() {
+        return None;
+    }
+    let call_expression = block.result.as_deref()?;
+    let ResolvedExprKind::Call(call) = &call_expression.kind else {
+        return None;
+    };
+    if !matches!(&call.callee, ResolvedCallee::Extern(_))
+        || !call.type_arguments.is_empty()
+        || call.permission.is_some()
+        || !call.session.is_empty()
+        || call.arguments.len() != 1
+        || !signed_scalar_type(&call.result)
+        || call_expression.ty != call.result
+        || block.ty != call_expression.ty
+    {
+        return None;
+    }
+    let argument = &call.arguments[0];
+    if !matches!(
+        &argument.value.kind,
+        ResolvedExprKind::Load(place) if place.projections.is_empty()
+    ) || !signed_scalar_type(&argument.value.ty)
+        || argument.conversion.kind != super::CheckedConversionKind::Identity
+        || argument.conversion.from != argument.value.ty
+        || argument.conversion.to != argument.value.ty
+    {
+        return None;
+    }
+    Some(call_expression)
+}
+
+fn signed_scalar_type(ty: &ResolvedTypeId) -> bool {
+    ty == &super::primitive_type_id(super::PrimitiveType::I32)
+        || ty == &super::primitive_type_id(super::PrimitiveType::I64)
 }
 
 fn resolved_body_fingerprint(body: &ResolvedBody) -> String {
@@ -2135,12 +2988,6 @@ fn stationary_loop_body(block: &ResolvedBlock) -> bool {
     block.result.is_none()
 }
 
-fn block_contains_math_point(block: &ResolvedBlock) -> bool {
-    let mut roots = ProofRoots::default();
-    collect_contracts(block, &mut roots);
-    roots.has_math
-}
-
 fn proof_expression_is_pure(expression: &ResolvedExpr) -> bool {
     match &expression.kind {
         ResolvedExprKind::Literal(_)
@@ -2155,6 +3002,16 @@ fn proof_expression_is_pure(expression: &ResolvedExpr) -> bool {
                 }
         }
         ResolvedExprKind::Unary { operand, .. } => proof_expression_is_pure(operand),
+        // Identity and numeric widening are total value conversions, so keep
+        // their branch facts (for example `x > (0 as i64)`). Narrowing and
+        // dynamic downcasts can trap, while ownership/dynamic packing may
+        // cross runtime boundaries; those conversions remain proof boundaries.
+        ResolvedExprKind::Cast { value, conversion } => {
+            matches!(
+                conversion.kind,
+                super::CheckedConversionKind::Identity | super::CheckedConversionKind::NumericWiden
+            ) && proof_expression_is_pure(value)
+        }
         ResolvedExprKind::Binary { left, right, .. } => {
             proof_expression_is_pure(left) && proof_expression_is_pure(right)
         }
@@ -2550,6 +3407,35 @@ mod tests {
         NodeId(format!("test:{value}"))
     }
 
+    fn checked_program(source: &str) -> crate::core::CheckedProgram {
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("tokenize match path fixture");
+        let file = crate::parser::Parser::new_memory(
+            tokens,
+            "typed-match-path-test",
+            "typed-match-path-test",
+            source,
+        )
+        .expect("create match path parser")
+        .parse_file()
+        .expect("parse match path fixture");
+        crate::core::check_program(&file).expect("check match path fixture")
+    }
+
+    fn body_call_points(
+        checked: &crate::core::CheckedProgram,
+        function: &str,
+    ) -> (ResolvedCallable, TypedProofPointWorklist) {
+        let owner = NodeId(format!("function:{function}"));
+        let callable = checked
+            .callable(&owner)
+            .expect("checked function callable")
+            .clone();
+        let worklist = callable.proof_point_worklist();
+        (callable, worklist)
+    }
+
     #[test]
     fn signature_rejects_duplicate_parameter_identity() {
         let mut types = ResolvedTypeTable::new();
@@ -2581,5 +3467,150 @@ mod tests {
             .unwrap_err()
             .iter()
             .any(|error| error.message.contains("parameter identities")));
+    }
+
+    #[test]
+    fn literal_match_call_receipts_are_callsite_bound_and_unsupported_shapes_defer() {
+        let source = r#"
+            extern "C" { func foreign(value: i32) -> i32; }
+            func literal_and_wildcard(value: i32) -> i32 {
+                match value {
+                    7 => foreign(value),
+                    _ => foreign(value)
+                }
+            }
+            func guarded(value: i32) -> i32 {
+                match value {
+                    7 if value > 0 => foreign(value),
+                    _ => 0
+                }
+            }
+            func overlapping(value: i32) -> i32 {
+                match value {
+                    7 => foreign(value),
+                    7 => foreign(value),
+                    _ => 0
+                }
+            }
+            func prefixed_assignment(value: i32) -> i32 {
+                match value {
+                    7 => {
+                        let mut candidate = value;
+                        candidate = candidate + 1;
+                        foreign(candidate)
+                    },
+                    _ => 0
+                }
+            }
+            func prefixed_effect(value: i32) -> i32 {
+                match value {
+                    7 => { foreign(value); foreign(value) },
+                    _ => 0
+                }
+            }
+            func main() -> i64 { 0 }
+        "#;
+        let checked = checked_program(source);
+
+        let (literal_callable, literal_worklist) =
+            body_call_points(&checked, "literal_and_wildcard");
+        assert!(literal_worklist.validate_in_checked_program(&checked));
+        assert_eq!(literal_worklist.calls.len(), 2);
+        let literal_call = &literal_worklist.calls[0];
+        assert_eq!(
+            literal_call.disposition,
+            TypedCallExecutionDisposition::Guarded
+        );
+        assert_eq!(literal_call.match_path.len(), 1);
+        assert_eq!(
+            literal_call.match_path[0].call_node.as_ref(),
+            Some(&literal_call.call_node)
+        );
+        assert_eq!(
+            literal_call.match_path[0].selected_arm,
+            literal_call.match_path[0].arms[0].arm
+        );
+        assert_eq!(
+            literal_call.match_path[0].arms[0].case,
+            TypedMatchCase::Integer(7)
+        );
+        assert_eq!(
+            literal_call.match_path[0].arms[0].cfg_edge.0 .0,
+            format!(
+                "{}/cfg:edge:match-arm",
+                literal_call.match_path[0].arms[0].arm.0
+            )
+        );
+        assert_eq!(
+            literal_call.match_path[0].arms[0].cfg_target.0 .0,
+            format!(
+                "{}/cfg:block:match-arm",
+                literal_call.match_path[0].arms[0].arm.0
+            )
+        );
+        assert_eq!(
+            literal_call.statement,
+            literal_call.match_path[0].selected_arm
+        );
+        assert_eq!(
+            literal_worklist
+                .root
+                .operations
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    TypedProofOperation::Call(point) if point.call_node == literal_call.call_node
+                ))
+                .count(),
+            1,
+            "the selected direct call must occupy one exact typed transfer event"
+        );
+        let wildcard_call = &literal_worklist.calls[1];
+        assert!(matches!(
+            &wildcard_call.disposition,
+            TypedCallExecutionDisposition::Deferred(_)
+        ));
+        assert!(wildcard_call.match_path.is_empty());
+
+        let mut forged_worklist = literal_worklist.clone();
+        forged_worklist.calls[0].match_path[0].arms[0].case = TypedMatchCase::Integer(8);
+        assert!(
+            !forged_worklist.validate_in_checked_program(&checked),
+            "a stale or forged literal-case receipt must not survive checker rederivation"
+        );
+        assert!(literal_callable
+            .proof_point_worklist()
+            .validate_against(&literal_callable));
+
+        for function in ["guarded", "overlapping"] {
+            let (_, worklist) = body_call_points(&checked, function);
+            assert!(
+                !worklist.calls.is_empty(),
+                "the unsupported {function} call remains in the checker census"
+            );
+            assert!(
+                worklist.calls.iter().all(|call| {
+                    matches!(
+                        &call.disposition,
+                        TypedCallExecutionDisposition::Deferred(_)
+                    ) && call.match_path.is_empty()
+                }),
+                "unsupported {function} pattern shape must not gain a match receipt"
+            );
+        }
+
+        for function in ["prefixed_assignment", "prefixed_effect"] {
+            let (_, worklist) = body_call_points(&checked, function);
+            assert!(!worklist.calls.is_empty());
+            assert!(
+                worklist.calls.iter().all(|call| {
+                    matches!(
+                        &call.disposition,
+                        TypedCallExecutionDisposition::Deferred(_)
+                    )
+                }),
+                "a multi-event {function} arm must stay fail-closed"
+            );
+        }
     }
 }

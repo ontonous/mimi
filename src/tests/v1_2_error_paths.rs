@@ -293,16 +293,16 @@ fn error_path_runtime_use_after_move() {
     // Session), not infrastructure primitives (SD-2). Strings are value types
     // in the bytecode VM: `let t = s` copies, so reusing `s` is legal.
     let src = r#"
-func main() -> string {
+func reused_string() -> string {
     let s = "hello";
     let t = s;
     s
 }
+func main() -> i32 {
+    if reused_string() == "hello" { 1 } else { 0 }
+}
 "#;
-    assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello".to_string())))
-    );
+    assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(1)));
 }
 
 #[test]

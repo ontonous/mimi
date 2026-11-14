@@ -105,7 +105,7 @@ impl ResolvedPlace {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CheckedConversionKind {
     Identity,
     /// Inject a concrete state into a checker-closed transition target set.
@@ -424,6 +424,312 @@ pub enum ResolvedExprKind {
     TypeValue(ResolvedTypeId),
 }
 
+impl ResolvedExpr {
+    /// Source identities whose evaluation is eager when this expression is
+    /// evaluated.  The returned set follows only runtime evaluation edges:
+    /// record fields, projection bases, call arguments, and control-flow
+    /// operands are included, while closure bodies, `comptime`, `quote`,
+    /// `typeof`, and specification-only `old`/`math` bodies remain latent.
+    ///
+    /// This is used to bind MIR trap origins back to the exact checked source
+    /// argument that can evaluate them.  It intentionally includes source
+    /// statement/block identities too, since lowerers may name an executable
+    /// check or drop after its owning statement rather than an expression.
+    pub(crate) fn eager_source_nodes(&self) -> Vec<NodeId> {
+        fn place(place: &ResolvedPlace, nodes: &mut BTreeSet<NodeId>) {
+            for projection in &place.projections {
+                if let ResolvedProjection::Index {
+                    index: ResolvedIndex::Dynamic(node),
+                    ..
+                } = projection
+                {
+                    nodes.insert(node.clone());
+                }
+            }
+        }
+
+        fn block(block: &ResolvedBlock, nodes: &mut BTreeSet<NodeId>) {
+            nodes.insert(block.node_id.clone());
+            for statement in &block.statements {
+                stmt(statement, nodes);
+            }
+            if let Some(result) = &block.result {
+                expr(result, nodes);
+            }
+        }
+
+        fn pattern(value: &ResolvedPattern, nodes: &mut BTreeSet<NodeId>) {
+            nodes.insert(value.node_id.clone());
+            match &value.kind {
+                ResolvedPatternKind::Constructor { fields, .. } => {
+                    for (_, nested) in fields {
+                        pattern(nested, nodes);
+                    }
+                }
+                ResolvedPatternKind::Tuple(patterns) | ResolvedPatternKind::Array(patterns) => {
+                    for nested in patterns {
+                        pattern(nested, nodes);
+                    }
+                }
+                ResolvedPatternKind::Slice { prefix, rest } => {
+                    for nested in prefix {
+                        pattern(nested, nodes);
+                    }
+                    if let Some(rest) = rest {
+                        pattern(rest, nodes);
+                    }
+                }
+                ResolvedPatternKind::Wildcard
+                | ResolvedPatternKind::Binding { .. }
+                | ResolvedPatternKind::Literal(_) => {}
+            }
+        }
+
+        fn stmt(statement: &ResolvedStmt, nodes: &mut BTreeSet<NodeId>) {
+            nodes.insert(statement.node_id.clone());
+            match &statement.kind {
+                ResolvedStmtKind::Bind {
+                    pattern: binding,
+                    initializer,
+                } => {
+                    pattern(binding, nodes);
+                    if let Some(initializer) = initializer {
+                        expr(initializer, nodes);
+                    }
+                }
+                ResolvedStmtKind::Assign { target, value, .. } => {
+                    place(target, nodes);
+                    expr(value, nodes);
+                }
+                ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                    if let Some(value) = value {
+                        expr(value, nodes);
+                    }
+                }
+                ResolvedStmtKind::Expr(expression) => expr(expression, nodes),
+                ResolvedStmtKind::While { condition, body } => {
+                    expr(condition, nodes);
+                    block(body, nodes);
+                }
+                ResolvedStmtKind::WhileLet {
+                    pattern: binding,
+                    initializer,
+                    body,
+                } => {
+                    pattern(binding, nodes);
+                    expr(initializer, nodes);
+                    block(body, nodes);
+                }
+                ResolvedStmtKind::IfLet {
+                    pattern: binding,
+                    initializer,
+                    then_block,
+                    else_block,
+                } => {
+                    pattern(binding, nodes);
+                    expr(initializer, nodes);
+                    block(then_block, nodes);
+                    if let Some(else_block) = else_block {
+                        block(else_block, nodes);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) => block(body, nodes),
+                ResolvedStmtKind::For {
+                    pattern: binding,
+                    iterable,
+                    body,
+                } => {
+                    pattern(binding, nodes);
+                    expr(iterable, nodes);
+                    block(body, nodes);
+                }
+                ResolvedStmtKind::Drop(places) => {
+                    for place_value in places {
+                        place(place_value, nodes);
+                    }
+                }
+                ResolvedStmtKind::Contract { condition, .. } => expr(condition, nodes),
+                // `math` is a specification root, not a runtime expression.
+                ResolvedStmtKind::Math(_) => {}
+                ResolvedStmtKind::Scope { body, .. } => block(body, nodes),
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    expr(value, nodes);
+                    block(body, nodes);
+                }
+                ResolvedStmtKind::Continue | ResolvedStmtKind::NestedCallable(_) => {}
+            }
+        }
+
+        fn expr(expression: &ResolvedExpr, nodes: &mut BTreeSet<NodeId>) {
+            nodes.insert(expression.node_id.clone());
+            match &expression.kind {
+                ResolvedExprKind::FString(parts) => {
+                    for part in parts {
+                        if let ResolvedFStringPart::Interpolation(value) = part {
+                            expr(value, nodes);
+                        }
+                    }
+                }
+                ResolvedExprKind::Load(value) => place(value, nodes),
+                ResolvedExprKind::Project { value, projection } => {
+                    expr(value, nodes);
+                    if let ResolvedValueProjection::Index(index) = projection {
+                        expr(index, nodes);
+                    }
+                }
+                ResolvedExprKind::Binary { left, right, .. }
+                | ResolvedExprKind::Range {
+                    start: left,
+                    end: right,
+                } => {
+                    expr(left, nodes);
+                    expr(right, nodes);
+                }
+                ResolvedExprKind::Unary { operand, .. }
+                | ResolvedExprKind::OptionalChain {
+                    receiver: operand, ..
+                }
+                | ResolvedExprKind::Try { value: operand, .. }
+                | ResolvedExprKind::Cast { value: operand, .. }
+                | ResolvedExprKind::Spawn(operand)
+                | ResolvedExprKind::Await(operand) => expr(operand, nodes),
+                ResolvedExprKind::Call(call) => {
+                    for argument in &call.arguments {
+                        expr(&argument.value, nodes);
+                    }
+                }
+                ResolvedExprKind::Tuple(values)
+                | ResolvedExprKind::List(values)
+                | ResolvedExprKind::Set(values) => {
+                    for value in values {
+                        expr(value, nodes);
+                    }
+                }
+                ResolvedExprKind::Map(entries) => {
+                    for (key, value) in entries {
+                        expr(key, nodes);
+                        expr(value, nodes);
+                    }
+                }
+                ResolvedExprKind::Comprehension {
+                    value,
+                    iterable,
+                    guard,
+                    ..
+                } => {
+                    expr(iterable, nodes);
+                    if let Some(guard) = guard {
+                        expr(guard, nodes);
+                    }
+                    expr(value, nodes);
+                }
+                ResolvedExprKind::Record { fields, rest, .. } => {
+                    for field in fields {
+                        expr(&field.value, nodes);
+                    }
+                    if let Some(rest) = rest {
+                        expr(rest, nodes);
+                    }
+                }
+                ResolvedExprKind::Block(body) | ResolvedExprKind::Scope { body, .. } => {
+                    block(body, nodes);
+                }
+                ResolvedExprKind::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    expr(condition, nodes);
+                    block(then_block, nodes);
+                    block(else_block, nodes);
+                }
+                ResolvedExprKind::Match { scrutinee, arms } => {
+                    expr(scrutinee, nodes);
+                    for arm in arms {
+                        pattern(&arm.pattern, nodes);
+                        if let Some(guard) = &arm.guard {
+                            expr(guard, nodes);
+                        }
+                        expr(&arm.body, nodes);
+                    }
+                }
+                ResolvedExprKind::Slice { target, start, end } => {
+                    expr(target, nodes);
+                    if let Some(start) = start {
+                        expr(start, nodes);
+                    }
+                    if let Some(end) = end {
+                        expr(end, nodes);
+                    }
+                }
+                // The expression itself is eager, but these bodies are not:
+                // closures run only when invoked, and compile-time/quoted
+                // expressions are not part of this runtime argument's MIR.
+                ResolvedExprKind::Lambda(_)
+                | ResolvedExprKind::Comptime(_)
+                | ResolvedExprKind::Quote(_)
+                | ResolvedExprKind::TypeOf(_)
+                | ResolvedExprKind::Old(_)
+                | ResolvedExprKind::Literal(_)
+                | ResolvedExprKind::Constant(_)
+                | ResolvedExprKind::Callable(_)
+                | ResolvedExprKind::DefaultArgument { .. }
+                | ResolvedExprKind::ComptimeValue(_)
+                | ResolvedExprKind::TypeValue(_) => {}
+            }
+        }
+
+        let mut nodes = BTreeSet::new();
+        expr(self, &mut nodes);
+        nodes.into_iter().collect()
+    }
+
+    /// Resolve eager dynamic-index operands referenced indirectly through a
+    /// checked body's place-input catalog.  Those operands are outside the
+    /// expression's inline tree, so their own eager source nodes must be
+    /// joined by NodeId before a consumer treats this as a complete set.
+    pub(crate) fn eager_source_nodes_with_place_inputs(
+        &self,
+        place_inputs: &BTreeMap<NodeId, ResolvedExpr>,
+    ) -> Vec<NodeId> {
+        Self::expand_eager_source_nodes(self.eager_source_nodes(), place_inputs)
+    }
+
+    /// Expand an already-collected eager node set through a checked body's
+    /// dynamic place-input edges.  This form also lets the proof census enrich
+    /// its compact argument receipts without retaining cloned expression
+    /// trees after discovery.
+    pub(crate) fn expand_eager_source_nodes(
+        source_nodes: impl IntoIterator<Item = NodeId>,
+        place_inputs: &BTreeMap<NodeId, ResolvedExpr>,
+    ) -> Vec<NodeId> {
+        let mut nodes = source_nodes.into_iter().collect::<BTreeSet<_>>();
+        let mut pending = nodes
+            .iter()
+            .filter(|node| place_inputs.contains_key(*node))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        let mut cursor = 0;
+        while cursor < pending.len() {
+            let place_node = pending[cursor].clone();
+            cursor += 1;
+            if !visited.insert(place_node.clone()) {
+                continue;
+            }
+            let Some(expression) = place_inputs.get(&place_node) else {
+                continue;
+            };
+            for node in expression.eager_source_nodes() {
+                if nodes.insert(node.clone()) && place_inputs.contains_key(&node) {
+                    pending.push(node);
+                }
+            }
+        }
+        nodes.into_iter().collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedPattern {
     pub node_id: NodeId,
@@ -630,6 +936,10 @@ impl ResolvedBody {
             resolved_calls: BTreeMap::new(),
             errors: Vec::new(),
             call_expressions: BTreeMap::new(),
+            cast_expressions: None,
+            skip_lambda_bodies: false,
+            follow_place_inputs: false,
+            visited_place_inputs: BTreeSet::new(),
         };
         for input in self.place_inputs.values() {
             validator.visit_expr(input);
@@ -639,6 +949,79 @@ impl ResolvedBody {
         }
         validator.visit_block(&self.root);
         Ok(validator.call_expressions)
+    }
+
+    /// Return calls evaluated by this callable body while leaving nested
+    /// lambda bodies as separate callable regions. This still follows typed
+    /// dynamic-place inputs referenced by the body, and validates the complete
+    /// body (including lambda bodies) before extracting the direct call set.
+    pub(crate) fn direct_call_expressions(
+        &self,
+        types: &ResolvedTypeTable,
+        type_targets: &std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
+    ) -> Result<BTreeMap<NodeId, ResolvedExpr>, Vec<ResolvedBodyError>> {
+        self.validate(types, type_targets)?;
+        let mut validator = BodyValidator {
+            body: self,
+            types,
+            type_targets,
+            nodes: BTreeSet::new(),
+            pending_nodes: Vec::new(),
+            resolved_calls: BTreeMap::new(),
+            errors: Vec::new(),
+            call_expressions: BTreeMap::new(),
+            cast_expressions: None,
+            skip_lambda_bodies: true,
+            follow_place_inputs: true,
+            visited_place_inputs: BTreeSet::new(),
+        };
+        for value in self.default_values.values() {
+            validator.visit_expr(value);
+        }
+        validator.visit_block(&self.root);
+        if validator.errors.is_empty() {
+            Ok(validator.call_expressions)
+        } else {
+            Err(validator.errors)
+        }
+    }
+
+    /// Return checker-lowered cast expressions by their canonical source
+    /// node. This shares body validation and traversal with call extraction so
+    /// source finalizers can join provisional casts to ownership receipts
+    /// without reopening the surface AST.
+    pub(crate) fn cast_expressions(
+        &self,
+        types: &ResolvedTypeTable,
+        type_targets: &std::collections::BTreeMap<crate::core::NodeId, crate::core::ResolvedTypeId>,
+    ) -> Result<BTreeMap<NodeId, ResolvedExpr>, Vec<ResolvedBodyError>> {
+        self.validate(types, type_targets)?;
+        let mut validator = BodyValidator {
+            body: self,
+            types,
+            type_targets,
+            nodes: BTreeSet::new(),
+            pending_nodes: Vec::new(),
+            resolved_calls: BTreeMap::new(),
+            errors: Vec::new(),
+            call_expressions: BTreeMap::new(),
+            cast_expressions: Some(BTreeMap::new()),
+            skip_lambda_bodies: false,
+            follow_place_inputs: false,
+            visited_place_inputs: BTreeSet::new(),
+        };
+        for input in self.place_inputs.values() {
+            validator.visit_expr(input);
+        }
+        for value in self.default_values.values() {
+            validator.visit_expr(value);
+        }
+        validator.visit_block(&self.root);
+        if validator.errors.is_empty() {
+            Ok(validator.cast_expressions.take().unwrap_or_default())
+        } else {
+            Err(validator.errors)
+        }
     }
 
     pub fn validate(
@@ -655,6 +1038,10 @@ impl ResolvedBody {
             resolved_calls: BTreeMap::new(),
             errors: Vec::new(),
             call_expressions: BTreeMap::new(),
+            cast_expressions: None,
+            skip_lambda_bodies: false,
+            follow_place_inputs: false,
+            visited_place_inputs: BTreeSet::new(),
         };
         if self.owner.0.trim().is_empty() {
             validator.error(&self.owner, "callable owner identity is empty");
@@ -749,6 +1136,10 @@ struct BodyValidator<'a> {
     resolved_calls: BTreeMap<NodeId, ResolvedCallee>,
     errors: Vec<ResolvedBodyError>,
     call_expressions: BTreeMap<NodeId, ResolvedExpr>,
+    cast_expressions: Option<BTreeMap<NodeId, ResolvedExpr>>,
+    skip_lambda_bodies: bool,
+    follow_place_inputs: bool,
+    visited_place_inputs: BTreeSet<NodeId>,
 }
 
 impl BodyValidator<'_> {
@@ -1065,7 +1456,9 @@ impl BodyValidator<'_> {
                     }
                     self.require_local(&expression.node_id, capture);
                 }
-                self.visit_block(&lambda.body);
+                if !self.skip_lambda_bodies {
+                    self.visit_block(&lambda.body);
+                }
             }
             ResolvedExprKind::DefaultArgument {
                 callable,
@@ -1243,6 +1636,14 @@ impl BodyValidator<'_> {
                 }
             }
             ResolvedExprKind::Cast { value, conversion } => {
+                if let Some(casts) = self.cast_expressions.as_mut() {
+                    let duplicate = casts
+                        .insert(expression.node_id.clone(), expression.clone())
+                        .is_some();
+                    if duplicate {
+                        self.error(&expression.node_id, "cast node occurs more than once");
+                    }
+                }
                 self.visit_expr(value);
                 self.visit_conversion(&expression.node_id, conversion, Some(&value.ty));
                 if conversion.to != expression.ty {
@@ -1465,9 +1866,15 @@ impl BodyValidator<'_> {
                 ResolvedProjection::Index {
                     index: ResolvedIndex::Dynamic(node),
                     ..
-                } => self
-                    .pending_nodes
-                    .push((owner.clone(), node.clone(), "dynamic index")),
+                } => {
+                    self.pending_nodes
+                        .push((owner.clone(), node.clone(), "dynamic index"));
+                    if self.follow_place_inputs && self.visited_place_inputs.insert(node.clone()) {
+                        if let Some(input) = self.body.place_inputs.get(node).cloned() {
+                            self.visit_expr(&input);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1540,6 +1947,143 @@ mod tests {
             backend_requirements: Vec::new(),
             kind: ResolvedExprKind::Literal(ResolvedLiteral::Int(value)),
         }
+    }
+
+    #[test]
+    fn eager_source_nodes_follow_record_projection_and_exclude_lambda_bodies() {
+        let (_, i32_ty, _) = types();
+        let conversion = CheckedConversion {
+            kind: CheckedConversionKind::Identity,
+            from: i32_ty.clone(),
+            to: i32_ty.clone(),
+        };
+        let arithmetic = ResolvedExpr {
+            node_id: node("expr.eager.remainder"),
+            origin: origin(),
+            ty: i32_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Binary {
+                op: ResolvedBinaryOp::Remainder,
+                left: Box::new(literal("expr.eager.left", &i32_ty, 1)),
+                right: Box::new(literal("expr.eager.right", &i32_ty, -1)),
+            },
+        };
+        let lambda = ResolvedExpr {
+            node_id: node("expr.lambda.value"),
+            origin: origin(),
+            ty: i32_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Lambda(Box::new(ResolvedLambda {
+                owner: node("callable.latent"),
+                parameters: Vec::new(),
+                captures: Vec::new(),
+                body: ResolvedBlock {
+                    node_id: node("block.latent"),
+                    origin: origin(),
+                    ty: i32_ty.clone(),
+                    statements: Vec::new(),
+                    result: Some(Box::new(ResolvedExpr {
+                        node_id: node("expr.latent.trap"),
+                        origin: origin(),
+                        ty: i32_ty.clone(),
+                        effects: Vec::new(),
+                        backend_requirements: Vec::new(),
+                        kind: ResolvedExprKind::Binary {
+                            op: ResolvedBinaryOp::Remainder,
+                            left: Box::new(literal("expr.latent.left", &i32_ty, 1)),
+                            right: Box::new(literal("expr.latent.right", &i32_ty, -1)),
+                        },
+                    })),
+                },
+            })),
+        };
+        let record = ResolvedExpr {
+            node_id: node("expr.record.actual"),
+            origin: origin(),
+            ty: i32_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Record {
+                nominal: NominalTypeId::new("type:Pair").expect("record identity"),
+                fields: vec![
+                    ResolvedRecordField {
+                        field: node("field.noise"),
+                        value: arithmetic,
+                        conversion: conversion.clone(),
+                    },
+                    ResolvedRecordField {
+                        field: node("field.callback"),
+                        value: lambda,
+                        conversion,
+                    },
+                ],
+                rest: None,
+            },
+        };
+        let projected = ResolvedExpr {
+            node_id: node("expr.record.projection"),
+            origin: origin(),
+            ty: i32_ty,
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Project {
+                value: Box::new(record),
+                projection: ResolvedValueProjection::Field(node("field.value")),
+            },
+        };
+
+        let nodes = projected
+            .eager_source_nodes()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(nodes.contains(&node("expr.record.projection")));
+        assert!(nodes.contains(&node("expr.record.actual")));
+        assert!(nodes.contains(&node("expr.eager.remainder")));
+        assert!(nodes.contains(&node("expr.eager.left")));
+        assert!(nodes.contains(&node("expr.lambda.value")));
+        assert!(!nodes.contains(&node("expr.latent.trap")));
+        assert!(!nodes.contains(&node("expr.latent.left")));
+    }
+
+    #[test]
+    fn eager_source_nodes_expand_dynamic_place_input_expression_tree() {
+        let (_, i32_ty, _) = types();
+        let place_input = ResolvedExpr {
+            node_id: node("expr.index.root"),
+            origin: origin(),
+            ty: i32_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Binary {
+                op: ResolvedBinaryOp::Remainder,
+                left: Box::new(literal("expr.index.numerator", &i32_ty, 1)),
+                right: Box::new(literal("expr.index.divisor", &i32_ty, -1)),
+            },
+        };
+        let expression = ResolvedExpr {
+            node_id: node("expr.indexed.load"),
+            origin: origin(),
+            ty: i32_ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Load(ResolvedPlace {
+                base: ResolvedLocalId(node("local.items")),
+                projections: vec![ResolvedProjection::Index {
+                    index: ResolvedIndex::Dynamic(place_input.node_id.clone()),
+                    ty: i32_ty.clone(),
+                }],
+            }),
+        };
+        let place_inputs = BTreeMap::from([(place_input.node_id.clone(), place_input)]);
+        let nodes = expression
+            .eager_source_nodes_with_place_inputs(&place_inputs)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        assert!(nodes.contains(&node("expr.index.root")));
+        assert!(nodes.contains(&node("expr.index.numerator")));
+        assert!(nodes.contains(&node("expr.index.divisor")));
     }
 
     fn valid_body(i32_ty: &ResolvedTypeId, unit_ty: &ResolvedTypeId) -> ResolvedBody {

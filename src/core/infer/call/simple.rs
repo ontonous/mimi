@@ -13,6 +13,20 @@ impl<'a> Checker<'a> {
         args: &[Expr],
         scopes: &mut Vec<HashMap<String, Type>>,
     ) -> Type {
+        self.check_call_with_prevalidated_defaults(name, args, scopes, &[])
+    }
+
+    /// Check a call whose defaulted argument positions were already validated
+    /// in the callee's declaration scope. Their call-site type is the
+    /// corresponding (possibly instantiated) parameter type, so their source
+    /// expression must not be inferred again in the caller's scope.
+    fn check_call_with_prevalidated_defaults(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        scopes: &mut Vec<HashMap<String, Type>>,
+        prevalidated_defaults: &[bool],
+    ) -> Type {
         // d1f43c22 shadow adjudication (2026-08-04): runtime resolution order
         // is local > global > builtin (VM compile_call: lookup_var →
         // func_table → builtin_table; codegen lower.rs mirrors it). The
@@ -358,6 +372,51 @@ impl<'a> Checker<'a> {
                         self.infer_expr(&args[0], scopes);
                     }
                     return Type::Name("i32".into(), vec![]);
+                }
+                "unpack_i32" | "unpack_string" => {
+                    let source_type = if let Some(argument) = args.first() {
+                        self.infer_expr(argument, scopes)
+                    } else {
+                        Type::TyErr
+                    };
+                    let source_type = self.resolve_type(&source_type);
+                    if !matches!(
+                        source_type.unlocated(),
+                        Type::Name(source, arguments)
+                            if source == "Any" && arguments.is_empty()
+                    ) {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0200,
+                            format!(
+                                "{name} accepts only an Any value from a checked Map/Any GetAny"
+                            ),
+                        );
+                        return Type::TyErr;
+                    }
+                    let candidate = self
+                        .current_callable_owner
+                        .clone()
+                        .zip(self.current_call_expression.clone());
+                    let Some((owner, expression)) = candidate else {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0200,
+                            format!("{name} requires a checker-owned source identity"),
+                        );
+                        return Type::TyErr;
+                    };
+                    self.ordinary_map_owned_any_v2_checked_unpack_candidates
+                        .entry(owner)
+                        .or_default()
+                        .insert(expression);
+                    return Type::Name(
+                        if name == "unpack_i32" {
+                            "i32"
+                        } else {
+                            "string"
+                        }
+                        .into(),
+                        vec![],
+                    );
                 }
                 "to_float" => {
                     if args.len() != 1 {
@@ -1150,7 +1209,40 @@ impl<'a> Checker<'a> {
                     return Type::Name("bool".into(), vec![]);
                 }
                 "map_new" => {
-                    return Type::Name("Record".into(), vec![]);
+                    return Type::Result(
+                        Box::new(Type::Name("Record".into(), vec![])),
+                        Box::new(Type::Name("i32".into(), vec![])),
+                    );
+                }
+                "map_clone" => {
+                    if args.len() != 1 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_clone expects 1 argument (map)",
+                        );
+                    } else {
+                        let map_ty = self.infer_expr(&args[0], scopes);
+                        let map_ty = self.resolve_type(&map_ty);
+                        if !matches!(map_ty.unlocated(), Type::TyErr)
+                            && !matches!(
+                                map_ty.unlocated(),
+                                Type::Name(map_name, arguments)
+                                    if map_name == "Record" && arguments.is_empty()
+                            )
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_clone expects a Map/Record as its first argument, found {}",
+                                    fmt_type(&map_ty)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("Record".into(), vec![])),
+                        Box::new(Type::Name("i32".into(), vec![])),
+                    );
                 }
                 "map_get" => {
                     if args.len() != 2 {
@@ -1159,13 +1251,97 @@ impl<'a> Checker<'a> {
                             "map_get expects 2 arguments (map, key)",
                         );
                     } else {
-                        self.infer_expr(&args[0], scopes);
-                        self.infer_expr(&args[1], scopes);
+                        let map_ty = self.infer_expr(&args[0], scopes);
+                        let map_ty = self.resolve_type(&map_ty);
+                        let is_supported_map = match map_ty.unlocated() {
+                            Type::Name(map_name, arguments)
+                                if map_name == "Record" && arguments.is_empty() =>
+                            {
+                                true
+                            }
+                            Type::Name(map_name, arguments)
+                                if map_name == "Map"
+                                    && arguments.len() == 2
+                                    && crate::core::helpers::is_string(&arguments[0]) =>
+                            {
+                                true
+                            }
+                            Type::TyErr => true,
+                            _ => false,
+                        };
+                        if !is_supported_map {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_get expects a Record or Map<string, T> as its first argument, found {}",
+                                    fmt_type(&map_ty)
+                                ),
+                            );
+                        }
+                        let key_ty = self.infer_expr(&args[1], scopes);
+                        let key_ty = self.resolve_type(&key_ty);
+                        if !matches!(key_ty.unlocated(), Type::TyErr)
+                            && !crate::core::helpers::is_string(&key_ty)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_get expects a String key as its second argument, found {}",
+                                    fmt_type(&key_ty)
+                                ),
+                            );
+                        }
                     }
                     return Type::Tuple(vec![
                         Type::Name("bool".into(), vec![]),
                         Type::Name("Any".into(), vec![]),
                     ]);
+                }
+                "map_get_any" => {
+                    if args.len() != 2 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "map_get_any expects 2 arguments (map, key)",
+                        );
+                    } else {
+                        let map_ty = self.infer_expr(&args[0], scopes);
+                        let map_ty = self.resolve_type(&map_ty);
+                        if !matches!(map_ty.unlocated(), Type::TyErr)
+                            && !matches!(
+                                map_ty.unlocated(),
+                                Type::Name(map_name, arguments)
+                                    if map_name == "Record" && arguments.is_empty()
+                            )
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_get_any expects a Map/Record as its first argument, found {}",
+                                    fmt_type(&map_ty)
+                                ),
+                            );
+                        }
+                        let key_ty = self.infer_expr(&args[1], scopes);
+                        let key_ty = self.resolve_type(&key_ty);
+                        if !matches!(key_ty.unlocated(), Type::TyErr)
+                            && !crate::core::helpers::is_string(&key_ty)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_get_any expects a String key as its second argument, found {}",
+                                    fmt_type(&key_ty)
+                                ),
+                            );
+                        }
+                    }
+                    return Type::Result(
+                        Box::new(Type::Tuple(vec![
+                            Type::Name("bool".into(), vec![]),
+                            Type::Name("Any".into(), vec![]),
+                        ])),
+                        Box::new(Type::Name("i32".into(), vec![])),
+                    );
                 }
                 "map_get_i32" | "map_get_string" => {
                     if args.len() != 2 {
@@ -1218,22 +1394,66 @@ impl<'a> Checker<'a> {
                             crate::diagnostic::codes::E0242,
                             "map_set expects 3 arguments (map, key, value)",
                         );
+                        for arg in args {
+                            self.infer_expr(arg, scopes);
+                        }
+                        return Type::TyErr;
                     } else {
-                        self.infer_expr(&args[0], scopes);
-                        self.infer_expr(&args[1], scopes);
+                        let map_ty = self.infer_expr(&args[0], scopes);
+                        let map_ty = self.resolve_type(&map_ty);
+                        let mut valid = !matches!(map_ty.unlocated(), Type::TyErr);
+                        if valid
+                            && !matches!(
+                                map_ty.unlocated(),
+                                Type::Name(map_name, arguments)
+                                    if map_name == "Record" && arguments.is_empty()
+                            )
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_set expects a Map/Record as its first argument, found {}",
+                                    fmt_type(&map_ty)
+                                ),
+                            );
+                            valid = false;
+                        }
+
+                        let key_ty = self.infer_expr(&args[1], scopes);
+                        let key_ty = self.resolve_type(&key_ty);
+                        if !matches!(key_ty.unlocated(), Type::TyErr)
+                            && !crate::core::helpers::is_string(&key_ty)
+                        {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "map_set expects a String key as its second argument, found {}",
+                                    fmt_type(&key_ty)
+                                ),
+                            );
+                            valid = false;
+                        }
+                        valid &= !matches!(key_ty.unlocated(), Type::TyErr);
                         let value_ty = self.infer_expr(&args[2], scopes);
+                        valid &= !matches!(value_ty.unlocated(), Type::TyErr);
                         // `map_set` stores its payload through the erased
                         // `Any` ABI. It cannot accept a linear value until
                         // dynamic Any carries a checked owner receipt.
-                        self.reject_linear_any_erasure(
+                        let erased_linear_value = self.reject_linear_any_erasure(
                             &args[2],
                             &value_ty,
                             &Type::Name("Any".into(), vec![]),
                             name,
                             2,
                         );
+                        if !valid || erased_linear_value {
+                            return Type::TyErr;
+                        }
                     }
-                    return Type::Name("Record".into(), vec![]);
+                    return Type::Result(
+                        Box::new(Type::Name("Record".into(), vec![])),
+                        Box::new(Type::Name("i32".into(), vec![])),
+                    );
                 }
                 "map_remove" => {
                     if args.len() != 2 {
@@ -1888,18 +2108,18 @@ impl<'a> Checker<'a> {
                     return Type::Name("SessionChan".into(), vec![]);
                 }
                 "session_pair" => {
-                    // 0.36.38: the plain form returns the two opaque handles
-                    // as a TUPLE (i64, i64) — the typed form (turbofish,
-                    // method.rs) returns (SessionChan<S>, SessionChan<dual S>)
-                    // with live residuals. Both share the {lo, hi} runtime
-                    // shape (send on lo → recv on hi).
+                    // Session endpoints are typed linear resources. The
+                    // untyped integer-handle form has no Mimi API contract;
+                    // callers must provide the protocol with the Turbofish
+                    // path, which is checked separately in method.rs.
                     for a in args {
                         self.infer_expr(a, scopes);
                     }
-                    return Type::Tuple(vec![
-                        Type::Name("i64".into(), vec![]),
-                        Type::Name("i64".into(), vec![]),
-                    ]);
+                    self.emit_code(
+                        crate::diagnostic::codes::E0242,
+                        "session_pair requires an explicit protocol type argument; use session_pair::<P>()",
+                    );
+                    return Type::TyErr;
                 }
 
                 "print" => {
@@ -1982,6 +2202,34 @@ impl<'a> Checker<'a> {
                     } else {
                         self.infer_expr(&args[0], scopes);
                         self.infer_expr(&args[1], scopes);
+                    }
+                    return Type::Result(
+                        Box::new(Type::Name("unit".into(), vec![])),
+                        Box::new(Type::Name("string".into(), vec![])),
+                    );
+                }
+                // C-02: write_file_guarded(path, content, token) carries the
+                // same linear SystemToken gate as read_file_guarded, with a
+                // write capability checked dynamically by the host registry.
+                "write_file_guarded" => {
+                    if args.len() != 3 {
+                        self.emit_code(
+                            crate::diagnostic::codes::E0242,
+                            "write_file_guarded expects 3 arguments (path, content, a SystemToken capability)",
+                        );
+                    } else {
+                        self.infer_expr(&args[0], scopes);
+                        self.infer_expr(&args[1], scopes);
+                        let cap_ty = self.infer_expr(&args[2], scopes);
+                        if cap_ty != Type::Name("SystemToken".into(), vec![]) {
+                            self.emit_code(
+                                crate::diagnostic::codes::E0242,
+                                format!(
+                                    "write_file_guarded capability slot expects SystemToken, found {}",
+                                    fmt_type(&cap_ty)
+                                ),
+                            );
+                        }
                     }
                     return Type::Result(
                         Box::new(Type::Name("unit".into(), vec![])),
@@ -3151,6 +3399,7 @@ impl<'a> Checker<'a> {
                 if func_params.len() == params.len() {
                     let mut reordered: Vec<&Expr> = vec![&Expr::Literal(Lit::Unit); params.len()];
                     let mut seen = vec![false; params.len()];
+                    let mut reordered_prevalidated_defaults = vec![false; params.len()];
                     let mut pos_idx = 0;
                     // H-2 (audit 2026-08-05): mixed named/positional placement
                     // errors. Previously a positional arg past the last free
@@ -3217,6 +3466,7 @@ impl<'a> Checker<'a> {
                         if let Some(ref default_expr) = p.default_value {
                             if !seen {
                                 reordered[i] = default_expr;
+                                reordered_prevalidated_defaults[i] = true;
                                 has_missing_defaults = true;
                             }
                         }
@@ -3244,7 +3494,12 @@ impl<'a> Checker<'a> {
                     if has_named_args || (has_missing_defaults && args.len() < params.len()) {
                         let reordered_args: Vec<Expr> =
                             reordered.iter().map(|e| (*e).clone()).collect();
-                        return self.check_call(name, &reordered_args, scopes);
+                        return self.check_call_with_prevalidated_defaults(
+                            name,
+                            &reordered_args,
+                            scopes,
+                            &reordered_prevalidated_defaults,
+                        );
                     }
                 }
             }
@@ -3282,7 +3537,22 @@ impl<'a> Checker<'a> {
                     self.instantiate_generic_signature(&params, &ret, &generics);
                 let arg_tys: Vec<Type> = args
                     .iter()
-                    .map(|argument| self.infer_expr(argument, scopes))
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        if prevalidated_defaults.get(index).copied().unwrap_or(false) {
+                            // Declaration checking already established that a
+                            // default fits its parameter. Use that parameter
+                            // after the same generic instantiation as explicit
+                            // arguments; do not re-resolve declaration names in
+                            // the caller's lexical scope.
+                            instantiated_params
+                                .get(index)
+                                .cloned()
+                                .unwrap_or(Type::TyErr)
+                        } else {
+                            self.infer_expr(argument, scopes)
+                        }
+                    })
                     .collect();
                 let erased_by_any: Vec<bool> = args
                     .iter()
@@ -3499,12 +3769,21 @@ impl<'a> Checker<'a> {
                     .unwrap_or_else(|_| Type::Name("unknown".into(), vec![]));
             } else {
                 for (i, (arg, param)) in args.iter().zip(params.iter()).enumerate() {
-                    let at = self.infer_expr(arg, scopes);
-                    let erased_by_any = self.reject_linear_any_erasure(arg, &at, param, name, i);
+                    let is_prevalidated_default =
+                        prevalidated_defaults.get(i).copied().unwrap_or(false);
+                    let at = if is_prevalidated_default {
+                        param.clone()
+                    } else {
+                        self.infer_expr(arg, scopes)
+                    };
+                    let erased_by_any = !is_prevalidated_default
+                        && self.reject_linear_any_erasure(arg, &at, param, name, i);
                     // v0.31.13: passing a session endpoint as a function argument
                     // moves it — consume the residual so scope-exit doesn't fire.
-                    if let Some(key) = Self::place_key(arg) {
-                        self.session_residuals.remove(&key);
+                    if !is_prevalidated_default {
+                        if let Some(key) = Self::place_key(arg) {
+                            self.session_residuals.remove(&key);
+                        }
                     }
                     if erased_by_any {
                         continue;
@@ -3569,8 +3848,14 @@ impl<'a> Checker<'a> {
                 // Check where constraints for non-generic functions. CK-H6: all entries.
                 if let Some(clauses) = self.where_clauses.get(name).cloned() {
                     for (type_param, bounds) in clauses {
-                        for (arg, param) in args.iter().zip(params.iter()) {
-                            let at = self.infer_expr(arg, scopes);
+                        for (index, param) in params.iter().enumerate() {
+                            let at = if prevalidated_defaults.get(index).copied().unwrap_or(false) {
+                                param.clone()
+                            } else if let Some(arg) = args.get(index) {
+                                self.infer_expr(arg, scopes)
+                            } else {
+                                continue;
+                            };
                             if self.type_uses_type_param(param, &type_param) {
                                 for bound in &bounds {
                                     if !self.type_implements_trait(&at, bound) {
@@ -4148,7 +4433,9 @@ fn is_impure_builtin(name: &str) -> bool {
             | "fs_walk_dir"
             // Legacy/alias fs names (codegen registers both)
             | "read_file"
+            | "read_file_guarded"
             | "write_file"
+            | "write_file_guarded"
             | "file_exists"
             | "listdir"
             | "is_dir"
@@ -4224,6 +4511,147 @@ fn is_impure_builtin(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::is_impure_builtin;
+    use crate::ast::{Expr, Lit, Type};
+    use crate::diagnostic::Diagnostic;
+    use std::collections::HashMap;
+
+    fn infer_builtin_call(
+        name: &str,
+        args: &[Expr],
+        locals: HashMap<String, Type>,
+    ) -> (Type, Vec<Diagnostic>) {
+        let file = crate::tests::parse("func main() -> i32 { 0 }");
+        let mut checker = crate::core::checker::Checker::new(&file);
+        let mut scopes = vec![locals];
+        let ty = checker.check_call(name, args, &mut scopes);
+        (ty, checker.errors)
+    }
+
+    fn map_result_type() -> Type {
+        Type::Result(
+            Box::new(Type::Name("Record".into(), vec![])),
+            Box::new(Type::Name("i32".into(), vec![])),
+        )
+    }
+
+    fn int_arg(value: i64) -> Expr {
+        Expr::Literal(Lit::Int(value))
+    }
+
+    fn string_arg(value: &str) -> Expr {
+        Expr::Literal(Lit::String(value.into()))
+    }
+
+    #[test]
+    fn map_new_has_zero_arity_and_recoverable_result_signature() {
+        let (ty, diagnostics) = infer_builtin_call("map_new", &[], HashMap::new());
+        assert_eq!(ty, map_result_type());
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let (ty, diagnostics) = infer_builtin_call("map_new", &[int_arg(1)], HashMap::new());
+        assert_eq!(
+            ty,
+            Type::TyErr,
+            "bad arity must not retain a fake signature"
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0242)
+                && diagnostic.message.contains("map_new expects 0 argument")
+        }));
+    }
+
+    #[test]
+    fn map_set_has_three_arity_record_receiver_and_recoverable_result_signature() {
+        let mut locals = HashMap::new();
+        locals.insert("map".into(), Type::Name("Record".into(), vec![]));
+        let args = vec![Expr::Ident("map".into()), string_arg("key"), int_arg(1)];
+        let (ty, diagnostics) = infer_builtin_call("map_set", &args, locals);
+        assert_eq!(ty, map_result_type());
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn map_set_rejects_under_and_over_arity_without_a_fake_signature() {
+        for args in [
+            vec![int_arg(1), string_arg("key")],
+            vec![int_arg(1), string_arg("key"), int_arg(2), int_arg(3)],
+        ] {
+            let (ty, diagnostics) = infer_builtin_call("map_set", &args, HashMap::new());
+            assert_eq!(
+                ty,
+                Type::TyErr,
+                "bad arity must not retain a fake signature"
+            );
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0242)
+                    && diagnostic.message.contains("map_set expects 3 argument")
+            }));
+        }
+    }
+
+    #[test]
+    fn map_set_rejects_non_record_receiver_without_a_fake_signature() {
+        let args = vec![int_arg(1), string_arg("key"), int_arg(2)];
+        let (ty, diagnostics) = infer_builtin_call("map_set", &args, HashMap::new());
+        assert_eq!(
+            ty,
+            Type::TyErr,
+            "bad receiver must not retain a fake signature"
+        );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0242)
+                && diagnostic
+                    .message
+                    .contains("map_set expects a Map/Record as its first argument")
+        }));
+    }
+
+    #[test]
+    fn ordinary_map_capacity_builtins_have_recoverable_result_signatures() {
+        assert!(crate::core::builtins::is_builtin_callable("map_clone"));
+        assert_eq!(crate::core::builtins::builtin_arity("map_clone"), Some(1));
+
+        let source = r#"
+            func create_map() -> Result<Record, i32> { map_new() }
+            func set_map(map: Record) -> Result<Record, i32> { map_set(map, "key", 1) }
+            func clone_map(map: Record) -> Result<Record, i32> { map_clone(map) }
+            func main() -> i32 { 0 }
+        "#;
+        let file = crate::tests::parse(source);
+
+        crate::core::check_program(&file)
+            .expect("ordinary Map capacity failures should have explicit Result signatures");
+    }
+
+    #[test]
+    fn map_clone_rejects_wrong_arity_and_non_record_arguments() {
+        for (source, expected) in [
+            (
+                "func invalid_arity() -> Result<Record, i32> { map_clone() }\nfunc main() -> i32 { 0 }",
+                "map_clone expects 1 argument",
+            ),
+            (
+                "func invalid_map(map: i32) -> Result<Record, i32> { map_clone(map) }\nfunc main() -> i32 { 0 }",
+                "map_clone expects a Map/Record as its first argument",
+            ),
+        ] {
+            let file = crate::tests::parse(source);
+            let diagnostics = crate::core::check_program(&file)
+                .expect_err("invalid map_clone arguments must fail type checking");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains(expected)),
+                "expected diagnostic containing '{expected}', got {diagnostics:?}"
+            );
+        }
+    }
 
     #[test]
     fn typed_owned_map_getters_require_a_record_and_string_key() {
@@ -4254,6 +4682,65 @@ mod tests {
         }
     }
 
+    #[test]
+    fn map_get_any_has_a_checked_dynamic_any_result_signature() {
+        assert!(crate::core::builtins::is_builtin_callable("map_get_any"));
+        assert_eq!(crate::core::builtins::builtin_arity("map_get_any"), Some(2));
+
+        let positive = crate::tests::parse(
+            "func get_any(map: Record, key: string) -> Result<(bool, Any), i32> { map_get_any(map, key) }\nfunc main() -> i32 { 0 }",
+        );
+        crate::core::check_program(&positive)
+            .expect("map_get_any should expose Result<(bool, Any), i32>");
+
+        for (source, expected) in [
+            (
+                "func invalid_arity(map: Record) -> Result<(bool, Any), i32> { map_get_any(map) }\nfunc main() -> i32 { 0 }",
+                "map_get_any expects 2 argument(s)",
+            ),
+            (
+                "func invalid_map(map: i32) -> Result<(bool, Any), i32> { map_get_any(map, \"key\") }\nfunc main() -> i32 { 0 }",
+                "expects a Map/Record as its first argument",
+            ),
+            (
+                "func invalid_key(map: Record) -> Result<(bool, Any), i32> { map_get_any(map, 1) }\nfunc main() -> i32 { 0 }",
+                "expects a String key as its second argument",
+            ),
+        ] {
+            let file = crate::tests::parse(source);
+            let diagnostics = crate::core::check_program(&file)
+                .expect_err("invalid map_get_any call must fail type checking");
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0242)
+                        && diagnostic.message.contains(expected)),
+                "expected E0242 containing '{expected}', got {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_defaults_use_declaration_checked_parameter_types() {
+        let source = r#"
+            func positive(value: i32) -> i32 { value }
+            func middle_default(a: i32 = 1, middle: i32 = positive(a), c: i32 = 3) -> i32 { middle }
+            func generic_default<T>(seed: T, value: Option<T> = None) -> Option<T> { value }
+            func main() -> i32 {
+                let a: string = "caller shadow"
+                let middle = middle_default(a = 2, c = 4)
+                match generic_default(7) {
+                    Some(value) => value + middle,
+                    None => middle,
+                }
+            }
+        "#;
+        let file = crate::tests::parse(source);
+
+        crate::core::check_program(&file)
+            .expect("defaults should use their declaration-checked types at the call site");
+    }
+
     /// P1-37: Cross-check that all known impure codegen builtins are
     /// covered by is_impure_builtin. When adding a new I/O/net/fs/env/
     /// time/process builtin to codegen/builtins/mod.rs, add it here too.
@@ -4279,7 +4766,9 @@ mod tests {
             // File system
             "file_exists",
             "read_file",
+            "read_file_guarded",
             "write_file",
+            "write_file_guarded",
             "listdir",
             "is_dir",
             "is_file",

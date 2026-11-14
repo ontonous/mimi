@@ -42,7 +42,27 @@ impl<'ctx> CodeGenerator<'ctx> {
         } else {
             index
         };
-        let char_at_fn = self.get_runtime_fn("mimi_str_char_at_ll")?;
+        let out_len = self.build_alloca(i64_ty, "char_at_out_len")?;
+        self.build_store(out_len, i64_ty.const_int(0, false))?;
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let char_at_fn = self
+            .module
+            .get_function("mimi_str_char_at_ll_with_len")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_str_char_at_ll_with_len",
+                    i8_ptr_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                            BasicMetadataTypeEnum::IntType(i64_ty),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let raw_result = self
             .build_call(
                 char_at_fn,
@@ -50,14 +70,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                     BasicMetadataValueEnum::PointerValue(data_ptr),
                     BasicMetadataValueEnum::IntValue(byte_len),
                     BasicMetadataValueEnum::IntValue(index_i64),
+                    BasicMetadataValueEnum::PointerValue(out_len),
                 ],
                 "str_char_at_call",
             )?
             .try_as_basic_value_opt()
             .ok_or("mimi_str_char_at returned void")?
             .into_pointer_value();
+        let result_len = self
+            .builder
+            .build_load(
+                BasicTypeEnum::IntType(i64_ty),
+                out_len,
+                "char_at_result_len",
+            )
+            .map_err(|e| CompileError::LlvmError(format!("load char_at length: {e}")))?
+            .into_int_value();
         self.register_heap_alloc(raw_result);
-        self.wrap_c_string(raw_result)
+        self.wrap_string_ptr_len(raw_result, result_len)
     }
     pub(super) fn compile_char_code(
         &self,

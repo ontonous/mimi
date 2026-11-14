@@ -1007,16 +1007,28 @@ impl<'a> Checker<'a> {
                 // v0.31.12: branch merge — save residuals before branching,
                 // check both branches, verify consistency at merge point.
                 let pre_residuals = self.session_residuals.clone();
+                let pre_flow_consumptions = self.flow_consumption_snapshot();
                 self.var_scopes.push(HashMap::new());
                 self.check_block(then_, ret, scopes);
                 self.var_scopes.pop();
                 let then_residuals = self.session_residuals.clone();
+                let then_flow_consumptions = self.flow_consumption_snapshot();
                 if let Some(else_) = else_ {
                     // Restore pre-branch state for else branch.
                     self.session_residuals = pre_residuals.clone();
+                    self.restore_flow_consumption_snapshot(&pre_flow_consumptions);
                     self.var_scopes.push(HashMap::new());
                     self.check_block(else_, ret, scopes);
                     self.var_scopes.pop();
+                    let else_flow_consumptions = self.flow_consumption_snapshot();
+                    let mut flow_branches = Vec::new();
+                    if !crate::core::infer::helpers::block_is_diverging(then_) {
+                        flow_branches.push(then_flow_consumptions);
+                    }
+                    if !crate::core::infer::helpers::block_is_diverging(else_) {
+                        flow_branches.push(else_flow_consumptions);
+                    }
+                    self.merge_flow_consumption_snapshots(pre_flow_consumptions, flow_branches);
                     // Merge: both branches must agree on every tracked endpoint.
                     let all_keys: std::collections::HashSet<&String> = then_residuals
                         .keys()
@@ -1067,6 +1079,12 @@ impl<'a> Checker<'a> {
                     // No else branch: conservatively restore pre-branch state
                     // (the then branch might not execute).
                     self.session_residuals = pre_residuals;
+                    let branches = if crate::core::infer::helpers::block_is_diverging(then_) {
+                        Vec::new()
+                    } else {
+                        vec![then_flow_consumptions]
+                    };
+                    self.merge_flow_consumption_snapshots(pre_flow_consumptions, branches);
                 }
             }
             Stmt::IfLet {
@@ -1080,6 +1098,7 @@ impl<'a> Checker<'a> {
                 // like If (then-branch may not run when pattern fails).
                 let it = self.infer_expr(init, scopes);
                 let pre_residuals = self.session_residuals.clone();
+                let pre_flow_consumptions = self.flow_consumption_snapshot();
                 self.var_scopes.push(HashMap::new());
                 scopes.push(HashMap::new());
                 self.check_pattern(pat, &it, scopes);
@@ -1087,11 +1106,22 @@ impl<'a> Checker<'a> {
                 scopes.pop();
                 self.var_scopes.pop();
                 let then_residuals = self.session_residuals.clone();
+                let then_flow_consumptions = self.flow_consumption_snapshot();
                 if let Some(else_) = else_ {
                     self.session_residuals = pre_residuals.clone();
+                    self.restore_flow_consumption_snapshot(&pre_flow_consumptions);
                     self.var_scopes.push(HashMap::new());
                     self.check_block(else_, ret, scopes);
                     self.var_scopes.pop();
+                    let else_flow_consumptions = self.flow_consumption_snapshot();
+                    let mut flow_branches = Vec::new();
+                    if !crate::core::infer::helpers::block_is_diverging(then_) {
+                        flow_branches.push(then_flow_consumptions);
+                    }
+                    if !crate::core::infer::helpers::block_is_diverging(else_) {
+                        flow_branches.push(else_flow_consumptions);
+                    }
+                    self.merge_flow_consumption_snapshots(pre_flow_consumptions, flow_branches);
                     // Merge: both branches must agree on every tracked endpoint.
                     let all_keys: std::collections::HashSet<&String> = then_residuals
                         .keys()
@@ -1139,6 +1169,12 @@ impl<'a> Checker<'a> {
                     self.session_residuals = then_residuals;
                 } else {
                     self.session_residuals = pre_residuals;
+                    let branches = if crate::core::infer::helpers::block_is_diverging(then_) {
+                        Vec::new()
+                    } else {
+                        vec![then_flow_consumptions]
+                    };
+                    self.merge_flow_consumption_snapshots(pre_flow_consumptions, branches);
                 }
             }
             Stmt::While { cond, body } => {
@@ -1829,10 +1865,15 @@ impl<'a> Checker<'a> {
                 }
                 for parameter in &func.params {
                     if let Some(default) = &parameter.default_value {
+                        self.reject_nested_contracts_in_expr(default, &func.name);
                         let expected = self.resolve_type(&parameter.ty);
                         self.check_expr(&expected, default, &mut nested_scopes);
                     }
                 }
+                // Nested functions follow this manual checker path instead
+                // of `check_func`; establish the same callable-root contract
+                // rule before checking their bodies.
+                self.reject_nested_requires_ensures(&func.body, &func.name);
                 self.check_block_with_implicit_return(&func.body, &nested_ret, &mut nested_scopes);
                 self.record_nested_function_signature(nested_owner, &params, &nested_ret);
                 self.finish_expression_type_capture();

@@ -726,11 +726,10 @@ fn float_bind_matrix_agrees_across_consumers() {
     for case in CASES {
         let label = format!("float bind case {}", case.name);
         let checked = checked_program_of(case.source);
-        assert!(
-            matches!(
-                crate::core::mir::classify_scalar_collection_admission(&checked),
-                crate::core::mir::ScalarCollectionAdmission::CompleteCoverage
-            ),
+        let admission = crate::core::mir::classify_scalar_collection_admission(&checked);
+        assert_eq!(
+            admission,
+            crate::core::mir::ScalarCollectionAdmission::CompleteCoverage,
             "{label} must classify complete"
         );
         let mir = materialize_float_bind(case.source, &label);

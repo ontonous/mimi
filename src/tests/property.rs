@@ -255,17 +255,25 @@ proptest! {
         }
     }
 
-    /// Interpreter never panics running float-literal programs.
+    /// Interpreter never panics running float-literal programs it accepts.
     #[test]
-    fn interp_never_panics_on_floats(src in any::<f64>()) {
-        let s = format!("func main() -> f64 {{ {} }}", src);
+    fn interp_never_panics_on_floats(value in any::<f64>()) {
+        let literal = format!("{:?}", value);
+        let s = format!(r#"
+func generated_float() -> f64 {{ {} }}
+func main() -> i32 {{
+    let value = generated_float()
+    if value == value {{ 0 }} else {{ 1 }}
+}}
+"#, literal);
         let lexer = crate::lexer::Lexer::new(&s);
         if let Ok(toks) = lexer.tokenize() {
             if let Ok(file) = crate::parser::Parser::new(toks).parse_file() {
-                if core::check(&file).is_ok() {
+                if let Ok(checked) = core::check_program(&file) {
                     let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
+                    compiler.install_checked_program(&checked);
                     if let Ok(prog) = compiler.compile_file(&file) {
-                        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
+                        let mut vm = crate::interp::bytecode::BytecodeVM::new(prog);
                         let _ = vm.run_value();
                     }
                 }
@@ -279,22 +287,45 @@ proptest! {
 proptest! {
     #[test]
     fn interp_float_literal(n in -1e10f64..1e10f64) {
-        // Skip NaN — NaN != NaN in equality check
-        prop_assume!(!n.is_nan());
-        let src = format!("func main() -> f64 {{ {} }}", n);
-        if let crate::interp::Value::Float(result) = run_source(&src) {
-            prop_assert!((result - n).abs() <= f64::EPSILON * n.abs().max(1.0),
-                "float literal mismatch: expected {}, got {}", n, result);
-        }
+        let literal = format!("{:?}", n);
+        let src = format!(r#"
+func generated_float() -> f64 {{ {} }}
+func main() -> i32 {{
+    let actual = generated_float()
+    println(actual);
+    if actual == {} {{ 1 }} else {{ 0 }}
+}}
+"#, literal, literal);
+        let (main_value, stdout) = run_source_with_stdout(&src);
+        prop_assert_eq!(main_value, crate::interp::Value::Int(1));
+        let result = stdout
+            .trim()
+            .parse::<f64>()
+            .expect("float helper should print a parseable value");
+        prop_assert!((result - n).abs() <= f64::EPSILON * n.abs().max(1.0),
+            "float literal mismatch: expected {}, got {}", n, result);
     }
 
     #[test]
     fn interp_float_negation(n in -1e5f64..1e5f64) {
-        let src = format!("func main() -> f64 {{ -({}) }}", n);
-        if let crate::interp::Value::Float(result) = run_source(&src) {
-            prop_assert!((result - (-n)).abs() <= f64::EPSILON * n.abs().max(1.0),
-                "float neg mismatch: expected {}, got {}", -n, result);
-        }
+        let literal = format!("{:?}", n);
+        let expected = format!("{:?}", -n);
+        let src = format!(r#"
+func generated_negated_float() -> f64 {{ -({}) }}
+func main() -> i32 {{
+    let actual = generated_negated_float()
+    println(actual);
+    if actual == {} {{ 1 }} else {{ 0 }}
+}}
+"#, literal, expected);
+        let (main_value, stdout) = run_source_with_stdout(&src);
+        prop_assert_eq!(main_value, crate::interp::Value::Int(1));
+        let result = stdout
+            .trim()
+            .parse::<f64>()
+            .expect("negated float helper should print a parseable value");
+        prop_assert!((result - (-n)).abs() <= f64::EPSILON * n.abs().max(1.0),
+            "float neg mismatch: expected {}, got {}", -n, result);
     }
 
     #[test]
@@ -428,7 +459,11 @@ proptest! {
     /// String concatenation works.
     #[test]
     fn string_concat(s1 in "[a-z]{0,5}", s2 in "[a-z]{0,5}") {
-        let src = format!("func main() -> string {{ \"{}\" + \"{}\" }}", s1, s2);
+        let src = format!(
+            "func generated_concat() -> string {{ \"{}\" + \"{}\" }}\nfunc main() -> i32 {{ println(generated_concat()); 0 }}",
+            s1,
+            s2
+        );
         let result = check_source(&src);
         assert!(result.is_ok(), "string concat should pass: {:?}", result.err());
     }
@@ -590,10 +625,19 @@ func main() -> i64 {{
 
     #[test]
     fn eval_type_name_int(n in 1i64..100) {
-        let src = format!("func main() -> string {{ type_name({}) }}", n);
-        if let crate::interp::Value::String(result) = run_source(&src) {
-            prop_assert!(result.as_str() == "i64" || result.as_str() == "i32", "unexpected type_name: {}", result);
-        }
+        let src = format!(r#"
+func generated_type_name() -> string {{ type_name({}) }}
+func main() -> i32 {{
+    let actual = generated_type_name()
+    if actual == "i64" {{ 1 }} else if actual == "i32" {{ 2 }} else {{ 0 }}
+}}
+"#, n);
+        let result = run_source(&src);
+        prop_assert!(
+            result == crate::interp::Value::Int(1) || result == crate::interp::Value::Int(2),
+            "unexpected helper type_name result: {:?}",
+            result
+        );
     }
 
     #[test]

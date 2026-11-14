@@ -1,8 +1,13 @@
-func main() -> string {
+func matched_integer_label() -> string {
     let x = 2;
     match x {
         1 => "one",
         2 => "two",
         _ => "other",
     }
+}
+
+func main() -> i32 {
+    println(matched_integer_label());
+    0
 }

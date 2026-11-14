@@ -7475,23 +7475,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         {
             if let Some(fdef) = self.func_defs.get(name).cloned() {
                 if !fdef.generics.is_empty() {
-                    #[cfg(test)]
-                    {
-                        self.compile_legacy_generic_test_instance(&fdef, &callee_map)
-                            .map_err(|e| {
-                                CompileError::Generic(format!(
-                                    "failed to monomorphize function '{}': {}",
-                                    name, e
-                                ))
-                            })?;
-                    }
-                    #[cfg(not(test))]
-                    {
-                        return Err(CompileError::CanonicalMirCoverage(format!(
-                            "MIR-COVERAGE-001/NITS: generic function '{}' reached the retired legacy monomorphizer",
-                            name
-                        )));
-                    }
+                    return Err(CompileError::CanonicalMirCoverage(format!(
+                        "MIR-COVERAGE-001/NITS: generic function '{}' requires a canonical specialized MIR instance",
+                        name
+                    )));
                 }
             }
         }
@@ -7636,6 +7623,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             .func_defs
             .get(callee_name)
             .and_then(|fd| fd.ret.as_ref())
+            .or_else(|| {
+                self.extern_func_defs
+                    .get(callee_name)
+                    .and_then(|fd| fd.ret.as_ref())
+            })
             .map(|t| matches!(t.unlocated(), Type::Name(n, _) if n == "string"))
             .unwrap_or(false);
         if !ret_is_string {

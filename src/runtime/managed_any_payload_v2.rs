@@ -6,8 +6,10 @@
 //! receives that exact identity plus trusted native callback pointers; it
 //! cannot reconstruct a TypeDesc closure from the hash alone. A descriptor
 //! registration pins one immutable pair of callbacks under the complete
-//! `(tag, type_id, hash, size, align)` key. An existing key cannot be rebound
-//! to different function pointers.
+//! `(tag, type_id, hash, size, align)` key. The canonical Core i32 scalar is
+//! the narrow exception: the runtime replaces supplied callbacks with its
+//! fixed memcpy/no-op pair before registration. Other exact keys cannot be
+//! rebound to different function pointers.
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::collections::HashMap;
@@ -26,6 +28,15 @@ pub(super) const TYPE_ID_BYTES: usize = 35;
 pub(super) const DESCRIPTOR_HASH_BYTES: usize = 32;
 pub(super) const SELECTION_SCHEMA_VERSION: u32 = 1;
 const REGISTRY_HASH_DOMAIN: &[u8] = b"mimi-managed-any-payload-v2:admitted-descriptor-set:v1\n";
+/// The one Core i32 TypeDesc admitted as the ordinary Map/Any V2 miss value.
+/// The hash is the V2 recursive TypeDesc-closure digest for the canonical
+/// Copy scalar descriptor emitted by `MirTypeCatalog`.
+pub(super) const CANONICAL_I32_TYPE_ID: &[u8; TYPE_ID_BYTES] =
+    b"rt:1eb1c4ed966863450a50a89ef0d38924";
+pub(super) const CANONICAL_I32_TYPE_DESC_HASH: [u8; DESCRIPTOR_HASH_BYTES] = [
+    0xf2, 0x7c, 0x00, 0x72, 0x7c, 0x62, 0x5b, 0x72, 0xf9, 0xe7, 0x8b, 0x51, 0x7a, 0x2e, 0xe5, 0x73,
+    0x1d, 0xf2, 0xec, 0x6d, 0x17, 0xdd, 0xb4, 0xc1, 0xd6, 0xe2, 0xcf, 0x87, 0x5e, 0x40, 0x17, 0x5b,
+];
 
 /// Stable tag values in the owner envelope. Aggregate payloads use the same
 /// pinned descriptor/callback mechanism as scalars; their compiler-generated
@@ -77,6 +88,22 @@ impl ManagedAnyPayloadV2TypeId {
     pub(super) const fn as_bytes(&self) -> &[u8; TYPE_ID_BYTES] {
         &self.0
     }
+}
+
+/// Return whether an ABI identity is the complete canonical Core i32 scalar
+/// descriptor, including its runtime layout. This is shared by miss admission
+/// and callback canonicalization so neither boundary can accept a looser
+/// identity than the other.
+pub(super) fn is_canonical_i32_identity(identity: ManagedAnyPayloadV2Identity) -> bool {
+    has_canonical_i32_type_desc(identity)
+        && identity.size == std::mem::size_of::<i32>()
+        && identity.align == std::mem::align_of::<i32>()
+}
+
+fn has_canonical_i32_type_desc(identity: ManagedAnyPayloadV2Identity) -> bool {
+    identity.tag == ManagedAnyPayloadV2Tag::I32
+        && identity.type_id.as_bytes() == CANONICAL_I32_TYPE_ID
+        && identity.descriptor_hash == CANONICAL_I32_TYPE_DESC_HASH
 }
 
 /// Exact payload descriptor identity. `size` and `align` are the source
@@ -282,8 +309,22 @@ fn descriptors(
 
 fn register_descriptor(
     identity: ManagedAnyPayloadV2Identity,
-    glue: ManagedAnyPayloadV2Glue,
+    requested_glue: ManagedAnyPayloadV2Glue,
 ) -> Result<Arc<ManagedAnyPayloadV2Descriptor>, ManagedAnyPayloadV2Error> {
+    // Core i32 is a Copy scalar with fixed memcpy/no-op ownership behavior.
+    // Do not let the first caller of this public runtime ABI pin arbitrary
+    // callbacks under the canonical i32 TypeDesc identity. Canonicalize
+    // before both the existing-key comparison and first insertion.
+    let glue = if has_canonical_i32_type_desc(identity) {
+        if identity.size != std::mem::size_of::<i32>()
+            || identity.align != std::mem::align_of::<i32>()
+        {
+            return Err(ManagedAnyPayloadV2Error::TypeMismatch);
+        }
+        canonical_i32_glue()
+    } else {
+        requested_glue
+    };
     let layout = checked_layout(identity.size, identity.align)?;
     let mut registry = descriptors()
         .lock()
@@ -308,6 +349,22 @@ fn register_descriptor(
     Ok(descriptor)
 }
 
+pub(super) fn canonical_i32_glue() -> ManagedAnyPayloadV2Glue {
+    ManagedAnyPayloadV2Glue {
+        clone: clone_canonical_i32,
+        drop: drop_canonical_i32,
+    }
+}
+
+unsafe extern "C" fn clone_canonical_i32(destination: *mut u8, source: *const u8) -> i32 {
+    // SAFETY: callers reach this glue only through the exact Core i32
+    // descriptor, and the owner runtime supplies checked 4-byte layouts.
+    unsafe { std::ptr::copy_nonoverlapping(source.cast::<i32>(), destination.cast::<i32>(), 1) };
+    0
+}
+
+unsafe extern "C" fn drop_canonical_i32(_payload: *mut u8) {}
+
 fn same_glue(left: ManagedAnyPayloadV2Glue, right: ManagedAnyPayloadV2Glue) -> bool {
     // Function pointer casts compare the executable addresses supplied by the
     // trusted compiler-native caller. This is identity consistency, not
@@ -324,13 +381,14 @@ pub(super) struct ManagedAnyPayloadV2 {
 
 // SAFETY: compiler whole-program preflight admits only immutable, non-linear,
 // recursively cloneable payloads. Payload bytes become immutable after
-// successful construction. The pinned compiler-generated callbacks are
-// required by the callback ABI to read/clone independent values concurrently
-// and to drop them on any freeing thread without TLS dependence. Each callback
-// runs only after an Arc snapshot has pinned this descriptor and allocation;
-// the runtime never shares a mutable payload pointer with a caller. Runtime
-// cannot infer linearity or authenticate arbitrary C pointers from the raw
-// hash, so these invariants rely on the reserved compiler-native ABI gate.
+// successful construction. Pinned generated callbacks are required to
+// read/clone independent values concurrently and drop them on any freeing
+// thread without TLS dependence; canonical Core i32 uses runtime-owned glue.
+// Each callback runs only after an Arc snapshot pins the descriptor and
+// allocation; the runtime never shares a mutable payload pointer with a
+// caller. For other identities, runtime cannot infer linearity or authenticate
+// arbitrary C pointers from the raw hash, so those invariants rely on the
+// reserved compiler-native ABI gate.
 unsafe impl Send for ManagedAnyPayloadV2 {}
 unsafe impl Sync for ManagedAnyPayloadV2 {}
 
@@ -343,7 +401,7 @@ impl ManagedAnyPayloadV2 {
         source: *const u8,
     ) -> Result<Self, ManagedAnyPayloadV2Error> {
         checked_layout(identity.size, identity.align)?;
-        if source.is_null() || (source as usize) % identity.align != 0 {
+        if source.is_null() || !(source as usize).is_multiple_of(identity.align) {
             return Err(ManagedAnyPayloadV2Error::InvalidPayloadPointer);
         }
         let descriptor = register_descriptor(identity, glue)?;
@@ -404,7 +462,7 @@ impl ManagedAnyPayloadV2 {
         if output_size != expected.size || output_align != expected.align {
             return Err(ManagedAnyPayloadV2Error::LayoutMismatch);
         }
-        if output.is_null() || (output as usize) % output_align != 0 {
+        if output.is_null() || !(output as usize).is_multiple_of(output_align) {
             return Err(ManagedAnyPayloadV2Error::InvalidOutputPointer);
         }
         // SAFETY: exact identity/layout was established above. The callback
@@ -527,6 +585,54 @@ mod tests {
         );
         assert!(ManagedAnyPayloadV2TypeId::parse(b"rt:0123456789abcdef0123456789abcdef").is_ok());
         assert!(ManagedAnyPayloadV2TypeId::parse(b"rt:0123456789ABCDEF0123456789ABCDEF").is_err());
+    }
+
+    #[test]
+    fn canonical_i32_runtime_receipt_matches_an_independent_core_typedesc() {
+        use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+        use crate::core::mir::types::MirTypeCatalog;
+
+        fn update_framed(hasher: &mut Blake3Hasher, bytes: &[u8]) {
+            hasher.update(&(bytes.len() as u64).to_be_bytes());
+            hasher.update(bytes);
+        }
+
+        let core_i32_id = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        assert_eq!(core_i32_id.as_str().as_bytes(), &CANONICAL_I32_TYPE_ID[..]);
+
+        let mut resolved = ResolvedTypeTable::new();
+        let interned_i32 = resolved
+            .intern_resolved(ResolvedType::Primitive(PrimitiveType::I32))
+            .expect("Core i32 TypeDesc");
+        assert_eq!(interned_i32, core_i32_id);
+        let catalog = MirTypeCatalog::from_resolved_types(&resolved).expect("Core i32 catalog");
+        let descriptor = catalog.get(&core_i32_id).expect("canonical i32 descriptor");
+        assert_eq!(
+            descriptor.canonical_text(),
+            format!(
+                "{} kind=primitive(i32) layout=scalar native_record_abi=none session_protocol=- ownership=copy abi=i32 glue=move_out=noop clone=noop drop=noop drop_plan=- variant_drop_plan=- drop=false clone=false\n",
+                core_i32_id.as_str()
+            )
+        );
+
+        // Independently build the existing one-node V2 TypeDesc-closure hash
+        // stream from the Core descriptor. Primitive i32 has no checker,
+        // layout, protocol, or glue-child edges.
+        let mut hasher = Blake3Hasher::new();
+        hasher.update(b"mimi-managed-any-payload-v2:typedesc-closure:v1\n");
+        update_framed(&mut hasher, core_i32_id.as_str().as_bytes());
+        update_framed(&mut hasher, descriptor.canonical_text().as_bytes());
+        for section in [
+            b"checker".as_slice(),
+            b"layout".as_slice(),
+            b"session-protocol".as_slice(),
+            b"drop-plan".as_slice(),
+            b"variant-drop-plans".as_slice(),
+        ] {
+            update_framed(&mut hasher, section);
+            hasher.update(&0_u64.to_be_bytes());
+        }
+        assert_eq!(hasher.finalize(), CANONICAL_I32_TYPE_DESC_HASH);
     }
 
     #[test]

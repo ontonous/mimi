@@ -385,15 +385,29 @@ func make() -> (Any, i32) {
 "#,
     )
     .expect("write tuple_any_check.mimi");
-    // EXPERIMENT: is this set_var load-bearing?
-    let _stdlib_guard = super::StdlibEnvGuard::set(&dir);
     let src = fs::read_to_string(&path).expect("read tuple_any_check.mimi");
     let tokens = crate::lexer::Lexer::new(&src)
         .tokenize()
         .expect("tuple_any lex should succeed");
-    let (file, parse_errors) = crate::loader::parser_for_path(tokens, &path)
-        .expect("parser_for_path should succeed")
-        .parse_file_with_recovery();
+    // Model the same source identity the loader assigns to files under std/.
+    // This lets the checker apply its stdlib-only `Any` rule without changing
+    // process-global MIMI_STDLIB, which can race with parallel tests.
+    let mut sources = crate::span::SourceRegistry::default();
+    let source_id = sources
+        .register(
+            crate::span::SourceRecord::new(
+                crate::span::SourceKey::new("stdlib:tuple_any_check.mimi")
+                    .expect("stdlib source key should be valid"),
+                crate::span::SourceTextOrigin::Builtin,
+            )
+            .with_disk_path(path.clone()),
+        )
+        .expect("register synthetic stdlib source");
+    let source_context = crate::span::SourceContext::registered(source_id, sources)
+        .expect("registered stdlib source should have a context");
+    let (file, parse_errors) =
+        crate::parser::Parser::new_with_source_context(tokens, source_context)
+            .parse_file_with_recovery();
     assert!(
         parse_errors.is_empty(),
         "tuple_any parse errors: {:?}",

@@ -603,10 +603,17 @@ fn audit_json_get_string_missing_key_vm_empty_string() {
     // json_get_string on a missing key ("key 'k' not found"), which DIVERGES
     // from the VM's "" — flagged to the parent for reconciliation; the VM's
     // behavior is pinned here as the reference semantics.
-    let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
+    let src = r#"
+func observed_json_get_string_missing_key() -> string {
+    json_get_string("{\"a\":1}", "nonexistent")
+}
+func main() -> i32 {
+    if observed_json_get_string_missing_key() == "" { 0 } else { 1 }
+}
+"#;
     assert_eq!(
-        v,
-        interp::Value::String(crate::interp::SharedString::new("".into())),
+        run_source(src),
+        interp::Value::Int(0),
         "VM json_get_string missing key must return empty string"
     );
 }

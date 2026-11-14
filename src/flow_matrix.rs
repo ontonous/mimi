@@ -12,6 +12,7 @@
 //! regardless of sparse/dense mode.
 
 use crate::ast::*;
+use crate::interp::SharedString;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -1063,34 +1064,40 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
     let mut panic_payload = HashMap::new();
     panic_payload.insert(
         "error_type".to_string(),
-        Value::String(crate::interp::SharedString::new(event.to_string())),
+        Value::String(SharedString::new(event.to_string())),
     );
-    panic_payload.insert("file".to_string(), Value::String(crate::interp::SharedString::new(String::new())));
+    panic_payload.insert(
+        "file".to_string(),
+        Value::String(SharedString::new(String::new())),
+    );
     panic_payload.insert("line".to_string(), Value::Int(0));
     panic_payload.insert(
         "stack".to_string(),
-        Value::String(crate::interp::SharedString::new(snapshot.to_string())),
+        Value::String(SharedString::new(snapshot.to_string())),
     );
 
     // v0.29.39: MemoryDump sub-record (field summary)
     // v0.29.44: populated with actual from_state field names when available
     let mut memory_dump = HashMap::new();
     let dump_fields = format!("from_state={};event={}", from_state, event);
-    memory_dump.insert("fields".to_string(), Value::String(crate::interp::SharedString::new(dump_fields)));
+    memory_dump.insert(
+        "fields".to_string(),
+        Value::String(SharedString::new(dump_fields)),
+    );
     memory_dump.insert("count".to_string(), Value::Int(2));
 
     let mut trace = HashMap::new();
     trace.insert(
         "last_state_name".to_string(),
-        Value::String(crate::interp::SharedString::new(from_state.to_string())),
+        Value::String(SharedString::new(from_state.to_string())),
     );
     trace.insert(
         "unexpected_event".to_string(),
-        Value::String(crate::interp::SharedString::new(event.to_string())),
+        Value::String(SharedString::new(event.to_string())),
     );
     trace.insert(
         "snapshot".to_string(),
-        Value::String(crate::interp::SharedString::new(snapshot.to_string())),
+        Value::String(SharedString::new(snapshot.to_string())),
     );
     trace.insert(
         "memory_dump".to_string(),
@@ -1113,7 +1120,7 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
         if let Some(code) = event.strip_prefix("panic:") {
             Value::Variant(
                 "Panic".to_string(),
-                vec![Value::String(crate::interp::SharedString::new(code.to_string()))],
+                vec![Value::String(SharedString::new(code.to_string()))],
             )
         } else {
             Value::Variant(event.to_string(), vec![])
@@ -1121,7 +1128,7 @@ pub fn make_fault_value(from_state: &str, event: &str, snapshot: &str) -> crate:
     );
     fields.insert(
         "snapshot".to_string(),
-        Value::String(crate::interp::SharedString::new(snapshot.to_string())),
+        Value::String(SharedString::new(snapshot.to_string())),
     );
     fields.insert(
         "trace".to_string(),
@@ -1137,11 +1144,11 @@ pub fn make_peer_fault_value(peer_id: &str, reason: &str) -> crate::interp::Valu
     let mut fields = HashMap::new();
     fields.insert(
         "peer_id".to_string(),
-        Value::String(crate::interp::SharedString::new(peer_id.to_string())),
+        Value::String(SharedString::new(peer_id.to_string())),
     );
     fields.insert(
         "reason".to_string(),
-        Value::String(crate::interp::SharedString::new(reason.to_string())),
+        Value::String(SharedString::new(reason.to_string())),
     );
     Value::Record(Some("PeerFault".to_string()), fields)
 }

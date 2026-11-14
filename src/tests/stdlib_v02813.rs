@@ -5,7 +5,8 @@
 //! (via `compile_and_run`) to enforce L1 (双后端等价性).
 
 use crate::interp;
-use crate::tests::{compile_and_run, run_source, run_with_stdlib};
+use crate::interp::SharedString;
+use crate::tests::{bytecode_call_named, compile_and_run, run_source, run_with_stdlib};
 
 // =====================================================================
 // v0.28.13 — trigonometric builtins (interpreter + codegen)
@@ -15,11 +16,56 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
     (a - b).abs() < eps
 }
 
+const FLOAT_RESULT_HELPER: &str = "stdlib_v02813_float_result";
+const STDLIB_RESULT_HELPER: &str = "stdlib_v02813_stdlib_result";
+
+fn float_result_source(body: &str) -> String {
+    format!(
+        "func {FLOAT_RESULT_HELPER}() -> f64 {{ {body} }}\n\
+         func main() -> i32 {{ let observed = {FLOAT_RESULT_HELPER}(); 0 }}"
+    )
+}
+
+fn run_named_helper(src: &str, helper: &str) -> interp::Value {
+    assert_eq!(
+        run_source(src),
+        interp::Value::Int(0),
+        "the legal scalar main should execute its result helper"
+    );
+    bytecode_call_named(src, helper, Vec::new())
+        .unwrap_or_else(|error| panic!("failed to execute result helper {helper}: {error}"))
+}
+
+fn run_named_helper_with_stdlib(stdlib_name: &str, src: &str, helper: &str) -> interp::Value {
+    assert_eq!(
+        run_with_stdlib(stdlib_name, src),
+        interp::Value::Int(0),
+        "the legal scalar main should execute its stdlib result helper"
+    );
+
+    let stdlib_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("std")
+        .join(stdlib_name);
+    let stdlib_src = std::fs::read_to_string(&stdlib_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", stdlib_path.display()));
+    let combined = format!("{}\n{}", stdlib_src, src);
+    bytecode_call_named(&combined, helper, Vec::new())
+        .unwrap_or_else(|error| panic!("failed to execute result helper {helper}: {error}"))
+}
+
 /// TC-H4: run a pure float main() on both backends (interp Value + println codegen).
 fn dual_float_main(body: &str, expected: f64, eps: f64, label: &str) {
-    let src = format!("func main() -> f64 {{ {} }}", body);
-    assert_float_approx(run_source(&src), expected, eps, label);
-    let cg = format!("func main() -> i32 {{ println({}); 0 }}", body);
+    let src = float_result_source(body);
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        expected,
+        eps,
+        label,
+    );
+    let cg = format!(
+        "func {FLOAT_RESULT_HELPER}() -> f64 {{ {body} }}\n\
+         func main() -> i32 {{ println({FLOAT_RESULT_HELPER}()); 0 }}"
+    );
     let out = compile_and_run(&cg).unwrap_or_else(|e| panic!("{} codegen: {}", label, e));
     let v: f64 = out
         .trim()
@@ -70,10 +116,10 @@ fn stdlib_v02813_tan_zero() {
 
 #[test]
 fn stdlib_v02813_asin_inverse() {
-    let src = "func main() -> f64 { asin(0.5) }";
+    let src = float_result_source("asin(0.5)");
     // asin(0.5) = pi/6
     assert_float_approx(
-        run_source(src),
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
         std::f64::consts::PI / 6.0,
         1e-10,
         "asin(0.5)",
@@ -82,10 +128,10 @@ fn stdlib_v02813_asin_inverse() {
 
 #[test]
 fn stdlib_v02813_acos_inverse() {
-    let src = "func main() -> f64 { acos(0.5) }";
+    let src = float_result_source("acos(0.5)");
     // acos(0.5) = pi/3
     assert_float_approx(
-        run_source(src),
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
         std::f64::consts::PI / 3.0,
         1e-10,
         "acos(0.5)",
@@ -94,10 +140,10 @@ fn stdlib_v02813_acos_inverse() {
 
 #[test]
 fn stdlib_v02813_atan_inverse() {
-    let src = "func main() -> f64 { atan(1.0) }";
+    let src = float_result_source("atan(1.0)");
     // atan(1) = pi/4
     assert_float_approx(
-        run_source(src),
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
         std::f64::consts::PI / 4.0,
         1e-10,
         "atan(1)",
@@ -106,10 +152,10 @@ fn stdlib_v02813_atan_inverse() {
 
 #[test]
 fn stdlib_v02813_atan2() {
-    let src = "func main() -> f64 { atan2(1.0, 1.0) }";
+    let src = float_result_source("atan2(1.0, 1.0)");
     // atan2(1,1) = pi/4
     assert_float_approx(
-        run_source(src),
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
         std::f64::consts::PI / 4.0,
         1e-10,
         "atan2(1,1)",
@@ -118,80 +164,145 @@ fn stdlib_v02813_atan2() {
 
 #[test]
 fn stdlib_v02813_sinh_zero() {
-    let src = "func main() -> f64 { sinh(0.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "sinh(0)");
+    let src = float_result_source("sinh(0.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        0.0,
+        1e-10,
+        "sinh(0)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_cosh_zero() {
-    let src = "func main() -> f64 { cosh(0.0) }";
-    assert_float_approx(run_source(src), 1.0, 1e-10, "cosh(0)");
+    let src = float_result_source("cosh(0.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        1.0,
+        1e-10,
+        "cosh(0)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_tanh_zero() {
-    let src = "func main() -> f64 { tanh(0.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "tanh(0)");
+    let src = float_result_source("tanh(0.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        0.0,
+        1e-10,
+        "tanh(0)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_ln_one() {
-    let src = "func main() -> f64 { ln(1.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "ln(1)");
+    let src = float_result_source("ln(1.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        0.0,
+        1e-10,
+        "ln(1)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_ln_e() {
-    let src = "func main() -> f64 { ln(2.718281828459045) }";
-    assert_float_approx(run_source(src), 1.0, 1e-9, "ln(e)");
+    let src = float_result_source("ln(2.718281828459045)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        1.0,
+        1e-9,
+        "ln(e)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_log2_eight() {
-    let src = "func main() -> f64 { log2(8.0) }";
-    assert_float_approx(run_source(src), 3.0, 1e-10, "log2(8)");
+    let src = float_result_source("log2(8.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        3.0,
+        1e-10,
+        "log2(8)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_log10_thousand() {
-    let src = "func main() -> f64 { log10(1000.0) }";
-    assert_float_approx(run_source(src), 3.0, 1e-10, "log10(1000)");
+    let src = float_result_source("log10(1000.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        3.0,
+        1e-10,
+        "log10(1000)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_log_with_base() {
-    let src = "func main() -> f64 { log(8.0, 2.0) }";
-    assert_float_approx(run_source(src), 3.0, 1e-10, "log_2(8)");
+    let src = float_result_source("log(8.0, 2.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        3.0,
+        1e-10,
+        "log_2(8)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_exp_zero() {
-    let src = "func main() -> f64 { exp(0.0) }";
-    assert_float_approx(run_source(src), 1.0, 1e-10, "exp(0)");
+    let src = float_result_source("exp(0.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        1.0,
+        1e-10,
+        "exp(0)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_exp_one() {
-    let src = "func main() -> f64 { exp(1.0) }";
-    assert_float_approx(run_source(src), std::f64::consts::E, 1e-9, "exp(1)");
+    let src = float_result_source("exp(1.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        std::f64::consts::E,
+        1e-9,
+        "exp(1)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_exp2_three() {
-    let src = "func main() -> f64 { exp2(3.0) }";
-    assert_float_approx(run_source(src), 8.0, 1e-10, "exp2(3)");
+    let src = float_result_source("exp2(3.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        8.0,
+        1e-10,
+        "exp2(3)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_cbrt_eight() {
-    let src = "func main() -> f64 { cbrt(8.0) }";
-    assert_float_approx(run_source(src), 2.0, 1e-10, "cbrt(8)");
+    let src = float_result_source("cbrt(8.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        2.0,
+        1e-10,
+        "cbrt(8)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_cbrt_neg_eight() {
-    let src = "func main() -> f64 { cbrt(-8.0) }";
-    assert_float_approx(run_source(src), -2.0, 1e-10, "cbrt(-8)");
+    let src = float_result_source("cbrt(-8.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        -2.0,
+        1e-10,
+        "cbrt(-8)",
+    );
 }
 
 #[test]
@@ -202,9 +313,15 @@ fn stdlib_v02813_my_sin_wrapper_inline() {
     // `codegen_e2e` and integration tests with MIMI_STDLIB set.
     let src = r#"
         func my_sin(x: f64) -> f64 { sin(x) }
-        func main() -> f64 { my_sin(pi() / 2.0) }
+        func stdlib_v02813_float_result() -> f64 { my_sin(pi() / 2.0) }
+        func main() -> i32 { let observed = stdlib_v02813_float_result(); 0 }
     "#;
-    assert_float_approx(run_source(src), 1.0, 1e-9, "my_sin(pi/2)");
+    assert_float_approx(
+        run_named_helper(src, FLOAT_RESULT_HELPER),
+        1.0,
+        1e-9,
+        "my_sin(pi/2)",
+    );
 }
 
 #[test]
@@ -370,12 +487,18 @@ fn stdlib_v02813_pythagoras_via_sin_cos() {
     let src = r#"
         func my_sin(x: f64) -> f64 { sin(x) }
         func my_cos(x: f64) -> f64 { cos(x) }
-        func main() -> f64 {
+        func stdlib_v02813_float_result() -> f64 {
             let x = 1.234
             my_sin(x) * my_sin(x) + my_cos(x) * my_cos(x)
         }
+        func main() -> i32 { let observed = stdlib_v02813_float_result(); 0 }
     "#;
-    assert_float_approx(run_source(src), 1.0, 1e-9, "sin²+cos²");
+    assert_float_approx(
+        run_named_helper(src, FLOAT_RESULT_HELPER),
+        1.0,
+        1e-9,
+        "sin²+cos²",
+    );
 }
 
 // =====================================================================
@@ -385,21 +508,23 @@ fn stdlib_v02813_pythagoras_via_sin_cos() {
 #[test]
 fn stdlib_v02813_sin_typecheck() {
     use crate::tests::check_source;
-    let src = "func main() -> f64 { sin(1.0) }";
+    let src =
+        "func sin_value() -> f64 { sin(1.0) }\nfunc main() -> i32 { println(sin_value()); 0 }";
     assert!(check_source(src).is_ok(), "sin(1.0) should typecheck");
 }
 
 #[test]
 fn stdlib_v02813_log_typecheck() {
     use crate::tests::check_source;
-    let src = "func main() -> f64 { log(8.0, 2.0) }";
+    let src =
+        "func log_value() -> f64 { log(8.0, 2.0) }\nfunc main() -> i32 { println(log_value()); 0 }";
     assert!(check_source(src).is_ok(), "log(8.0, 2.0) should typecheck");
 }
 
 #[test]
 fn stdlib_v02813_atan2_typecheck() {
     use crate::tests::check_source;
-    let src = "func main() -> f64 { atan2(1.0, 1.0) }";
+    let src = "func atan2_value() -> f64 { atan2(1.0, 1.0) }\nfunc main() -> i32 { println(atan2_value()); 0 }";
     assert!(check_source(src).is_ok(), "atan2 should typecheck");
 }
 
@@ -410,8 +535,8 @@ fn stdlib_v02813_atan2_typecheck() {
 #[test]
 fn stdlib_v02813_exp_negative() {
     // exp(-1) = 1/e
-    let src = "func main() -> f64 { exp(-1.0) }";
-    let result = run_source(src);
+    let src = float_result_source("exp(-1.0)");
+    let result = run_named_helper(&src, FLOAT_RESULT_HELPER);
     if let interp::Value::Float(f) = result {
         assert!((f - 1.0 / std::f64::consts::E).abs() < 1e-9);
     } else {
@@ -421,14 +546,24 @@ fn stdlib_v02813_exp_negative() {
 
 #[test]
 fn stdlib_v02813_log10_one() {
-    let src = "func main() -> f64 { log10(1.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "log10(1)");
+    let src = float_result_source("log10(1.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        0.0,
+        1e-10,
+        "log10(1)",
+    );
 }
 
 #[test]
 fn stdlib_v02813_log2_one() {
-    let src = "func main() -> f64 { log2(1.0) }";
-    assert_float_approx(run_source(src), 0.0, 1e-10, "log2(1)");
+    let src = float_result_source("log2(1.0)");
+    assert_float_approx(
+        run_named_helper(&src, FLOAT_RESULT_HELPER),
+        0.0,
+        1e-10,
+        "log2(1)",
+    );
 }
 
 #[test]
@@ -449,11 +584,12 @@ fn stdlib_v02813_asin_codegen() {
 fn stdlib_v02813_atan2_quadrants() {
     // atan2(0, 1) = 0; atan2(1, 0) = pi/2; atan2(0, -1) = pi; atan2(-1, 0) = -pi/2
     let src = r#"
-        func main() -> f64 {
+        func stdlib_v02813_float_result() -> f64 {
             atan2(0.0, 1.0) + atan2(1.0, 0.0) + atan2(0.0, -1.0) + atan2(-1.0, 0.0)
         }
+        func main() -> i32 { let observed = stdlib_v02813_float_result(); 0 }
     "#;
-    let result = run_source(src);
+    let result = run_named_helper(src, FLOAT_RESULT_HELPER);
     if let interp::Value::Float(f) = result {
         // 0 + pi/2 + pi + (-pi/2) = pi
         assert!((f - std::f64::consts::PI).abs() < 1e-9, "got {}", f);
@@ -485,50 +621,54 @@ fn stdlib_v02813_array_new_zero() {
 #[test]
 fn stdlib_v02813_array_get() {
     let src = r#"
-        func main() -> string { array_get(array_new(3, "hi"), 1) }
+        func stdlib_v02813_stdlib_result() -> string { array_get(array_new(3, "hi"), 1) }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("hi".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("hi".to_string()))
     );
 }
 
 #[test]
 fn stdlib_v02813_array_get_out_of_bounds() {
     let src = r#"
-        func main() -> string { array_get(array_new(3, "hi"), 10) }
+        func stdlib_v02813_stdlib_result() -> string { array_get(array_new(3, "hi"), 10) }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("".to_string()))
     );
 }
 
 #[test]
 fn stdlib_v02813_array_set() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             let arr = array_new(3, "x")
             array_get(array_set(arr, 1, "y"), 1)
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("y".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("y".to_string()))
     );
 }
 
 #[test]
 fn stdlib_v02813_array_fill() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             let arr = array_new(3, "x")
             array_get(array_fill(arr, "z"), 0)
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("z".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("z".to_string()))
     );
 }
 
@@ -551,14 +691,15 @@ fn stdlib_v02813_array_slice_clamps() {
 #[test]
 fn stdlib_v02813_array_reverse() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             let arr = ["a", "b", "c", "d"]
             array_get(array_reverse(arr), 0)
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("d".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("d".to_string()))
     );
 }
 
@@ -566,14 +707,15 @@ fn stdlib_v02813_array_reverse() {
 fn stdlib_v02813_array_rotate_left_basic() {
     // [a,b,c,d,e] rotate_left(2) = [c,d,e,a,b]
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             let arr = ["a", "b", "c", "d", "e"]
             array_get(array_rotate_left(arr, 2), 0)
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("c".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("c".to_string()))
     );
 }
 
@@ -581,14 +723,15 @@ fn stdlib_v02813_array_rotate_left_basic() {
 fn stdlib_v02813_array_rotate_right_basic() {
     // [a,b,c,d,e] rotate_right(2) = [d,e,a,b,c]
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             let arr = ["a", "b", "c", "d", "e"]
             array_get(array_rotate_right(arr, 2), 0)
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("array.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("d".to_string()))
+        run_named_helper_with_stdlib("array.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("d".to_string()))
     );
 }
 
@@ -743,24 +886,26 @@ fn stdlib_v02813_iter_range_negative() {
 #[test]
 fn stdlib_v02813_iter_range_first_value() {
     let src = r#"
-        func main() -> string { iter_range(10, 13)[0] }
+        func stdlib_v02813_stdlib_result() -> string { iter_range(10, 13)[0] }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("10".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("10".to_string()))
     );
 }
 
 #[test]
 fn stdlib_v02813_iter_zip_basic() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             iter_zip(["a", "b", "c"], ["x", "y", "z"])[1]
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("b|y".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("b|y".to_string()))
     );
 }
 
@@ -775,13 +920,14 @@ fn stdlib_v02813_iter_zip_truncates() {
 #[test]
 fn stdlib_v02813_iter_enumerate() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             iter_enumerate(["a", "b", "c"])[2]
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("2|c".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("2|c".to_string()))
     );
 }
 
@@ -830,22 +976,24 @@ fn stdlib_v02813_iter_chain() {
 #[test]
 fn stdlib_v02813_iter_repeat() {
     let src = r#"
-        func main() -> string { iter_repeat("x", 3)[2] }
+        func stdlib_v02813_stdlib_result() -> string { iter_repeat("x", 3)[2] }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("x".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("x".to_string()))
     );
 }
 
 #[test]
 fn stdlib_v02813_iter_reversed() {
     let src = r#"
-        func main() -> string { iter_reversed(["a", "b", "c"])[0] }
+        func stdlib_v02813_stdlib_result() -> string { iter_reversed(["a", "b", "c"])[0] }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("c".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("c".to_string()))
     );
 }
 
@@ -872,13 +1020,14 @@ fn stdlib_v02813_iter_unique() {
 #[test]
 fn stdlib_v02813_iter_unique_preserves_order() {
     let src = r#"
-        func main() -> string {
+        func stdlib_v02813_stdlib_result() -> string {
             iter_unique(["c", "a", "b", "a", "c"])[2]
         }
+        func main() -> i32 { let observed = stdlib_v02813_stdlib_result(); 0 }
     "#;
     assert_eq!(
-        run_with_stdlib("iter.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("b".to_string()))
+        run_named_helper_with_stdlib("iter.mimi", src, STDLIB_RESULT_HELPER),
+        interp::Value::String(SharedString::new("b".to_string()))
     );
 }
 

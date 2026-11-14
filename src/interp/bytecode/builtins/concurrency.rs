@@ -5,6 +5,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use crate::interp::SharedString;
 use std::sync::Arc;
 
 pub fn register(reg: &mut BuiltinRegistry) {
@@ -781,7 +782,7 @@ fn builtin_actor_set_mailbox_depth(
         _ => {
             return Err(InterpError::new(
                 "actor_set_mailbox_depth: depth must be positive i64",
-            ))
+            ));
         }
     };
     match &args[0] {
@@ -823,7 +824,7 @@ fn builtin_broadcast(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         _ => {
             return Err(InterpError::new(
                 "broadcast: first argument must be a List of actors",
-            ))
+            ));
         }
     };
     let method = match &args[1] {
@@ -831,7 +832,7 @@ fn builtin_broadcast(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         _ => {
             return Err(InterpError::new(
                 "broadcast: second argument must be a method name string",
-            ))
+            ));
         }
     };
     let mut results = Vec::with_capacity(targets.len());
@@ -876,7 +877,7 @@ fn builtin_assert_state(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         _ => {
             return Err(InterpError::new(
                 "assert_state: state_name must be a string",
-            ))
+            ));
         }
     };
     if actual_state != expected_state {
@@ -897,11 +898,11 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut fault_fields = std::collections::HashMap::new();
     fault_fields.insert(
         "last_state".to_string(),
-        Value::String(crate::interp::SharedString::new(state_name.clone())),
+        Value::String(SharedString::new(state_name.clone())),
     );
     fault_fields.insert(
         "unexpected_event".to_string(),
-        Value::String(crate::interp::SharedString::new("inject_fault".to_string())),
+        Value::String(SharedString::new("inject_fault".to_string())),
     );
     fault_fields.insert("snapshot".to_string(), args[0].clone());
 
@@ -909,15 +910,15 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut trace_fields = std::collections::HashMap::new();
     trace_fields.insert(
         "last_state_name".to_string(),
-        Value::String(crate::interp::SharedString::new(state_name)),
+        Value::String(SharedString::new(state_name)),
     );
     trace_fields.insert(
         "unexpected_event".to_string(),
-        Value::String(crate::interp::SharedString::new("inject_fault".to_string())),
+        Value::String(SharedString::new("inject_fault".to_string())),
     );
     trace_fields.insert(
         "snapshot".to_string(),
-        Value::String(crate::interp::SharedString::new(String::new())),
+        Value::String(SharedString::new(String::new())),
     );
 
     // MemoryDump: empty dump.
@@ -933,13 +934,16 @@ fn builtin_inject_fault(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
     let mut panic_fields = std::collections::HashMap::new();
     panic_fields.insert(
         "error_type".to_string(),
-        Value::String(crate::interp::SharedString::new("InjectFault".to_string())),
+        Value::String(SharedString::new("InjectFault".to_string())),
     );
-    panic_fields.insert("file".to_string(), Value::String(crate::interp::SharedString::new(String::new())));
+    panic_fields.insert(
+        "file".to_string(),
+        Value::String(SharedString::new(String::new())),
+    );
     panic_fields.insert("line".to_string(), Value::Int(0));
     panic_fields.insert(
         "stack_snapshot".to_string(),
-        Value::String(crate::interp::SharedString::new(String::new())),
+        Value::String(SharedString::new(String::new())),
     );
     trace_fields.insert(
         "panic_payload".to_string(),
@@ -968,10 +972,14 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
             for actor_val in actor_names.iter() {
                 if let Value::String(name) = actor_val {
                     match vm.spawn_actor(name, false) {
-                        Ok(_) => results.push(Value::String(crate::interp::SharedString::new(format!("spawned:{}", name)))),
-                        Err(e) => {
-                            results.push(Value::String(crate::interp::SharedString::new(format!("failed:{}:{}", name, e))))
-                        }
+                        Ok(_) => results.push(Value::String(SharedString::new(format!(
+                            "spawned:{}",
+                            name
+                        )))),
+                        Err(e) => results.push(Value::String(SharedString::new(format!(
+                            "failed:{}:{}",
+                            name, e
+                        )))),
                     }
                 }
             }
@@ -989,7 +997,10 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(crate::interp::SharedString::new(format!("called:{}", method))));
+                    results.push(Value::String(SharedString::new(format!(
+                        "called:{}",
+                        method
+                    ))));
                 }
             }
         }
@@ -1006,7 +1017,10 @@ fn builtin_test_sandbox(vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, In
                             }
                         })
                         .unwrap_or_default();
-                    results.push(Value::String(crate::interp::SharedString::new(format!("injected:{}", ftype))));
+                    results.push(Value::String(SharedString::new(format!(
+                        "injected:{}",
+                        ftype
+                    ))));
                 }
             }
         }

@@ -432,7 +432,24 @@ impl ManagedAnyInterproceduralSourcePlanV1 {
         type_catalog: &MirTypeCatalog,
         excluded_sources: Option<&HashSet<SourceId>>,
     ) -> Result<Self, Vec<String>> {
-        SourcePlanBuilder::new(program, instances, type_catalog, excluded_sources).derive()
+        Self::derive_with_owner_scope(program, instances, type_catalog, excluded_sources, None)
+    }
+
+    pub(super) fn derive_with_owner_scope(
+        program: &CheckedProgram,
+        instances: &BTreeMap<crate::core::mir::MirInstanceId, MirInstance>,
+        type_catalog: &MirTypeCatalog,
+        excluded_sources: Option<&HashSet<SourceId>>,
+        owner_scope: Option<&BTreeSet<NodeId>>,
+    ) -> Result<Self, Vec<String>> {
+        SourcePlanBuilder::new(
+            program,
+            instances,
+            type_catalog,
+            excluded_sources,
+            owner_scope,
+        )
+        .derive()
     }
 
     pub(super) fn validate_mir_call_census(
@@ -461,6 +478,7 @@ struct SourcePlanBuilder<'a> {
     instances: &'a BTreeMap<crate::core::mir::MirInstanceId, MirInstance>,
     type_catalog: &'a MirTypeCatalog,
     excluded_sources: Option<&'a HashSet<SourceId>>,
+    owner_scope: Option<&'a BTreeSet<NodeId>>,
 }
 
 impl<'a> SourcePlanBuilder<'a> {
@@ -469,13 +487,19 @@ impl<'a> SourcePlanBuilder<'a> {
         instances: &'a BTreeMap<crate::core::mir::MirInstanceId, MirInstance>,
         type_catalog: &'a MirTypeCatalog,
         excluded_sources: Option<&'a HashSet<SourceId>>,
+        owner_scope: Option<&'a BTreeSet<NodeId>>,
     ) -> Self {
         Self {
             program,
             instances,
             type_catalog,
             excluded_sources,
+            owner_scope,
         }
+    }
+
+    fn is_in_owner_scope(&self, owner: &NodeId) -> bool {
+        self.owner_scope.is_none_or(|scope| scope.contains(owner))
     }
 
     fn is_excluded(&self, callable: &crate::core::ResolvedCallable) -> bool {
@@ -521,7 +545,7 @@ impl<'a> SourcePlanBuilder<'a> {
         let mut callable_seals = BTreeMap::new();
         let mut calls_by_owner = BTreeMap::<NodeId, Vec<ScannedSourceCallV1>>::new();
         for (owner, callable) in self.program.callables() {
-            if self.is_excluded(callable) {
+            if !self.is_in_owner_scope(owner) || self.is_excluded(callable) {
                 continue;
             }
             callable_seals.insert(
@@ -552,7 +576,10 @@ impl<'a> SourcePlanBuilder<'a> {
 
         let mut instance_keys = BTreeSet::new();
         for (owner, callable) in self.program.callables() {
-            if !self.is_excluded(callable) && callable.signature.generic_parameters.is_empty() {
+            if self.is_in_owner_scope(owner)
+                && !self.is_excluded(callable)
+                && callable.signature.generic_parameters.is_empty()
+            {
                 instance_keys.insert(ManagedAnySourceFunctionKeyV1 {
                     owner: owner.clone(),
                     type_arguments: Vec::new(),
@@ -1472,7 +1499,7 @@ fn source_shape_for_term(
             | ManagedAnySourceTypeHeadV1::Capability(_)
             | ManagedAnySourceTypeHeadV1::Trait { .. } => ManagedAnySourceShapeV1::None,
             ManagedAnySourceTypeHeadV1::GenericParameter(_) => {
-                return Err("unsubstituted generic binder remains in source graph".into())
+                return Err("unsubstituted generic binder remains in source graph".into());
             }
             ManagedAnySourceTypeHeadV1::DynamicAny { .. } => unreachable!("handled above"),
             _ => {
@@ -2911,19 +2938,7 @@ mod tests {
         let source = r#"
 func leaf(value: Any) -> Any { value }
 func relay(value: Any) -> Any { leaf(value) }
-func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", 7)
-    let pair = map_get(root, "key")
-    drop(empty)
-    drop(root)
-    let payload = pair.1
-    let returned = relay(payload)
-    drop(pair)
-    drop(payload)
-    drop(returned)
-    0
-}
+func main() -> i32 { 0 }
 "#;
         // `Any` is retained only by stdlib declarations.  User-facing
         // functions cannot declare an erased owner after the 0.34 grammar
@@ -2943,23 +2958,36 @@ func main() -> i32 {
     }
 
     #[test]
-    fn ordinary_any_helper_chain_source_plan_rejects_unmaterialized_generic_substitute() {
+    fn ordinary_any_helper_chain_stays_outside_the_incomplete_map_route_profile() {
         let checked = checked_program(
             r#"
 func leaf<T>(value: T) -> T { value }
 func relay<T>(value: T) -> T { leaf(value) }
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", 7)
-    let pair = map_get(root, "key")
-    drop(empty)
-    drop(root)
-    let payload = pair.1
-    let returned = relay(payload)
-    drop(pair)
-    drop(payload)
-    drop(returned)
-    0
+    let created = map_new()
+    match created {
+        Ok(empty) => {
+            let changed = map_set(empty, "key", 7)
+            match changed {
+                Ok(root) => {
+                    drop(empty)
+                    let pair = map_get(root, "key")
+                    drop(root)
+                    let payload = pair.1
+                    let returned = relay(payload)
+                    drop(pair)
+                    drop(payload)
+                    drop(returned)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -2972,10 +3000,8 @@ func main() -> i32 {
             .collect::<Vec<_>>()
             .join(";");
         assert!(
-            text.contains("outside scalar contract")
-                || text.contains("generic identity contract")
-                || text.contains("ManagedAny"),
-            "{text}"
+            text.contains("ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage"),
+            "the current Map/Any source receipt must fail closed before an unresolved generic helper can inherit its identity: {text}"
         );
     }
 

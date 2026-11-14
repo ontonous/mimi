@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{PrimitiveType, ResolvedLiteral, ResolvedSignature, ResolvedType, ResolvedTypeId};
-use crate::core::{CheckedProgram, NodeId};
+use crate::core::{CheckedProgram, FlowId, NodeId, Origin, TransitionId};
 
 pub const RESOLVED_ACTOR_SCHEMA: &str = "mimi-resolved-actor-v1";
 
@@ -51,6 +51,39 @@ pub struct ResolvedActorMethodDescriptor {
     pub has_explicit_result: bool,
 }
 
+/// Checker-owned Flow state and dispatch identities attached to a `runs Flow`
+/// Actor.  Names are descriptive only; every executable association is sealed
+/// by the Flow/state/transition NodeIds and canonical signatures below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedActorFlowDescriptor {
+    pub flow: FlowId,
+    pub flow_owner: NodeId,
+    pub root_state: NodeId,
+    pub root_state_type: ResolvedTypeId,
+    pub payload: Vec<ResolvedActorFlowPayloadDescriptor>,
+    pub transitions: Vec<ResolvedActorFlowTransitionDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedActorFlowPayloadDescriptor {
+    pub field: NodeId,
+    pub name: String,
+    pub ty: ResolvedTypeId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedActorFlowTransitionDescriptor {
+    pub transition: TransitionId,
+    pub body_owner: NodeId,
+    pub method_owner: NodeId,
+    pub target_states: Vec<NodeId>,
+    pub is_fallback: bool,
+    pub is_ffi_pinned: bool,
+    pub fails: bool,
+    pub source_signature: ResolvedSignature,
+    pub body_signature: ResolvedSignature,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedActorDescriptor {
     pub schema: &'static str,
@@ -61,6 +94,9 @@ pub struct ResolvedActorDescriptor {
     /// Declaration order is the mailbox dispatch order.
     pub methods: Vec<ResolvedActorMethodDescriptor>,
     pub runs_flow: Option<String>,
+    /// Immutable checked Flow/state/transition identity snapshot for Actors
+    /// declared with `runs Flow`.
+    pub flow: Option<ResolvedActorFlowDescriptor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +118,19 @@ impl std::error::Error for ResolvedActorError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedScalarActorReceipt {
     descriptor: ResolvedActorDescriptor,
+    dispatch_methods: Vec<ResolvedActorMethodDescriptor>,
 }
 
 impl ResolvedScalarActorReceipt {
     pub fn descriptor(&self) -> &ResolvedActorDescriptor {
         &self.descriptor
+    }
+
+    /// The finite dispatch surface admitted by this scalar receipt. Generated
+    /// Fault recovery verbs remain visible in the declaration descriptor but
+    /// are not runtime entries in this closed non-failing profile.
+    pub(crate) fn dispatch_methods(&self) -> &[ResolvedActorMethodDescriptor] {
+        &self.dispatch_methods
     }
 }
 
@@ -168,6 +212,13 @@ impl ResolvedActorDescriptor {
                 return Err(self.error("method self parameter does not identify this actor"));
             }
         }
+        match (&self.runs_flow, &self.flow) {
+            (None, None) => (),
+            (Some(name), Some(flow)) => {
+                validate_actor_flow_descriptor(self, flow, name, program)?;
+            }
+            _ => return Err(self.error("runs-Flow name and checked Flow descriptor disagree")),
+        }
         if program.actor_descriptors().get(&self.actor) != Some(self) {
             return Err(
                 self.error("descriptor differs from the checker-owned initializer snapshot")
@@ -183,15 +234,24 @@ impl ResolvedActorDescriptor {
         program: &CheckedProgram,
     ) -> Result<ResolvedScalarActorReceipt, ResolvedActorError> {
         self.validate_against(program)?;
-        if self.runs_flow.is_some() {
-            return Err(self.error("runs-Flow actors require a separate state transition contract"));
-        }
         let is_i32 = |ty: &ResolvedTypeId| {
             matches!(
                 program.resolved_types().get(ty),
                 Some(ResolvedType::Primitive(PrimitiveType::I32))
             )
         };
+        let flow_method_owners = self
+            .flow
+            .as_ref()
+            .map(|flow| {
+                flow.transitions
+                    .iter()
+                    .filter(|transition| !transition.is_fallback)
+                    .map(|transition| transition.method_owner.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut dispatch_methods = Vec::new();
         for field in &self.fields {
             if !is_i32(&field.ty)
                 || !matches!(
@@ -203,10 +263,42 @@ impl ResolvedActorDescriptor {
             }
         }
         for method in &self.methods {
+            let is_user_transition = flow_method_owners.contains(&method.owner)
+                && program
+                    .functions()
+                    .get(&method.owner)
+                    .is_some_and(|function| {
+                        matches!(
+                            &function.origin,
+                            Origin::Desugared { rule, .. }
+                                if rule == "resolved.runs_flow_transition_method"
+                        )
+                    });
+            let is_generated_flow_method = self.flow.is_some()
+                && program
+                    .functions()
+                    .get(&method.owner)
+                    .is_some_and(|function| {
+                        matches!(
+                            &function.origin,
+                            Origin::Desugared { rule, .. }
+                                if rule == "resolved.runs_flow_transition_method"
+                        )
+                    });
+            if is_generated_flow_method && !is_user_transition {
+                continue;
+            }
             let function = program
                 .functions()
                 .get(&method.owner)
                 .ok_or_else(|| self.error("method function is absent"))?;
+            if is_user_transition {
+                // A synthetic Actor method is only a mailbox identity. Its
+                // executable body is the checked Flow transition callable.
+                validate_flow_method(self, method, program, is_i32)?;
+                dispatch_methods.push(method.clone());
+                continue;
+            }
             if function.is_async
                 || function.is_comptime
                 || function.extern_abi.is_some()
@@ -246,9 +338,14 @@ impl ResolvedActorDescriptor {
                     "method effect set is outside the checked nested-callable Actor contract",
                 ));
             }
+            dispatch_methods.push(method.clone());
+        }
+        if let Some(flow) = &self.flow {
+            validate_scalar_i32_flow_profile(self, flow, program, is_i32)?;
         }
         Ok(ResolvedScalarActorReceipt {
             descriptor: self.clone(),
+            dispatch_methods,
         })
     }
 }
@@ -327,6 +424,325 @@ fn default_initializer(ty: &ResolvedTypeId, program: &CheckedProgram) -> Option<
         Some(ResolvedType::Primitive(P::Unit)) => Some(ResolvedLiteral::Unit),
         _ => None,
     }
+}
+
+fn actor_flow_descriptor(
+    actor: &crate::core::ResolvedActor,
+    flow_name: Option<&str>,
+    root_state_name: Option<&str>,
+    program: &CheckedProgram,
+) -> Result<Option<ResolvedActorFlowDescriptor>, String> {
+    let Some(flow_name) = flow_name else {
+        return Ok(None);
+    };
+    let flow_id = FlowId(flow_name.to_owned());
+    let flow = program
+        .flows()
+        .get(&flow_id)
+        .ok_or("runs-Flow target is absent from the checked Flow directory")?;
+    let root_state_name = root_state_name.ok_or("runs-Flow target has no root state")?;
+    let root = flow
+        .states
+        .get(root_state_name)
+        .ok_or("runs-Flow root state is absent from the checked state directory")?;
+    let root_state_type = program
+        .resolved_types()
+        .iter()
+        .find_map(|(ty, shape)| {
+            matches!(shape, ResolvedType::Nominal { item, arguments, is_linear: true }
+                if item.as_str() == root.node_id.0 && arguments.is_empty())
+            .then(|| ty.clone())
+        })
+        .ok_or("runs-Flow root state has no canonical nominal type")?;
+    let payload = root
+        .payload
+        .iter()
+        .map(|(name, _)| {
+            let field = root
+                .field_ids
+                .get(name)
+                .ok_or("runs-Flow root payload has no stable field identity")?;
+            let ty = program
+                .resolved_state_field_types()
+                .get(field)
+                .ok_or("runs-Flow root payload has no canonical field type")?;
+            Ok(ResolvedActorFlowPayloadDescriptor {
+                field: field.clone(),
+                name: name.clone(),
+                ty: ty.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, &'static str>>()?;
+    let mut transitions = Vec::with_capacity(flow.transitions.len());
+    for transition_id in &flow.transitions {
+        let transition = program.transitions().get(transition_id).ok_or(
+            "runs-Flow transition identity is absent from the checked transition directory",
+        )?;
+        let method_owner = NodeId(format!(
+            "function:{}::{}",
+            actor.qualified_name, transition_id.event
+        ));
+        let source_signature = program
+            .resolved_signature(&method_owner)
+            .ok_or("runs-Flow synthetic Actor method has no canonical signature")?
+            .clone();
+        let body_signature = program
+            .resolved_signature(&transition.node_id)
+            .ok_or("runs-Flow transition body has no canonical signature")?
+            .clone();
+        let target_states = transition
+            .targets
+            .iter()
+            .map(|target| {
+                flow.states
+                    .get(&target.name)
+                    .filter(|state| state.id == *target)
+                    .map(|state| state.node_id.clone())
+                    .ok_or("runs-Flow transition target is absent from the checked state directory")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transitions.push(ResolvedActorFlowTransitionDescriptor {
+            transition: transition_id.clone(),
+            body_owner: transition.node_id.clone(),
+            method_owner,
+            target_states,
+            is_fallback: transition.is_fallback,
+            is_ffi_pinned: transition.is_ffi_pinned,
+            fails: transition.fails.is_some(),
+            source_signature,
+            body_signature,
+        });
+    }
+    Ok(Some(ResolvedActorFlowDescriptor {
+        flow: flow.id.clone(),
+        flow_owner: flow.node_id.clone(),
+        root_state: root.node_id.clone(),
+        root_state_type,
+        payload,
+        transitions,
+    }))
+}
+
+fn validate_actor_flow_descriptor(
+    actor: &ResolvedActorDescriptor,
+    descriptor: &ResolvedActorFlowDescriptor,
+    flow_name: &str,
+    program: &CheckedProgram,
+) -> Result<(), ResolvedActorError> {
+    let flow_id = FlowId(flow_name.to_owned());
+    let Some(flow) = program.flows().get(&flow_id) else {
+        return Err(actor.error("runs-Flow target is absent from the checked Flow directory"));
+    };
+    if descriptor.flow != flow_id
+        || descriptor.flow_owner != flow.node_id
+        || descriptor.transitions.len() != flow.transitions.len()
+    {
+        return Err(actor.error("Flow owner or transition coverage differs from CheckedProgram"));
+    }
+    let Some(root) = flow
+        .states
+        .values()
+        .find(|state| state.node_id == descriptor.root_state)
+    else {
+        return Err(actor.error("Flow root state identity is absent from CheckedProgram"));
+    };
+    if root.id.flow != flow_id
+        || !matches!(
+            program.resolved_types().get(&descriptor.root_state_type),
+            Some(ResolvedType::Nominal { item, arguments, is_linear: true })
+                if item.as_str() == root.node_id.0 && arguments.is_empty()
+        )
+        || descriptor.payload.len() != root.payload.len()
+    {
+        return Err(
+            actor.error("Flow root-state type or payload coverage differs from CheckedProgram")
+        );
+    }
+    for (entry, (name, _)) in descriptor.payload.iter().zip(&root.payload) {
+        let Some(field) = root.field_ids.get(name) else {
+            return Err(actor.error("Flow root payload field is absent from CheckedProgram"));
+        };
+        if entry.field != *field
+            || entry.name != *name
+            || program.resolved_state_field_types().get(field) != Some(&entry.ty)
+        {
+            return Err(
+                actor.error("Flow root payload identity or type differs from CheckedProgram")
+            );
+        }
+    }
+    for (entry, transition_id) in descriptor.transitions.iter().zip(&flow.transitions) {
+        let Some(transition) = program.transitions().get(transition_id) else {
+            return Err(actor.error("Flow transition is absent from CheckedProgram"));
+        };
+        let Some(source_signature) = program.resolved_signature(&entry.method_owner) else {
+            return Err(actor.error("Flow Actor method signature is absent from CheckedProgram"));
+        };
+        let Some(body_signature) = program.resolved_signature(&transition.node_id) else {
+            return Err(actor.error("Flow body signature is absent from CheckedProgram"));
+        };
+        let expected_method = NodeId(format!(
+            "function:{}::{}",
+            program
+                .actors()
+                .get(&actor.actor)
+                .map_or("", |source| source.qualified_name.as_str()),
+            transition_id.event
+        ));
+        let expected_targets = transition
+            .targets
+            .iter()
+            .filter_map(|target| flow.states.get(&target.name))
+            .map(|state| state.node_id.clone())
+            .collect::<Vec<_>>();
+        if entry.transition != *transition_id
+            || transition.id != *transition_id
+            || entry.body_owner != transition.node_id
+            || entry.method_owner != expected_method
+            || entry.target_states != expected_targets
+            || entry.is_fallback != transition.is_fallback
+            || entry.is_ffi_pinned != transition.is_ffi_pinned
+            || entry.fails != transition.fails.is_some()
+            || entry.source_signature != *source_signature
+            || entry.body_signature != *body_signature
+            || entry.body_signature.owner != entry.body_owner
+        {
+            return Err(
+                actor.error("Flow transition identity or signatures differ from CheckedProgram")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_flow_method(
+    actor: &ResolvedActorDescriptor,
+    method: &ResolvedActorMethodDescriptor,
+    program: &CheckedProgram,
+    is_i32: impl Fn(&ResolvedTypeId) -> bool,
+) -> Result<(), ResolvedActorError> {
+    let flow = actor
+        .flow
+        .as_ref()
+        .ok_or_else(|| actor.error("Flow dispatch method has no checked Flow descriptor"))?;
+    let transition = flow
+        .transitions
+        .iter()
+        .find(|transition| transition.method_owner == method.owner && !transition.is_fallback)
+        .ok_or_else(|| actor.error("Flow dispatch method has no transition body identity"))?;
+    let callable = program
+        .callable(&transition.body_owner)
+        .ok_or_else(|| actor.error("Flow transition has no canonical callable body"))?;
+    let body = &transition.body_signature;
+    let source = &transition.source_signature;
+    let parameters_match = source.parameters.len() == body.parameters.len()
+        && source
+            .parameters
+            .iter()
+            .skip(1)
+            .zip(body.parameters.iter().skip(1))
+            .all(|(source, body)| {
+                source.ty == body.ty
+                    && source.permission.is_none()
+                    && !source.has_default
+                    && is_i32(&source.ty)
+            });
+    let source_receiver = source.parameters.first();
+    let body_receiver = body.parameters.first();
+    if callable.owner != transition.body_owner
+        || callable.signature != *body
+        || !callable.body.captures.is_empty()
+        || !callable.contracts.is_empty()
+        || source.owner != method.owner
+        || method.signature != *source
+        || !source.generic_parameters.is_empty()
+        || !body.generic_parameters.is_empty()
+        || !source.effects.is_empty()
+        || !body.effects.is_empty()
+        || !parameters_match
+        || source
+            .parameters
+            .len()
+            .checked_sub(1)
+            .is_none_or(|count| count > 64)
+        || source_receiver.is_none_or(|parameter| {
+            parameter.name != "self"
+                || parameter.ty != actor.handle_type
+                || parameter.permission == Some(crate::core::ir::Permission::Consume)
+        })
+        || body_receiver.is_none_or(|parameter| parameter.ty != flow.root_state_type)
+        || source.result != flow.root_state_type
+        || body.result != flow.root_state_type
+    {
+        return Err(
+            actor.error("Flow transition body is outside the checked scalar i32 self-loop ABI")
+        );
+    }
+    Ok(())
+}
+
+fn validate_scalar_i32_flow_profile(
+    actor: &ResolvedActorDescriptor,
+    flow_descriptor: &ResolvedActorFlowDescriptor,
+    program: &CheckedProgram,
+    is_i32: impl Fn(&ResolvedTypeId) -> bool,
+) -> Result<(), ResolvedActorError> {
+    let flow = program
+        .flows()
+        .get(&flow_descriptor.flow)
+        .ok_or_else(|| actor.error("checked Flow directory entry is absent"))?;
+    let user_states = flow
+        .states
+        .values()
+        .filter(|state| matches!(&state.origin, Origin::User(_)))
+        .collect::<Vec<_>>();
+    if !actor.fields.is_empty()
+        || !flow.generic_parameters.is_empty()
+        || !flow.persistent_fields.is_empty()
+        || user_states.len() != 1
+        || user_states[0].node_id != flow_descriptor.root_state
+        || flow_descriptor.payload.len() != 1
+        || !is_i32(&flow_descriptor.payload[0].ty)
+    {
+        return Err(
+            actor.error("runs-Flow Actor is outside the one-root-state i32 payload profile")
+        );
+    }
+    let mut user_transitions = 0usize;
+    for transition in &flow_descriptor.transitions {
+        if transition.is_fallback {
+            continue;
+        }
+        user_transitions += 1;
+        if transition.is_ffi_pinned
+            || transition.fails
+            || transition.transition.source.name != user_states[0].id.name
+            || transition.target_states.as_slice() != [flow_descriptor.root_state.clone()]
+        {
+            return Err(actor.error("Flow event is not a non-failing root-state self-loop"));
+        }
+        let method = actor
+            .methods
+            .iter()
+            .find(|method| method.owner == transition.method_owner)
+            .ok_or_else(|| actor.error("Flow event has no synthetic Actor method descriptor"))?;
+        let function = program
+            .functions()
+            .get(&method.owner)
+            .ok_or_else(|| actor.error("Flow event synthetic method is absent"))?;
+        if !matches!(
+            &function.origin,
+            Origin::Desugared { rule, .. }
+                if rule == "resolved.runs_flow_transition_method"
+        ) {
+            return Err(actor.error("Flow event collides with an explicit Actor method"));
+        }
+        validate_flow_method(actor, method, program, &is_i32)?;
+    }
+    if user_transitions == 0 {
+        return Err(actor.error("runs-Flow Actor has no checked user transition dispatch entries"));
+    }
+    Ok(())
 }
 
 /// The only Actor descriptor producer. Surface syntax is consumed here during
@@ -437,6 +853,24 @@ pub(crate) fn build_checked_actor_descriptors(
                         .is_some_and(|method| method.ret.is_some()),
                 });
             }
+            let flow_syntax = syntax.runs_flow.as_deref().and_then(|flow_name| {
+                file.items.iter().find_map(|item| match item {
+                    crate::ast::Item::Flow(flow) if flow.name == flow_name => Some(flow),
+                    _ => None,
+                })
+            });
+            let root_state_name = flow_syntax.and_then(|flow| {
+                flow.states
+                    .iter()
+                    .find(|state| state.name != "Fault")
+                    .map(|state| state.name.as_str())
+            });
+            let flow = actor_flow_descriptor(
+                actor,
+                syntax.runs_flow.as_deref(),
+                root_state_name,
+                program,
+            )?;
             Ok(ResolvedActorDescriptor {
                 schema: RESOLVED_ACTOR_SCHEMA,
                 actor: actor_id.clone(),
@@ -444,6 +878,7 @@ pub(crate) fn build_checked_actor_descriptors(
                 fields,
                 methods,
                 runs_flow: syntax.runs_flow.clone(),
+                flow,
             })
         };
         match build() {

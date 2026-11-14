@@ -13,9 +13,14 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::core::mir::reference::MirProgram;
 use crate::fmt;
 use crate::lsp::util::percent_decode;
 use crate::lsp::{diagnostic, LspServer};
+use crate::query::{
+    diagnostics_response, QueryService, QueryStatus, QueryTrust, QUERY_SCHEMA_VERSION,
+    QUERY_SEMANTICS_VERSION,
+};
 
 /// Extract the `method` string from a JSON-RPC message.
 fn get_method(msg: &Value) -> Option<&str> {
@@ -139,6 +144,7 @@ pub(crate) fn transition(mut server: LspServer, msg: &Value) -> (LspServer, Opti
         "textDocument/prepareCallHierarchy" => prepare_call_hierarchy(server, msg, id),
         "callHierarchy/incomingCalls" => incoming_calls(server, msg, id),
         "callHierarchy/outgoingCalls" => outgoing_calls(server, msg, id),
+        "mimi/query" | "mimi/semanticQuery" => semantic_query(server, msg, id),
         "shutdown" => {
             server.lifecycle = crate::lsp::LifecycleState::Shutdown;
             (
@@ -235,10 +241,176 @@ fn initialize(
             "documentFormattingProvider": true,
             "documentHighlightProvider": true,
             "inlayHintProvider": true,
-            "callHierarchyProvider": true
+            "callHierarchyProvider": true,
+            "experimental": {
+                "mimi/query": true,
+                "mimi/semanticQuery": true
+            }
         },
         "serverInfo": { "name": "mimi", "version": "0.27.0" }
     });
+    (
+        server,
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result
+        })),
+    )
+}
+
+/// Handle the versioned semantic query surface used by editor integrations.
+///
+/// Params are intentionally small and forwards-compatible:
+/// {textDocument:{uri}, query:"symbol", name:"foo"} is the common shape;
+/// kind, symbol, function, and target are accepted aliases.
+fn semantic_query(
+    server: LspServer,
+    msg: &Value,
+    id: Option<&Value>,
+) -> (LspServer, Option<Value>) {
+    let params = msg.get("params").unwrap_or(&Value::Null);
+    let uri = params
+        .get("textDocument")
+        .and_then(|document| document.get("uri"))
+        .and_then(Value::as_str)
+        .or(server.active_document_uri.as_deref());
+    let Some(uri) = uri else {
+        return (
+            server,
+            Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32602, "message": "mimi/query requires textDocument.uri"}
+            })),
+        );
+    };
+    let Some(text) = server.documents.get(uri).cloned() else {
+        return (
+            server,
+            Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32001, "message": "document is not open"}
+            })),
+        );
+    };
+    let query = params
+        .get("query")
+        .or_else(|| params.get("kind"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("kind").and_then(Value::as_str))
+        })
+        .unwrap_or("symbol");
+    let target = params
+        .get("name")
+        .or_else(|| params.get("symbol"))
+        .or_else(|| params.get("function"))
+        .or_else(|| params.get("target"))
+        .and_then(Value::as_str);
+    // Queries that address one declaration must never silently fall back to a
+    // different query (for example, `impact` -> whole-program `calls`).  That
+    // would make an editor believe it received the requested identity while
+    // serving a different semantic fact.  Keep the requested query and the
+    // trust/status boundary in structured error data so clients can handle the
+    // failure without guessing.
+    if matches!(
+        query,
+        "symbol"
+            | "references"
+            | "refs"
+            | "flow"
+            | "ownership"
+            | "owner"
+            | "effects"
+            | "effect"
+            | "cost"
+            | "impact"
+    ) && target.is_none_or(|name| name.trim().is_empty())
+    {
+        return (
+            server,
+            Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32602,
+                    "message": format!("mimi/query kind {query} requires a non-empty target"),
+                    "data": {
+                        "schema_version": QUERY_SCHEMA_VERSION,
+                        "semantics_version": QUERY_SEMANTICS_VERSION,
+                        "query": query,
+                        "identity": "<missing-target>",
+                        "trust": QueryTrust::Unsupported.as_str(),
+                        "status": QueryStatus::Unknown.as_str(),
+                        "requires_target": true,
+                    }
+                }
+            })),
+        );
+    }
+    let Some(mut file) = server.parse_with_recovery_for_uri(&text, Some(uri)) else {
+        return (
+            server,
+            Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32603, "message": "unable to parse document"}
+            })),
+        );
+    };
+    crate::loader::merge_prelude_into(&mut file);
+    let result = match crate::core::check_program(&file) {
+        Ok(checked) => {
+            let mir = MirProgram::from_checked_program(&checked).ok();
+            let service = mir
+                .as_ref()
+                .map(|mir| QueryService::with_mir(&checked, mir))
+                .unwrap_or_else(|| QueryService::new(&checked))
+                .with_source(uri.to_string());
+            match query {
+                "symbol" => target
+                    .map(|name| service.symbol(name))
+                    .unwrap_or_else(|| service.calls(None)),
+                "references" | "refs" => target
+                    .map(|name| service.references(name))
+                    .unwrap_or_else(|| service.calls(None)),
+                "calls" | "callGraph" => service.calls(target),
+                "flow" => target
+                    .map(|name| service.flow(name, None, None))
+                    .unwrap_or_else(|| service.holes()),
+                "ownership" | "owner" => target
+                    .map(|name| service.ownership(name))
+                    .unwrap_or_else(|| service.holes()),
+                "effects" | "effect" => target
+                    .map(|name| service.effects(name))
+                    .unwrap_or_else(|| service.holes()),
+                "cost" => target
+                    .map(|name| service.cost(name))
+                    .unwrap_or_else(|| service.holes()),
+                "impact" => target
+                    .map(|name| service.impact(name))
+                    .unwrap_or_else(|| service.holes()),
+                "holes" => service.holes(),
+                _ => {
+                    return (
+                        server,
+                        Some(serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": {
+                                "code": -32602,
+                                "message": format!("unknown mimi/query kind {query}")
+                            }
+                        })),
+                    )
+                }
+            }
+        }
+        Err(diagnostics) => diagnostics_response(&diagnostics, Some(uri)),
+    };
     (
         server,
         Some(serde_json::json!({

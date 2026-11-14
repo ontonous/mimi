@@ -43,6 +43,7 @@ pub(crate) struct MirActorReferenceTurn {
     state: MirActorReferenceState,
     pub(crate) owner: NodeId,
     pub(crate) arguments: Vec<MirRuntimeValue>,
+    flow_state_slot: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -211,17 +212,43 @@ impl MirActorReferenceDomain {
             instance: handle.instance,
             turn,
         };
+        let flow_state_slot = if method.flow_transition.is_some() {
+            let [field] = contract.fields.as_slice() else {
+                return Err("Flow Actor has no exact one-field root-state slot".into());
+            };
+            let value = instance
+                .fields
+                .get(field.index)
+                .copied()
+                .ok_or_else(|| "Flow Actor root-state slot is absent".to_string())?;
+            let mut arguments = Vec::with_capacity(payload.len() + 1);
+            arguments.push(MirRuntimeValue::Int(i64::from(value)));
+            arguments.extend(payload);
+            instance.active = Some((turn, method.body_owner.clone()));
+            self.next_turn = next;
+            self.lifecycle.started += 1;
+            self.lifecycle.active_turns += 1;
+            return Ok(MirActorReferenceTurn {
+                state,
+                owner: method.body_owner.clone(),
+                arguments,
+                flow_state_slot: Some(field.index),
+            });
+        } else {
+            None
+        };
         let mut arguments = Vec::with_capacity(payload.len() + 1);
         arguments.push(MirRuntimeValue::ActorState(state.clone()));
         arguments.extend(payload);
-        instance.active = Some((turn, method.owner.clone()));
+        instance.active = Some((turn, method.body_owner.clone()));
         self.next_turn = next;
         self.lifecycle.started += 1;
         self.lifecycle.active_turns += 1;
         Ok(MirActorReferenceTurn {
             state,
-            owner: method.owner.clone(),
+            owner: method.body_owner.clone(),
             arguments,
+            flow_state_slot,
         })
     }
 
@@ -231,13 +258,30 @@ impl MirActorReferenceDomain {
         outcome: &Result<MirRuntimeValue, MirExecutionError>,
     ) -> Result<(), String> {
         self.state_instance(&turn.owner, &turn.state)?;
-        let result_validation = outcome.as_ref().map_or(Ok(()), |value| {
-            scalar_i32(value, "Actor mailbox result").map(|_| ())
+        let result_value = outcome
+            .as_ref()
+            .map(|value| scalar_i32(value, "Actor mailbox result"));
+        let result_validation = result_value.as_ref().map_or(Ok(()), |value| {
+            value.as_ref().map(|_| ()).map_err(Clone::clone)
         });
         let instance = self
             .instances
             .get_mut(&turn.state.instance)
             .ok_or_else(|| "Actor turn instance disappeared before settlement".to_string())?;
+        if outcome.is_ok() && result_validation.is_ok() {
+            if let Some(index) = turn.flow_state_slot {
+                let value = result_value
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.as_ref().ok())
+                    .copied()
+                    .ok_or_else(|| "Flow Actor result disappeared before commit".to_string())?;
+                let Some(slot) = instance.fields.get_mut(index) else {
+                    return Err("Flow Actor root-state slot disappeared before commit".into());
+                };
+                *slot = value;
+            }
+        }
         instance.active = None;
         self.lifecycle.active_turns -= 1;
         if outcome.is_ok() && result_validation.is_ok() {
@@ -262,6 +306,33 @@ impl MirActorReferenceDomain {
         };
         if arguments.len() != method.execution_parameter_types.len() {
             return Err("Actor internal method signature has an incompatible arity".into());
+        }
+        if method.flow_transition.is_some() {
+            let receiver = arguments.first().ok_or_else(|| {
+                "Flow Actor method entry has no scalar root-state receiver".to_string()
+            })?;
+            let receiver = scalar_i32(receiver, "Flow Actor root-state receiver")?;
+            let Some(instance) = self.instances.values().find(|instance| {
+                instance.actor == actor.actor
+                    && instance
+                        .active
+                        .as_ref()
+                        .is_some_and(|(_, active_owner)| active_owner == owner)
+            }) else {
+                return Err(
+                    "Flow Actor method entry is outside its exact active mailbox turn".into(),
+                );
+            };
+            let [field] = actor.fields.as_slice() else {
+                return Err("Flow Actor has no exact one-field root-state slot".into());
+            };
+            if instance.fields.get(field.index) != Some(&receiver) {
+                return Err("Flow Actor receiver differs from its committed root state".into());
+            }
+            for value in arguments.iter().skip(1) {
+                scalar_i32(value, "Actor internal method payload")?;
+            }
+            return Ok(());
         }
         let Some(MirRuntimeValue::ActorState(state)) = arguments.first() else {
             return Err("Actor method entry requires an internal state role".into());

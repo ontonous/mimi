@@ -64,9 +64,24 @@ impl CheckedActorEnvironmentPlan {
         let mut errors = Vec::new();
         for (_, actor) in actors.iter() {
             for method in &actor.methods {
-                let Some(parent) = program.callable(&method.owner) else {
+                // The lexical owner is the exact executable body selected by
+                // the checked Actor contract. `owner` remains the source
+                // mailbox identity; `body_owner` may be an explicit method or
+                // the exact Flow transition body chosen by the descriptor.
+                let Some(parent) = program.callable(&method.body_owner) else {
+                    errors.push(format!(
+                        "Actor method '{}' body owner '{}' has no checked callable",
+                        method.owner.0, method.body_owner.0
+                    ));
                     continue;
                 };
+                if parent.owner != method.body_owner {
+                    errors.push(format!(
+                        "Actor method '{}' body owner differs from its checked callable",
+                        method.owner.0
+                    ));
+                    continue;
+                }
                 for statement in &parent.body.root.statements {
                     let ResolvedStmtKind::NestedCallable(owner) = &statement.kind else {
                         continue;
@@ -80,14 +95,16 @@ impl CheckedActorEnvironmentPlan {
                             checked_snapshot(program, parent, target, &statement.node_id)
                         });
                     match result {
-                        Ok(snapshot) => {
-                            if snapshots.insert(owner.clone(), snapshot).is_some() {
-                                errors.push(format!(
-                                    "Actor helper '{}' has duplicate lexical declarations",
-                                    owner.0
-                                ));
+                        Ok(snapshot) => match snapshots.get(owner) {
+                            Some(existing) if existing == &snapshot => (),
+                            Some(_) => errors.push(format!(
+                                "Actor helper '{}' has conflicting checked lexical owners",
+                                owner.0
+                            )),
+                            None => {
+                                snapshots.insert(owner.clone(), snapshot);
                             }
-                        }
+                        },
                         Err(message) => errors.push(message),
                     }
                 }
@@ -448,7 +465,17 @@ pub(crate) fn validate_actor_environments(
 
 impl MirActorEnvironmentReceipt {
     pub(crate) fn canonical_text(&self) -> String {
-        format!("mir.actor-environment schema={} parent={} declaration={} callee={} source_parameters={} parameter_types={:?} slots={:?} calls={:?}\n", self.schema, self.parent.0, self.declaration.0, self.callee.0, self.source_parameter_count, self.parameter_types, self.slots, self.call_instructions)
+        format!(
+            "mir.actor-environment schema={} parent={} declaration={} callee={} source_parameters={} parameter_types={:?} slots={:?} calls={:?}\n",
+            self.schema,
+            self.parent.0,
+            self.declaration.0,
+            self.callee.0,
+            self.source_parameter_count,
+            self.parameter_types,
+            self.slots,
+            self.call_instructions
+        )
     }
 }
 

@@ -1,25 +1,25 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn actor_await_method() {
     let src = r#"
-actor Counter {
-    count: i32 = 0;
-
-    func increment() {
-        self.count = self.count + 1;
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get() -> i32 {
-        return self.count;
+    transition get(Ready) -> Ready {
+        return Ready { count: self.count }
     }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
-    let val = c.get();
-    val
+    let state = c.get();
+    state.count
 }
 "#;
     let v = run_source(src);
@@ -49,24 +49,23 @@ func main() -> i32 {
 #[test]
 fn actor_await_multiple_methods() {
     let src = r#"
-actor Calculator {
-    value: i32 = 0;
-
-    func add(n: i32) {
-        self.value = self.value + n;
+flow CalculatorFlow {
+    state Ready { value: i32 }
+    transition add(Ready, n: i32) -> Ready {
+        return Ready { value: self.value + n }
     }
-
-    func get() -> i32 {
-        return self.value;
+    transition get(Ready) -> Ready {
+        return Ready { value: self.value }
     }
 }
+actor Calculator runs CalculatorFlow {}
 
 func main() -> i32 {
     let calc = Calculator.spawn();
     calc.add(10);
     calc.add(20);
-    let result = calc.get();
-    result
+    let state = calc.get();
+    state.value
 }
 "#;
     let v = run_source(src);
@@ -97,23 +96,23 @@ func main() {
 #[test]
 fn actor_method_with_param() {
     let src = r#"
-actor Accumulator {
-    total: i32 = 0;
-
-    func add(n: i32) {
-        self.total = self.total + n;
+flow AccumulatorFlow {
+    state Ready { total: i32 }
+    transition add(Ready, n: i32) -> Ready {
+        return Ready { total: self.total + n }
     }
-
-    func get() -> i32 {
-        return self.total;
+    transition get(Ready) -> Ready {
+        return Ready { total: self.total }
     }
 }
+actor Accumulator runs AccumulatorFlow {}
 
 func main() -> i32 {
     let a = Accumulator.spawn();
     a.add(5);
     a.add(10);
-    a.get()
+    let state = a.get();
+    state.total
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(15));
@@ -149,14 +148,24 @@ actor Messenger {
     }
 }
 
-func main() -> string {
+func actor_return_string_value() -> string {
     let m = Messenger.spawn();
     m.get_msg()
 }
+
+func main() -> i32 {
+    if actor_return_string_value() == "hello" { 0 } else { 1 }
+}
 "#;
+    let file = parse_prod(src);
+    let checked = core::check_program(&file).expect("Actor string helper must type-check");
+    let bytecode = compile_test_bytecode_program(&file, Some(&checked))
+        .expect("Actor string helper must compile to bytecode");
+    let mut vm = interp::bytecode::BytecodeVM::new(bytecode);
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello".into()))
+        vm.call_named("actor_return_string_value", Vec::new())
+            .expect("Actor string helper must execute"),
+        interp::Value::String(SharedString::new("hello".into()))
     );
 }
 
@@ -202,29 +211,75 @@ func main() -> i32 {
 #[test]
 fn actor_method_not_shadowed_by_prelude() {
     let src = r#"
-actor Counter {
-    count: i32 = 0;
-
-    func increment() {
-        self.count = self.count + 1;
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get_count() -> i32 {
-        return self.count;
+    transition get_count(Ready) -> Ready {
+        return Ready { count: self.count }
     }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn();
-    println(c.get_count());
+    println(c.get_count().count);
     c.increment();
-    println(c.get_count());
+    println(c.get_count().count);
     c.increment();
-    println(c.get_count());
+    println(c.get_count().count);
     42
 }
 "#;
     assert_eq!(run_with_stdlib("prelude.mimi", src), interp::Value::Int(42));
+}
+
+#[test]
+fn actor_stateless_service_without_flow_is_supported() {
+    let src = r#"
+actor Greeter {
+    func greet(name: string) -> string {
+        "hi " + name
+    }
+}
+
+func main() -> i32 {
+    let actor = Greeter.spawn();
+    if actor.greet("mimi") == "hi mimi" { 0 } else { 1 }
+}
+"#;
+    check_source(src).expect("stateless Actor service may omit runs Flow");
+    assert_eq!(run_source(src), interp::Value::Int(0));
+}
+
+#[test]
+fn actor_persistent_non_mut_field_write_requires_flow_with_assignment_span() {
+    let src = r#"
+actor Counter {
+    count: i32 = 0;
+    func increment() {
+        self.count = self.count + 1;
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors = check_source(src).expect_err("persistent Actor state must belong to a Flow");
+    let diagnostic = errors
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code.as_deref() == Some("E0448") && diagnostic.message.contains("Flow")
+        })
+        .expect("stable Actor/Flow diagnostic");
+    assert_eq!(
+        diagnostic.span.start_line, 5,
+        "diagnostic must point to the write"
+    );
+    assert_eq!(
+        diagnostic.span.start_col, 9,
+        "diagnostic must point at `self`"
+    );
 }
 
 // Regression test for v0.28.28 item #1: actor methods must be able to call
@@ -268,15 +323,12 @@ actor Messenger {
     }
 }
 
-func main() -> string {
+func main() -> i32 {
     let m = Messenger.spawn();
-    m.format()
+    if m.format() == "user:alice" { 1 } else { 0 }
 }
 "#;
-    assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("user:alice".into()))
-    );
+    assert_eq!(run_source(src), interp::Value::Int(1));
 }
 
 #[test]
@@ -284,8 +336,12 @@ fn actor_runs_flow_parse_and_check() {
     // v0.31.11: `actor Name runs FlowName` parses and checks when the flow exists.
     let src = r#"
 flow Order {
+    state Uninitialized {}
     state Pending { item: string }
     state Shipped { item: string }
+    transition initialize(Uninitialized) -> Pending {
+        { return Pending { item: "pending" } }
+    }
     transition ship(Pending) -> Shipped {
         { return Shipped { item: self.item } }
     }

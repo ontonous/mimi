@@ -76,6 +76,7 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "read_file_partial"
             | "read_file_bytes"
             | "read_file_guarded"
+            | "write_file_guarded"
             | "write_file_bytes"
             | "read_lines_json"
             | "read_lines_json_builtin"
@@ -117,6 +118,10 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "f64_eq_exact"
             | "str_parse_int"
             | "str_parse_float"
+            // Narrow source forms lowered only after an exact Checker
+            // receipt proves a Map/Any GetAny payload selection.
+            | "unpack_i32"
+            | "unpack_string"
             | "to_int"
             | "to_float"
             // 0.39.136: registered aliases of to_int/to_float (same VM
@@ -157,7 +162,9 @@ pub fn is_builtin_callable(name: &str) -> bool {
             | "keys"
             | "values"
             | "map_new"
+            | "map_clone"
             | "map_get"
+            | "map_get_any"
             | "map_get_i32"
             | "map_get_string"
             | "map_set"
@@ -434,7 +441,9 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "log2" => Some(1),
         "map" => Some(2),
         "map_from_list" => Some(1),
+        "map_clone" => Some(1),
         "map_get" => Some(2),
+        "map_get_any" => Some(2),
         "map_get_i32" => Some(2),
         "map_get_string" => Some(2),
         "map_list" => Some(2),
@@ -478,6 +487,7 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "read_file" => Some(1),
         "read_file_bytes" => Some(1),
         "read_file_guarded" => Some(2),
+        "write_file_guarded" => Some(3),
         "read_file_partial" => Some(2),
         "read_lines_each" => Some(2),
         "read_lines_json" => Some(1),
@@ -559,6 +569,8 @@ pub fn builtin_arity(name: &str) -> Option<usize> {
         "type_fields" => Some(1),
         "type_name" => Some(1),
         "type_variants" => Some(1),
+        "unpack_i32" => Some(1),
+        "unpack_string" => Some(1),
         "values" => Some(1),
         "walk_dir" => Some(1),
         "wrapping_add" => Some(2),

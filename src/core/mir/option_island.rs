@@ -690,15 +690,33 @@ impl<'a> OptionStringVariantValidator<'a> {
                     "{subject} OrdinaryMapOwnerLifecycle operation is outside the Option island"
                 ));
             }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson { .. }
+            | MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln { .. } => {
+                self.error(format!(
+                    "{subject} OrdinaryMapOwnerLifecycle observer is outside the Option island"
+                ));
+            }
             MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2SetStringResult { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetStringResult { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultI32 { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultString { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Println { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2Keys { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack { .. }
+            | MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
             | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. } => {
                 self.error(format!(
@@ -706,7 +724,9 @@ impl<'a> OptionStringVariantValidator<'a> {
                 ));
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn interp_string_equality() {
@@ -16,13 +17,15 @@ func main() -> i32 {
 #[test]
 fn interp_string_index() {
     let src = r#"
-func main() -> string {
+func string_index_result() -> string {
     let s = "abc";
     s[1]
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("b".to_string())));
+    let v = bytecode_call_named(src, "string_index_result", vec![])
+        .expect("string-index helper should run");
+    assert_eq!(v, interp::Value::String(SharedString::new("b".to_string())));
 }
 
 #[test]

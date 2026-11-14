@@ -1,16 +1,63 @@
 use super::*;
+use crate::interp::SharedString;
 
-// Helper to wrap JSON in a func main
+// Keep the JSON-producing function out of `main`: entry points may return only
+// scalar values. The scalar entry point calls the named owner and prints its
+// result so the Rust harness can retain the original JSON value assertions.
 fn json_src(code: &str) -> String {
-    format!("func main() -> string {{ {} }}", code)
+    json_src_with_items("", code)
+}
+
+fn json_src_with_items(items: &str, code: &str) -> String {
+    format!(
+        "{items}\nfunc json_owner() -> string {{ {code} }}\nfunc main() -> i64 {{ println(json_owner()); 0 }}"
+    )
+}
+
+fn json_owner_output(main_result: interp::Value, stdout: String) -> Result<interp::Value, String> {
+    if main_result != interp::Value::Int(0) {
+        return Err(format!(
+            "JSON harness main returned {main_result:?}, expected 0"
+        ));
+    }
+    let json = stdout
+        .strip_suffix('\n')
+        .ok_or_else(|| "JSON owner did not print a newline-terminated result".to_string())?;
+    Ok(interp::Value::String(SharedString::new(json.into())))
+}
+
+fn json_result_with_items(items: &str, code: &str) -> Result<interp::Value, String> {
+    let source = json_src_with_items(items, code);
+    let tokens = lexer::Lexer::new(&source).tokenize()?;
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .map_err(|error| error.message)?;
+    let mut compiler = interp::bytecode::BytecodeCompiler::new();
+    let program = compiler
+        .compile_file(&file)
+        .map_err(|error| error.to_string())?;
+    let mut vm = interp::bytecode::BytecodeVM::new(program);
+    vm.enable_stdout_capture();
+    let main_result = vm
+        .run_value()
+        .map_err(|error| error.message().to_string())?;
+    let stdout = vm.take_stdout();
+    json_owner_output(main_result, stdout)
 }
 
 fn json_result(code: &str) -> Result<interp::Value, String> {
-    run_source_result(&json_src(code))
+    json_result_with_items("", code)
 }
 
 fn json_value(code: &str) -> interp::Value {
-    run_source(&json_src(code))
+    let (main_result, stdout) = run_source_with_stdout(&json_src(code));
+    json_owner_output(main_result, stdout).expect("JSON owner should return a value")
+}
+
+fn json_value_with_items(items: &str, code: &str) -> interp::Value {
+    let source = json_src_with_items(items, code);
+    let (main_result, stdout) = run_source_with_stdout(&source);
+    json_owner_output(main_result, stdout).expect("JSON owner should return a value")
 }
 
 // from_json: valid inputs
@@ -18,7 +65,7 @@ fn json_value(code: &str) -> interp::Value {
 fn json_from_json_valid_object() {
     assert_eq!(
         json_value(r#"from_json("{\"a\":1}")"#),
-        interp::Value::String(crate::interp::SharedString::new("{\"a\":1}".into()))
+        interp::Value::String(SharedString::new("{\"a\":1}".into()))
     );
 }
 
@@ -26,7 +73,7 @@ fn json_from_json_valid_object() {
 fn json_from_json_valid_array() {
     assert_eq!(
         json_value(r#"from_json("[1, 2, 3]")"#),
-        interp::Value::String(crate::interp::SharedString::new("[1, 2, 3]".into()))
+        interp::Value::String(SharedString::new("[1, 2, 3]".into()))
     );
 }
 
@@ -34,7 +81,7 @@ fn json_from_json_valid_array() {
 fn json_from_json_valid_string() {
     assert_eq!(
         json_value(r#"from_json("\"hello\"")"#),
-        interp::Value::String(crate::interp::SharedString::new("\"hello\"".into()))
+        interp::Value::String(SharedString::new("\"hello\"".into()))
     );
 }
 
@@ -42,7 +89,7 @@ fn json_from_json_valid_string() {
 fn json_from_json_valid_number() {
     assert_eq!(
         json_value(r#"from_json("42")"#),
-        interp::Value::String(crate::interp::SharedString::new("42".into()))
+        interp::Value::String(SharedString::new("42".into()))
     );
 }
 
@@ -50,7 +97,7 @@ fn json_from_json_valid_number() {
 fn json_from_json_valid_bool() {
     assert_eq!(
         json_value(r#"from_json("true")"#),
-        interp::Value::String(crate::interp::SharedString::new("true".into()))
+        interp::Value::String(SharedString::new("true".into()))
     );
 }
 
@@ -58,7 +105,7 @@ fn json_from_json_valid_bool() {
 fn json_from_json_valid_null() {
     assert_eq!(
         json_value(r#"from_json("null")"#),
-        interp::Value::String(crate::interp::SharedString::new("null".into()))
+        interp::Value::String(SharedString::new("null".into()))
     );
 }
 
@@ -67,7 +114,7 @@ fn json_from_json_valid_null() {
 fn json_from_json_nested_object() {
     assert_eq!(
         json_value(r#"from_json("{\"a\":{\"b\":{\"c\":1}}}")"#),
-        interp::Value::String(crate::interp::SharedString::new("{\"a\":{\"b\":{\"c\":1}}}".into()))
+        interp::Value::String(SharedString::new("{\"a\":{\"b\":{\"c\":1}}}".into()))
     );
 }
 
@@ -75,7 +122,7 @@ fn json_from_json_nested_object() {
 fn json_from_json_nested_array() {
     assert_eq!(
         json_value(r#"from_json("[[1,2],[3,4]]")"#),
-        interp::Value::String(crate::interp::SharedString::new("[[1,2],[3,4]]".into()))
+        interp::Value::String(SharedString::new("[[1,2],[3,4]]".into()))
     );
 }
 
@@ -84,7 +131,7 @@ fn json_from_json_nested_array() {
 fn json_from_json_unicode() {
     assert_eq!(
         json_value(r#"from_json("\"\\u0041\"")"#),
-        interp::Value::String(crate::interp::SharedString::new("\"\\u0041\"".into()))
+        interp::Value::String(SharedString::new("\"\\u0041\"".into()))
     );
 }
 
@@ -93,7 +140,7 @@ fn json_from_json_unicode() {
 fn json_from_json_whitespace() {
     assert_eq!(
         json_value(r#"from_json("{  \"a\" : 1  }")"#),
-        interp::Value::String(crate::interp::SharedString::new("{  \"a\" : 1  }".into()))
+        interp::Value::String(SharedString::new("{  \"a\" : 1  }".into()))
     );
 }
 
@@ -121,17 +168,16 @@ fn json_from_json_invalid_empty_string() {
 // json_get_string: extract string field
 #[test]
 fn json_get_string_exists() {
-    let v =
-        run_source(r#"func main() -> string { json_get_string("{\"name\":\"Alice\"}", "name") }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("Alice".into())));
+    let v = json_value(r#"json_get_string("{\"name\":\"Alice\"}", "name")"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("Alice".into())));
 }
 
 #[test]
 fn json_get_string_missing_key() {
-    let v = run_source(r#"func main() -> string { json_get_string("{\"a\":1}", "nonexistent") }"#);
+    let v = json_value(r#"json_get_string("{\"a\":1}", "nonexistent")"#);
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("".into())),
+        interp::Value::String(SharedString::new("".into())),
         "json_get_string with missing key returns empty string"
     );
 }
@@ -139,8 +185,8 @@ fn json_get_string_missing_key() {
 #[test]
 fn json_get_string_not_a_string() {
     // json_get_string on non-string values returns string representation
-    let v = run_source(r#"func main() -> string { json_get_string("{\"a\":42}", "a") }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("42".into())));
+    let v = json_value(r#"json_get_string("{\"a\":42}", "a")"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("42".into())));
 }
 
 // json_get_int: extract integer field
@@ -163,19 +209,19 @@ fn json_get_int_missing_key() {
 // json_get_element: extract from array
 #[test]
 fn json_get_element_first() {
-    let v = run_source(r#"func main() -> string { json_get_element("[10, 20, 30]", 0) }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("10".into())));
+    let v = json_value(r#"json_get_element("[10, 20, 30]", 0)"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("10".into())));
 }
 
 #[test]
 fn json_get_element_middle() {
-    let v = run_source(r#"func main() -> string { json_get_element("[10, 20, 30]", 1) }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("20".into())));
+    let v = json_value(r#"json_get_element("[10, 20, 30]", 1)"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("20".into())));
 }
 
 #[test]
 fn json_get_element_out_of_bounds() {
-    let result = run_source_result(r#"func main() -> string { json_get_element("[10, 20]", 99) }"#);
+    let result = json_result(r#"json_get_element("[10, 20]", 99)"#);
     assert!(
         result.is_err(),
         "json_get_element out of bounds should error (tree-walker parity)"
@@ -185,28 +231,33 @@ fn json_get_element_out_of_bounds() {
 // json_get_element: nested objects in arrays
 #[test]
 fn json_get_element_object_in_array() {
-    let v =
-        run_source(r#"func main() -> string { json_get_element("[{\"x\":1}, {\"x\":2}]", 0) }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("{\"x\":1}".into())));
+    let v = json_value(r#"json_get_element("[{\"x\":1}, {\"x\":2}]", 0)"#);
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("{\"x\":1}".into()))
+    );
 }
 
 // to_json: serialization
 #[test]
 fn json_to_json_int() {
-    let v = run_source(r#"func main() -> string { to_json(42) }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("42".into())));
+    let v = json_value("to_json(42)");
+    assert_eq!(v, interp::Value::String(SharedString::new("42".into())));
 }
 
 #[test]
 fn json_to_json_bool() {
-    let v = run_source(r#"func main() -> string { to_json(true) }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("true".into())));
+    let v = json_value("to_json(true)");
+    assert_eq!(v, interp::Value::String(SharedString::new("true".into())));
 }
 
 #[test]
 fn json_to_json_string() {
-    let v = run_source(r#"func main() -> string { to_json("hello") }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("\"hello\"".into())));
+    let v = json_value(r#"to_json("hello")"#);
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("\"hello\"".into()))
+    );
 }
 
 // stdlib-style wrappers (without module import)
@@ -229,21 +280,16 @@ fn json_get_bool_false() {
 #[test]
 fn json_get_bool_result() {
     // Test that json_get_string returns "false" for boolean false
-    let src = r#"
-func main() -> str {
-    json_get_string("{\"x\": false}", "x")
-}
-"#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("false".into())));
+    let v = json_value(r#"json_get_string("{\"x\": false}", "x")"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("false".into())));
 }
 
 #[test]
 fn json_get_bool_missing_key() {
-    let v = run_source(r#"func main() -> string { json_get_string("{\"a\": true}", "missing") }"#);
+    let v = json_value(r#"json_get_string("{\"a\": true}", "missing")"#);
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("".into())),
+        interp::Value::String(SharedString::new("".into())),
         "json_get_string with missing key returns empty string"
     );
 }
@@ -337,8 +383,8 @@ fn json_from_json_typed_i32() {
 
 #[test]
 fn json_from_json_typed_string() {
-    let v = run_source(r#"func main() -> string { from_json::<string>("\"hello\"") }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello".into())));
+    let v = json_value(r#"from_json::<string>("\"hello\"")"#);
+    assert_eq!(v, interp::Value::String(SharedString::new("hello".into())));
 }
 
 #[test]
@@ -355,7 +401,12 @@ fn json_from_json_typed_bool_false() {
 
 #[test]
 fn json_from_json_typed_f64() {
-    let v = run_source(r#"func main() -> f64 { from_json::<f64>("2.5") }"#);
+    let src = r#"
+func json_typed_f64_result() -> f64 { from_json::<f64>("2.5") }
+func main() -> i32 { 0 }
+"#;
+    let v = bytecode_call_named(src, "json_typed_f64_result", vec![])
+        .expect("typed f64 JSON helper should run");
     assert_eq!(v, interp::Value::Float(2.5));
 }
 
@@ -401,33 +452,31 @@ fn json_from_json_typed_option_some() {
 
 #[test]
 fn json_from_json_typed_option_none() {
-    let v = run_source(
+    let v = json_value(
         r#"
-        func main() -> string {
-            let x = from_json::<Option<i32>>("null");
-            // None gives unit, check type
-            type_name(x)
-        }
+        let x = from_json::<Option<i32>>("null");
+        // None gives unit, check type
+        type_name(x)
     "#,
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("None".into())));
+    assert_eq!(v, interp::Value::String(SharedString::new("None".into())));
 }
 
 #[test]
 fn json_from_json_typed_nested_record() {
-    let v = run_source(
+    let v = json_value_with_items(
         r#"
         type Address { city: string, zip: i32 }
         type Person { name: string, addr: Address }
-        func main() -> string {
-            let p = from_json::<Person>("{\"name\": \"Alice\", \"addr\": {\"city\": \"NYC\", \"zip\": 10001}}");
-            p.name + " lives in " + p.addr.city
-        }
+    "#,
+        r#"
+        let p = from_json::<Person>("{\"name\": \"Alice\", \"addr\": {\"city\": \"NYC\", \"zip\": 10001}}");
+        p.name + " lives in " + p.addr.city
     "#,
     );
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("Alice lives in NYC".into()))
+        interp::Value::String(SharedString::new("Alice lives in NYC".into()))
     );
 }
 
@@ -448,26 +497,34 @@ fn json_from_json_typed_empty_list() {
 
 #[test]
 fn json_from_json_typed_list_string() {
-    let v = run_source(
+    let v = json_value(
         r#"
-        func main() -> string {
-            let items = from_json::<List<string>>("[\"a\", \"b\", \"c\"]");
-            items[0] + items[1] + items[2]
-        }
+        let items = from_json::<List<string>>("[\"a\", \"b\", \"c\"]");
+        items[0] + items[1] + items[2]
     "#,
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("abc".into())));
+    assert_eq!(v, interp::Value::String(SharedString::new("abc".into())));
 }
 
 #[test]
 fn json_from_json_typed_f64_negative() {
-    let v = run_source(r#"func main() -> f64 { from_json::<f64>("-1.5") }"#);
+    let src = r#"
+func json_typed_f64_negative_result() -> f64 { from_json::<f64>("-1.5") }
+func main() -> i32 { 0 }
+"#;
+    let v = bytecode_call_named(src, "json_typed_f64_negative_result", vec![])
+        .expect("negative typed f64 JSON helper should run");
     assert_eq!(v, interp::Value::Float(-1.5));
 }
 
 #[test]
 fn json_from_json_typed_f64_zero() {
-    let v = run_source(r#"func main() -> f64 { from_json::<f64>("0.0") }"#);
+    let src = r#"
+func json_typed_f64_zero_result() -> f64 { from_json::<f64>("0.0") }
+func main() -> i32 { 0 }
+"#;
+    let v = bytecode_call_named(src, "json_typed_f64_zero_result", vec![])
+        .expect("zero typed f64 JSON helper should run");
     assert_eq!(v, interp::Value::Float(0.0));
 }
 
@@ -479,46 +536,52 @@ fn json_from_json_typed_i32_negative() {
 
 #[test]
 fn json_from_json_typed_record_with_list() {
-    let v = run_source(
+    let v = json_value_with_items(
         r#"
         type Team { name: string, members: List<string> }
-        func main() -> string {
-            let t = from_json::<Team>("{\"name\": \"dev\", \"members\": [\"A\", \"B\"]}");
-            t.name + ": " + t.members[0] + ", " + t.members[1]
-        }
+    "#,
+        r#"
+        let t = from_json::<Team>("{\"name\": \"dev\", \"members\": [\"A\", \"B\"]}");
+        t.name + ": " + t.members[0] + ", " + t.members[1]
     "#,
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("dev: A, B".into())));
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("dev: A, B".into()))
+    );
 }
 
 #[test]
 fn json_from_json_typed_enum_unit_variant() {
-    let v = run_source(
+    let v = json_value_with_items(
         r#"
         type Color { Red, Green, Blue }
-        func main() -> string {
-            let c = from_json::<Color>("\"Red\"");
-            type_name(c)
-        }
+    "#,
+        r#"
+        let c = from_json::<Color>("\"Red\"");
+        type_name(c)
     "#,
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("Red".into())));
+    assert_eq!(v, interp::Value::String(SharedString::new("Red".into())));
 }
 
 #[test]
 fn json_from_json_typed_enum_with_payload() {
-    let v = run_source(
-        r#"
-        type Shape { Circle(f64), Rect(f64, f64) }
-        func main() -> f64 {
-            let s = from_json::<Shape>("{\"Circle\": 2.5}");
-            // Pattern match would be ideal but checker may not support it
-            // Just verify it deserializes without error
-            1.0
-        }
-    "#,
-    );
-    assert_eq!(v, interp::Value::Float(1.0));
+    let src = r#"
+type Shape { Circle(f64), Rect(f64, f64) }
+func json_shape_result() -> Shape {
+    from_json::<Shape>("{\"Circle\": 2.5}")
+}
+func main() -> i32 { 0 }
+"#;
+    let v = bytecode_call_named(src, "json_shape_result", vec![])
+        .expect("typed enum JSON helper should run");
+    let interp::Value::Record(Some(type_name), fields) = v else {
+        panic!("typed enum JSON should decode to a tagged record, got {v:?}");
+    };
+    assert_eq!(type_name, "Shape");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields.get("Circle"), Some(&interp::Value::Float(2.5)));
 }
 
 #[test]
@@ -543,8 +606,11 @@ fn json_from_json_typed_type_mismatch_string_as_int() {
 
 #[test]
 fn json_from_json_untyped_backward_compat() {
-    let v = run_source(r#"func main() -> string { from_json("\"hello\"") }"#);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("\"hello\"".into())));
+    let v = json_value(r#"from_json("\"hello\"")"#);
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("\"hello\"".into()))
+    );
 }
 
 // ─── json_array_length tests ─────────────────────────────────

@@ -65,6 +65,7 @@ impl CheckedPowerWidth {
 pub(crate) enum CheckedPowerProfile {
     /// Candidate source-width checked rule: the intermediate/result range is
     /// exactly i32 or i64 as selected by typed Mimi IR.
+    #[cfg(test)]
     CheckedSourceWidth,
     /// Existing VM/native implementation: checked i64 intermediates and an
     /// i32 wrap after success when the typed result width is i32.
@@ -145,6 +146,7 @@ pub(crate) fn encode_checked_integer_power(
     let one = Int::from_i64(1);
     let two = Int::from_i64(2);
     let checked_width = match profile {
+        #[cfg(test)]
         CheckedPowerProfile::CheckedSourceWidth => source_width,
         CheckedPowerProfile::VmNativeI64ThenI32Wrap => CheckedPowerWidth::I64,
     };

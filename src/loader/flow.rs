@@ -18,7 +18,7 @@ use crate::parser;
 use crate::span::{
     SourceId, SourceIdRemap, SourceKey, SourceRecord, SourceRegistry, SourceTextOrigin,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 // ── Import public types from parent module ─────────────────────────────
@@ -1312,6 +1312,16 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
             }
             if let Some(name) = item_name(item) {
                 if !seen_names.insert(name.clone()) {
+                    // D-05 migration seam: two explicitly aliased file
+                    // modules may export the same bare function name. Keep
+                    // both declarations in the merged compatibility view so
+                    // the checker can route `left::parse` and `right::parse`
+                    // by alias. Unqualified imports retain the historical
+                    // duplicate-export error below.
+                    if qualified_duplicate_allowed(item, modules, &sources) {
+                        all_items.push(item.clone());
+                        continue;
+                    }
                     let mut dup_modules: Vec<String> = modules
                         .values()
                         .filter(|m| {
@@ -1349,6 +1359,137 @@ pub fn flow_merge_all(modules: &HashMap<String, LoadedModule>) -> Result<File, S
         items: all_items,
         implicit_single: false,
     })
+}
+
+fn qualified_duplicate_allowed(
+    item: &Item,
+    modules: &HashMap<String, LoadedModule>,
+    merged_sources: &SourceRegistry,
+) -> bool {
+    let Item::Func(current_function) = item else {
+        return false;
+    };
+    if !current_function.pub_ {
+        return false;
+    }
+    let Some(current_source) = merged_sources
+        .key(current_function.meta.span.source_id)
+        .cloned()
+    else {
+        return false;
+    };
+
+    // Only declarations that flow_merge_all would actually append participate
+    // in this decision. Use each matching declaration's own span: a loaded
+    // module's first item is not provenance for its other declarations.
+    let mut declarations = Vec::new();
+    let mut source_keys = BTreeSet::new();
+    let mut module_paths = BTreeSet::new();
+    for module in modules.values() {
+        let is_dependency = module_is_dependency(&module.path);
+        for candidate in &module.file.items {
+            if item_name(candidate).as_deref() != Some(current_function.name.as_str()) {
+                continue;
+            }
+            if is_dependency && !item_is_pub(candidate) {
+                continue;
+            }
+            let Item::Func(function) = candidate else {
+                // A type or another item kind with the same merge name makes
+                // this duplicate set unsuitable for function-only routing.
+                return false;
+            };
+            if !function.pub_ {
+                return false;
+            }
+            let Some(source_key) = module
+                .file
+                .sources
+                .key(function.meta.span.source_id)
+                .cloned()
+            else {
+                return false;
+            };
+            let Some(module_path) = crate::module_system::module_path_from_source_key(&source_key)
+            else {
+                return false;
+            };
+            // Same-source duplicate declarations and distinct sources that
+            // collapse to one import spelling cannot be selected by aliases.
+            if !source_keys.insert(source_key.clone()) || !module_paths.insert(module_path.clone())
+            {
+                return false;
+            }
+            declarations.push((source_key, module_path));
+        }
+    }
+    if declarations.len() < 2 || !source_keys.contains(&current_source) {
+        return false;
+    }
+
+    // The merged checker has one alias -> path slot. If an alias used to
+    // reach one of these declarations is also bound to another path anywhere
+    // in the merged import set, its target depends on import order; reject it.
+    let mut alias_targets: HashMap<String, BTreeSet<Vec<String>>> = HashMap::new();
+    let imports = modules
+        .values()
+        .flat_map(|module| module.file.imports.iter())
+        .collect::<Vec<_>>();
+    for import in &imports {
+        if let Some(alias) = import
+            .alias
+            .as_deref()
+            .or_else(|| import.path.first().map(String::as_str))
+        {
+            alias_targets
+                .entry(alias.to_string())
+                .or_default()
+                .insert(import.path.clone());
+        }
+    }
+
+    let mut aliased_sources = BTreeSet::new();
+    for import in imports {
+        // An omitted alias may still conflict with a named binding, but it
+        // cannot authorize same-name export routing.
+        if import.alias.is_none() {
+            continue;
+        }
+        let Some(alias) = import
+            .alias
+            .as_deref()
+            .or_else(|| import.path.first().map(String::as_str))
+        else {
+            return false;
+        };
+        let matched = declarations
+            .iter()
+            .filter(|(_, module_path)| {
+                crate::module_system::module_path_matches_import_path(
+                    module_path,
+                    &import.path.join("::"),
+                )
+            })
+            .map(|(source_key, _)| source_key.clone())
+            .collect::<BTreeSet<_>>();
+        if matched.is_empty() {
+            continue;
+        }
+        // A broad/package-root spelling that matches more than one duplicate
+        // source does not identify one export, even if it has an alias.
+        if matched.len() != 1
+            || alias_targets
+                .get(alias)
+                .is_none_or(|targets| targets.len() != 1 || !targets.contains(&import.path))
+        {
+            return false;
+        }
+        aliased_sources.extend(matched);
+    }
+
+    declarations
+        .iter()
+        .all(|(source_key, _)| aliased_sources.contains(source_key))
 }
 
 fn item_is_pub(item: &Item) -> bool {
@@ -1425,6 +1566,35 @@ mod tests {
         parser::Parser::new_with_source_registry(tokens, source_id, sources)
             .parse_file()
             .expect("parse test source")
+    }
+
+    fn parsed_module(path: &str, source_key: &str, source: &str) -> LoadedModule {
+        let mut sources = SourceRegistry::default();
+        let source_id = sources
+            .register_key(source_key, SourceTextOrigin::Disk)
+            .expect("register module source");
+        LoadedModule {
+            path: PathBuf::from(path),
+            file: parse_registered(source, source_id, sources),
+        }
+    }
+
+    fn combine_source_files(files: Vec<File>) -> File {
+        let mut sources = SourceRegistry::default();
+        let mut imports = Vec::new();
+        let mut items = Vec::new();
+        for mut file in files {
+            remap_file_into_registry(&mut file, &mut sources)
+                .expect("remap test source file into combined registry");
+            imports.extend(file.imports);
+            items.extend(file.items);
+        }
+        File {
+            sources,
+            imports,
+            items,
+            implicit_single: false,
+        }
     }
 
     fn requires_source(file: &File, function_name: &str) -> SourceId {
@@ -2148,6 +2318,193 @@ mod tests {
             result.unwrap_err(),
             "duplicate item 'conflict' found in modules: a.mimi, b.mimi"
         );
+    }
+
+    #[test]
+    fn flow_merge_all_keeps_public_same_named_functions_with_distinct_aliases() {
+        let modules = HashMap::from([
+            (
+                "left".to_string(),
+                parsed_module(
+                    "/workspace/apps/left.mimi",
+                    "workspace:apps/left.mimi",
+                    "pub func parse() -> i32 { 1 }",
+                ),
+            ),
+            (
+                "right".to_string(),
+                parsed_module(
+                    "/workspace/apps/right.mimi",
+                    "workspace:apps/right.mimi",
+                    "pub func parse() -> i32 { 2 }",
+                ),
+            ),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::left as left;\nuse apps::right as right;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]);
+
+        let merged = flow_merge_all(&modules).expect("distinct aliases disambiguate exports");
+        assert_eq!(
+            merged
+                .items
+                .iter()
+                .filter(|item| matches!(item, Item::Func(function) if function.name == "parse"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn flow_merge_all_rejects_unaliased_or_wrong_path_duplicate_exports() {
+        let left = parsed_module(
+            "/workspace/apps/left.mimi",
+            "workspace:apps/left.mimi",
+            "pub func parse() -> i32 { 1 }",
+        );
+        let right = parsed_module(
+            "/workspace/apps/right.mimi",
+            "workspace:apps/right.mimi",
+            "pub func parse() -> i32 { 2 }",
+        );
+        let unaliased = HashMap::from([
+            ("left".to_string(), left.clone()),
+            ("right".to_string(), right.clone()),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::left;\nuse apps::right as right;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]);
+        assert!(flow_merge_all(&unaliased).is_err());
+
+        // The file's first item is from a different source and has an alias.
+        // It must not lend that alias to the later `parse` declaration.
+        let mut sources = SourceRegistry::default();
+        let decoy_id = sources
+            .register_key("workspace:apps/other.mimi", SourceTextOrigin::Disk)
+            .expect("register decoy source");
+        let left_parse_id = sources
+            .register_key("workspace:apps/left.mimi", SourceTextOrigin::Disk)
+            .expect("register left source");
+        let decoy = parse_registered(
+            "pub func unrelated() -> i32 { 0 }",
+            decoy_id,
+            sources.clone(),
+        );
+        let left_parse = parse_registered("pub func parse() -> i32 { 1 }", left_parse_id, sources);
+        let left_with_decoy = LoadedModule {
+            path: PathBuf::from("/workspace/apps/left.mimi"),
+            file: combine_source_files(vec![decoy, left_parse]),
+        };
+        let wrong_path_alias = HashMap::from([
+            ("left".to_string(), left_with_decoy),
+            ("right".to_string(), right),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::other as other;\nuse apps::right as right;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]);
+        assert!(flow_merge_all(&wrong_path_alias).is_err());
+    }
+
+    #[test]
+    fn flow_merge_all_rejects_private_unknown_and_alias_conflicting_duplicates() {
+        let public_left = parsed_module(
+            "/workspace/apps/left.mimi",
+            "workspace:apps/left.mimi",
+            "pub func parse() -> i32 { 1 }",
+        );
+        let private_right = parsed_module(
+            "/workspace/apps/right.mimi",
+            "workspace:apps/right.mimi",
+            "func parse() -> i32 { 2 }",
+        );
+        assert!(flow_merge_all(&HashMap::from([
+            ("left".to_string(), public_left.clone()),
+            ("right".to_string(), private_right),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::left as left;\nuse apps::right as right;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]))
+        .is_err());
+
+        let conflicting_alias = HashMap::from([
+            (
+                "left".to_string(),
+                parsed_module(
+                    "/workspace/apps/left.mimi",
+                    "workspace:apps/left.mimi",
+                    "pub func parse() -> i32 { 1 }",
+                ),
+            ),
+            (
+                "right".to_string(),
+                parsed_module(
+                    "/workspace/apps/right.mimi",
+                    "workspace:apps/right.mimi",
+                    "pub func parse() -> i32 { 2 }",
+                ),
+            ),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::left as shared;\nuse apps::right as shared;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]);
+        assert!(flow_merge_all(&conflicting_alias).is_err());
+
+        let mut unknown_source = public_left;
+        let parse = unknown_source
+            .file
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                Item::Func(function) if function.name == "parse" => Some(function),
+                _ => None,
+            })
+            .expect("left parse declaration");
+        parse.meta.span.source_id = SourceId::UNKNOWN;
+        assert!(flow_merge_all(&HashMap::from([
+            ("left".to_string(), unknown_source),
+            (
+                "right".to_string(),
+                parsed_module(
+                    "/workspace/apps/right.mimi",
+                    "workspace:apps/right.mimi",
+                    "pub func parse() -> i32 { 2 }",
+                ),
+            ),
+            (
+                "root".to_string(),
+                parsed_module(
+                    "/workspace/main.mimi",
+                    "workspace:main.mimi",
+                    "use apps::left as left;\nuse apps::right as right;\nfunc main() -> i32 { 0 }",
+                ),
+            ),
+        ]))
+        .is_err());
     }
 
     #[test]

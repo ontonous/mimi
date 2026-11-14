@@ -2053,13 +2053,18 @@ func main() -> i32 {
 fn audit_iflet_divergent_branch_keeps_post_block_reachable() {
     let src = r#"
 cap Token
-func main() -> cap Token {
+func audit_iflet_divergent_branch_token() -> cap Token {
     let tok = Token
     let opt: Option<i32> = Some(1)
     if let Some(_) = opt {
         return tok
     }
     return tok
+}
+func main() -> i32 {
+    let tok = audit_iflet_divergent_branch_token()
+    drop(tok)
+    0
 }
 "#;
     assert!(

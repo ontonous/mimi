@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::core::ir::{
-    MatchArm, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedIndex,
-    ResolvedPattern, ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedStmt,
-    ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
+    MatchArm, ResolvedBinaryOp, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart,
+    ResolvedIndex, ResolvedLiteral, ResolvedPattern, ResolvedPatternKind, ResolvedPlace,
+    ResolvedProjection, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp, ResolvedValueProjection,
 };
 use crate::core::{IndexProjection, LocalId, NodeId, Origin, Place, PlaceProjection, ResolvedBody};
 use crate::diagnostic::Diagnostic;
@@ -497,6 +497,14 @@ impl<'a> ResolvedCfgLowerer<'a> {
             } => self.lower_if(
                 expression, condition, then_block, else_block, current, point_kind,
             ),
+            ResolvedExprKind::Binary { op, left, right }
+                if matches!(
+                    *op,
+                    ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr
+                ) =>
+            {
+                self.lower_short_circuit(expression, *op, left, right, current, point_kind)
+            }
             ResolvedExprKind::Match { scrutinee, arms } => {
                 self.lower_match(expression, scrutinee, arms, current, point_kind)
             }
@@ -739,6 +747,110 @@ impl<'a> ResolvedCfgLowerer<'a> {
             &expression.node_id,
             &expression.origin,
             result_kind,
+            PointAccesses::default(),
+        );
+        Some(join)
+    }
+
+    /// Give short-circuit expressions the same explicit branch and join
+    /// structure used by MIR lowering. The right operand is reachable only
+    /// from the operator's evaluation edge, so ownership and verifier CFG
+    /// receipts see the language's actual execution paths.
+    fn lower_short_circuit(
+        &mut self,
+        expression: &ResolvedExpr,
+        op: ResolvedBinaryOp,
+        left: &ResolvedExpr,
+        right: &ResolvedExpr,
+        current: BasicBlockId,
+        point_kind: CfgPointKind,
+    ) -> Option<BasicBlockId> {
+        let condition_end = self.lower_expr(left, current, CfgPointKind::Condition)?;
+        let shortcut_node = NodeId(format!("{}/short-circuit", expression.node_id.0));
+        let shortcut = ResolvedExpr {
+            node_id: shortcut_node.clone(),
+            origin: expression.origin.clone(),
+            ty: expression.ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Literal(ResolvedLiteral::Bool(
+                op == ResolvedBinaryOp::LogicalOr,
+            )),
+        };
+        let right_block = ResolvedBlock {
+            node_id: right.node_id.clone(),
+            origin: right.origin.clone(),
+            ty: right.ty.clone(),
+            statements: Vec::new(),
+            result: Some(Box::new(right.clone())),
+        };
+        let shortcut_block = ResolvedBlock {
+            node_id: shortcut.node_id.clone(),
+            origin: shortcut.origin.clone(),
+            ty: shortcut.ty.clone(),
+            statements: Vec::new(),
+            result: Some(Box::new(shortcut)),
+        };
+        let (then_block, else_block) = if op == ResolvedBinaryOp::LogicalAnd {
+            (&right_block, &shortcut_block)
+        } else {
+            (&shortcut_block, &right_block)
+        };
+        let then_entry = self.new_block(&then_block.node_id, &then_block.origin, "if-then");
+        let else_entry = self.new_block(&else_block.node_id, &else_block.origin, "if-else");
+        let join = self.new_block(&expression.node_id, &expression.origin, "if-join");
+        let then_edge = self.edge(
+            &condition_end,
+            &then_entry,
+            EdgeKind::Then,
+            &expression.node_id,
+            &expression.origin,
+            "if-then",
+        );
+        let else_edge = self.edge(
+            &condition_end,
+            &else_entry,
+            EdgeKind::Else,
+            &expression.node_id,
+            &expression.origin,
+            "if-else",
+        );
+        self.terminate(
+            &condition_end,
+            Terminator::Branch {
+                condition: left.node_id.clone(),
+                then_edge,
+                else_edge,
+            },
+        );
+
+        let then_end = self.lower_block(then_block, Some(then_entry));
+        let else_end = self.lower_block(else_block, Some(else_entry));
+        if let Some(end) = then_end {
+            self.goto(
+                &end,
+                &join,
+                EdgeKind::Fallthrough,
+                &then_block.node_id,
+                &then_block.origin,
+                "if-then-join",
+            );
+        }
+        if let Some(end) = else_end {
+            self.goto(
+                &end,
+                &join,
+                EdgeKind::Fallthrough,
+                &else_block.node_id,
+                &else_block.origin,
+                "if-else-join",
+            );
+        }
+        self.point(
+            &join,
+            &expression.node_id,
+            &expression.origin,
+            point_kind,
             PointAccesses::default(),
         );
         Some(join)

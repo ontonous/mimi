@@ -45,3 +45,21 @@ func main() -> i32 {
         "expected E0445 for inline module block, got: {err:?}"
     );
 }
+
+#[test]
+fn qualified_alias_unknown_export_fails_closed() {
+    let src = r#"
+use std::fs as files;
+
+func main() -> i32 {
+    files.no_such_export()
+}
+"#;
+    let diagnostics = check_source(src).expect_err("unknown qualified export must be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("does not export 'no_such_export'")),
+        "expected a module export diagnostic, got: {diagnostics:?}"
+    );
+}

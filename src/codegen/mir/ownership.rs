@@ -82,6 +82,23 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             }
             MirGlueKind::OwnedString => self.emit_owned_string_clone_value(value, subject),
             MirGlueKind::List => self.emit_list_clone_value(value, ty, subject),
+            MirGlueKind::OrdinaryMapOwnedAnyV2Values => {
+                let values_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+                if ty != &values_ty {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any owner-v2 Values Clone has a noncanonical TypeDesc",
+                    ));
+                }
+                self.program
+                    .type_catalog()
+                    .validate_list_glue(ty, crate::core::mir::types::MirGlueOperation::Clone)
+                    .map_err(|message| NativeMirError::new(subject, message))?;
+                // `native_list_kind` recognizes this exact TypeDesc and routes
+                // it to `mimi_mir_list_clone_managed_any_v2`, which deep-clones
+                // each element owner with staged cleanup on failure.
+                self.emit_list_clone_value(value, ty, subject)
+            }
             MirGlueKind::Set => self.emit_set_clone_value(value, ty, subject),
             MirGlueKind::Aggregate => {
                 if matches!(

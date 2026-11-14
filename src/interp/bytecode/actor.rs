@@ -89,8 +89,11 @@ impl CanonicalActorManifest {
                 .methods
                 .iter()
                 .map(|method| {
-                    indices.get(&method.owner).copied().ok_or_else(|| {
-                        format!("Actor method '{}' has no bytecode function", method.owner.0)
+                    indices.get(&method.body_owner).copied().ok_or_else(|| {
+                        format!(
+                            "Actor body '{}' has no bytecode function",
+                            method.body_owner.0
+                        )
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -312,9 +315,16 @@ impl CanonicalActorManifest {
                     .get(*function as usize)
                     .ok_or("canonical Actor dispatch references a missing function")?;
                 if method.index != index
-                    || proto.name != method.owner.0
+                    || proto.name != method.body_owner.0
                     || proto.param_count as usize != method.execution_parameter_types.len()
-                    || method.execution_parameter_types.first() != Some(&actor.contract.state_type)
+                    || (method.flow_transition.is_none()
+                        && method.execution_parameter_types.first()
+                            != Some(&actor.contract.state_type))
+                    || (method.flow_transition.is_some()
+                        && method.execution_parameter_types.first()
+                            != Some(&crate::core::ir::primitive_type_id(
+                                crate::core::PrimitiveType::I32,
+                            )))
                     || !self.worker_functions.contains(function)
                     || !method_functions.insert(*function)
                 {
@@ -482,7 +492,7 @@ impl CanonicalActorManifest {
                 _ => {
                     return Err(format!(
                         "canonical Actor worker contains unmodeled opcode {op:?}"
-                    ))
+                    ));
                 }
             }
         }
@@ -571,6 +581,7 @@ impl PartialEq for CanonicalActorStateValue {
 struct WorkerState {
     receiver: CanonicalActorStateValue,
     fields: Vec<i32>,
+    flow_payload: Option<i32>,
 }
 
 #[derive(Default)]
@@ -615,7 +626,38 @@ impl CanonicalActorRuntime {
                 "direct canonical Actor method entry requires its mailbox worker",
             ));
         };
-        if !matches!(arguments.first(), Some(Value::CanonicalActorState(receiver))
+        let method_index = actor
+            .functions
+            .iter()
+            .position(|entry| *entry == function)
+            .ok_or_else(|| InterpError::new("canonical Actor method index is absent"))?;
+        let method = actor
+            .contract
+            .methods
+            .get(method_index)
+            .ok_or_else(|| InterpError::new("canonical Actor method contract is absent"))?;
+        if arguments.len() != method.execution_parameter_types.len() {
+            return Err(InterpError::new(
+                "canonical Actor method entry has an incompatible arity",
+            ));
+        }
+        if method.flow_transition.is_some() {
+            let Some(Value::Int(value)) = arguments.first() else {
+                return Err(InterpError::new(
+                    "canonical Flow Actor method entry has no scalar root-state receiver",
+                ));
+            };
+            let Some(expected) = worker.flow_payload else {
+                return Err(InterpError::new(
+                    "canonical Flow Actor worker has no root-state snapshot",
+                ));
+            };
+            if i32::try_from(*value).ok() != Some(expected) {
+                return Err(InterpError::new(
+                    "canonical Flow Actor receiver differs from its committed root state",
+                ));
+            }
+        } else if !matches!(arguments.first(), Some(Value::CanonicalActorState(receiver))
             if receiver == &worker.receiver && receiver.actor == actor.contract.actor)
         {
             return Err(InterpError::new(
@@ -687,7 +729,7 @@ impl CanonicalActorRuntime {
             .as_ref()
             .ok_or_else(|| InterpError::new("canonical Actor spawn has no manifest"))?;
         let dispatch = manifest.descriptor(descriptor)?.clone();
-        let initial_fields = dispatch
+        let initial_fields: Vec<i32> = dispatch
             .contract
             .fields
             .iter()
@@ -700,6 +742,7 @@ impl CanonicalActorRuntime {
             .map(|method| method.execution_parameter_types.len() - 1)
             .collect();
         let actor_identity = dispatch.contract.actor.clone();
+        let mut worker_fields = vec![0; initial_fields.len()];
         let handle = self
             .participant
             .as_ref()
@@ -712,6 +755,7 @@ impl CanonicalActorRuntime {
                         Arc::clone(&program),
                         &dispatch,
                         fields,
+                        &mut worker_fields,
                         method,
                         arguments,
                         context,
@@ -773,7 +817,34 @@ impl CanonicalActorRuntime {
             .ok_or_else(|| InterpError::new("canonical Actor call has no active root domain"))?
             .call(&handle.handle, method, &arguments)
             .map_err(domain_error)?;
-        Ok(Value::Int(i64::from(result)))
+        if let Some(flow) = &contract.flow_transition {
+            let state = dispatch.contract.flow.as_ref().ok_or_else(|| {
+                InterpError::new("Flow Actor dispatch has no checked state receipt")
+            })?;
+            let [payload] = state.payload.as_slice() else {
+                return Err(InterpError::new(
+                    "Flow Actor dispatch has no exact single-field state payload",
+                ));
+            };
+            if flow.method_owner != contract.owner
+                || flow.body_owner != contract.body_owner
+                || contract.result_type != state.root_state_type
+                || payload.ty != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+            {
+                return Err(InterpError::new(
+                    "Flow Actor result differs from its checked state receipt",
+                ));
+            }
+            Ok(Value::Record(
+                Some(state.root_state.0.clone()),
+                std::collections::HashMap::from([(
+                    payload.name.clone(),
+                    Value::Int(i64::from(result)),
+                )]),
+            ))
+        } else {
+            Ok(Value::Int(i64::from(result)))
+        }
     }
 
     pub(crate) fn field_load(
@@ -845,6 +916,7 @@ fn execute_turn(
     program: Arc<BytecodeProgram>,
     dispatch: &ActorDispatch,
     fields: &mut [i32],
+    reusable_worker_fields: &mut Vec<i32>,
     method: u32,
     arguments: &[i32],
     context: &ActorTurnContext,
@@ -864,6 +936,7 @@ fn execute_turn(
         .ok_or(ActorDomainError::InvalidPayload)?;
     if arguments.len() + 1 != contract.execution_parameter_types.len()
         || fields.len() != dispatch.contract.fields.len()
+        || reusable_worker_fields.len() != fields.len()
     {
         return Err(ActorDomainError::InvalidPayload);
     }
@@ -871,13 +944,34 @@ fn execute_turn(
         actor: dispatch.contract.actor.clone(),
         token: Arc::new(()),
     };
+    reusable_worker_fields.copy_from_slice(fields);
     let mut vm = BytecodeVM::new(program);
+    let flow_payload = if contract.flow_transition.is_some() {
+        if dispatch.contract.flow.as_ref().is_none_or(|flow| {
+            flow.payload.len() != 1
+                || dispatch.contract.fields.len() != 1
+                || dispatch.contract.fields[0].field != flow.payload[0].field
+                || dispatch.contract.fields[0].ty != flow.payload[0].ty
+                || fields.is_empty()
+        }) {
+            *reusable_worker_fields = fields.to_vec();
+            return Err(ActorDomainError::InvalidPayload);
+        }
+        fields.first().copied()
+    } else {
+        None
+    };
     vm.canonical_actor_runtime.worker = Some(WorkerState {
         receiver: receiver.clone(),
-        fields: fields.to_vec(),
+        fields: std::mem::take(reusable_worker_fields),
+        flow_payload,
     });
     let mut parameters = Vec::with_capacity(arguments.len() + 1);
-    parameters.push(Value::CanonicalActorState(receiver));
+    if let Some(value) = flow_payload {
+        parameters.push(Value::Int(i64::from(value)));
+    } else {
+        parameters.push(Value::CanonicalActorState(receiver));
+    }
     parameters.extend(arguments.iter().map(|value| Value::Int(i64::from(*value))));
     let result = vm.call_function(function, &parameters);
     let worker = vm
@@ -885,8 +979,7 @@ fn execute_turn(
         .worker
         .take()
         .ok_or(ActorDomainError::InvalidPayload)?;
-    fields.copy_from_slice(&worker.fields);
-    match result {
+    let reply = match result {
         Ok(Value::Int(value)) => i32::try_from(value).map_err(|_| ActorDomainError::InvalidPayload),
         Ok(_) => Err(ActorDomainError::InvalidPayload),
         Err(error) => Err(ActorDomainError::Trap(match error.code() {
@@ -894,6 +987,23 @@ fn execute_turn(
             "E0802" => 802,
             _ => 800,
         })),
+    };
+    if let Ok(value) = reply {
+        if contract.flow_transition.is_some() {
+            if let Some(slot) = fields.first_mut() {
+                *slot = value;
+            } else {
+                *reusable_worker_fields = worker.fields;
+                return Err(ActorDomainError::InvalidPayload);
+            }
+        } else {
+            fields.copy_from_slice(&worker.fields);
+        }
+        *reusable_worker_fields = worker.fields;
+        Ok(value)
+    } else {
+        *reusable_worker_fields = worker.fields;
+        reply
     }
 }
 
@@ -976,21 +1086,31 @@ mod tests {
     }
 
     const REPEAT: &str = r#"
-        actor Counter {
-            base: i32 = 0;
+        flow CounterFlow {
+            state Active { base: i32 }
+            transition seed(Active, value: i32) -> Active {
+                return Active { base: value }
+            }
+            transition add(Active, amount: i32) -> Active {
+                return Active { base: self.base + amount }
+            }
+        }
+        actor Counter runs CounterFlow {
             func bump(delta: i32) -> i32 {
                 let scale = 10
                 func scaled(d: i32) -> i32 { scale + d }
-                self.base = self.base + scaled(delta)
-                self.base
+                scaled(delta)
             }
         }
         func main() -> i32 {
             let first = Counter.spawn()
             let second = Counter.spawn()
-            println(first.bump(5))
-            println(first.bump(7))
-            println(second.bump(1))
+            let first_turn = first.add(first.bump(5))
+            let second_turn = first.add(first.bump(7))
+            let other_turn = second.add(second.bump(1))
+            println(first_turn.base)
+            println(second_turn.base)
+            println(other_turn.base)
             0
         }
     "#;
@@ -1008,14 +1128,21 @@ mod tests {
     }
 
     #[test]
-    fn canonical_actor_vm_nonzero_initializer_and_two_capture_snapshots() {
+    fn canonical_actor_vm_nonzero_flow_seed_and_two_capture_snapshots() {
         let source = REPEAT
-            .replace("base: i32 = 0", "base: i32 = 3")
+            .replace(
+                "let first_turn = first.add(first.bump(5))",
+                "let first_initial = first.seed(3)\n            let first_turn = first.add(first.bump(5) + first_initial.base)",
+            )
+            .replace(
+                "let other_turn = second.add(second.bump(1))",
+                "let other_initial = second.seed(3)\n            let other_turn = second.add(second.bump(1) + other_initial.base)",
+            )
             .replace("let scale = 10", "let scale = 10\nlet offset = 2")
             .replace("scale + d", "scale + offset + d");
         let mut vm = BytecodeVM::new(compile(&source));
         assert_eq!(vm.run().unwrap(), 0);
-        assert_eq!(vm.stdout(), "20\n39\n16\n");
+        assert_eq!(vm.stdout(), "23\n42\n19\n");
         assert_closed(vm.canonical_actor_domain_counts().unwrap(), 2);
     }
 
@@ -1034,8 +1161,7 @@ mod tests {
                         base: i32 = 4;
                         func bump(delta: i32) -> i32 {{
                             func helper(delta: i32) -> i32 {{ {expression} }}
-                            self.base = helper(delta)
-                            self.base
+                            helper(delta)
                         }}
                     }}
                     func main() -> i32 {{
@@ -1048,7 +1174,7 @@ mod tests {
             } else {
                 format!(
                     r#"
-                    actor Counter {{ base: i32 = 4; func read() -> i32 {{ self.base }} }}
+                    actor Counter {{ func read() -> i32 {{ 4 }} }}
                     func helper(delta: i32) -> i32 {{ {expression} }}
                     func main() -> i32 {{
                         let c = Counter.spawn()

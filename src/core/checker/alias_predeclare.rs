@@ -136,13 +136,14 @@ impl<'a> Checker<'a> {
         let Some(source_key) = self.source_registry.key(span.source_id) else {
             return false;
         };
-        let Some(module_path) = crate::core::module_identity::module_path_from_source_key(source_key)
+        let Some(module_path) =
+            crate::core::module_identity::module_path_from_source_key(source_key)
         else {
             return false;
         };
-        self.module_aliases
-            .values()
-            .any(|path| crate::core::module_identity::module_path_matches_import_path(&module_path, path))
+        self.module_aliases.values().any(|path| {
+            crate::core::module_identity::module_path_matches_import_path(&module_path, path)
+        })
     }
 }
 

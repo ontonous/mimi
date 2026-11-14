@@ -4,6 +4,7 @@ use crate::interp::bytecode::registry::{BuiltinCategory, BuiltinDesc, BuiltinReg
 use crate::interp::bytecode::vm::BytecodeVM;
 use crate::interp::error::InterpError;
 use crate::interp::value::Value;
+use crate::interp::SharedString;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -20,12 +21,19 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_write_file,
     });
-    // Phase D (0.39.75): 收 cap 的 fs API（SystemToken 能力门禁，运行时忽略）。
+    // Phase D (0.39.75): 收 cap 的 fs API（SystemToken 能力门禁）；
+    // runtime registry checks the concrete path before the I/O sink.
     reg.register(BuiltinDesc {
         name: "read_file_guarded",
         arity: 2,
         category: BuiltinCategory::System,
         func: builtin_read_file_guarded,
+    });
+    reg.register(BuiltinDesc {
+        name: "write_file_guarded",
+        arity: 3,
+        category: BuiltinCategory::System,
+        func: builtin_write_file_guarded,
     });
     reg.register(BuiltinDesc {
         name: "append_file",
@@ -112,7 +120,8 @@ pub fn register(reg: &mut BuiltinRegistry) {
         category: BuiltinCategory::System,
         func: builtin_getenv,
     });
-    // Phase D (0.39.75): 收 cap 的 env API（SystemToken 能力门禁，运行时忽略）。
+    // Phase D (0.39.75): 收 cap 的 env API；the runtime registry checks the
+    // concrete variable name before getenv.
     reg.register(BuiltinDesc {
         name: "get_env_guarded",
         arity: 2,
@@ -178,7 +187,7 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
         if meta.len() > crate::path_safety::MAX_SOURCE_BYTES {
             return Ok(Value::Variant(
                 "Err".into(),
-                vec![Value::String(crate::interp::SharedString::new(
+                vec![Value::String(SharedString::new(
                     "read_file: file too large".to_string(),
                 ))],
             ));
@@ -187,18 +196,39 @@ fn builtin_read_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inte
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Value::Variant(
             "Ok".into(),
-            vec![Value::String(crate::interp::SharedString::new(content))],
+            vec![Value::String(SharedString::new(content))],
         )),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(crate::interp::SharedString::new(e.to_string()))],
+            vec![Value::String(SharedString::new(e.to_string()))],
         )),
     }
 }
 
 /// Phase D (0.39.75): 收 cap 的 fs API——path 为 args[0]，SystemToken 能力门禁
-/// 在 args[1]（运行时忽略：能力由 checker/CFG 线性消费保证）。语义同 read_file。
+/// 在 args[1]；checker/CFG 负责线性消费，runtime registry 负责动态范围。
 fn builtin_read_file_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let token = match args.get(1) {
+        Some(Value::Int(token)) => *token,
+        Some(other) => {
+            return Err(InterpError::new(format!(
+                "read_file_guarded: capability must be SystemToken, found {}",
+                crate::interp::value::type_name(other)
+            )));
+        }
+        None => return Err(InterpError::new("read_file_guarded: missing capability")),
+    };
+    let path = expect_str(args, 0)?;
+    crate::runtime::capability_scope::check_path(
+        token,
+        &path,
+        crate::runtime::capability_scope::PathAccess::Read,
+    )
+    .map_err(|error| {
+        InterpError::new(format!(
+            "read_file_guarded: capability scope denied: {error}"
+        ))
+    })?;
     builtin_read_file(_vm, &args[0..1])
 }
 
@@ -209,9 +239,36 @@ fn builtin_write_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Int
         Ok(()) => Ok(Value::Variant("Ok".into(), vec![Value::Unit])),
         Err(e) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(crate::interp::SharedString::new(e.to_string()))],
+            vec![Value::String(SharedString::new(e.to_string()))],
         )),
     }
+}
+
+/// Write a file only after checking the token's dynamic directory scope.
+fn builtin_write_file_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let token = match args.get(2) {
+        Some(Value::Int(token)) => *token,
+        Some(other) => {
+            return Err(InterpError::new(format!(
+                "write_file_guarded: capability must be SystemToken, found {}",
+                crate::interp::value::type_name(other)
+            )));
+        }
+        None => return Err(InterpError::new("write_file_guarded: missing capability")),
+    };
+    let path = expect_str(args, 0)?;
+    let _ = expect_str(args, 1)?;
+    crate::runtime::capability_scope::check_path(
+        token,
+        &path,
+        crate::runtime::capability_scope::PathAccess::Write,
+    )
+    .map_err(|error| {
+        InterpError::new(format!(
+            "write_file_guarded: capability scope denied: {error}"
+        ))
+    })?;
+    builtin_write_file(_vm, &args[0..2])
 }
 
 fn builtin_append_file(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -258,7 +315,7 @@ fn builtin_listdir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Interp
         Ok(entries) => {
             let mut result = Vec::new();
             for entry in entries.flatten() {
-                result.push(Value::String(crate::interp::SharedString::new(
+                result.push(Value::String(SharedString::new(
                     entry.file_name().to_string_lossy().to_string(),
                 )));
             }
@@ -311,7 +368,7 @@ fn builtin_walk_dir(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
     Ok(Value::List(Arc::new(
         result
             .into_iter()
-            .map(|s| Value::String(crate::interp::SharedString::new(s)))
+            .map(|s| Value::String(SharedString::new(s)))
             .collect(),
     )))
 }
@@ -324,7 +381,7 @@ fn builtin_path_basename(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, 
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(crate::interp::SharedString::new(basename)))
+    Ok(Value::String(SharedString::new(basename)))
 }
 
 fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -334,7 +391,7 @@ fn builtin_path_dirname(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, I
         .and_then(|p| p.to_str())
         .unwrap_or("")
         .to_string();
-    Ok(Value::String(crate::interp::SharedString::new(dirname)))
+    Ok(Value::String(SharedString::new(dirname)))
 }
 
 fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
@@ -343,14 +400,14 @@ fn builtin_path_ext(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, Inter
         .extension()
         .map(|e| e.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(Value::String(crate::interp::SharedString::new(ext)))
+    Ok(Value::String(SharedString::new(ext)))
 }
 
 fn builtin_path_join(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
     let base = expect_str(args, 0)?;
     let other = expect_str(args, 1)?;
     let joined = std::path::Path::new(&base).join(&other);
-    Ok(Value::String(crate::interp::SharedString::new(
+    Ok(Value::String(SharedString::new(
         joined.to_string_lossy().to_string(),
     )))
 }
@@ -361,14 +418,28 @@ fn builtin_args(vm: &mut BytecodeVM, _args: &[Value]) -> Result<Value, InterpErr
     let args: Vec<Value> = vm
         .cli_args
         .iter()
-        .map(|s| Value::String(crate::interp::SharedString::new(s.clone())))
+        .map(|s| Value::String(SharedString::new(s.clone())))
         .collect();
     Ok(Value::List(Arc::new(args)))
 }
 
 /// Phase D (0.39.75): 收 cap 的 env API——name 为 args[0]，SystemToken 能力
-/// 门禁在 args[1]（运行时忽略）。语义同 getenv。
+/// 门禁在 args[1]，runtime registry 负责动态变量范围。语义同 getenv。
 fn builtin_get_env_guarded(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpError> {
+    let token = match args.get(1) {
+        Some(Value::Int(token)) => *token,
+        Some(other) => {
+            return Err(InterpError::new(format!(
+                "get_env_guarded: capability must be SystemToken, found {}",
+                crate::interp::value::type_name(other)
+            )));
+        }
+        None => return Err(InterpError::new("get_env_guarded: missing capability")),
+    };
+    let name = expect_str(args, 0)?;
+    crate::runtime::capability_scope::check_env(token, &name).map_err(|error| {
+        InterpError::new(format!("get_env_guarded: capability scope denied: {error}"))
+    })?;
     builtin_getenv(_vm, &args[0..1])
 }
 
@@ -377,11 +448,11 @@ fn builtin_getenv(_vm: &mut BytecodeVM, args: &[Value]) -> Result<Value, InterpE
     match std::env::var(&key) {
         Ok(val) => Ok(Value::Variant(
             "Ok".into(),
-            vec![Value::String(crate::interp::SharedString::new(val))],
+            vec![Value::String(SharedString::new(val))],
         )),
         Err(_) => Ok(Value::Variant(
             "Err".into(),
-            vec![Value::String(crate::interp::SharedString::new(format!(
+            vec![Value::String(SharedString::new(format!(
                 "env var '{}' not set",
                 key
             )))],

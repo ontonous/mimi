@@ -1613,7 +1613,7 @@ func main() -> i32 {
         check_source(src)
     );
     assert_eq!(run_source_bytecode_result(src), Ok(interp::Value::Int(0)));
-    let out = compile_and_run(src).expect("codegen failed");
+    let out = checked_codegen_compile_and_run_without_legacy(src).expect("codegen failed");
     assert_eq!(out.trim(), "7");
 }
 
@@ -3891,16 +3891,16 @@ fn mailbox_bp_state_mute_and_hysteresis() {
 #[test]
 fn actor_mailbox_depth_and_set() {
     let src = r#"
-actor Counter {
-    n: i32
-    func bump() -> i32 {
-        self.n = self.n + 1
-        self.n
+flow CounterFlow {
+    state Ready { n: i32 }
+    transition bump(Ready) -> Ready {
+        return Ready { n: self.n + 1 }
     }
-    func get() -> i32 {
-        self.n
+    transition get(Ready) -> Ready {
+        return Ready { n: self.n }
     }
 }
+actor Counter runs CounterFlow {}
 func main() -> i32 {
     let c = Counter.spawn()
     actor_set_mailbox_depth(c, 8)
@@ -3909,7 +3909,9 @@ func main() -> i32 {
     println(d)
     println(m)
     let v = c.bump()
-    println(v)
+    let state = c.get()
+    if state.n != 1 { return -1 }
+    println(v.n)
     0
 }
 "#;
@@ -3960,21 +3962,26 @@ fn actor_mailbox_backpressure_ttl() {
     // we simulate by setting depth=1 and flooding from main (sequential still ok).
     // L1: setting depth and reading it dual-backend.
     let src = r#"
-actor Worker {
-    n: i32
-    func work() -> i32 {
-        self.n = self.n + 1
-        self.n
+flow WorkerFlow {
+    state Ready { n: i32 }
+    transition work(Ready) -> Ready {
+        return Ready { n: self.n + 1 }
+    }
+    transition get(Ready) -> Ready {
+        return Ready { n: self.n }
     }
 }
+actor Worker runs WorkerFlow {}
 func main() -> i32 {
     let w = Worker.spawn()
     actor_set_mailbox_depth(w, 1)
     let a = w.work()
     let b = w.work()
-    println(a)
-    println(b)
+    println(a.n)
+    println(b.n)
     println(actor_mailbox_depth(w))
+    let state = w.get()
+    if state.n != 2 { return -1 }
     0
 }
 "#;
@@ -4314,11 +4321,12 @@ func main() -> i32 {
 #[test]
 fn broadcast_same_type_actors_dual_backend() {
     let src = r#"
-actor Sensor {
-    v: i32
-    func read() -> i32 { self.v }
-    func set(n: i32) { self.v = n }
+flow SensorFlow {
+    state Ready { v: i32 }
+    transition read(Ready) -> Ready { return Ready { v: self.v } }
+    transition set(Ready, n: i32) -> Ready { return Ready { v: n } }
 }
+actor Sensor runs SensorFlow {}
 func main() -> i32 {
     let a = Sensor.spawn()
     let b = Sensor.spawn()
@@ -4327,8 +4335,10 @@ func main() -> i32 {
     let targets = [a, b]
     let results = broadcast(targets, "read")
     println(len(results))
-    println(results[0])
-    println(results[1])
+    let a_state = a.read()
+    let b_state = b.read()
+    println(a_state.v)
+    println(b_state.v)
     0
 }
 "#;
@@ -4802,18 +4812,19 @@ func main() -> i32 {
 fn spawn_detached_dual_backend() {
     // L1: spawn_detached creates an actor that can be called normally.
     let src = r#"
-actor W {
-    v: i32
-    func read() -> i32 { self.v }
-    func set(n: i32) { self.v = n }
+flow WFlow {
+    state Ready { v: i32 }
+    transition read(Ready) -> Ready { return Ready { v: self.v } }
+    transition set(Ready, n: i32) -> Ready { return Ready { v: n } }
 }
+actor W runs WFlow {}
 func main() -> i32 {
     let a = W.spawn()
     a.set(10)
     let d = W.spawn_detached()
     d.set(99)
-    println(a.read())
-    println(d.read())
+    println(a.read().v)
+    println(d.read().v)
     0
 }
 "#;
@@ -4851,17 +4862,19 @@ func main() {
 fn broadcast_peerfault_sentinel_dual_backend() {
     // L1: broadcast with unknown method → PeerFault sentinel -1 (both backends).
     let src = r#"
-actor S {
-    v: i32
-    func read() -> i32 { self.v }
-    func set(n: i32) { self.v = n }
+flow SFlow {
+    state Ready { v: i32 }
+    transition read(Ready) -> Ready { return Ready { v: self.v } }
+    transition set(Ready, n: i32) -> Ready { return Ready { v: n } }
 }
+actor S runs SFlow {}
 func main() -> i32 {
     let a = S.spawn()
     a.set(42)
     let targets = [a]
     let ok = broadcast(targets, "read")
-    println(ok[0])
+    if len(ok) != 1 { return -2 }
+    println(a.read().v)
     let bad = broadcast(targets, "nonexistent")
     println(bad[0])
     0
@@ -5264,17 +5277,19 @@ fn producer_mute_cascade() {
     // L1 interp: when consumer actor enters mute (mailbox overflow),
     // producer actor should also be muted (push-mute cascade).
     let src = r#"
-actor Consumer {
-    n: i32
-    func bump() -> i32 {
-        self.n = self.n + 1
-        self.n
+flow ConsumerFlow {
+    state Ready { n: i32 }
+    transition bump(Ready) -> Ready {
+        return Ready { n: self.n + 1 }
     }
+    transition get(Ready) -> Ready { return Ready { n: self.n } }
 }
-actor Producer {
-    n: i32
-    func get() -> i32 { self.n }
+actor Consumer runs ConsumerFlow {}
+flow ProducerFlow {
+    state Ready { n: i32 }
+    transition get(Ready) -> Ready { return Ready { n: self.n } }
 }
+actor Producer runs ProducerFlow {}
 func main() -> i32 {
     let c = Consumer.spawn()
     actor_set_mailbox_depth(c, 2)
@@ -5287,26 +5302,36 @@ func main() -> i32 {
 
     // Consumer should be muted
     let cm = actor_is_muted(c)
+    let consumer_state = c.get()
+    let producer_state = p.get()
     println(cm)
 
-    0
+    if consumer_state.n == 3 && producer_state.n == 0 { 0 } else { -1 }
 }
 "#;
     let r = run_source_bytecode_result(src);
     assert!(r.is_ok(), "producer mute cascade should not crash: {:?}", r);
+    assert_eq!(
+        r.expect("producer mute cascade should return its state-isolation result"),
+        interp::Value::Int(0),
+        "producer mute cascade should preserve independent Flow state"
+    );
 }
 
 // ── v0.29.48: Integration Test Sandbox ────────────────────────────────
 
 #[test]
 fn test_sandbox_multi_actor() {
-    // L1 interp: test_sandbox spawns actors and runs transitions.
+    // L1 interp: test_sandbox spawns Flow-backed actors.
     // fix-plan: verify actual output, not just is_ok() (was false success).
     let src = r#"
-actor Counter {
-    n: i32
-    func bump() -> i32 { self.n = self.n + 1; self.n }
+flow CounterFlow {
+    state Ready { n: i32 }
+    transition bump(Ready) -> Ready {
+        return Ready { n: self.n + 1 }
+    }
 }
+actor Counter runs CounterFlow {}
 func main() -> i32 {
     let cfg = Record { actors: ["Counter"], calls: [], faults: [] }
     let results = test_sandbox(cfg)
@@ -6013,6 +6038,191 @@ func main() -> i32 {
         result.is_ok(),
         "sequential transitions should be accepted: {:?}",
         result
+    );
+}
+
+#[test]
+fn flow_state_consumption_is_path_local_across_if_arms() {
+    let src = r#"
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func choose(flag: bool, pending: Pending) -> Finished {
+    if flag {
+        Gate::finish(pending)
+    } else {
+        Gate::finish(pending)
+    }
+}
+"#;
+    check_source(src).expect("the two if arms consume the state on alternative paths");
+}
+
+#[test]
+fn flow_state_consumption_is_path_local_across_match_arms() {
+    let src = r#"
+type Choice { Left, Right }
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func choose(choice: Choice, pending: Pending) -> Finished {
+    match choice {
+        Left => Gate::finish(pending),
+        Right => Gate::finish(pending),
+    }
+}
+"#;
+    check_source(src).expect("the two match arms consume the state on alternative paths");
+}
+
+#[test]
+fn flow_state_guarded_match_arms_share_consumption_and_fallthrough() {
+    let src = r#"
+type Choice { Left, Right }
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func choose(choice: Choice, flag: bool, pending: Pending) -> Finished {
+    match choice {
+        Left if flag => Gate::finish(pending),
+        _ => Gate::finish(pending),
+    }
+}
+"#;
+    check_source(src).expect("guard-false fallthrough reaches the wildcard as an alternative");
+}
+
+#[test]
+fn flow_state_if_without_else_return_preserves_fallthrough_state() {
+    let src = r#"
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func choose(flag: bool, pending: Pending) -> Finished {
+    if flag {
+        return Gate::finish(pending)
+    }
+    Gate::finish(pending)
+}
+"#;
+    check_source(src).expect("the post-if path retains pending when the then branch returned");
+}
+
+#[test]
+fn flow_state_sequential_double_transition_remains_rejected() {
+    let src = r#"
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func invalid(pending: Pending) -> Finished {
+    let first = Gate::finish(pending)
+    Gate::finish(pending)
+}
+"#;
+    let errors =
+        check_source(src).expect_err("sequentially consuming a Flow state twice must fail");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0423")),
+        "expected E0423 for sequential double consumption, got: {errors:?}"
+    );
+}
+
+#[test]
+fn flow_state_consumed_in_if_arms_remains_unavailable_after_join() {
+    let src = r#"
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func invalid(flag: bool, pending: Pending) -> Finished {
+    if flag {
+        Gate::finish(pending)
+    } else {
+        Gate::finish(pending)
+    }
+    Gate::finish(pending)
+}
+"#;
+    let errors = check_source(src).expect_err("a consumed Flow state cannot be reused after join");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0423")),
+        "expected E0423 after the branch join, got: {errors:?}"
+    );
+}
+
+#[test]
+fn flow_state_nonexhaustive_guarded_match_retains_fallthrough_and_consumption() {
+    let src = r#"
+type Choice { Left, Right }
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func invalid(choice: Choice, flag: bool, pending: Pending) -> Finished {
+    match choice {
+        Left if flag => Gate::finish(pending),
+    }
+    Gate::finish(pending)
+}
+"#;
+    let errors = check_source(src).expect_err("guarded match leaves a runtime fallthrough path");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0215")),
+        "expected E0215 for the unmatched or guard-false path, got: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0423")),
+        "expected E0423 when the successful arm consumed pending before the join, got: {errors:?}"
+    );
+}
+
+#[test]
+fn flow_state_if_without_else_may_consumption_rejects_later_reuse() {
+    let src = r#"
+flow Gate {
+    state Pending { value: i32 }
+    state Finished { value: i32 }
+    transition finish(Pending) -> Finished {
+        return Finished { value: self.value }
+    }
+}
+func invalid(flag: bool, pending: Pending) -> Finished {
+    if flag {
+        Gate::finish(pending)
+    }
+    Gate::finish(pending)
+}
+"#;
+    let errors = check_source(src).expect_err("the then path consumed pending before the join");
+    assert!(
+        errors.iter().any(|d| d.code.as_deref() == Some("E0423")),
+        "expected E0423 after a possibly consuming if, got: {errors:?}"
     );
 }
 

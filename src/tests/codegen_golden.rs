@@ -3,11 +3,13 @@ use super::*;
 /// Compile Mimi source to LLVM IR string.
 fn compile_to_ir(src: &str) -> String {
     let file = parse(src);
+    let checked = crate::core::check_program(&file)
+        .expect("golden fixture should pass checked native compilation");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "golden_test");
     codegen
-        .compile_file(&file)
-        .expect("src/tests/codegen_golden.rs:8 unwrap failed");
+        .compile_checked(&checked)
+        .expect("golden fixture should compile through the canonical native route");
     codegen.emit_ir()
 }
 

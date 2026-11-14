@@ -271,7 +271,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                         return Err(NativeMirError::new(
                             subject,
                             "unsupported FFI predicate operator",
-                        ))
+                        ));
                     }
                 }
                 .map_err(error)?;
@@ -304,7 +304,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 subject,
                 "FFI predicate cannot evaluate float literals",
             )),
-            Expr::Result | Expr::Old(_) | Expr::Project { .. } => Err(NativeMirError::new(
+            Expr::Result
+            | Expr::Old(_)
+            | Expr::Project { .. }
+            | Expr::String(_)
+            | Expr::StringLength(_)
+            | Expr::StringCharAt0(_)
+            | Expr::Unsupported(_) => Err(NativeMirError::new(
                 subject,
                 "unsupported FFI predicate expression",
             )),

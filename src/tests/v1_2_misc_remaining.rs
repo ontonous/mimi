@@ -1,14 +1,22 @@
 use super::*;
+use crate::interp::SharedString;
 #[test]
 fn fstring_escape_sequences() {
     let src = r#"
-func main() -> string {
+func escaped_string() -> string {
     "hello\nworld"
+}
+
+func main() -> i32 {
+    let _value = escaped_string()
+    0
 }
 "#;
     assert_eq!(
-        run_source_bytecode_result(src),
-        Ok(interp::Value::String(crate::interp::SharedString::new("hello\nworld".to_string())))
+        bytecode_call_named(src, "escaped_string", vec![]),
+        Ok(interp::Value::String(SharedString::new(
+            "hello\nworld".to_string()
+        )))
     );
 }
 

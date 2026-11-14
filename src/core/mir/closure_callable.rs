@@ -19,7 +19,10 @@ use crate::core::ir::{
 use crate::core::{CheckedProgram, NodeId, PrimitiveType};
 use crate::span::SourceId;
 
-use super::lower::{lower_callable_with_type_catalog_and_permissions, MirLoweringError};
+use super::lower::{
+    is_comptime_callable, lower_callable_with_type_catalog_and_permissions_and_constants,
+    MirLoweringError,
+};
 use super::types::{MirTypeCatalog, MirTypeKind};
 use super::{MirFunction, MirInstructionId, MirInstructionKind, MirValueId};
 
@@ -193,11 +196,15 @@ struct UseCensus {
 impl CheckedClosureCallablePlanV1 {
     pub(crate) fn has_source_candidate(program: &CheckedProgram) -> bool {
         program.callables().iter().any(|(owner, callable)| {
-            root_bound_lambdas(owner, &callable.body.root)
-                .iter()
-                .any(|bound| {
-                    function_returns_owned_any_pair(&bound.expression.ty, program.resolved_types())
-                })
+            !is_comptime_callable(program, owner)
+                && root_bound_lambdas(owner, &callable.body.root)
+                    .iter()
+                    .any(|bound| {
+                        function_returns_owned_any_pair(
+                            &bound.expression.ty,
+                            program.resolved_types(),
+                        )
+                    })
         })
     }
 
@@ -206,7 +213,16 @@ impl CheckedClosureCallablePlanV1 {
         type_catalog: &MirTypeCatalog,
         excluded_sources: Option<&HashSet<SourceId>>,
     ) -> Result<Self, Vec<String>> {
-        let plan = Self::derive_source(program, excluded_sources)?;
+        Self::derive_with_owner_scope(program, type_catalog, excluded_sources, None)
+    }
+
+    pub(crate) fn derive_with_owner_scope(
+        program: &CheckedProgram,
+        type_catalog: &MirTypeCatalog,
+        excluded_sources: Option<&HashSet<SourceId>>,
+        owner_scope: Option<&BTreeSet<NodeId>>,
+    ) -> Result<Self, Vec<String>> {
+        let plan = Self::derive_source_with_owner_scope(program, excluded_sources, owner_scope)?;
         for closure in plan.closures.values() {
             type_catalog
                 .validate_ordinary_map_owned_get_any_result_type(
@@ -232,13 +248,24 @@ impl CheckedClosureCallablePlanV1 {
         program: &CheckedProgram,
         excluded_sources: Option<&HashSet<SourceId>>,
     ) -> Result<Self, Vec<String>> {
+        Self::derive_source_with_owner_scope(program, excluded_sources, None)
+    }
+
+    pub(crate) fn derive_source_with_owner_scope(
+        program: &CheckedProgram,
+        excluded_sources: Option<&HashSet<SourceId>>,
+        owner_scope: Option<&BTreeSet<NodeId>>,
+    ) -> Result<Self, Vec<String>> {
         let mut plan = Self::default();
         let mut errors = Vec::new();
         let mut owners = BTreeSet::new();
         for (parent_owner, parent) in program.callables() {
-            if excluded_sources.is_some_and(|excluded| {
-                excluded.contains(&parent.body.root.origin.user_span().source_id)
-            }) {
+            if is_comptime_callable(program, parent_owner)
+                || owner_scope.is_some_and(|scope| !scope.contains(parent_owner))
+                || excluded_sources.is_some_and(|excluded| {
+                    excluded.contains(&parent.body.root.origin.user_span().source_id)
+                })
+            {
                 continue;
             }
             for bound in root_bound_lambdas(parent_owner, &parent.body.root) {
@@ -332,14 +359,16 @@ impl CheckedClosureCallablePlanV1 {
     pub(crate) fn lower_functions(
         &self,
         type_catalog: &MirTypeCatalog,
+        checked_constants: &std::collections::HashMap<NodeId, crate::core::ResolvedConstant>,
     ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
         let mut functions = BTreeMap::new();
         let mut errors = Vec::new();
         for closure in self.closures.values() {
-            match lower_callable_with_type_catalog_and_permissions(
+            match lower_callable_with_type_catalog_and_permissions_and_constants(
                 &closure.callable,
                 type_catalog,
                 None,
+                checked_constants,
             ) {
                 Ok(function) => {
                     if functions.insert(function.owner.clone(), function).is_some() {
@@ -670,6 +699,8 @@ fn plan_one_closure(
         &BTreeMap::from([(bound.lambda.owner.clone(), synthetic_body.clone())]),
         &BTreeMap::from([(bound.lambda.owner.clone(), signature.clone())]),
         program.resolved_types(),
+        program.constants(),
+        &BTreeMap::new(),
         &BTreeSet::new(),
     )
     .map_err(|diagnostics| {

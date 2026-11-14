@@ -27,13 +27,19 @@ fn checked_bytecode_helper_runs_scalar_ffi_through_canonical_mir() {
     let mut guard = FfiEnvGuard::lock();
     let library = build_interp_ffi_so().expect("build the shared FFI test library");
     guard.set_path(&library);
-    let result = run_source_bytecode_result(
-        r#"
+    let source = r#"
         extern "C" { func test_float_identity(x: f64) -> f64; }
-        func main() -> f64 { test_float_identity(2.5) }
-    "#,
-    )
-    .expect("receipt-bearing scalar FFI execution");
+        func call_float_identity() -> f64 { test_float_identity(2.5) }
+        func main() -> i32 { 0 }
+    "#;
+    let file = parse_prod(source);
+    let checked = core::check_program(&file).expect("check receipt-bearing scalar FFI source");
+    let program = compile_test_bytecode_program(&file, Some(&checked))
+        .expect("compile receipt-bearing scalar FFI source");
+    let mut vm = interp::bytecode::BytecodeVM::new(program);
+    let result = vm
+        .call_named("function:call_float_identity", Vec::new())
+        .expect("receipt-bearing scalar FFI execution");
     assert!(
         matches!(result, interp::Value::Float(value) if (value - 2.5).abs() < 0.001),
         "unexpected scalar result: {result:?}"

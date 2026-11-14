@@ -662,8 +662,12 @@ fn audit_vm_to_float_rejects_non_finite_parses() {
     for bad in ["NaN", "inf", "-inf", "infinity", "1e999"] {
         let src = format!(
             r#"
-func main() -> f64 {{
+func parse_float_value() -> f64 {{
     to_float("{bad}")
+}}
+func main() -> i64 {{
+    let _ = parse_float_value();
+    0
 }}
 "#
         );

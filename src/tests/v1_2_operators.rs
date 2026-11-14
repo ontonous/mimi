@@ -1,25 +1,41 @@
 use super::*;
+use crate::interp::SharedString;
 #[test]
 fn string_concatenation() {
     let src = r#"
-func main() -> string {
+func concatenated_string() -> string {
     "hello" + " " + "world"
+}
+
+func main() -> i32 {
+    let _value = concatenated_string()
+    0
 }
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
+        bytecode_call_named(src, "concatenated_string", vec![])
+            .expect("string concatenation helper should run"),
+        interp::Value::String(SharedString::new("hello world".to_string()))
     );
 }
 
 #[test]
 fn float_arithmetic_chain() {
     let src = r#"
-func main() -> f64 {
+func float_arithmetic() -> f64 {
     (1.5 + 2.5) * 2.0
 }
+
+func main() -> i32 {
+    let _value = float_arithmetic()
+    0
+}
 "#;
-    assert_eq!(run_source(src), interp::Value::Float(8.0));
+    assert_eq!(
+        bytecode_call_named(src, "float_arithmetic", vec![])
+            .expect("float arithmetic helper should run"),
+        interp::Value::Float(8.0)
+    );
 }
 
 #[test]

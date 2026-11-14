@@ -16,8 +16,9 @@ mod types;
 pub(crate) use actor::build_checked_actor_descriptors;
 pub use actor::{
     ResolvedActorDescriptor, ResolvedActorError, ResolvedActorFieldDescriptor,
-    ResolvedActorFieldInitializer, ResolvedActorInitializerKind, ResolvedActorMethodDescriptor,
-    ResolvedScalarActorReceipt, RESOLVED_ACTOR_SCHEMA,
+    ResolvedActorFieldInitializer, ResolvedActorFlowDescriptor, ResolvedActorFlowPayloadDescriptor,
+    ResolvedActorFlowTransitionDescriptor, ResolvedActorInitializerKind,
+    ResolvedActorMethodDescriptor, ResolvedScalarActorReceipt, RESOLVED_ACTOR_SCHEMA,
 };
 pub use body::{
     AllocatorKind, BackendRequirement, BuiltinId, CheckedConversion, CheckedConversionKind,
@@ -29,20 +30,26 @@ pub use body::{
     ResolvedSessionAction, ResolvedStmt, ResolvedStmtKind, ResolvedUnaryOp,
     ResolvedValueProjection, SessionResidualId, SessionTransition,
 };
+pub(crate) use callable::{
+    set_get_any_result_i32_contract_is_direct_result_domain,
+    values_local_index_i32_result_branch_contract_is_direct_result_domain,
+};
 pub use callable::{
     ResolvedCallable, ResolvedContract, ResolvedParameter, ResolvedSignature,
     ResolvedSignatureError, TypedCallEffectAuthority, TypedCallEffectReceipt,
     TypedCallExecutionDisposition, TypedCallGuard, TypedCallProofPoint, TypedDefaultProofRoot,
-    TypedDefaultProofUse, TypedLoopInvariantPoint, TypedMathProofPoint, TypedProofBlock,
-    TypedProofBoundary, TypedProofOperation, TypedProofOrderedEvent, TypedProofPointId,
-    TypedProofPointWorklist, TypedProofScopeFrame,
+    TypedDefaultProofUse, TypedLoopInvariantPoint, TypedMatchArmSelection, TypedMatchCase,
+    TypedMatchPathReceipt, TypedMathProofPoint, TypedProofBlock, TypedProofBoundary,
+    TypedProofOperation, TypedProofOrderedEvent, TypedProofPointId, TypedProofPointWorklist,
+    TypedProofScopeFrame,
 };
 pub use loop_proof::{
-    derive_typed_loop_proof_receipt, type_path_fingerprint, typed_loop_expression_fingerprint,
-    validate_loop_expression_site, validate_typed_loop_proof_receipt, TypedLoopBranchGuard,
-    TypedLoopEdgeKind, TypedLoopEdgeSite, TypedLoopExpressionRole, TypedLoopExpressionSite,
-    TypedLoopProofReceipt, TypedLoopResourceBlockState, TypedLoopResourceEdgeState,
-    TypedLoopStateLocal, TypedLoopWriteSite, TYPED_LOOP_PROOF_SCHEMA_VERSION,
+    derive_typed_loop_ffi_call_path, derive_typed_loop_proof_receipt, type_path_fingerprint,
+    typed_loop_expression_fingerprint, validate_loop_expression_site,
+    validate_typed_loop_proof_receipt, TypedLoopBranchGuard, TypedLoopEdgeKind, TypedLoopEdgeSite,
+    TypedLoopExpressionRole, TypedLoopExpressionSite, TypedLoopFfiCallPath, TypedLoopProofReceipt,
+    TypedLoopResourceBlockState, TypedLoopResourceEdgeState, TypedLoopStateLocal,
+    TypedLoopWriteSite, TYPED_LOOP_PROOF_SCHEMA_VERSION,
 };
 pub(crate) use native_declaration::build_checked_native_declarations;
 pub use native_declaration::{

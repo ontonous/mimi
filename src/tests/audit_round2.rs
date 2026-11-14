@@ -309,6 +309,22 @@ func main() -> i32 {
 }
 
 #[test]
+fn try_operator_accepts_structural_result_from_map_builtins() {
+    let src = r#"
+func main() -> i32 {
+    let map = map_new()?
+    let updated = map_set(map, "answer", 42)?
+    let answer = map_get_i32(updated, "answer")?
+    return answer
+}
+"#;
+    assert!(
+        check_source(src).is_ok(),
+        "try operator should accept structural Result values from Map builtins"
+    );
+}
+
+#[test]
 fn try_operator_in_chained_calls() {
     // Multiple `?` in a chain: foo()? + bar()?
     let src = r#"

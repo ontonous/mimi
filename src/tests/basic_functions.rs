@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn parse_func_with_contracts() {
@@ -182,13 +183,19 @@ func main() -> i32 {
 #[test]
 fn typecheck_f64_min_edge() {
     let src = r#"
-func main() -> f64 {
+func min_edge_value() -> f64 {
     0.000001
+}
+func main() -> i32 {
+    println(min_edge_value())
+    0
 }
 "#;
     assert!(check_source(src).is_ok());
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::Float(0.000001));
+    let (v, stdout) = run_source_with_stdout(src);
+    assert_eq!(v, interp::Value::Int(0));
+    let printed: f64 = stdout.trim().parse().expect("printed min edge float");
+    assert_eq!(printed, 0.000001);
 }
 
 #[test]
@@ -208,53 +215,64 @@ func main() -> i32 {
 #[test]
 fn interp_format_basic() {
     let src = r#"
-func main() -> string {
+func format_basic_result() -> string {
     format("hello {} world", "beautiful")
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "format_basic_result", vec![])
+        .expect("basic format helper should run");
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("hello beautiful world".to_string()))
+        interp::Value::String(SharedString::new("hello beautiful world".to_string()))
     );
 }
 
 #[test]
 fn interp_format_multi() {
     let src = r#"
-func main() -> string {
+func format_multi_result() -> string {
     format("{} + {} = {}", 1, 2, 3)
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("1 + 2 = 3".to_string())));
+    let v = bytecode_call_named(src, "format_multi_result", vec![])
+        .expect("multi-format helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("1 + 2 = 3".to_string()))
+    );
 }
 
 #[test]
 fn interp_format_no_placeholders() {
     let src = r#"
-func main() -> string {
+func format_no_placeholders_result() -> string {
     format("hello world")
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "format_no_placeholders_result", vec![])
+        .expect("no-placeholder format helper should run");
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
+        interp::Value::String(SharedString::new("hello world".to_string()))
     );
 }
 
 #[test]
 fn interp_format_mixed_types() {
     let src = r#"
-func main() -> string {
+func format_mixed_types_result() -> string {
     format("int={} float={} str={}", 42, 3.14, "test")
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "format_mixed_types_result", vec![])
+        .expect("mixed-format helper should run");
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("int=42 float=3.14 str=test".to_string()))
+        interp::Value::String(SharedString::new("int=42 float=3.14 str=test".to_string()))
     );
 }
 
@@ -265,14 +283,16 @@ func greet(name: string = "world") -> string {
     "hello " + name
 }
 
-func main() -> string {
+func default_param_result() -> string {
     greet()
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "default_param_result", vec![])
+        .expect("default-parameter helper should run");
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("hello world".to_string()))
+        interp::Value::String(SharedString::new("hello world".to_string()))
     );
 }
 
@@ -283,12 +303,17 @@ func greet(name: string = "world") -> string {
     "hello " + name
 }
 
-func main() -> string {
+func default_param_override_result() -> string {
     greet("mimi")
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("hello mimi".to_string())));
+    let v = bytecode_call_named(src, "default_param_override_result", vec![])
+        .expect("default-parameter override helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("hello mimi".to_string()))
+    );
 }
 
 #[test]
@@ -328,12 +353,17 @@ func create_point(x: i32 = 0, y: i32 = 0) -> string {
     "(" + to_string(x) + "," + to_string(y) + ")"
 }
 
-func main() -> string {
+func named_args_defaults_result() -> string {
     create_point(y = 5)
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("(0,5)".to_string())));
+    let v = bytecode_call_named(src, "named_args_defaults_result", vec![])
+        .expect("named-argument defaults helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("(0,5)".to_string()))
+    );
 }
 
 #[test]
@@ -351,16 +381,21 @@ func main() -> i32 {
 #[test]
 fn interp_for_over_string() {
     let src = r#"
-func main() -> string {
+func for_over_string_result() -> string {
     let mut result = ""
     for c in "abc" {
         result = result + c
     }
     result
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("abc".to_string())));
+    let v = bytecode_call_named(src, "for_over_string_result", vec![])
+        .expect("for-over-string helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("abc".to_string()))
+    );
 }
 
 #[test]

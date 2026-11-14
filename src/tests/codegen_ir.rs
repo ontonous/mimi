@@ -5,12 +5,20 @@
 use super::*;
 
 fn compile_to_ir(src: &str) -> String {
+    checked_codegen_compile_to_ir_for_test(src).expect("legacy codegen IR test adapter failed")
+}
+
+fn compile_checked_to_ir(src: &str) -> String {
     let file = parse(src);
+    let checked = crate::core::check_program(&file)
+        .expect("scalar IR fixture should pass checked compilation");
+
     let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "checked_codegen_ir_test");
     codegen
-        .compile_file(&file)
-        .expect("src/tests/codegen_ir.rs:11 unwrap failed");
+        .compile_checked(&checked)
+        .expect("scalar IR fixture should compile through the checked backend");
+
     codegen.emit_ir()
 }
 
@@ -18,13 +26,13 @@ fn compile_to_ir(src: &str) -> String {
 
 #[test]
 fn ir_module_has_moduleid() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(ir.contains("ModuleID"), "IR should have ModuleID");
 }
 
 #[test]
 fn ir_module_has_filename() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(
         ir.contains("source_filename"),
         "IR should have source_filename"
@@ -33,7 +41,7 @@ fn ir_module_has_filename() {
 
 #[test]
 fn ir_i32_returns_i32() {
-    let ir = compile_to_ir("func main() -> i32 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i32 { 42 }");
     assert!(
         ir.contains("define i32 @main(i32"),
         "i32 should map to i32 in IR (A1 restoration); main carries the C (argc, argv) pair since 0.35.23"
@@ -156,14 +164,19 @@ fn ir_icmp_ne() {
 
 #[test]
 fn ir_i64_return_type() {
-    let ir = compile_to_ir("func main() -> i64 { 42 }");
+    let ir = compile_checked_to_ir("func main() -> i64 { 42 }");
     assert!(ir.contains("define i64 @main(i32"), "i64 return type");
 }
 
 #[test]
 fn ir_f64_return_type() {
-    let ir = compile_to_ir("func main() -> f64 { 3.14 }");
-    assert!(ir.contains("define double @main(i32"), "f64 maps to double");
+    let ir = compile_checked_to_ir(
+        "func f64_result() -> f64 { 3.14 }\nfunc main() -> i32 { let value = f64_result(); if value > 0.0 { 0 } else { 1 } }",
+    );
+    assert!(
+        ir.contains("define double @f64_result()"),
+        "f64 helper return maps to double"
+    );
 }
 
 // ===================== Logical Operator IR =====================

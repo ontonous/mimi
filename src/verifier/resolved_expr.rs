@@ -2,7 +2,7 @@
 //!
 //! Parallel to `expr.rs` (raw AST encoding). Consumes `ResolvedExprKind`
 //! instead of `Expr`, enabling the verifier to work from CheckedProgram
-//! without `legacy_body_file()`.
+//! without reopening the surface AST.
 //!
 //! # Mapping (AST → Resolved IR)
 //!
@@ -35,6 +35,42 @@ use crate::verifier::checked_power::{
 };
 use crate::verifier::ctx::Z3VarMap;
 use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
+
+pub(crate) type ResolvedFlowStateFieldCatalog =
+    BTreeMap<NodeId, BTreeMap<NodeId, crate::core::ir::ResolvedTypeId>>;
+
+/// Build the exact Flow-state field directory needed by the verifier's
+/// structural state-pattern model. A state is included only when all of its
+/// checker-owned field identities have canonical types.
+pub(crate) fn resolved_flow_state_field_catalog(
+    program: &crate::core::CheckedProgram,
+) -> Option<ResolvedFlowStateFieldCatalog> {
+    let mut catalog = BTreeMap::new();
+    for flow in program.flows().values() {
+        for (name, state) in &flow.states {
+            if state.id.flow != flow.id
+                || state.id.name != *name
+                || state.payload.len() != state.field_ids.len()
+            {
+                return None;
+            }
+            let mut fields = BTreeMap::new();
+            for (field_name, _) in &state.payload {
+                let field = state.field_ids.get(field_name)?;
+                let ty = program.resolved_field_type(field)?.clone();
+                if program.resolved_types().get(&ty).is_none()
+                    || fields.insert(field.clone(), ty).is_some()
+                {
+                    return None;
+                }
+            }
+            if catalog.insert(state.node_id.clone(), fields).is_some() {
+                return None;
+            }
+        }
+    }
+    Some(catalog)
+}
 
 /// Resolve a place to the unique variable key of its base local.
 ///
@@ -1061,6 +1097,14 @@ fn resolved_variant_tag_int(
                 let tag = resolved_variant_tag_number(&value.ty, variant, types, variants)?;
                 return Some(Z3Int::from_i64(tag));
             }
+            if call.result == value.ty {
+                if let Some(variant) =
+                    resolved_builtin_sum_constructor_variant(call, types, variants)
+                {
+                    let tag = resolved_variant_tag_number(&value.ty, &variant, types, variants)?;
+                    return Some(Z3Int::from_i64(tag));
+                }
+            }
             if matches!(&call.callee, ResolvedCallee::Transition(_)) {
                 if call.result != value.ty {
                     return None;
@@ -1266,6 +1310,22 @@ fn resolved_variant_payload_scalar(
                     vars,
                 );
             }
+            if call.result == value.ty {
+                if let Some(argument) = resolved_builtin_sum_constructor_payload(
+                    call,
+                    expected_variant,
+                    member,
+                    types,
+                    variants,
+                ) {
+                    if argument.ty != *expected_type {
+                        return None;
+                    }
+                    return scalar_value_of_expr_with_catalog(
+                        argument, body, types, callables, variants, vars,
+                    );
+                }
+            }
             if let ResolvedCallee::Function(_) = &call.callee {
                 let (tail, callee_body, mut callee_vars) = inline_pure_call_tail(
                     call,
@@ -1346,31 +1406,6 @@ fn resolved_variant_payload_scalar(
         }
         _ => None,
     }
-}
-
-fn resolved_block_tail_payload_scalar(
-    block: &ResolvedBlock,
-    expected_variant: &NodeId,
-    member: &NodeId,
-    expected_type: &crate::core::ir::ResolvedTypeId,
-    body: &ResolvedBody,
-    types: &ResolvedTypeTable,
-    callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
-    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
-    vars: &mut Z3VarMap,
-) -> Option<ResolvedScalarValue> {
-    resolved_block_stmts_with_catalog(block, body, types, callables, variants, vars)?;
-    resolved_variant_payload_scalar(
-        block.result.as_deref()?,
-        expected_variant,
-        member,
-        expected_type,
-        body,
-        types,
-        callables,
-        variants,
-        vars,
-    )
 }
 
 fn scalar_ite(
@@ -1914,73 +1949,183 @@ fn resolved_sum_variants(
     }
 }
 
+/// Resolve and validate the typed shape of the builtin Option/Result
+/// constructors.  These calls are represented as Builtin callees in Resolved
+/// IR, but they are value constructors rather than opaque runtime builtins.
+fn resolved_builtin_sum_constructor_variant(
+    call: &crate::core::ir::ResolvedCall,
+    types: &ResolvedTypeTable,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+) -> Option<NodeId> {
+    use crate::core::ir::ResolvedCallee;
+
+    let ResolvedCallee::Builtin(builtin) = &call.callee else {
+        return None;
+    };
+    let variant = match builtin.as_str() {
+        "Some" => NodeId("builtin:variant:Option::Some".into()),
+        "None" => NodeId("builtin:variant:Option::None".into()),
+        "Ok" => NodeId("builtin:variant:Result::Ok".into()),
+        "Err" => NodeId("builtin:variant:Result::Err".into()),
+        _ => return None,
+    };
+    if call.permission.is_some()
+        || !call.effects.is_empty()
+        || !call.session.is_empty()
+        || !call.type_arguments.is_empty()
+    {
+        return None;
+    }
+    resolved_variant_tag_number(&call.result, &variant, types, variants)?;
+    let members = resolved_sum_variants(&call.result, types, variants)?
+        .into_iter()
+        .find_map(|(candidate, members)| (candidate == variant).then_some(members))?;
+    let member_count = members.len();
+    if member_count != call.arguments.len() {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    for (member, member_type) in members {
+        let (index, argument) = call
+            .arguments
+            .iter()
+            .enumerate()
+            .find(|(_, argument)| argument.parameter.0 == member)
+            .or_else(|| {
+                (call.arguments.len() == 1 && member_count == 1).then(|| (0, &call.arguments[0]))
+            })?;
+        if !seen.insert(index)
+            || argument.value.ty != member_type
+            || argument.conversion.kind != CheckedConversionKind::Identity
+            || argument.conversion.from != argument.value.ty
+            || argument.conversion.to != member_type
+            || !argument.value.effects.is_empty()
+        {
+            return None;
+        }
+    }
+    if seen.len() != call.arguments.len() {
+        return None;
+    }
+    Some(variant)
+}
+
+fn resolved_builtin_sum_constructor_payload<'a>(
+    call: &'a crate::core::ir::ResolvedCall,
+    expected_variant: &NodeId,
+    member: &NodeId,
+    types: &ResolvedTypeTable,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+) -> Option<&'a ResolvedExpr> {
+    let actual_variant = resolved_builtin_sum_constructor_variant(call, types, variants)?;
+    if &actual_variant != expected_variant {
+        return None;
+    }
+    let payload_type = resolved_sum_variants(&call.result, types, variants)?
+        .into_iter()
+        .find_map(|(variant, members)| {
+            (variant == actual_variant)
+                .then(|| {
+                    members
+                        .into_iter()
+                        .find(|(candidate, _)| candidate == member)
+                })
+                .flatten()
+                .map(|(_, ty)| ty)
+        })?;
+    let argument = call
+        .arguments
+        .iter()
+        .find(|argument| argument.parameter.0 == *member)
+        .or_else(|| (call.arguments.len() == 1).then(|| &call.arguments[0]))?;
+    (argument.value.ty == payload_type).then_some(&argument.value)
+}
+
 /// Preserve already-encoded typed leaf facts when a checker-owned aggregate
 /// local is forwarded into a newly-bound local.  This copies only facts that
 /// already exist under the exact source projection prefix; it never creates
 /// unconstrained aliases or derives facts from a constructor name.
 fn copy_known_value_path_facts(source_key: &str, target_key: &str, vars: &mut Z3VarMap) {
+    let source_vars = vars.clone();
+    copy_known_value_path_facts_between(&source_vars, source_key, target_key, vars);
+}
+
+/// Copy only already encoded facts under one exact typed value-path namespace
+/// between verifier frames. Transition bodies use a temporary frame, so
+/// aggregate result bindings must explicitly transfer the selected payload
+/// terms back to their caller without leaking unrelated callee locals.
+fn copy_known_value_path_facts_between(
+    source_vars: &Z3VarMap,
+    source_key: &str,
+    target_key: &str,
+    target_vars: &mut Z3VarMap,
+) {
     let source_prefix = format!("{source_key}.");
     let remap = |key: &str| {
-        key.strip_prefix(&source_prefix)
-            .map(|suffix| format!("{target_key}.{suffix}"))
+        if key == source_key {
+            Some(target_key.to_string())
+        } else {
+            key.strip_prefix(&source_prefix)
+                .map(|suffix| format!("{target_key}.{suffix}"))
+        }
     };
 
-    let ints = vars
+    let ints = source_vars
         .int_vars
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let reals = vars
+    let reals = source_vars
         .real_vars
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let bools = vars
+    let bools = source_vars
         .bool_vars
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let strings = vars
+    let strings = source_vars
         .string_vars
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let string_lengths = vars
+    let string_lengths = source_vars
         .string_len
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let string_nonempty = vars
+    let string_nonempty = source_vars
         .string_nonempty
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
-    let list_lengths = vars
+    let list_lengths = source_vars
         .list_len
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
 
     for (key, value) in ints {
-        vars.insert_int(key, value);
+        target_vars.insert_int(key, value);
     }
     for (key, value) in reals {
-        vars.insert_real(key, value);
+        target_vars.insert_real(key, value);
     }
     for (key, value) in bools {
-        vars.insert_bool(key, value);
+        target_vars.insert_bool(key, value);
     }
     for (key, value) in strings {
-        vars.insert_string_var(key, value);
+        target_vars.insert_string_var(key, value);
     }
     for (key, value) in string_lengths {
-        vars.insert_string_len(key, value);
+        target_vars.insert_string_len(key, value);
     }
     for (key, value) in string_nonempty {
-        vars.insert_string_nonempty(key, value);
+        target_vars.insert_string_nonempty(key, value);
     }
     for (key, value) in list_lengths {
-        vars.insert_list_len(key, value);
+        target_vars.insert_list_len(key, value);
     }
 }
 
@@ -2006,6 +2151,147 @@ fn resolved_type_at_path(
         _ => return None,
     };
     resolved_type_at_path(&next, rest, types, variants)
+}
+
+fn resolved_flow_state_type_at_path(
+    root_type: &crate::core::ir::ResolvedTypeId,
+    path: &[ResolvedValuePathPart],
+    types: &ResolvedTypeTable,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+) -> Option<crate::core::ir::ResolvedTypeId> {
+    let mut current = root_type.clone();
+    for part in path {
+        current = match (part, types.get(&current)?) {
+            (ResolvedValuePathPart::Tuple(index), ResolvedType::Tuple(items)) => {
+                items.get(*index)?.clone()
+            }
+            (ResolvedValuePathPart::VariantPayload { variant, member }, _) => {
+                resolved_variant_member_type(&current, variant, member, types, variants)?
+            }
+            (
+                ResolvedValuePathPart::Field(field),
+                ResolvedType::Nominal {
+                    item,
+                    is_linear: true,
+                    ..
+                },
+            ) => flow_state_fields?
+                .get(&NodeId(item.as_str().to_string()))?
+                .get(field)?
+                .clone(),
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn flow_state_pattern_fields<'a>(
+    pattern: &crate::core::ir::ResolvedPattern,
+    variant: &NodeId,
+    fields: &[(NodeId, crate::core::ir::ResolvedPattern)],
+    types: &ResolvedTypeTable,
+    flow_state_fields: Option<&'a ResolvedFlowStateFieldCatalog>,
+) -> Option<&'a BTreeMap<NodeId, crate::core::ir::ResolvedTypeId>> {
+    let ResolvedType::Nominal {
+        item,
+        is_linear: true,
+        ..
+    } = types.get(&pattern.ty)?
+    else {
+        return None;
+    };
+    let owner = NodeId(item.as_str().to_string());
+    if &owner != variant {
+        return None;
+    }
+    let schema = flow_state_fields?.get(&owner)?;
+    if fields.len() != schema.len() {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    for (field, child) in fields {
+        if !seen.insert(field)
+            || schema.get(field) != Some(&child.ty)
+            || types.get(&child.ty).is_none()
+        {
+            return None;
+        }
+    }
+    (seen.len() == schema.len()).then_some(schema)
+}
+
+fn flow_state_pattern_candidate(
+    pattern: &crate::core::ir::ResolvedPattern,
+    variant: &NodeId,
+    types: &ResolvedTypeTable,
+) -> bool {
+    let is_flow_state_type = matches!(
+        types.get(&pattern.ty),
+        Some(ResolvedType::Nominal { item, .. }) if item.as_str().starts_with("state:")
+    );
+    is_flow_state_type || variant.0.starts_with("state:")
+}
+
+fn resolved_pattern_variant_tag_at_path(
+    value: &ResolvedExpr,
+    path: &[ResolvedValuePathPart],
+    expected_type: &crate::core::ir::ResolvedTypeId,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+    vars: &mut Z3VarMap,
+) -> Option<Z3Int> {
+    if let Some(source_type) =
+        resolved_flow_state_type_at_path(&value.ty, path, types, variants, flow_state_fields)
+    {
+        if &source_type != expected_type {
+            return None;
+        }
+        if path.is_empty() {
+            return resolved_variant_tag_int(value, body, types, callables, variants, vars);
+        }
+        if matches!(value.kind, ResolvedExprKind::Load(_)) {
+            let key = value_base_key(value, body)?;
+            return Some(vars.get_or_create_int(&format!("{}.tag", append_value_path(&key, path))));
+        }
+    }
+    resolved_variant_tag_at_path(
+        value,
+        path,
+        expected_type,
+        body,
+        types,
+        callables,
+        variants,
+        vars,
+    )
+}
+
+fn bind_flow_state_scalar_at_path(
+    value: &ResolvedExpr,
+    path: &[ResolvedValuePathPart],
+    target_type: &crate::core::ir::ResolvedTypeId,
+    target_key: &str,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    vars: &mut Z3VarMap,
+) -> Option<()> {
+    let key = append_value_path(&value_base_key(value, body)?, path);
+    match types.get(target_type)? {
+        ResolvedType::Primitive(PrimitiveType::String | PrimitiveType::Unit) => Some(()),
+        ResolvedType::Primitive(_) if resolved_scalar_leaf_supported(target_type, types) => {
+            match scalar_value_at_key(&key, target_type, types, vars)? {
+                ResolvedScalarValue::Int(value) => vars.insert_int(target_key, value),
+                ResolvedScalarValue::Real(value) => vars.insert_real(target_key, value),
+                ResolvedScalarValue::Bool(value) => vars.insert_bool(target_key, value),
+            }
+            Some(())
+        }
+        _ => None,
+    }
 }
 
 fn resolved_expression_type_at_path(
@@ -2063,6 +2349,19 @@ fn resolved_expression_type_at_path(
                 return resolved_transition_expression_type_at_path(
                     call, path, body, types, callables, variants,
                 );
+            }
+            if call.result == value.ty {
+                if let Some(ResolvedValuePathPart::VariantPayload { variant, member }) =
+                    path.first()
+                {
+                    if let Some(argument) = resolved_builtin_sum_constructor_payload(
+                        call, variant, member, types, variants,
+                    ) {
+                        return resolved_expression_type_at_path(
+                            argument, rest, body, types, callables, variants,
+                        );
+                    }
+                }
             }
             if let ResolvedCallee::Constructor(actual_variant) = &call.callee {
                 if call.result != value.ty
@@ -2168,6 +2467,9 @@ fn resolved_constructor_at_path(
                 {
                     Some(variant.clone())
                 }
+                ResolvedCallee::Builtin(_) if call.result == value.ty => {
+                    resolved_builtin_sum_constructor_variant(call, types, variants)
+                }
                 ResolvedCallee::Function(_) => {
                     let (tail, callee_body, _) = inline_pure_call_tail(
                         call,
@@ -2231,6 +2533,24 @@ fn resolved_constructor_at_path(
             resolved_constructor_at_path(base.as_deref()?, path, body, types, callables, variants)
         }
         ResolvedExprKind::Call(call) => {
+            if call.result == value.ty {
+                if let Some(actual_variant) =
+                    resolved_builtin_sum_constructor_variant(call, types, variants)
+                {
+                    let ResolvedValuePathPart::VariantPayload { variant, member } = first else {
+                        return None;
+                    };
+                    if &actual_variant != variant {
+                        return None;
+                    }
+                    let argument = resolved_builtin_sum_constructor_payload(
+                        call, variant, member, types, variants,
+                    )?;
+                    return resolved_constructor_at_path(
+                        argument, rest, body, types, callables, variants,
+                    );
+                }
+            }
             let ResolvedCallee::Constructor(actual_variant) = &call.callee else {
                 return None;
             };
@@ -2384,6 +2704,20 @@ fn bind_value_at_path(
     }
     if let ResolvedExprKind::Call(call) = &value.kind {
         if matches!(&call.callee, ResolvedCallee::Transition(_)) {
+            if source_path.is_empty() && value.ty == call.result && target_type == &call.result {
+                return bind_sum_value_at_path(
+                    value,
+                    source_path,
+                    target_type,
+                    target_key,
+                    source_body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                    active,
+                );
+            }
             return bind_transition_value_at_path(
                 call,
                 source_path,
@@ -3425,7 +3759,7 @@ pub(crate) fn resolved_bind_aggregate_result_with_catalog(
     session: &mut crate::verifier::ctx::SolverSession,
 ) -> Option<()> {
     let result_local = contract_result_local(body)?;
-    if &body.locals.get(&result_local)?.ty != &value.ty {
+    if body.locals.get(&result_local)?.ty != value.ty {
         return None;
     }
     let mut projected = BTreeMap::new();
@@ -4170,13 +4504,27 @@ pub(crate) fn resolved_block_tail_bool_with_catalog(
     )
 }
 
-fn resolved_match_is_irrefutable(pattern: &crate::core::ir::ResolvedPattern) -> bool {
+fn resolved_match_is_irrefutable(
+    pattern: &crate::core::ir::ResolvedPattern,
+    types: &ResolvedTypeTable,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+) -> bool {
     match &pattern.kind {
         ResolvedPatternKind::Wildcard
         | ResolvedPatternKind::Binding {
             by_reference: None, ..
         } => true,
-        ResolvedPatternKind::Tuple(items) => items.iter().all(resolved_match_is_irrefutable),
+        ResolvedPatternKind::Tuple(items) => items
+            .iter()
+            .all(|item| resolved_match_is_irrefutable(item, types, flow_state_fields)),
+        ResolvedPatternKind::Constructor { variant, fields }
+            if flow_state_pattern_fields(pattern, variant, fields, types, flow_state_fields)
+                .is_some() =>
+        {
+            fields
+                .iter()
+                .all(|(_, child)| resolved_match_is_irrefutable(child, types, flow_state_fields))
+        }
         _ => false,
     }
 }
@@ -4186,11 +4534,11 @@ fn resolved_match_is_exhaustive(
     arms: &[crate::core::ir::MatchArm],
     types: &ResolvedTypeTable,
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
 ) -> bool {
-    if arms
-        .iter()
-        .any(|arm| arm.guard.is_none() && resolved_match_is_irrefutable(&arm.pattern))
-    {
+    if arms.iter().any(|arm| {
+        arm.guard.is_none() && resolved_match_is_irrefutable(&arm.pattern, types, flow_state_fields)
+    }) {
         return true;
     }
     let Some(sum_variants) = resolved_sum_variants(&scrutinee.ty, types, variants) else {
@@ -4208,9 +4556,9 @@ fn resolved_match_is_exhaustive(
         .filter(|arm| arm.guard.is_none())
         .filter_map(|arm| match &arm.pattern.kind {
             ResolvedPatternKind::Constructor { variant, fields }
-                if fields
-                    .iter()
-                    .all(|(_, pattern)| resolved_match_is_irrefutable(pattern)) =>
+                if fields.iter().all(|(_, pattern)| {
+                    resolved_match_is_irrefutable(pattern, types, flow_state_fields)
+                }) =>
             {
                 Some(variant.clone())
             }
@@ -4231,7 +4579,7 @@ fn resolved_match_int_with_catalog(
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
 ) -> Option<Z3Int> {
-    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants) {
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, None) {
         return None;
     }
     let mut result = None;
@@ -4282,6 +4630,153 @@ fn resolved_match_int_with_catalog(
     result
 }
 
+fn resolved_match_int_in_context(
+    scrutinee: &ResolvedExpr,
+    arms: &[crate::core::ir::MatchArm],
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    context: &ResolvedDefinednessContext<'_>,
+    vars: &mut Z3VarMap,
+) -> Option<Z3Int> {
+    let callables = context.callables?;
+    let variants = context.variants?;
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, context.flow_state_fields) {
+        return None;
+    }
+    let mut result = None;
+    for arm in arms.iter().rev() {
+        let mut arm_vars = vars.clone();
+        let mut condition = resolved_match_pattern_condition_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        resolved_bind_match_pattern_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        if let Some(guard) = &arm.guard {
+            let guard = resolved_to_z3_bool_in_context(guard, body, types, &mut arm_vars, context)?;
+            condition = Z3Bool::and(&[&condition, &guard]);
+        }
+        let value = resolved_to_z3_int_in_context(&arm.body, body, types, &mut arm_vars, context)?;
+        result = Some(match result {
+            Some(other) => condition.ite(&value, &other),
+            None => value,
+        });
+    }
+    result
+}
+
+fn resolved_match_real_in_context(
+    scrutinee: &ResolvedExpr,
+    arms: &[crate::core::ir::MatchArm],
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    context: &ResolvedDefinednessContext<'_>,
+    vars: &mut Z3VarMap,
+) -> Option<Z3Real> {
+    let callables = context.callables?;
+    let variants = context.variants?;
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, context.flow_state_fields) {
+        return None;
+    }
+    let mut result = None;
+    for arm in arms.iter().rev() {
+        let mut arm_vars = vars.clone();
+        let mut condition = resolved_match_pattern_condition_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        resolved_bind_match_pattern_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        if let Some(guard) = &arm.guard {
+            let guard = resolved_to_z3_bool_in_context(guard, body, types, &mut arm_vars, context)?;
+            condition = Z3Bool::and(&[&condition, &guard]);
+        }
+        let value = resolved_to_z3_real_in_context(&arm.body, body, types, &mut arm_vars, context)?;
+        result = Some(match result {
+            Some(other) => condition.ite(&value, &other),
+            None => value,
+        });
+    }
+    result
+}
+
+fn resolved_match_bool_in_context(
+    scrutinee: &ResolvedExpr,
+    arms: &[crate::core::ir::MatchArm],
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    context: &ResolvedDefinednessContext<'_>,
+    vars: &mut Z3VarMap,
+) -> Option<Z3Bool> {
+    let callables = context.callables?;
+    let variants = context.variants?;
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, context.flow_state_fields) {
+        return None;
+    }
+    let mut result = None;
+    for arm in arms.iter().rev() {
+        let mut arm_vars = vars.clone();
+        let mut condition = resolved_match_pattern_condition_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        resolved_bind_match_pattern_with_flow_state_fields(
+            scrutinee,
+            &arm.pattern,
+            body,
+            types,
+            callables,
+            variants,
+            context.flow_state_fields,
+            &mut arm_vars,
+        )?;
+        if let Some(guard) = &arm.guard {
+            let guard = resolved_to_z3_bool_in_context(guard, body, types, &mut arm_vars, context)?;
+            condition = Z3Bool::and(&[&condition, &guard]);
+        }
+        let value = resolved_to_z3_bool_in_context(&arm.body, body, types, &mut arm_vars, context)?;
+        result = Some(match result {
+            Some(other) => condition.ite(&value, &other),
+            None => value,
+        });
+    }
+    result
+}
+
 fn resolved_match_real_with_catalog(
     scrutinee: &ResolvedExpr,
     arms: &[crate::core::ir::MatchArm],
@@ -4291,7 +4786,7 @@ fn resolved_match_real_with_catalog(
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
 ) -> Option<Z3Real> {
-    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants) {
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, None) {
         return None;
     }
     let mut result = None;
@@ -4351,7 +4846,7 @@ fn resolved_match_bool_with_catalog(
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
 ) -> Option<Z3Bool> {
-    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants) {
+    if !resolved_match_is_exhaustive(scrutinee, arms, types, variants, None) {
         return None;
     }
     let mut result = None;
@@ -4477,7 +4972,7 @@ pub(crate) fn resolved_to_z3_int_with_catalog(
                 ResolvedValueProjection::Field(field) => field.0.clone(),
                 ResolvedValueProjection::Tuple(index) => format!("t{index}"),
                 ResolvedValueProjection::Index(_) | ResolvedValueProjection::Dereference => {
-                    return None
+                    return None;
                 }
             };
             Some(vars.get_or_create_int(&format!("{base}.{projection}")))
@@ -4605,7 +5100,7 @@ pub(crate) fn resolved_to_z3_real_with_catalog(
                 ResolvedValueProjection::Field(field) => field.0.clone(),
                 ResolvedValueProjection::Tuple(index) => format!("t{index}"),
                 ResolvedValueProjection::Index(_) | ResolvedValueProjection::Dereference => {
-                    return None
+                    return None;
                 }
             };
             Some(vars.get_or_create_real(&format!("{base}.{projection}")))
@@ -4722,7 +5217,7 @@ pub(crate) fn resolved_to_z3_bool_with_catalog(
                 ResolvedValueProjection::Field(field) => field.0.clone(),
                 ResolvedValueProjection::Tuple(index) => format!("t{index}"),
                 ResolvedValueProjection::Index(_) | ResolvedValueProjection::Dereference => {
-                    return None
+                    return None;
                 }
             };
             Some(vars.get_or_create_bool(&format!("{base}.{projection}")))
@@ -4938,6 +5433,27 @@ fn projected_scalar_value(
                 }
                 projected_scalar_value(
                     &argument.value,
+                    &path[1..],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )
+            }
+            ResolvedCallee::Builtin(_) => {
+                if call.result != value.ty {
+                    return None;
+                }
+                let ResolvedValuePathPart::VariantPayload { variant, member } = &path[0] else {
+                    return None;
+                };
+                let argument = resolved_builtin_sum_constructor_payload(
+                    call, variant, member, types, variants,
+                )?;
+                projected_scalar_value(
+                    argument,
                     &path[1..],
                     expected_type,
                     body,
@@ -5197,6 +5713,27 @@ fn resolved_variant_tag_at_path(
                     vars,
                 )
             }
+            ResolvedCallee::Builtin(_) => {
+                if call.result != value.ty {
+                    return None;
+                }
+                let ResolvedValuePathPart::VariantPayload { variant, member } = &path[0] else {
+                    return None;
+                };
+                let argument = resolved_builtin_sum_constructor_payload(
+                    call, variant, member, types, variants,
+                )?;
+                resolved_variant_tag_at_path(
+                    argument,
+                    &path[1..],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )
+            }
             ResolvedCallee::Function(_) => {
                 let (tail, callee_body, mut callee_vars) = inline_pure_call_tail(
                     call,
@@ -5298,6 +5835,7 @@ fn pattern_condition_at_path(
     types: &ResolvedTypeTable,
     callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
     vars: &mut Z3VarMap,
 ) -> Option<Z3Bool> {
     match &pattern.kind {
@@ -5305,6 +5843,17 @@ fn pattern_condition_at_path(
             Some(Z3Bool::from_bool(true))
         }
         ResolvedPatternKind::Literal(ResolvedLiteral::Int(expected)) => {
+            if let Some(source_type) = resolved_flow_state_type_at_path(
+                &value.ty,
+                path,
+                types,
+                variants,
+                flow_state_fields,
+            ) {
+                if source_type != pattern.ty {
+                    return None;
+                }
+            }
             match projected_scalar_value(
                 value,
                 path,
@@ -5320,6 +5869,17 @@ fn pattern_condition_at_path(
             }
         }
         ResolvedPatternKind::Literal(ResolvedLiteral::Bool(expected)) => {
+            if let Some(source_type) = resolved_flow_state_type_at_path(
+                &value.ty,
+                path,
+                types,
+                variants,
+                flow_state_fields,
+            ) {
+                if source_type != pattern.ty {
+                    return None;
+                }
+            }
             match projected_scalar_value(
                 value,
                 path,
@@ -5336,7 +5896,53 @@ fn pattern_condition_at_path(
         }
         ResolvedPatternKind::Literal(_) => None,
         ResolvedPatternKind::Constructor { variant, fields } => {
-            let tag = resolved_variant_tag_at_path(
+            if let Some(schema) =
+                flow_state_pattern_fields(pattern, variant, fields, types, flow_state_fields)
+            {
+                if resolved_flow_state_type_at_path(
+                    &value.ty,
+                    path,
+                    types,
+                    variants,
+                    flow_state_fields,
+                )? != pattern.ty
+                {
+                    return None;
+                }
+                let mut conditions = Vec::with_capacity(schema.len());
+                for (field, child) in fields {
+                    let mut child_path = path.to_vec();
+                    child_path.push(ResolvedValuePathPart::Field(field.clone()));
+                    conditions.push(pattern_condition_at_path(
+                        value,
+                        child,
+                        &child_path,
+                        body,
+                        types,
+                        callables,
+                        variants,
+                        flow_state_fields,
+                        vars,
+                    )?);
+                }
+                let refs = conditions.iter().collect::<Vec<_>>();
+                return Some(Z3Bool::and(&refs));
+            }
+            if flow_state_pattern_candidate(pattern, variant, types) {
+                return None;
+            }
+            if let Some(source_type) = resolved_flow_state_type_at_path(
+                &value.ty,
+                path,
+                types,
+                variants,
+                flow_state_fields,
+            ) {
+                if source_type != pattern.ty {
+                    return None;
+                }
+            }
+            let tag = resolved_pattern_variant_tag_at_path(
                 value,
                 path,
                 &pattern.ty,
@@ -5344,6 +5950,7 @@ fn pattern_condition_at_path(
                 types,
                 callables,
                 variants,
+                flow_state_fields,
                 vars,
             )?;
             let expected = resolved_variant_tag_number(&pattern.ty, variant, types, variants)?;
@@ -5362,6 +5969,7 @@ fn pattern_condition_at_path(
                     types,
                     callables,
                     variants,
+                    flow_state_fields,
                     vars,
                 )?);
             }
@@ -5381,6 +5989,7 @@ fn pattern_condition_at_path(
                     types,
                     callables,
                     variants,
+                    flow_state_fields,
                     vars,
                 )?);
             }
@@ -5400,6 +6009,21 @@ pub(crate) fn resolved_match_pattern_condition(
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
 ) -> Option<Z3Bool> {
+    resolved_match_pattern_condition_with_flow_state_fields(
+        scrutinee, pattern, body, types, callables, variants, None, vars,
+    )
+}
+
+pub(crate) fn resolved_match_pattern_condition_with_flow_state_fields(
+    scrutinee: &ResolvedExpr,
+    pattern: &crate::core::ir::ResolvedPattern,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+    vars: &mut Z3VarMap,
+) -> Option<Z3Bool> {
     pattern_condition_at_path(
         scrutinee,
         pattern,
@@ -5408,6 +6032,7 @@ pub(crate) fn resolved_match_pattern_condition(
         types,
         callables,
         variants,
+        flow_state_fields,
         vars,
     )
 }
@@ -5420,6 +6045,7 @@ fn bind_pattern_at_path(
     types: &ResolvedTypeTable,
     callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
     vars: &mut Z3VarMap,
     active: &mut BTreeSet<NodeId>,
 ) -> Option<()> {
@@ -5430,12 +6056,70 @@ fn bind_pattern_at_path(
         } => {
             let local = body.locals.get(local)?;
             let key = local_var_key(&local.id, &local.display_name);
+            if path
+                .iter()
+                .any(|part| matches!(part, ResolvedValuePathPart::Field(_)))
+            {
+                if let Some(source_type) = resolved_flow_state_type_at_path(
+                    &scrutinee.ty,
+                    path,
+                    types,
+                    variants,
+                    flow_state_fields,
+                ) {
+                    if source_type != local.ty {
+                        return None;
+                    }
+                    if matches!(&scrutinee.kind, ResolvedExprKind::Load(_)) {
+                        return bind_flow_state_scalar_at_path(
+                            scrutinee, path, &local.ty, &key, body, types, vars,
+                        );
+                    }
+                }
+            }
             bind_value_at_path(
                 scrutinee, path, &local.ty, &key, body, types, callables, variants, vars, active,
             )
         }
         ResolvedPatternKind::Binding { .. } => None,
         ResolvedPatternKind::Constructor { variant, fields } => {
+            let state_schema =
+                flow_state_pattern_fields(pattern, variant, fields, types, flow_state_fields);
+            if state_schema.is_none() && flow_state_pattern_candidate(pattern, variant, types) {
+                return None;
+            }
+            if let Some(schema) = state_schema {
+                if resolved_flow_state_type_at_path(
+                    &scrutinee.ty,
+                    path,
+                    types,
+                    variants,
+                    flow_state_fields,
+                )? != pattern.ty
+                {
+                    return None;
+                }
+                for (field, child) in fields {
+                    if !schema.contains_key(field) {
+                        return None;
+                    }
+                    let mut child_path = path.to_vec();
+                    child_path.push(ResolvedValuePathPart::Field(field.clone()));
+                    bind_pattern_at_path(
+                        scrutinee,
+                        child,
+                        &child_path,
+                        body,
+                        types,
+                        callables,
+                        variants,
+                        flow_state_fields,
+                        vars,
+                        active,
+                    )?;
+                }
+                return Some(());
+            }
             for (member, child) in fields {
                 let mut child_path = path.to_vec();
                 child_path.push(ResolvedValuePathPart::VariantPayload {
@@ -5450,6 +6134,7 @@ fn bind_pattern_at_path(
                     types,
                     callables,
                     variants,
+                    flow_state_fields,
                     vars,
                     active,
                 )?;
@@ -5468,6 +6153,7 @@ fn bind_pattern_at_path(
                     types,
                     callables,
                     variants,
+                    flow_state_fields,
                     vars,
                     active,
                 )?;
@@ -5488,6 +6174,21 @@ pub(crate) fn resolved_bind_match_pattern(
     variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
 ) -> Option<()> {
+    resolved_bind_match_pattern_with_flow_state_fields(
+        scrutinee, pattern, body, types, callables, variants, None, vars,
+    )
+}
+
+pub(crate) fn resolved_bind_match_pattern_with_flow_state_fields(
+    scrutinee: &ResolvedExpr,
+    pattern: &crate::core::ir::ResolvedPattern,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+    vars: &mut Z3VarMap,
+) -> Option<()> {
     bind_pattern_at_path(
         scrutinee,
         pattern,
@@ -5496,6 +6197,7 @@ pub(crate) fn resolved_bind_match_pattern(
         types,
         callables,
         variants,
+        flow_state_fields,
         vars,
         &mut BTreeSet::new(),
     )
@@ -5666,6 +6368,7 @@ fn block_involves_f64(block: &ResolvedBlock, types: &ResolvedTypeTable) -> bool 
 struct ResolvedDefinednessContext<'a> {
     callables: Option<&'a BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>>,
     variants: Option<&'a BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>>,
+    flow_state_fields: Option<&'a ResolvedFlowStateFieldCatalog>,
     active_calls: BTreeSet<crate::core::NodeId>,
     /// Checker-owned session actions whose exact endpoint transition and
     /// argument definedness were validated by the statement collector. The
@@ -5689,6 +6392,7 @@ impl<'a> ResolvedDefinednessContext<'a> {
         Self {
             callables: None,
             variants: None,
+            flow_state_fields: None,
             active_calls: BTreeSet::new(),
             validated_session_statements: BTreeSet::new(),
             type_premises: Vec::new(),
@@ -5696,13 +6400,15 @@ impl<'a> ResolvedDefinednessContext<'a> {
         }
     }
 
-    fn with_catalog(
+    fn with_flow_state_catalog(
         callables: &'a BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>,
         variants: &'a BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>,
+        flow_state_fields: Option<&'a ResolvedFlowStateFieldCatalog>,
     ) -> Self {
         Self {
             callables: Some(callables),
             variants: Some(variants),
+            flow_state_fields,
             active_calls: BTreeSet::new(),
             validated_session_statements: BTreeSet::new(),
             type_premises: Vec::new(),
@@ -5725,9 +6431,12 @@ fn resolved_to_z3_int_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Int> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
-            resolved_to_z3_int_with_catalog(expr, body, types, callables, variants, vars)
-        }
+        (Some(callables), Some(variants)) => match &expr.kind {
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                resolved_match_int_in_context(scrutinee, arms, body, types, context, vars)
+            }
+            _ => resolved_to_z3_int_with_catalog(expr, body, types, callables, variants, vars),
+        },
         _ => resolved_to_z3_int(expr, body, types, vars),
     }
 }
@@ -5740,9 +6449,19 @@ fn resolved_to_z3_real_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Real> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
-            resolved_to_z3_real_with_catalog(expr, body, types, callables, variants, vars)
-        }
+        (Some(_), Some(_)) => match &expr.kind {
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                resolved_match_real_in_context(scrutinee, arms, body, types, context, vars)
+            }
+            _ => resolved_to_z3_real_with_catalog(
+                expr,
+                body,
+                types,
+                context.callables?,
+                context.variants?,
+                vars,
+            ),
+        },
         _ => resolved_to_z3_real(expr, body, types, vars),
     }
 }
@@ -5755,9 +6474,19 @@ fn resolved_to_z3_bool_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Bool> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
-            resolved_to_z3_bool_with_catalog(expr, body, types, callables, variants, vars)
-        }
+        (Some(_), Some(_)) => match &expr.kind {
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                resolved_match_bool_in_context(scrutinee, arms, body, types, context, vars)
+            }
+            _ => resolved_to_z3_bool_with_catalog(
+                expr,
+                body,
+                types,
+                context.callables?,
+                context.variants?,
+                vars,
+            ),
+        },
         _ => resolved_to_z3_bool(expr, body, types, vars),
     }
 }
@@ -5950,60 +6679,66 @@ fn resolved_block_tail_int_with_context_and_session_receipts(
     block: &ResolvedBlock,
     body: &ResolvedBody,
     types: &ResolvedTypeTable,
-    callables: &BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>,
-    variants: &BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Int> {
     resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
-    resolved_to_z3_int_with_catalog(
-        block.result.as_deref()?,
-        body,
-        types,
-        callables,
-        variants,
-        vars,
-    )
+    resolved_to_z3_int_in_context(block.result.as_deref()?, body, types, vars, context)
+}
+
+fn resolved_block_tail_int_with_context(
+    block: &ResolvedBlock,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    vars: &mut Z3VarMap,
+    context: &ResolvedDefinednessContext<'_>,
+) -> Option<Z3Int> {
+    resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
+    resolved_to_z3_int_in_context(block.result.as_deref()?, body, types, vars, context)
 }
 
 fn resolved_block_tail_real_with_context_and_session_receipts(
     block: &ResolvedBlock,
     body: &ResolvedBody,
     types: &ResolvedTypeTable,
-    callables: &BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>,
-    variants: &BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Real> {
     resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
-    resolved_to_z3_real_with_catalog(
-        block.result.as_deref()?,
-        body,
-        types,
-        callables,
-        variants,
-        vars,
-    )
+    resolved_to_z3_real_in_context(block.result.as_deref()?, body, types, vars, context)
 }
 
 fn resolved_block_tail_bool_with_context_and_session_receipts(
     block: &ResolvedBlock,
     body: &ResolvedBody,
     types: &ResolvedTypeTable,
-    callables: &BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>,
-    variants: &BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>,
     vars: &mut Z3VarMap,
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Bool> {
     resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
-    resolved_to_z3_bool_with_catalog(
-        block.result.as_deref()?,
-        body,
-        types,
-        callables,
-        variants,
-        vars,
-    )
+    resolved_to_z3_bool_in_context(block.result.as_deref()?, body, types, vars, context)
+}
+
+fn resolved_block_tail_real_with_context(
+    block: &ResolvedBlock,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    vars: &mut Z3VarMap,
+    context: &ResolvedDefinednessContext<'_>,
+) -> Option<Z3Real> {
+    resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
+    resolved_to_z3_real_in_context(block.result.as_deref()?, body, types, vars, context)
+}
+
+fn resolved_block_tail_bool_with_context(
+    block: &ResolvedBlock,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    vars: &mut Z3VarMap,
+    context: &ResolvedDefinednessContext<'_>,
+) -> Option<Z3Bool> {
+    resolved_prepare_context_value_block_stmts(block, body, types, vars, context)?;
+    resolved_to_z3_bool_in_context(block.result.as_deref()?, body, types, vars, context)
 }
 
 fn resolved_block_tail_int_in_context(
@@ -6014,13 +6749,13 @@ fn resolved_block_tail_int_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Int> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
+        (Some(_), Some(_)) => {
             if block_has_session_value_statement_candidate(block) {
                 resolved_block_tail_int_with_context_and_session_receipts(
-                    block, body, types, callables, variants, vars, context,
+                    block, body, types, vars, context,
                 )
             } else {
-                resolved_block_tail_int_with_catalog(block, body, types, callables, variants, vars)
+                resolved_block_tail_int_with_context(block, body, types, vars, context)
             }
         }
         _ => resolved_block_tail_int(block, body, types, vars),
@@ -6035,13 +6770,13 @@ fn resolved_block_tail_real_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Real> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
+        (Some(_), Some(_)) => {
             if block_has_session_value_statement_candidate(block) {
                 resolved_block_tail_real_with_context_and_session_receipts(
-                    block, body, types, callables, variants, vars, context,
+                    block, body, types, vars, context,
                 )
             } else {
-                resolved_block_tail_real_with_catalog(block, body, types, callables, variants, vars)
+                resolved_block_tail_real_with_context(block, body, types, vars, context)
             }
         }
         _ => resolved_block_tail_real(block, body, types, vars),
@@ -6056,13 +6791,13 @@ fn resolved_block_tail_bool_in_context(
     context: &ResolvedDefinednessContext<'_>,
 ) -> Option<Z3Bool> {
     match (context.callables, context.variants) {
-        (Some(callables), Some(variants)) => {
+        (Some(_), Some(_)) => {
             if block_has_session_value_statement_candidate(block) {
                 resolved_block_tail_bool_with_context_and_session_receipts(
-                    block, body, types, callables, variants, vars, context,
+                    block, body, types, vars, context,
                 )
             } else {
-                resolved_block_tail_bool_with_catalog(block, body, types, callables, variants, vars)
+                resolved_block_tail_bool_with_context(block, body, types, vars, context)
             }
         }
         _ => resolved_block_tail_bool(block, body, types, vars),
@@ -6099,7 +6834,7 @@ fn terminal_explicit_scalar_return<'a>(
         || !value.effects.is_empty()
         || &value.ty != expected_type
         || conversion.kind != CheckedConversionKind::Identity
-        || &conversion.from != &value.ty
+        || conversion.from != value.ty
         || &conversion.to != expected_type
     {
         return None;
@@ -6833,22 +7568,24 @@ fn collect_expr_i32_definedness_scoped(
             for arm in arms {
                 let mut arm_vars = vars.clone();
                 let pattern_condition =
-                    crate::verifier::resolved_expr::resolved_match_pattern_condition(
+                    crate::verifier::resolved_expr::resolved_match_pattern_condition_with_flow_state_fields(
                         scrutinee,
                         &arm.pattern,
                         body,
                         types,
                         callables,
                         variants,
+                        context.flow_state_fields,
                         &mut arm_vars,
                     )?;
-                crate::verifier::resolved_expr::resolved_bind_match_pattern(
+                crate::verifier::resolved_expr::resolved_bind_match_pattern_with_flow_state_fields(
                     scrutinee,
                     &arm.pattern,
                     body,
                     types,
                     callables,
                     variants,
+                    context.flow_state_fields,
                     &mut arm_vars,
                 )?;
 
@@ -7051,7 +7788,7 @@ fn resolved_call_argument_evaluation_order(
 
 /// Build a frame for a checker-identified failing Flow transition.  Admission
 /// is intentionally narrow: the TransitionId must resolve to its canonical
-/// callable; the result must be `Result<Target, (Source, Error)>`; and every
+/// callable; its full result must be `Result<Target, (Source, Error)>`; and every
 /// actual must match its declared formal by exact typed identity.  No flow
 /// precondition or transition effect is inferred from a name.
 fn resolved_transition_call_frame(
@@ -7068,7 +7805,9 @@ fn resolved_transition_call_frame(
         return None;
     };
     let target = crate::core::mir::transition_owner_from_id(id);
-    let callee = callables.get(&target)?.clone();
+    let Some(callee) = callables.get(&target).cloned() else {
+        return None;
+    };
     if callee.owner != target
         || callee.signature.owner != target
         || callee.body.owner != target
@@ -7087,19 +7826,15 @@ fn resolved_transition_call_frame(
     {
         return None;
     }
-    let (ok_type, error_type) = match types.get(&call.result)? {
-        ResolvedType::Result { ok, error } => (ok.clone(), error.clone()),
-        ResolvedType::Nominal {
-            item, arguments, ..
-        } if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
-            (arguments[0].clone(), arguments[1].clone())
-        }
-        _ => return None,
-    };
-    if ok_type != callee.signature.result {
+    let (ok_type, error_type) = resolved_result_type_payloads(&call.result, types)?;
+    if call.result != callee.signature.result {
         return None;
     }
-    let error_items = match types.get(&error_type)? {
+    let (_, _, return_value) = resolved_transition_body_tail_and_try(&callee, types)?;
+    if ok_type != &return_value.ty {
+        return None;
+    }
+    let error_items = match types.get(error_type)? {
         ResolvedType::Tuple(items) if items.len() == 2 => items,
         _ => return None,
     };
@@ -7110,13 +7845,15 @@ fn resolved_transition_call_frame(
 
     let mut frame = Z3VarMap::new();
     let mut seen = BTreeSet::new();
-    for (formal, local_id) in callee
+    for (index, (formal, local_id)) in callee
         .signature
         .parameters
         .iter()
         .zip(&callee.body.parameters)
+        .enumerate()
     {
-        if formal.has_default || formal.permission.is_some() {
+        let expected_permission = (index == 0).then_some(Permission::Consume);
+        if formal.has_default || formal.permission != expected_permission {
             return None;
         }
         let local = callee.body.locals.get(local_id)?;
@@ -7176,16 +7913,18 @@ fn resolved_transition_call_frame(
                 frame.insert_bool(key.clone(), value.clone());
                 frame.insert_bool(format!("old.{key}"), value);
             }
-            None => bind_value_to_local(
-                &argument.value,
-                caller_body,
-                local,
-                types,
-                callables,
-                variants,
-                &mut frame,
-                &mut BTreeSet::new(),
-            )?,
+            None => {
+                bind_value_to_local(
+                    &argument.value,
+                    caller_body,
+                    local,
+                    types,
+                    callables,
+                    variants,
+                    &mut frame,
+                    &mut BTreeSet::new(),
+                )?;
+            }
         }
     }
     if seen.len() != call.arguments.len() {
@@ -7194,8 +7933,27 @@ fn resolved_transition_call_frame(
     Some((callee, frame))
 }
 
+fn resolved_result_type_payloads<'a>(
+    ty: &'a crate::core::ir::ResolvedTypeId,
+    types: &'a ResolvedTypeTable,
+) -> Option<(
+    &'a crate::core::ir::ResolvedTypeId,
+    &'a crate::core::ir::ResolvedTypeId,
+)> {
+    match types.get(ty)? {
+        crate::core::ir::ResolvedType::Result { ok, error } => Some((ok, error)),
+        crate::core::ir::ResolvedType::Nominal {
+            item, arguments, ..
+        } if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
+            Some((&arguments[0], &arguments[1]))
+        }
+        _ => None,
+    }
+}
+
 fn resolved_transition_body_tail_and_try<'a>(
     callable: &'a crate::core::ResolvedCallable,
+    types: &ResolvedTypeTable,
 ) -> Option<(&'a ResolvedExpr, &'a ResolvedExpr, &'a ResolvedExpr)> {
     fn block_contains_try(block: &ResolvedBlock) -> bool {
         for statement in &block.statements {
@@ -7337,6 +8095,7 @@ fn resolved_transition_body_tail_and_try<'a>(
     }
 
     let statements = &callable.body.root.statements;
+    let (result_ok_type, _) = resolved_result_type_payloads(&callable.signature.result, types)?;
     if callable.body.root.result.is_some() || statements.is_empty() {
         return None;
     }
@@ -7404,8 +8163,8 @@ fn resolved_transition_body_tail_and_try<'a>(
             } if index + 1 == statements.len() => {
                 if conversion.kind != CheckedConversionKind::Identity
                     || conversion.from != value.ty
-                    || conversion.to != callable.signature.result
-                    || value.ty != callable.signature.result
+                    || conversion.to != value.ty
+                    || &value.ty != result_ok_type
                     || !value.effects.is_empty()
                 {
                     return None;
@@ -7469,32 +8228,19 @@ fn resolved_transition_result_variants(
     if !matches!(&call.callee, crate::core::ir::ResolvedCallee::Transition(_)) {
         return None;
     }
-    // A failing transition's callable signature is the target state, while
-    // its typed call expression is Result<Target, (Source, Error)>.
-    let (call_ok, call_error) = match types.get(&call.result)? {
-        ResolvedType::Result { ok, error } => (ok, error),
-        ResolvedType::Nominal {
-            item, arguments, ..
-        } if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
-            (&arguments[0], &arguments[1])
-        }
-        _ => return None,
-    };
-    let (inner_try, inner_error, _) = resolved_transition_body_tail_and_try(callable)?;
-    let (inner_ok, actual_inner_error) = match types.get(&inner_error.ty)? {
-        ResolvedType::Result { ok, error } => (ok, error),
-        ResolvedType::Nominal {
-            item, arguments, ..
-        } if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
-            (&arguments[0], &arguments[1])
-        }
-        _ => return None,
-    };
+    // A failing transition's callable signature and typed call expression
+    // both carry Result<Target, (Source, Error)>; the source-level Return
+    // value supplies only the Result::Ok payload type.
+    let (call_ok, call_error) = resolved_result_type_payloads(&call.result, types)?;
+    let (inner_try, inner_error, return_value) =
+        resolved_transition_body_tail_and_try(callable, types)?;
+    let (inner_ok, actual_inner_error) = resolved_result_type_payloads(&inner_error.ty, types)?;
     let error_members = match types.get(call_error)? {
         ResolvedType::Tuple(members) if members.len() == 2 => members,
         _ => return None,
     };
-    if call_ok != &callable.signature.result
+    if call.result != callable.signature.result
+        || call_ok != &return_value.ty
         || inner_ok != &inner_try.ty
         || actual_inner_error != &error_members[1]
         || error_members[0] != callable.signature.parameters.first()?.ty
@@ -7537,7 +8283,8 @@ fn resolved_transition_evaluation(
     {
         return None;
     }
-    let (try_expr, try_value, return_value) = resolved_transition_body_tail_and_try(&callable)?;
+    let (try_expr, try_value, return_value) =
+        resolved_transition_body_tail_and_try(&callable, types)?;
     let _ = resolved_transition_result_variants(call, &callable, types, variants)?;
     if try_expr.effects != try_value.effects || !try_expr.effects.is_empty() {
         return None;
@@ -7590,7 +8337,8 @@ fn resolved_transition_expression_type_at_path(
         return None;
     };
     let callee = callables.get(&crate::core::mir::transition_owner_from_id(id))?;
-    let (_try_expr, try_value, return_value) = resolved_transition_body_tail_and_try(callee)?;
+    let (_try_expr, try_value, return_value) =
+        resolved_transition_body_tail_and_try(callee, types)?;
     let (ok_variant, err_variant) =
         resolved_transition_result_variants(call, callee, types, variants)?;
     let [ResolvedValuePathPart::VariantPayload { variant, member }, rest @ ..] = path else {
@@ -7599,7 +8347,7 @@ fn resolved_transition_expression_type_at_path(
     let member_type = resolved_variant_member_type(&call.result, variant, member, types, variants)?;
     if variant == &ok_variant
         && member == &NodeId("builtin:variant:Result::Ok/payload:0".into())
-        && member_type == callee.signature.result
+        && member_type == return_value.ty
     {
         if return_value.ty != member_type {
             return None;
@@ -7697,9 +8445,6 @@ fn bind_transition_value_at_path(
     };
     let member_type = resolved_variant_member_type(&call.result, variant, member, types, variants)?;
     if variant == &ok_variant && member == &NodeId("builtin:variant:Result::Ok/payload:0".into()) {
-        if member_type != callee.signature.result {
-            return None;
-        }
         let (callee, mut frame, _, return_value, _) = resolved_transition_evaluation(
             call,
             caller_body,
@@ -7708,7 +8453,10 @@ fn bind_transition_value_at_path(
             variants,
             caller_vars,
         )?;
-        return bind_value_at_path(
+        if member_type != return_value.ty {
+            return None;
+        }
+        bind_value_at_path(
             &return_value,
             rest,
             target_type,
@@ -7719,7 +8467,9 @@ fn bind_transition_value_at_path(
             variants,
             &mut frame,
             active,
-        );
+        )?;
+        copy_known_value_path_facts_between(&frame, target_key, target_key, caller_vars);
+        return Some(());
     }
     if variant != &err_variant || member != &NodeId("builtin:variant:Result::Err/payload:0".into())
     {
@@ -7773,6 +8523,7 @@ fn bind_transition_value_at_path(
                 active,
             )?;
         }
+        copy_known_value_path_facts_between(&frame, target_key, target_key, caller_vars);
         return Some(());
     }
     let [ResolvedValuePathPart::Tuple(index), member_path @ ..] = rest else {
@@ -7823,14 +8574,18 @@ fn bind_transition_value_at_path(
         variants,
         source_vars,
         active,
-    )
+    )?;
+    if *index == 1 {
+        copy_known_value_path_facts_between(&frame, target_key, target_key, caller_vars);
+    }
+    Some(())
 }
 
 fn try_expr_error_type(
     callable: &crate::core::ResolvedCallable,
     types: &ResolvedTypeTable,
 ) -> Option<crate::core::ir::ResolvedTypeId> {
-    let (_, try_value, _) = resolved_transition_body_tail_and_try(callable)?;
+    let (_, try_value, _) = resolved_transition_body_tail_and_try(callable, types)?;
     match types.get(&try_value.ty)? {
         ResolvedType::Result { error, .. } => Some(error.clone()),
         ResolvedType::Nominal {
@@ -7853,10 +8608,15 @@ fn collect_resolved_call_definedness(
 ) -> Option<()> {
     use crate::core::ir::ResolvedCallee;
 
-    if matches!(&call.callee, ResolvedCallee::Constructor(_))
+    if (matches!(&call.callee, ResolvedCallee::Constructor(_))
+        || matches!(&call.callee, ResolvedCallee::Builtin(builtin)
+            if matches!(builtin.as_str(), "Some" | "None" | "Ok" | "Err")))
         && call.effects.is_empty()
         && call.session.is_empty()
     {
+        if matches!(&call.callee, ResolvedCallee::Builtin(_)) {
+            let _ = resolved_builtin_sum_constructor_variant(call, types, context.variants?)?;
+        }
         for index in resolved_call_argument_evaluation_order(call)? {
             let argument = &call.arguments[index];
             collect_expr_i32_definedness_scoped(
@@ -8030,22 +8790,31 @@ fn collect_resolved_call_definedness(
         )?;
     }
     let (callee, mut callee_vars) = if is_transition {
-        let (callee, frame) = resolved_transition_call_frame(
+        let transition_frame = resolved_transition_call_frame(
             call,
             caller_body,
             types,
             context.callables?,
             context.variants?,
             caller_vars,
-        )?;
+        );
+        let Some((callee, frame)) = transition_frame else {
+            return None;
+        };
         // This first Flow slice models only checker-lowered recoverable
         // transitions with one Result `?` and a terminal target-state
         // return. Other Flow effects/controls remain outside the subset.
-        let (try_expression, try_value, _) = resolved_transition_body_tail_and_try(&callee)?;
+        let Some((try_expression, try_value, _)) =
+            resolved_transition_body_tail_and_try(&callee, types)
+        else {
+            return None;
+        };
         if try_expression.effects != try_value.effects || !try_expression.effects.is_empty() {
             return None;
         }
-        let _ = resolved_transition_result_variants(call, &callee, types, context.variants?)?;
+        if resolved_transition_result_variants(call, &callee, types, context.variants?).is_none() {
+            return None;
+        }
         if callee
             .body
             .resolved_calls
@@ -9330,19 +10099,16 @@ fn valid_session_pair_binding(
         return None;
     }
     let protocol = call.type_arguments.first()?;
-    let first_has_protocol = match types.get(&endpoint_types[0]) {
+    let first_has_protocol = matches!(
+        types.get(&endpoint_types[0]),
         Some(ResolvedType::Nominal {
             item,
             arguments,
             is_linear: true,
         }) if item.as_str() == "builtin:type:SessionChan"
             && arguments.len() == 1
-            && &arguments[0] == protocol =>
-        {
-            true
-        }
-        _ => false,
-    };
+            && &arguments[0] == protocol
+    );
     let second_is_dual = match types.get(&endpoint_types[1]) {
         Some(ResolvedType::Nominal {
             item,
@@ -11932,7 +12698,9 @@ fn resolved_block_references_local(block: &ResolvedBlock, local: &ResolvedLocalI
 /// - f64 contracts: fail-closed NotInTrustedSubset (H-21)
 /// - Direct pure call-site requires and body-definedness VCs: ✅ (catalog-aware,
 ///   non-generic scalar actuals, ordered Requires, bounded pure-call subset)
-/// - Invariant checking: ❌ (deferred)
+/// - Flow transition source invariants: ✅ (checker-owned entry assumptions;
+///   definedness is discharged before the invariant is admitted)
+/// - Ordinary callable invariant checking: ❌ (deferred)
 /// - Callee ensures propagation: ❌ (deferred)
 ///
 /// # Soundness
@@ -11943,6 +12711,7 @@ fn resolved_block_references_local(block: &ResolvedBlock, local: &ResolvedLocalI
 /// Similarly, any contract encoding failure causes an immediate
 /// `NotInTrustedSubset` return, regardless of whether a violation
 /// was found (the violation could be an artifact of missing constraints).
+#[cfg(test)]
 pub(crate) fn verify_contracts_from_resolved(
     callable: &crate::core::ir::ResolvedCallable,
     types: &crate::core::ir::ResolvedTypeTable,
@@ -11950,24 +12719,34 @@ pub(crate) fn verify_contracts_from_resolved(
 ) -> Option<(crate::verifier::ctx::VerifStatus, String)> {
     let mut context = ResolvedDefinednessContext::without_catalog();
     context.active_calls.insert(callable.owner.clone());
-    verify_contracts_from_resolved_in_context(callable, types, &mut context, session)
+    verify_contracts_from_resolved_in_context(callable, types, false, &mut context, session)
 }
 
-pub(crate) fn verify_contracts_from_resolved_with_catalog(
+pub(crate) fn verify_contracts_from_resolved_with_flow_state_catalog(
     callable: &crate::core::ir::ResolvedCallable,
     types: &crate::core::ir::ResolvedTypeTable,
     callables: &BTreeMap<crate::core::NodeId, crate::core::ResolvedCallable>,
     variants: &BTreeMap<crate::core::NodeId, crate::core::ResolvedVariantSchema>,
+    flow_state_fields: Option<&ResolvedFlowStateFieldCatalog>,
+    is_flow_transition: bool,
     session: &mut crate::verifier::ctx::SolverSession,
 ) -> Option<(crate::verifier::ctx::VerifStatus, String)> {
-    let mut context = ResolvedDefinednessContext::with_catalog(callables, variants);
+    let mut context =
+        ResolvedDefinednessContext::with_flow_state_catalog(callables, variants, flow_state_fields);
     context.active_calls.insert(callable.owner.clone());
-    verify_contracts_from_resolved_in_context(callable, types, &mut context, session)
+    verify_contracts_from_resolved_in_context(
+        callable,
+        types,
+        is_flow_transition,
+        &mut context,
+        session,
+    )
 }
 
 fn verify_contracts_from_resolved_in_context(
     callable: &crate::core::ir::ResolvedCallable,
     types: &crate::core::ir::ResolvedTypeTable,
+    is_flow_transition: bool,
     context: &mut ResolvedDefinednessContext<'_>,
     session: &mut crate::verifier::ctx::SolverSession,
 ) -> Option<(crate::verifier::ctx::VerifStatus, String)> {
@@ -12063,6 +12842,7 @@ fn verify_contracts_from_resolved_in_context(
     }
 
     // 4. Separate contracts by kind
+    let mut invariants = Vec::new();
     let mut requires = Vec::new();
     let mut ensures = Vec::new();
     let root_contracts = body
@@ -12081,7 +12861,8 @@ fn verify_contracts_from_resolved_in_context(
         match contract.kind {
             ContractKind::Requires => requires.push(&contract.condition),
             ContractKind::Ensures => ensures.push(&contract.condition),
-            ContractKind::Invariant => {} // deferred
+            ContractKind::Invariant if is_flow_transition => invariants.push(&contract.condition),
+            ContractKind::Invariant => {} // ordinary callable invariant proof is deferred
         }
     }
 
@@ -12099,7 +12880,12 @@ fn verify_contracts_from_resolved_in_context(
             .resolved_calls
             .values()
             .any(|callee| matches!(callee, crate::core::ir::ResolvedCallee::Function(_)));
-    if requires.is_empty() && ensures.is_empty() && !has_proof_points && !has_direct_function_call {
+    if invariants.is_empty()
+        && requires.is_empty()
+        && ensures.is_empty()
+        && !has_proof_points
+        && !has_direct_function_call
+    {
         return None; // No contracts, proof points, or direct-call obligations to verify
     }
 
@@ -12109,8 +12895,9 @@ fn verify_contracts_from_resolved_in_context(
     //     The Resolved IR is fully typed, so detection is exact: any f64-typed
     //     sub-expression in the contracts or the body rejects the callable.
     //     (Full IEEE modeling is deliberately not attempted — conservative.)
-    let f64_involved = requires
+    let f64_involved = invariants
         .iter()
+        .chain(requires.iter())
         .chain(ensures.iter())
         .any(|condition| expr_involves_f64(condition, types))
         || body
@@ -12125,6 +12912,35 @@ fn verify_contracts_from_resolved_in_context(
             "f64 floating-point is not verified: IEEE 754 rounding and NaN are not modeled \
              (fail-closed; exact-Real encoding removed by audit H-21)",
         ));
+    }
+
+    // 5. A transition's own invariant describes valid source states.  Prove
+    // its expression is defined before assuming its truth, then admit that
+    // checker-owned fact ahead of the transition Requires clauses. Ordinary
+    // callable invariants remain deferred until their program-point model is
+    // available.
+    for invariant in &invariants {
+        if let Err((status, detail)) = discharge_root_contract_definedness(
+            invariant,
+            ContractKind::Invariant,
+            body,
+            types,
+            &mut vars,
+            context,
+            session,
+        ) {
+            return Some(status_msg(status, &detail));
+        }
+        if let Some(z3_bool) =
+            resolved_to_z3_bool_in_context(invariant, body, types, &mut vars, context)
+        {
+            session.solver.assert(z3_bool);
+        } else {
+            return Some(status_msg(
+                VerifStatus::NotInTrustedSubset,
+                "Flow transition invariant is outside the scalar contract encoding",
+            ));
+        }
     }
 
     // 5. Check Requires evaluation before admitting that clause as an
@@ -12680,7 +13496,7 @@ mod tests {
 
     #[test]
     fn projected_place_keys_match_explicit_field_and_tuple_projects() {
-        let (types, ty) = test_table_and_ty();
+        let (_types, ty) = test_table_and_ty();
         let body = test_body_with_local("aggregate");
         let base = body.parameters[0].clone();
         let field = NodeId("type:Counter/node:decl.field@count".into());
@@ -12856,7 +13672,7 @@ mod tests {
                 ))
                 .unwrap(),
                 &Default::default(),
-                |name| crate::core::ir::ResolvedTypeName::primitive(name),
+                crate::core::ir::ResolvedTypeName::primitive,
             )
             .unwrap();
         let mut body = test_body_with_local("x");
@@ -13065,6 +13881,107 @@ func main() -> i32 { 0 }
             status,
             Some(crate::verifier::ctx::VerifStatus::Disproven),
             "ensures: result == true with body: x > 0 → Disproven (x can be negative)"
+        );
+    }
+
+    #[test]
+    fn e2e_resolved_flow_state_record_match_preserves_bool_result_context() {
+        let source = r#"
+flow F {
+    state A { n: i32 }
+    state B { n: i32 }
+
+    transition go(A) -> B fails string {
+        let checked: Result<i32, string> = if self.n == 0 {
+            Err("bad")
+        } else {
+            Ok(self.n + 1)
+        }
+        let next = checked?
+        return B { n: next }
+    }
+}
+
+func reports_failure() -> bool {
+    requires: true
+    ensures: result == false
+    let outcome = F::go(A { n: 0 })
+    match outcome {
+        Ok(B { n }) => n > 0,
+        Err((source, error)) => {
+            drop(source)
+            drop(error)
+            false
+        },
+    }
+}
+
+func reports_the_wrong_result() -> bool {
+    requires: true
+    ensures: result == true
+    let outcome = F::go(A { n: 0 })
+    match outcome {
+        Ok(B { n }) => n > 0,
+        Err((source, error)) => {
+            drop(source)
+            drop(error)
+            false
+        },
+    }
+}
+
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let program = crate::core::check_program(&file).expect("check");
+        let flow_state_fields =
+            resolved_flow_state_field_catalog(&program).expect("canonical Flow state fields");
+
+        for (name, expected) in [
+            ("reports_failure", crate::verifier::ctx::VerifStatus::Proven),
+            (
+                "reports_the_wrong_result",
+                crate::verifier::ctx::VerifStatus::Disproven,
+            ),
+        ] {
+            let owner = NodeId(format!("function:{name}"));
+            let callable = program.callables().get(&owner).expect("callable");
+            let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+            let (actual, detail) = verify_contracts_from_resolved_with_flow_state_catalog(
+                callable,
+                program.resolved_types(),
+                program.callables(),
+                program.resolved_variants(),
+                Some(&flow_state_fields),
+                false,
+                &mut session,
+            )
+            .expect("verification result");
+            assert_eq!(actual, expected, "{name}: {detail}");
+        }
+
+        let callable = program
+            .callables()
+            .get(&NodeId("function:reports_failure".into()))
+            .expect("callable");
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let (actual, detail) = verify_contracts_from_resolved_with_flow_state_catalog(
+            callable,
+            program.resolved_types(),
+            program.callables(),
+            program.resolved_variants(),
+            None,
+            false,
+            &mut session,
+        )
+        .expect("fail-closed result");
+        assert_eq!(
+            actual,
+            crate::verifier::ctx::VerifStatus::NotInTrustedSubset,
+            "a state-shaped pattern without checker-owned field metadata must fail closed: {detail}"
         );
     }
 

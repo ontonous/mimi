@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn comprehension_basic() {
@@ -29,16 +30,18 @@ func main() -> i32 {
 #[test]
 fn comprehension_transform() {
     let src = r#"
-func main() -> string {
+func comprehension_transform_result() -> string {
     let words = ["hello", "world"];
     let upper = [w + "!" for w in words];
     upper[0] + " " + upper[1]
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "comprehension_transform_result", vec![])
+        .expect("comprehension transform helper should run");
     assert_eq!(
         v,
-        interp::Value::String(crate::interp::SharedString::new("hello! world!".to_string()))
+        interp::Value::String(SharedString::new("hello! world!".to_string()))
     );
 }
 

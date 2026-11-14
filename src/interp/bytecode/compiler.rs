@@ -36,6 +36,233 @@ impl CheckedSourceSpanKey {
     }
 }
 
+fn collect_checked_cast_receipts(
+    body: &crate::core::ResolvedBody,
+    types: &crate::core::ResolvedTypeTable,
+    out: &mut HashMap<CheckedSourceSpanKey, Vec<CheckedCastReceipt>>,
+) {
+    fn visit_block(
+        block: &crate::core::ir::ResolvedBlock,
+        types: &crate::core::ResolvedTypeTable,
+        out: &mut HashMap<CheckedSourceSpanKey, Vec<CheckedCastReceipt>>,
+    ) {
+        for statement in &block.statements {
+            visit_stmt(statement, types, out);
+        }
+        if let Some(result) = &block.result {
+            visit_expr(result, types, out);
+        }
+    }
+
+    fn visit_stmt(
+        statement: &crate::core::ir::ResolvedStmt,
+        types: &crate::core::ResolvedTypeTable,
+        out: &mut HashMap<CheckedSourceSpanKey, Vec<CheckedCastReceipt>>,
+    ) {
+        use crate::core::ir::ResolvedStmtKind as Stmt;
+        match &statement.kind {
+            Stmt::Bind { initializer, .. } => {
+                if let Some(initializer) = initializer {
+                    visit_expr(initializer, types, out);
+                }
+            }
+            Stmt::Assign { value, .. } => visit_expr(value, types, out),
+            Stmt::Return { value, .. } | Stmt::Break(value) => {
+                if let Some(value) = value {
+                    visit_expr(value, types, out);
+                }
+            }
+            Stmt::Expr(value) => visit_expr(value, types, out),
+            Stmt::While { condition, body } => {
+                visit_expr(condition, types, out);
+                visit_block(body, types, out);
+            }
+            Stmt::WhileLet {
+                initializer, body, ..
+            } => {
+                visit_expr(initializer, types, out);
+                visit_block(body, types, out);
+            }
+            Stmt::IfLet {
+                initializer,
+                then_block,
+                else_block,
+                ..
+            } => {
+                visit_expr(initializer, types, out);
+                visit_block(then_block, types, out);
+                if let Some(else_block) = else_block {
+                    visit_block(else_block, types, out);
+                }
+            }
+            Stmt::Loop(body) | Stmt::Scope { body, .. } => visit_block(body, types, out),
+            Stmt::For { iterable, body, .. } => {
+                visit_expr(iterable, types, out);
+                visit_block(body, types, out);
+            }
+            Stmt::Contract { condition, .. } => visit_expr(condition, types, out),
+            Stmt::Math(values) => {
+                for value in values {
+                    visit_expr(value, types, out);
+                }
+            }
+            Stmt::Pinned { value, body, .. } => {
+                visit_expr(value, types, out);
+                visit_block(body, types, out);
+            }
+            Stmt::Continue | Stmt::Drop(_) | Stmt::NestedCallable(_) => {}
+        }
+    }
+
+    fn visit_expr(
+        expression: &crate::core::ir::ResolvedExpr,
+        types: &crate::core::ResolvedTypeTable,
+        out: &mut HashMap<CheckedSourceSpanKey, Vec<CheckedCastReceipt>>,
+    ) {
+        use crate::core::ir::{
+            ResolvedExprKind as Expr, ResolvedFStringPart, ResolvedValueProjection,
+        };
+        match &expression.kind {
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let ResolvedFStringPart::Interpolation(value) = part {
+                        visit_expr(value, types, out);
+                    }
+                }
+            }
+            Expr::Project { value, projection } => {
+                visit_expr(value, types, out);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    visit_expr(index, types, out);
+                }
+            }
+            Expr::Binary { left, right, .. }
+            | Expr::Range {
+                start: left,
+                end: right,
+            } => {
+                visit_expr(left, types, out);
+                visit_expr(right, types, out);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::OptionalChain {
+                receiver: operand, ..
+            }
+            | Expr::TypeOf(operand)
+            | Expr::Old(operand)
+            | Expr::Try { value: operand, .. }
+            | Expr::Spawn(operand)
+            | Expr::Await(operand) => visit_expr(operand, types, out),
+            Expr::Call(call) => {
+                for argument in &call.arguments {
+                    visit_expr(&argument.value, types, out);
+                }
+            }
+            Expr::Tuple(values) | Expr::List(values) | Expr::Set(values) => {
+                for value in values {
+                    visit_expr(value, types, out);
+                }
+            }
+            Expr::Map(entries) => {
+                for (key, value) in entries {
+                    visit_expr(key, types, out);
+                    visit_expr(value, types, out);
+                }
+            }
+            Expr::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                visit_expr(iterable, types, out);
+                if let Some(guard) = guard {
+                    visit_expr(guard, types, out);
+                }
+                visit_expr(value, types, out);
+            }
+            Expr::Record { fields, rest, .. } => {
+                for field in fields {
+                    visit_expr(&field.value, types, out);
+                }
+                if let Some(rest) = rest {
+                    visit_expr(rest, types, out);
+                }
+            }
+            Expr::Block(block)
+            | Expr::Scope { body: block, .. }
+            | Expr::Comptime(block)
+            | Expr::Quote(block) => visit_block(block, types, out),
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                visit_expr(condition, types, out);
+                visit_block(then_block, types, out);
+                visit_block(else_block, types, out);
+            }
+            Expr::Match { scrutinee, arms } => {
+                visit_expr(scrutinee, types, out);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        visit_expr(guard, types, out);
+                    }
+                    visit_expr(&arm.body, types, out);
+                }
+            }
+            Expr::Slice { target, start, end } => {
+                visit_expr(target, types, out);
+                if let Some(start) = start {
+                    visit_expr(start, types, out);
+                }
+                if let Some(end) = end {
+                    visit_expr(end, types, out);
+                }
+            }
+            Expr::Cast { value, conversion } => {
+                if let crate::core::Origin::User(span) = &expression.origin {
+                    if let Some(key) = CheckedSourceSpanKey::from_span(*span) {
+                        let primitive = |ty: &crate::core::ResolvedTypeId| match types.get(ty) {
+                            Some(crate::core::ResolvedType::Primitive(primitive)) => {
+                                Some(*primitive)
+                            }
+                            _ => None,
+                        };
+                        out.entry(key).or_default().push(CheckedCastReceipt {
+                            node_id: expression.node_id.clone(),
+                            origin: expression.origin.clone(),
+                            from: conversion.from.clone(),
+                            to: conversion.to.clone(),
+                            conversion_kind: conversion.kind,
+                            from_primitive: primitive(&conversion.from),
+                            to_primitive: primitive(&conversion.to),
+                        });
+                    }
+                }
+                visit_expr(value, types, out);
+            }
+            Expr::Lambda(lambda) => visit_block(&lambda.body, types, out),
+            Expr::Literal(_)
+            | Expr::Load(_)
+            | Expr::Constant(_)
+            | Expr::Callable(_)
+            | Expr::DefaultArgument { .. }
+            | Expr::ComptimeValue(_)
+            | Expr::TypeValue(_) => {}
+        }
+    }
+
+    visit_block(&body.root, types, out);
+    for expression in body
+        .place_inputs
+        .values()
+        .chain(body.default_values.values())
+    {
+        visit_expr(expression, types, out);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CheckedImplOwnerReceipt {
     method_names: Vec<String>,
@@ -46,6 +273,20 @@ struct CheckedImplOwnerReceipt {
 struct CheckedCallSiteReceipt {
     node_id: crate::core::NodeId,
     callee: Option<crate::core::ResolvedCallee>,
+    dynamic_protocol_receiver: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CheckedCastReceipt {
+    /// Stable Checker node identity, retained alongside its exact origin so
+    /// the bytecode adapter never treats a span-only observation as authority.
+    node_id: crate::core::NodeId,
+    origin: crate::core::Origin,
+    from: crate::core::ResolvedTypeId,
+    to: crate::core::ResolvedTypeId,
+    conversion_kind: crate::core::ir::CheckedConversionKind,
+    from_primitive: Option<crate::core::PrimitiveType>,
+    to_primitive: Option<crate::core::PrimitiveType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +425,10 @@ pub struct BytecodeCompiler {
     checked_impl_callable_owner_counts: HashMap<String, usize>,
     /// Checked call-site target receipts indexed by the full AST call span.
     checked_call_sites_by_span: HashMap<CheckedSourceSpanKey, Vec<CheckedCallSiteReceipt>>,
+    /// Checker-owned explicit cast conversions indexed by their source span.
+    /// This gives AST bytecode lowering the exact source and target types
+    /// without guessing from the operand's surface syntax.
+    checked_casts_by_span: HashMap<CheckedSourceSpanKey, Vec<CheckedCastReceipt>>,
     /// Set by install_checked_program. In this mode method dispatch must use
     /// the checked call-site owner and cannot fall back to method_table or a
     /// legacy `{Type}_{method}` spelling.
@@ -309,8 +554,9 @@ enum VarType {
     String,
     /// User-defined type (named), prevents fallback to Int operations.
     User(String),
-    /// `dyn Trait` receiver: method dispatch happens at runtime by the
-    /// concrete record type (tree-walker Value::DynTrait semantics).
+    /// Retained surface marker for removed `dyn Trait` method dispatch. The
+    /// compiler keeps it long enough to fail closed before any runtime or
+    /// static compatibility dispatch is selected.
     Dyn(String),
     Unknown,
 }
@@ -545,9 +791,8 @@ impl FuncCompiler {
         self.var_mut.get(name).copied().unwrap_or(false)
     }
 
-    /// True when the variable holds a `dyn Trait` value. Method calls on
-    /// such receivers must dispatch at runtime by concrete type, not by
-    /// static impl-name prefix matching.
+    /// True when the variable holds a `dyn Trait` value, which is rejected at
+    /// the method-call boundary before legacy dispatch can choose an impl.
     fn var_is_dyn(&self, name: &str) -> bool {
         matches!(self.var_types.get(name), Some(VarType::Dyn(_)))
     }
@@ -577,6 +822,7 @@ impl BytecodeCompiler {
             checked_impl_callable_owners: HashSet::new(),
             checked_impl_callable_owner_counts: HashMap::new(),
             checked_call_sites_by_span: HashMap::new(),
+            checked_casts_by_span: HashMap::new(),
             checked_program_installed: false,
             flow_defs: HashMap::new(),
             actor_defs: HashMap::new(),
@@ -605,7 +851,36 @@ impl BytecodeCompiler {
         self.checked_impl_callable_owners.clear();
         self.checked_impl_callable_owner_counts.clear();
         self.checked_call_sites_by_span.clear();
+        self.checked_casts_by_span.clear();
         self.method_table.clear();
+
+        for body in program.resolved_bodies().values() {
+            collect_checked_cast_receipts(
+                body,
+                program.resolved_types(),
+                &mut self.checked_casts_by_span,
+            );
+        }
+        // Top-level constants are inlined from their original AST expression
+        // by `compile_expr(Ident)`. Their checked Cast nodes live in the
+        // declaration-expression directory rather than a callable body, so
+        // collect the exact declaration-owned receipt before that AST is
+        // inlined. Keeping the initializer's source span is what binds the
+        // inlined cast back to this checked root.
+        for declaration in program.declaration_expression_bodies().values() {
+            if declaration.kind
+                != crate::core::ir::lower::ResolvedDeclarationExpressionKind::ConstantInitializer
+            {
+                continue;
+            }
+            if let Ok(body) = &declaration.body {
+                collect_checked_cast_receipts(
+                    body,
+                    program.resolved_types(),
+                    &mut self.checked_casts_by_span,
+                );
+            }
+        }
 
         // Preserve exact Checker call-site identities. The compatibility VM
         // still compiles the retained AST, but a method call may use that AST
@@ -620,6 +895,20 @@ impl BytecodeCompiler {
                 .push(CheckedCallSiteReceipt {
                     node_id: site.node_id.clone(),
                     callee: site.resolved_callee.clone(),
+                    dynamic_protocol_receiver: site
+                        .method_receiver
+                        .as_ref()
+                        .and_then(|receiver| program.resolved_node_type(receiver))
+                        .and_then(|ty| program.resolved_types().get(ty))
+                        .is_some_and(|ty| {
+                            matches!(
+                                ty,
+                                crate::core::ResolvedType::Trait {
+                                    kind: crate::core::ir::TraitTypeKind::Dynamic,
+                                    ..
+                                }
+                            )
+                        }),
                 });
         }
 
@@ -714,6 +1003,19 @@ impl BytecodeCompiler {
         &self,
         call_meta: Option<AstNodeMeta>,
     ) -> Result<crate::core::ResolvedCallee, InterpError> {
+        let receipt = self.checked_callsite_receipt(call_meta)?;
+        receipt.callee.ok_or_else(|| {
+            InterpError::new(format!(
+                "checked method call '{}' has no checker-resolved callable owner",
+                receipt.node_id.0
+            ))
+        })
+    }
+
+    fn checked_callsite_receipt(
+        &self,
+        call_meta: Option<AstNodeMeta>,
+    ) -> Result<CheckedCallSiteReceipt, InterpError> {
         let span = call_meta
             .map(|meta| meta.span)
             .and_then(CheckedSourceSpanKey::from_span)
@@ -730,18 +1032,87 @@ impl BytecodeCompiler {
                 "checked method call has ambiguous checker call-site receipts for its source span",
             ));
         };
-        site.callee.clone().ok_or_else(|| {
-            InterpError::new(format!(
-                "checked method call '{}' has no checker-resolved callable owner",
-                site.node_id.0
+        Ok(site.clone())
+    }
+
+    fn checked_cast_receipt(
+        &self,
+        expr: &Expr,
+        target: &Type,
+    ) -> Result<CheckedCastReceipt, InterpError> {
+        if !self.checked_program_installed {
+            return Err(InterpError::new(
+                "bytecode cast requires a checker-installed conversion receipt",
+            ));
+        }
+        let key = expr
+            .meta()
+            .and_then(|meta| CheckedSourceSpanKey::from_span(meta.span))
+            .ok_or_else(|| InterpError::new("bytecode cast has no stable source span"))?;
+        let Some(receipts) = self.checked_casts_by_span.get(&key) else {
+            return Err(InterpError::new(
+                "bytecode cast has no checker-issued explicit conversion receipt",
+            ));
+        };
+        let [receipt] = receipts.as_slice() else {
+            return Err(InterpError::new(
+                "bytecode cast has ambiguous checker-issued conversion receipts",
+            ));
+        };
+        if CheckedSourceSpanKey::from_span(receipt.origin.user_span()) != Some(key)
+            || !receipt.node_id.0.contains("/node:expr.cast@")
+            || !receipt.node_id.0.ends_with(&format!(
+                ":{}:{}-{}:{}",
+                key.start_line, key.start_col, key.end_line, key.end_col
             ))
-        })
+        {
+            return Err(InterpError::new(
+                "bytecode cast Checker receipt is not bound to this exact source node",
+            ));
+        }
+        let resolved_target = self.resolve_type(target);
+        let target_primitive = match resolved_target.unlocated() {
+            Type::Name(name, args) if args.is_empty() => {
+                crate::core::PrimitiveType::from_language_name(name)
+            }
+            _ => None,
+        };
+        if receipt.to_primitive != target_primitive
+            || (receipt.conversion_kind == crate::core::ir::CheckedConversionKind::Identity
+                && receipt.from != receipt.to)
+            || (receipt.from == receipt.to
+                && receipt.conversion_kind != crate::core::ir::CheckedConversionKind::Identity)
+        {
+            return Err(InterpError::new(
+                "bytecode cast Checker receipt disagrees with the exact source target or conversion",
+            ));
+        }
+        Ok(receipt.clone())
     }
 
     /// Compile a full AST file into a BytecodeProgram (Arc-shared so VMs,
     /// cross-thread FFI callbacks, and actor workers can hold it independently
     /// of the compiler/creator lifetime — 0.35.27 C3 ownership model).
     pub fn compile_file(&mut self, file: &File) -> Result<Arc<BytecodeProgram>, InterpError> {
+        // The AST compatibility emitter may also be called directly by tools
+        // and tests. Its casts still require real Checker conversions: obtain
+        // them from the Checker for this exact source before emitting any
+        // bytecode, and fail closed if the source is not checkable. A caller
+        // that already installed its CheckedProgram remains responsible for
+        // pairing it with the corresponding AST.
+        if !self.checked_program_installed {
+            let checked = crate::core::check_program(file).map_err(|diagnostics| {
+                let details = diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                InterpError::new(format!(
+                    "bytecode compilation requires Checker-issued source authority; Checker rejected the input:\n{details}"
+                ))
+            })?;
+            self.install_checked_program(&checked);
+        }
         // Store AST for actor worker threads.
         self.ast_file = Some(std::sync::Arc::new(file.clone()));
 
@@ -1640,9 +2011,9 @@ impl BytecodeCompiler {
                                 // printed "foo"; unsafe_cast_protocol(5)
                                 // dispatched Foo_show with an Int receiver) —
                                 // diverging from codegen's runtime vtable
-                                // dispatch. With VarType::Dyn the call
-                                // compiles to Op::DynMethodCall and resolves
-                                // by the receiver's concrete type at runtime.
+                                // dispatch. Preserve VarType::Dyn so the
+                                // removed Protocol method shape is rejected
+                                // before either bytecode dispatch path.
                                 match decl_ty.unlocated() {
                                     Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
                                     // 0.34.34: a declared scalar annotation is
@@ -2113,6 +2484,10 @@ impl BytecodeCompiler {
             Expr::Ident(name) => {
                 // Constants: inline the value expression.
                 if let Some(const_expr) = self.constants.get(name).cloned() {
+                    // `clone` preserves the initializer's source metadata.
+                    // Cast receipt lookup is keyed to that original source
+                    // span, which is collected from the constant declaration
+                    // root above; do not synthesize a use-site cast identity.
                     return self.compile_expr(fc, &const_expr);
                 }
                 // Local variable reference (shadows nullary constructors and
@@ -2200,33 +2575,91 @@ impl BytecodeCompiler {
                 Ok(rd)
             }
             Expr::Cast(inner, ty) => {
+                let receipt = self.checked_cast_receipt(expr, ty)?;
+                let from = receipt.from_primitive;
+                let to = receipt.to_primitive;
                 let r = self.compile_expr(fc, inner)?;
                 let rd = fc.proto.alloc_reg();
-                match ty.unlocated() {
-                    Type::Name(n, _) if n == "f64" || n == "f32" => {
-                        fc.emit(Op::IntToFloat { rd, ra: r });
-                    }
-                    Type::Name(n, _) if n == "i64" || n == "int" => {
-                        // Cast to int: truncate Float → Int.
-                        fc.emit(Op::Cast {
-                            rd,
-                            ra: r,
-                            target: 0,
-                        });
-                    }
-                    Type::Name(n, _) if n == "i32" => {
-                        // Cast to i32: VALUE must additionally wrap to the i32
-                        // width (0.34.34 L1 parity: codegen truncates —
-                        // `3000000000 as i32` yields -1294967296, the VM
-                        // previously passed the i64 value through unchanged).
+                use crate::core::PrimitiveType::{F32, F64, I32, I64};
+                match (from, to) {
+                    (Some(I32 | I64), Some(I32)) => {
+                        // Rust integer `as i32` keeps the low 32 bits and
+                        // sign-interprets them, matching native truncation.
                         fc.emit(Op::Cast {
                             rd,
                             ra: r,
                             target: 2,
                         });
                     }
-                    _ => {
+                    (Some(I32 | I64), Some(I64)) => {
+                        // Bytecode integers use an i64 payload; widening an
+                        // i32 is therefore a value-preserving move.
                         fc.emit(Op::Mov { rd, rs: r });
+                    }
+                    (Some(F32 | F64), Some(I32)) => {
+                        let cast_input = if from == Some(F32) {
+                            let narrowed = fc.proto.alloc_reg();
+                            fc.emit(Op::FloatNarrow {
+                                rd: narrowed,
+                                ra: r,
+                            });
+                            narrowed
+                        } else {
+                            r
+                        };
+                        fc.emit(Op::Cast {
+                            rd,
+                            ra: cast_input,
+                            target: 2,
+                        });
+                    }
+                    (Some(F32 | F64), Some(I64)) => {
+                        let cast_input = if from == Some(F32) {
+                            let narrowed = fc.proto.alloc_reg();
+                            fc.emit(Op::FloatNarrow {
+                                rd: narrowed,
+                                ra: r,
+                            });
+                            narrowed
+                        } else {
+                            r
+                        };
+                        fc.emit(Op::Cast {
+                            rd,
+                            ra: cast_input,
+                            target: 0,
+                        });
+                    }
+                    (Some(I32 | I64), Some(F32)) => {
+                        // Convert the integer directly to binary32. Going
+                        // through f64 can double-round large i64 values.
+                        fc.emit(Op::IntToFloat32 { rd, ra: r });
+                    }
+                    (Some(F32), Some(F32 | F64)) => {
+                        // VM floats are represented as f64 values. Normalize
+                        // an f32 source before either preserving or widening
+                        // it, including values arriving through parameters.
+                        fc.emit(Op::FloatNarrow { rd, ra: r });
+                    }
+                    (Some(F64), Some(F32)) => {
+                        fc.emit(Op::FloatNarrow { rd, ra: r });
+                    }
+                    (Some(I32 | I64), Some(F64)) => {
+                        fc.emit(Op::IntToFloat { rd, ra: r });
+                    }
+                    (Some(F64), Some(F64)) => {
+                        fc.emit(Op::Mov { rd, rs: r });
+                    }
+                    _ if receipt.from == receipt.to
+                        && receipt.conversion_kind
+                            == crate::core::ir::CheckedConversionKind::Identity =>
+                    {
+                        fc.emit(Op::Mov { rd, rs: r });
+                    }
+                    _ => {
+                        return Err(InterpError::new(
+                            "bytecode cast: checker receipt does not establish a supported numeric conversion",
+                        ));
                     }
                 }
                 Ok(rd)
@@ -2897,7 +3330,7 @@ impl BytecodeCompiler {
                     Lit::FString(_) => {
                         return Err(InterpError::new(
                             "bytecode quote: f-strings not supported in quote context",
-                        ))
+                        ));
                     }
                 };
                 fc.emit(Op::QuotePushLit { const_idx: idx });
@@ -3456,7 +3889,7 @@ impl BytecodeCompiler {
                 return Err(InterpError::new(format!(
                     "bytecode: unsupported int binary op {:?}",
                     op
-                )))
+                )));
             }
         };
         fc.emit(instr);
@@ -3487,7 +3920,7 @@ impl BytecodeCompiler {
                 return Err(InterpError::new(format!(
                     "bytecode: unsupported float binary op {:?}",
                     op
-                )))
+                )));
             }
         };
         fc.emit(instr);
@@ -3610,12 +4043,30 @@ impl BytecodeCompiler {
         args: &[Expr],
         call_meta: Option<AstNodeMeta>,
     ) -> Result<Reg, InterpError> {
-        let checked_method_callee =
+        let checked_method_receipt =
             if self.checked_program_installed && matches!(callee.unlocated(), Expr::Field(_, _)) {
-                Some(self.checked_callsite_callee(call_meta)?)
+                Some(self.checked_callsite_receipt(call_meta)?)
             } else {
                 None
             };
+        if checked_method_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.dynamic_protocol_receiver)
+        {
+            return Err(InterpError::new(
+                "MIR-COVERAGE-001: dynamic Protocol method dispatch through a `dyn Trait` receiver is removed by language-spec §3.9; Bytecode compatibility compilation is not permitted",
+            ));
+        }
+        if let Expr::Field(receiver, _) = callee.unlocated() {
+            if matches!(self.infer_expr_type(fc, receiver), VarType::Dyn(_)) {
+                return Err(InterpError::new(
+                    "MIR-COVERAGE-001: dynamic Protocol method dispatch through a `dyn Trait` receiver is removed by language-spec §3.9; Bytecode compatibility compilation is not permitted",
+                ));
+            }
+        }
+        let checked_method_callee = checked_method_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.callee.clone());
         // ── Early-return special cases (no pre-allocation) ──
         if let Expr::Ident(name) = callee.unlocated() {
             // Special case: push(var, elem) → ListPush (in-place mutation).
@@ -4502,8 +4953,9 @@ impl BytecodeCompiler {
             // Try CheckedProgram method table (G1: precise dispatch).
             // The method_table maps (type_name, method_name) → mangled function name.
             // We try all known impl types as potential receivers.
-            // dyn receivers: skip static resolution entirely — the concrete
-            // type is only known at runtime (tree-walker DynTrait semantics).
+            // Defensive local check: the shared call boundary above already
+            // rejects checked dynamic Protocol receivers before code reaches
+            // any static compatibility resolution.
             let recv_is_dyn = matches!(
                 obj.unlocated(),
                 Expr::Ident(name) if fc.var_is_dyn(name)
@@ -4587,7 +5039,9 @@ impl BytecodeCompiler {
                 }
             }
 
-            // Fallback: dynamic method call (runtime dispatch for actors, records, etc.).
+            // Fallback: runtime dispatch for actors and other supported
+            // receiver domains. Dynamic Protocol receivers have already been
+            // rejected at the shared call boundary above.
             // This MUST come before bare user function lookup to prevent stdlib
             // functions from shadowing actor methods (e.g., `c.increment()` must
             // dispatch to the actor, not to a stdlib `increment` function).
@@ -7023,6 +7477,8 @@ impl FuncCompiler {
 /// Convert a surface AST Type to a lightweight VarType tag (G1 helper).
 fn surface_type_to_var_type(ty: &Type) -> VarType {
     match ty.unlocated() {
+        Type::DynTrait(names) => VarType::Dyn(names.join(" + ")),
+        Type::Ref(_, inner) | Type::RefMut(_, inner) => surface_type_to_var_type(inner),
         Type::Name(n, _) => match n.as_str() {
             "i32" => VarType::Int32,
             "i64" | "i8" | "i16" | "u8" | "u16" | "u32" | "u64" => VarType::Int,
@@ -7031,7 +7487,6 @@ fn surface_type_to_var_type(ty: &Type) -> VarType {
             "string" => VarType::String,
             other => VarType::User(other.to_string()),
         },
-        Type::Ref(_, inner) | Type::RefMut(_, inner) => surface_type_to_var_type(inner),
         _ => VarType::Unknown,
     }
 }
@@ -7066,6 +7521,9 @@ fn ret_type_to_var_type(ret: &Option<Type>) -> VarType {
 /// stores field types as display strings; only scalar tags matter for
 /// comparison/arithmetic dispatch (nominal containers stay Unknown).
 fn surface_type_str_to_var_type(s: &str) -> VarType {
+    if let Some(traits) = s.trim().strip_prefix("dyn ") {
+        return VarType::Dyn(traits.trim().to_string());
+    }
     let base = s.split('<').next().unwrap_or(s).trim();
     match base {
         "f32" | "f64" => VarType::Float,
@@ -8169,6 +8627,7 @@ mod checked_owner_dispatch_tests {
             vec![CheckedCallSiteReceipt {
                 node_id: crate::core::NodeId("call:unresolved".into()),
                 callee: None,
+                dynamic_protocol_receiver: false,
             }],
         );
         assert!(compiler
@@ -8183,10 +8642,12 @@ mod checked_owner_dispatch_tests {
                 CheckedCallSiteReceipt {
                     node_id: crate::core::NodeId("call:first".into()),
                     callee: None,
+                    dynamic_protocol_receiver: false,
                 },
                 CheckedCallSiteReceipt {
                     node_id: crate::core::NodeId("call:second".into()),
                     callee: None,
+                    dynamic_protocol_receiver: false,
                 },
             ],
         );

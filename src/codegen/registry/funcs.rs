@@ -12,27 +12,6 @@ use inkwell::values::{
 use inkwell::ThreadLocalMode;
 use std::collections::HashMap;
 
-fn native_generic_to_ast(
-    generic: &crate::core::ir::NativeGenericBinder,
-) -> crate::ast::GenericParam {
-    crate::ast::GenericParam {
-        meta: crate::ast::AstNodeMeta::synthetic(crate::ast::AstOrigin::RuntimeSystem(
-            "codegen.checked_impl_generic",
-        )),
-        name: generic.name.clone(),
-        bounds: generic
-            .bounds
-            .iter()
-            .map(|bound| bound.name.clone())
-            .collect(),
-        kind: match generic.kind {
-            crate::core::ir::NativeGenericKind::Free => crate::ast::GenericKind::Free,
-            crate::core::ir::NativeGenericKind::Linear => crate::ast::GenericKind::Linear,
-            crate::core::ir::NativeGenericKind::LinearDrop => crate::ast::GenericKind::LinearDrop,
-        },
-    }
-}
-
 /// LLVM types computed for an extern wrapper and its underlying C declaration.
 #[allow(dead_code)]
 struct ExternFnSignature<'ctx> {
@@ -80,254 +59,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 crate::core::fmt_type(ty)
             ))
         })
-    }
-
-    /// Production method bodies are joined to their checked native signature
-    /// and vtable slot by callable owner. The AST value here is only the legacy
-    /// executable body payload; it never decides which method gets emitted.
-    pub(in crate::codegen) fn compile_checked_impl_methods(
-        &mut self,
-        program: &crate::core::CheckedProgram,
-    ) -> MimiResult<()> {
-        self.compile_checked_impl_methods_with_eligibility(program, None)
-    }
-
-    /// Install checked impl-method declarations before vtable materialization.
-    ///
-    /// A production resolved pass supplies the exact callable set it will
-    /// lower. Those method bodies are only declared here; the Typed IR
-    /// emitter fills the body after all declarations are installed. A method
-    /// outside that set is an explicit canonical coverage boundary. It must
-    /// not quietly re-enter the retained AST emitter merely because a vtable
-    /// needs a function symbol.
-    pub(in crate::codegen) fn compile_checked_impl_methods_with_eligibility(
-        &mut self,
-        program: &crate::core::CheckedProgram,
-        resolved_eligible: Option<&std::collections::BTreeSet<crate::core::NodeId>>,
-    ) -> MimiResult<()> {
-        let catalog = program.native_declarations();
-        for impl_owner in &catalog.impl_order {
-            let implementation = catalog.impls.get(impl_owner).ok_or_else(|| {
-                CompileError::LlvmError(format!(
-                    "checked impl '{}' is absent from native declaration catalog",
-                    impl_owner.0
-                ))
-            })?;
-            for binding in &implementation.methods {
-                let (body, receiver_ty) = self
-                    .checked_impl_method_bodies
-                    .get(&binding.callable)
-                    .cloned()
-                    .ok_or_else(|| {
-                        CompileError::LlvmError(format!(
-                            "checked impl method '{}' has no body payload",
-                            binding.callable.0
-                        ))
-                    })?;
-                if body.name != binding.symbol {
-                    return Err(CompileError::LlvmError(format!(
-                        "checked impl body '{}' differs from native method '{}'",
-                        body.name, binding.symbol
-                    )));
-                }
-                let type_args_for_self: Vec<Type> = implementation
-                    .generics
-                    .iter()
-                    .map(|generic| Type::Name(generic.name.clone(), Vec::new()))
-                    .collect();
-                let impl_method = if resolved_eligible
-                    .is_some_and(|eligible| eligible.contains(&binding.callable))
-                {
-                    // Resolved `self` follows the canonical signature's
-                    // value ABI. The compatibility header above retains the
-                    // historical reference spelling for the test adapter,
-                    // but using that spelling for the declaration here would
-                    // make the vtable slot's LLVM type disagree with Typed
-                    // MIR for record receivers.
-                    let canonical_receiver =
-                        binding.signature.parameters.first().ok_or_else(|| {
-                            CompileError::LlvmError(format!(
-                                "checked impl method '{}' has no canonical receiver",
-                                binding.callable.0
-                            ))
-                        })?;
-                    let canonical_receiver_ty = self
-                        .checked_legacy_type_for_resolved(
-                            &canonical_receiver.ty,
-                            program.resolved_types(),
-                        )
-                        .map_err(|error| {
-                            CompileError::LlvmError(format!(
-                                "checked impl method '{}' canonical receiver is not materializable: {error}",
-                                binding.callable.0
-                            ))
-                        })?;
-                    self.impl_method_with_self_type(&body, &binding.symbol, canonical_receiver_ty)
-                } else {
-                    self.impl_method_with_self_type(&body, &binding.symbol, receiver_ty)
-                };
-                match resolved_eligible {
-                    Some(eligible) if eligible.contains(&binding.callable) => {
-                        // The canonical emitter owns the body. Declare the
-                        // checker-issued symbol now so vtable construction can
-                        // bind its slot before resolved bodies are emitted.
-                        self.declare_func(&impl_method)?;
-                    }
-                    Some(_) => {
-                        return Err(CompileError::CanonicalMirCoverage(format!(
-                            "MIR-COVERAGE-001/NITS: checked impl method '{}' has no canonical resolved-native body; refusing legacy impl emission",
-                            binding.callable.0
-                        )));
-                    }
-                    None => {
-                        // Unit tests that exercise the compatibility registry
-                        // directly retain the old body adapter. Production
-                        // always passes an explicit resolved-eligibility set.
-                        #[cfg(test)]
-                        {
-                            self.compile_impl_method_body_for_test(
-                                &body,
-                                &binding.symbol,
-                                type_args_for_self,
-                                impl_method.params[0].ty.clone(),
-                            )?;
-                        }
-                        #[cfg(not(test))]
-                        {
-                            let _ = type_args_for_self;
-                            return Err(CompileError::CanonicalMirCoverage(format!(
-                                "MIR-COVERAGE-001/NITS: checked impl method '{}' requires an explicit resolved-native eligibility receipt",
-                                binding.callable.0
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(in crate::codegen) fn checked_impl_method_header(
-        &self,
-        body: &crate::ast::FuncDef,
-        implementation: &crate::core::ir::NativeImplDeclaration,
-        binding: &crate::core::ir::NativeImplMethodDeclaration,
-        program: &crate::core::CheckedProgram,
-    ) -> Result<(crate::ast::FuncDef, Type), CompileError> {
-        let signature = &binding.signature;
-        let Some(receiver) = signature.parameters.first() else {
-            return Err(CompileError::LlvmError(format!(
-                "checked impl method '{}' has no canonical receiver parameter",
-                binding.callable.0
-            )));
-        };
-        if receiver.name != "self" {
-            return Err(CompileError::LlvmError(format!(
-                "checked impl method '{}' first parameter is not self",
-                binding.callable.0
-            )));
-        }
-        let source_parameters = body
-            .params
-            .iter()
-            .filter(|parameter| parameter.name != "self")
-            .collect::<Vec<_>>();
-        if source_parameters.len() + 1 != signature.parameters.len() {
-            return Err(CompileError::LlvmError(format!(
-                "checked impl method '{}' source body and canonical parameter counts differ",
-                binding.callable.0
-            )));
-        }
-
-        let mut checked = body.clone();
-        checked.name = binding.symbol.clone();
-        checked.params.clear();
-        for (source, canonical) in source_parameters
-            .into_iter()
-            .zip(signature.parameters.iter().skip(1))
-        {
-            if source.name != canonical.name {
-                return Err(CompileError::LlvmError(format!(
-                    "checked impl method '{}' parameter order differs at '{}' / '{}'",
-                    binding.callable.0, source.name, canonical.name
-                )));
-            }
-            let ty = self
-                .checked_legacy_type_for_resolved(&canonical.ty, program.resolved_types())
-                .map_err(|error| {
-                    CompileError::LlvmError(format!(
-                        "checked impl method '{}' parameter '{}' type is not materializable: {error}",
-                        binding.callable.0, canonical.name
-                    ))
-                })?
-                .deep_reorigin(source.meta);
-            checked.params.push(crate::ast::Param {
-                meta: source.meta,
-                name: canonical.name.clone(),
-                ty,
-                mut_: canonical.mutable,
-                default_value: source.default_value.clone(),
-                borrow: match canonical.permission {
-                    Some(crate::core::Permission::View) => Some(crate::ast::ParamBorrow::View),
-                    Some(crate::core::Permission::Mutate) => Some(crate::ast::ParamBorrow::Mutate),
-                    Some(crate::core::Permission::Consume) | None => None,
-                },
-            });
-        }
-        let return_type = self
-            .checked_legacy_type_for_resolved(&signature.result, program.resolved_types())
-            .map_err(|error| {
-                CompileError::LlvmError(format!(
-                    "checked impl method '{}' result type is not materializable: {error}",
-                    binding.callable.0
-                ))
-            })?;
-        checked.ret = Some(return_type);
-        checked.generics = implementation
-            .generics
-            .iter()
-            .chain(&binding.generics)
-            .map(native_generic_to_ast)
-            .collect();
-
-        let receiver_ty = self
-            .checked_legacy_type_for_resolved(&receiver.ty, program.resolved_types())
-            .map_err(|error| {
-                CompileError::LlvmError(format!(
-                    "checked impl method '{}' receiver type is not materializable: {error}",
-                    binding.callable.0
-                ))
-            })?;
-        let receiver_is_direct = matches!(
-            program.resolved_types().get(&receiver.ty),
-            Some(
-                crate::core::ResolvedType::Primitive(
-                    crate::core::PrimitiveType::I32
-                        | crate::core::PrimitiveType::I64
-                        | crate::core::PrimitiveType::F64
-                        | crate::core::PrimitiveType::Bool
-                ) | crate::core::ResolvedType::DynamicAny { .. }
-            )
-        ) || matches!(
-            program.resolved_types().get(&receiver.ty),
-            Some(crate::core::ResolvedType::Nominal { item, .. })
-                if matches!(
-                    item.as_str()
-                        .strip_prefix("builtin:type:")
-                        .unwrap_or(item.as_str()),
-                    "Record" | "Map" | "Any"
-                )
-        );
-        let receiver_ty = if receiver_is_direct
-            || matches!(
-                receiver_ty.unlocated(),
-                Type::Ref(_, _) | Type::RefMut(_, _)
-            ) {
-            receiver_ty
-        } else {
-            Type::Ref(None, Box::new(receiver_ty))
-        };
-        Ok((checked, receiver_ty))
     }
 
     pub(in crate::codegen) fn checked_legacy_type_for_resolved(
@@ -458,69 +189,9 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
-    pub(in crate::codegen) fn compile_checked_impl_method_instance(
-        &mut self,
-        callable: &crate::core::NodeId,
-        type_map: &HashMap<String, Type>,
-    ) -> MimiResult<()> {
-        let (method, receiver_ty) = self
-            .checked_impl_method_bodies
-            .get(callable)
-            .cloned()
-            .ok_or_else(|| {
-                CompileError::LlvmError(format!(
-                    "checked impl method '{}' has no canonical body template",
-                    callable.0
-                ))
-            })?;
-        let instance = self.impl_method_with_self_type(&method, &method.name, receiver_ty);
-        if self.checked_native_declarations.is_some() {
-            return Err(CompileError::CanonicalMirCoverage(format!(
-                "MIR-COVERAGE-001/NITS: checked generic impl method '{}' has no canonical specialized MIR instance; refusing legacy monomorphization",
-                callable.0
-            )));
-        }
-        #[cfg(test)]
-        {
-            self.compile_checked_impl_method_instance_legacy_for_test(&instance, type_map)
-        }
-        #[cfg(not(test))]
-        {
-            let _ = (instance, type_map);
-            Err(CompileError::CanonicalMirCoverage(format!(
-                "MIR-COVERAGE-001/NITS: checked generic impl method '{}' requires a canonical specialized MIR instance",
-                callable.0
-            )))
-        }
-    }
-
-    pub(in crate::codegen) fn impl_method_with_self_type(
-        &self,
-        method: &crate::ast::FuncDef,
-        symbol: &str,
-        self_ty: Type,
-    ) -> crate::ast::FuncDef {
-        let mut impl_method = method.clone();
-        impl_method.name = symbol.to_owned();
-        impl_method.params.insert(0, {
-            let meta = crate::ast::AstNodeMeta::inherited(
-                impl_method.meta.span,
-                crate::ast::AstOrigin::RuntimeSystem("codegen.impl_self"),
-            );
-            crate::ast::Param {
-                meta,
-                name: "self".into(),
-                ty: self_ty.deep_reorigin(meta),
-                mut_: false,
-                default_value: None,
-                borrow: None,
-            }
-        });
-        impl_method
-    }
-
     /// Build vtable struct types and global vtable instances for all trait impls.
     /// Called after compile_impl_methods so mangled functions exist.
+    #[cfg(test)]
     pub(in crate::codegen) fn compile_vtables(&mut self) -> MimiResult<()> {
         let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
         let mut trait_method_list: HashMap<String, Vec<String>> = HashMap::new();
@@ -893,6 +564,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::codegen) fn register_extern_block(
         &mut self,
         block: &crate::ast::ExternBlock,
@@ -988,7 +660,8 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
 
         // Phase 4: Build wrapper args, converting Mimi types to C ABI.
-        let (mut wrapper_args, json_strings) = self.emit_arg_conversions(&ef, wrapper_fn, &sig)?;
+        let (mut wrapper_args, json_strings, c_string_copies) =
+            self.emit_arg_conversions(&ef, wrapper_fn, &sig)?;
 
         // For complex repr(C) record returns, allocate an sret alloca and pass
         // its pointer as the first argument. The extern function returns void
@@ -1025,16 +698,31 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         }
 
-        // Free temporary allocations, restore handlers.
-        self.emit_ffi_cleanup(&ef, &json_strings)?;
+        // Copy string returns before freeing temporary C argument buffers. A
+        // C function may return the pointer it received as a borrowed string
+        // argument; the copy must happen while that buffer is still live.
+        let string_return = if ef.ret.as_ref().is_some_and(
+            |ty| matches!(ty.unlocated(), crate::ast::Type::Name(n, _) if n == "string"),
+        ) {
+            Some(self.emit_string_return(&call, &sig)?)
+        } else {
+            None
+        };
 
         // Phase 5: Check ensures contract after C call
         if self.verify_contracts {
-            self.emit_ensures_check(&ef, wrapper_fn, &call)?;
+            self.emit_ensures_check(&ef, wrapper_fn, &call, string_return.as_ref())?;
         }
 
+        // Free temporary allocations, restore handlers, then return the value.
+        self.emit_ffi_cleanup(&ef, &json_strings, &c_string_copies)?;
+
         // Phase 6: Return
-        self.emit_extern_return(&ef, wrapper_fn, &call, &sig, sret_alloca)?;
+        if let Some(string_return) = string_return {
+            self.build_return(Some(&string_return))?;
+        } else {
+            self.emit_extern_return(&ef, wrapper_fn, &call, &sig, sret_alloca)?;
+        }
 
         // Store the wrapper so call sites can find it even if LLVM mangled
         // the name (e.g., `strlen` → `strlen.11` when C lib strlen exists).
@@ -1559,9 +1247,14 @@ impl<'ctx> CodeGenerator<'ctx> {
         ef: &crate::ast::ExternFunc,
         wrapper_fn: inkwell::values::FunctionValue<'ctx>,
         sig: &ExternFnSignature<'ctx>,
-    ) -> MimiResult<(Vec<BasicMetadataValueEnum<'ctx>>, Vec<PointerValue<'ctx>>)> {
+    ) -> MimiResult<(
+        Vec<BasicMetadataValueEnum<'ctx>>,
+        Vec<PointerValue<'ctx>>,
+        Vec<PointerValue<'ctx>>,
+    )> {
         let mut wrapper_args = Vec::new();
         let mut json_strings = Vec::new();
+        let mut c_string_copies = Vec::new();
 
         for (i, p) in ef.params.iter().enumerate() {
             let param = wrapper_fn
@@ -1569,7 +1262,9 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .ok_or_else(|| CompileError::LlvmError(format!("missing param {}", i)))?;
             match p.ty.unlocated() {
                 crate::ast::Type::Name(n, _) if n == "string" => {
-                    wrapper_args.push(self.emit_string_arg_conversion(param, i)?);
+                    let (c_string, allocation) = self.emit_string_arg_conversion(param, i)?;
+                    wrapper_args.push(c_string);
+                    c_string_copies.push(allocation);
                 }
                 crate::ast::Type::Name(n, _)
                     if n == "List"
@@ -1667,27 +1362,66 @@ impl<'ctx> CodeGenerator<'ctx> {
                 }
             }
         }
-        Ok((wrapper_args, json_strings))
+        Ok((wrapper_args, json_strings, c_string_copies))
     }
 
-    /// Convert a Mimi string argument to a bare `i8*` pointer.
+    /// Copy a Mimi string argument into a temporary C buffer. The wrapper
+    /// frees this buffer immediately after the foreign call, so the C callee
+    /// must not retain the pointer.
     fn emit_string_arg_conversion(
         &self,
         param: BasicValueEnum<'ctx>,
         i: usize,
-    ) -> MimiResult<BasicMetadataValueEnum<'ctx>> {
+    ) -> MimiResult<(BasicMetadataValueEnum<'ctx>, PointerValue<'ctx>)> {
         let struct_val = param.into_struct_value();
         let ptr = self
             .builder
             .build_extract_value(struct_val, 0, &format!("str_ptr_{}", i))
             .map_err(|e| CompileError::LlvmError(format!("extract value error: {}", e)))?;
-        match ptr {
-            BasicValueEnum::PointerValue(pv) => Ok(BasicMetadataValueEnum::PointerValue(pv)),
-            _ => Err(CompileError::TypeMismatch(format!(
-                "string param {}: expected pointer from struct field 0",
-                i
-            ))),
-        }
+        let ptr = match ptr {
+            BasicValueEnum::PointerValue(pv) => pv,
+            _ => {
+                return Err(CompileError::TypeMismatch(format!(
+                    "string param {}: expected pointer from struct field 0",
+                    i
+                )))
+            }
+        };
+        let len = self
+            .builder
+            .build_extract_value(struct_val, 1, &format!("str_len_{}", i))
+            .map_err(|e| CompileError::LlvmError(format!("extract value error: {}", e)))?
+            .into_int_value();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let copy_fn = self
+            .module
+            .get_function("mimi_string_to_cstr_copy")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_string_to_cstr_copy",
+                    i8_ptr_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let copy = self
+            .build_call(
+                copy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(ptr),
+                    BasicMetadataValueEnum::IntValue(len),
+                ],
+                &format!("c_string_arg_copy_{}", i),
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("Mimi-to-C string copy returned void".into()))?
+            .into_pointer_value();
+        Ok((BasicMetadataValueEnum::PointerValue(copy), copy))
     }
 
     /// Convert a List/Record argument to a freshly allocated JSON string (i8*).
@@ -2170,6 +1904,7 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         ef: &crate::ast::ExternFunc,
         json_strings: &[PointerValue<'ctx>],
+        c_string_copies: &[PointerValue<'ctx>],
     ) -> MimiResult<()> {
         for (j, json_pv) in json_strings.iter().enumerate() {
             if let Some(free_fn) = self.module.get_function("free") {
@@ -2177,6 +1912,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     free_fn,
                     &[BasicMetadataValueEnum::PointerValue(*json_pv)],
                     &format!("free_json_{}", j),
+                )?;
+            }
+        }
+
+        if !c_string_copies.is_empty() {
+            let free_string_fn = self.get_runtime_fn("mimi_string_free")?;
+            for (index, c_string) in c_string_copies.iter().enumerate() {
+                self.build_call(
+                    free_string_fn,
+                    &[BasicMetadataValueEnum::PointerValue(*c_string)],
+                    &format!("free_c_string_arg_{}", index),
                 )?;
             }
         }
@@ -2193,21 +1939,49 @@ impl<'ctx> CodeGenerator<'ctx> {
         ef: &crate::ast::ExternFunc,
         wrapper_fn: inkwell::values::FunctionValue<'ctx>,
         call: &CallSiteValue<'ctx>,
+        converted_return: Option<&BasicValueEnum<'ctx>>,
     ) -> MimiResult<()> {
         if let Some(ens_expr) = &ef.ensures {
-            let ret_val = call_try_basic_value(call).ok_or_else(|| {
-                CompileError::LlvmError("extern wrapper call did not return a value".to_string())
-            })?;
+            let string_result = ef.ret.as_ref().is_some_and(
+                |ty| matches!(ty.unlocated(), crate::ast::Type::Name(name, _) if name == "string"),
+            );
+            let ret_val = if let Some(converted) = converted_return {
+                *converted
+            } else if string_result {
+                return Err(CompileError::LlvmError(
+                    "extern String ensures is missing its validated Mimi result".to_string(),
+                ));
+            } else {
+                call_try_basic_value(call).ok_or_else(|| {
+                    CompileError::LlvmError(
+                        "extern wrapper call did not return a value".to_string(),
+                    )
+                })?
+            };
             let mut contract_vars = self.contract_vars_from_params(ef, wrapper_fn)?;
             let result_ty = ret_val.get_type();
             let result_alloca = self.build_alloca(result_ty, "result")?;
             self.build_store(result_alloca, ret_val)?;
             contract_vars.insert("result".to_string(), (result_alloca, result_ty));
-            self.compile_contract_assert(
+            let previous_result_type = if string_result {
+                self.var_type_names
+                    .insert("result".to_string(), "string".to_string())
+            } else {
+                None
+            };
+            let assertion_result = self.compile_contract_assert(
                 ens_expr,
                 &contract_vars,
                 super::super::scope::ContractPhase::Ensures,
-            )?;
+            );
+            if string_result {
+                if let Some(previous) = previous_result_type {
+                    self.var_type_names.insert("result".to_string(), previous);
+                } else {
+                    self.var_type_names.remove("result");
+                }
+            }
+            assertion_result?;
         }
         Ok(())
     }
@@ -2263,7 +2037,8 @@ impl<'ctx> CodeGenerator<'ctx> {
             .as_ref()
             .is_some_and(|t| matches!(t.unlocated(), crate::ast::Type::Name(n, _) if n == "string"))
         {
-            self.emit_string_return(call, sig)?;
+            let ret = self.emit_string_return(call, sig)?;
+            self.build_return(Some(&ret))?;
         } else if sig.wrapper_fn_type.get_return_type().is_some() {
             let ret = call_try_basic_value(call).ok_or_else(|| {
                 CompileError::LlvmError("extern wrapper call did not return a value".to_string())
@@ -2614,47 +2389,80 @@ impl<'ctx> CodeGenerator<'ctx> {
         Ok(())
     }
 
-    /// Convert a returned C string (`i8*`) into a Mimi `{i8*, i64}` struct.
+    /// Convert a C string return into an owned Mimi string.
+    ///
+    /// The C ABI only supplies a `char *`, so the original pointer may be
+    /// borrowed, static, or mutable after this call. Validate it as UTF-8 and
+    /// copy it into Mimi-owned storage before exposing a `{ptr, len}` value.
     fn emit_string_return(
         &mut self,
         call: &CallSiteValue<'ctx>,
-        sig: &ExternFnSignature<'ctx>,
-    ) -> MimiResult<()> {
-        let ret = call_try_basic_value(call)
-            .ok_or_else(|| CompileError::LlvmError("extern call returned void".to_string()))?;
-        let raw_ptr = match ret {
-            BasicValueEnum::PointerValue(pv) => pv,
+        _sig: &ExternFnSignature<'ctx>,
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        let raw = call_try_basic_value(call).ok_or_else(|| {
+            CompileError::LlvmError("extern C string return did not produce a value".into())
+        })?;
+        let raw_ptr = match raw {
+            BasicValueEnum::PointerValue(ptr) => ptr,
             _ => {
-                return Err(CompileError::LlvmError(
-                    "string return must be pointer".to_string(),
+                return Err(CompileError::TypeMismatch(
+                    "extern C string return must use the char* ABI".into(),
                 ))
             }
         };
-        let strlen_fn = self.get_runtime_fn("strlen")?;
+
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let len_fn = self
+            .module
+            .get_function("mimi_c_string_len_utf8")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_c_string_len_utf8",
+                    self.context
+                        .i64_type()
+                        .fn_type(&[BasicMetadataTypeEnum::PointerType(i8_ptr_ty)], false),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
         let len = self
             .build_call(
-                strlen_fn,
+                len_fn,
                 &[BasicMetadataValueEnum::PointerValue(raw_ptr)],
-                "strlen",
+                "extern_string_utf8_len",
             )?
             .try_as_basic_value_opt()
-            .ok_or_else(|| CompileError::LlvmError("strlen returned void".to_string()))?
+            .ok_or_else(|| CompileError::LlvmError("UTF-8 C string length returned void".into()))?
             .into_int_value();
 
-        let struct_ty = sig.wrapper_ret_ty;
-        let alloca = self.build_alloca(struct_ty, "string_ret")?;
-        let ptr_gep = self
-            .gep()
-            .build_struct_gep(struct_ty, alloca, 0, "str_ptr_gep")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        self.build_store(ptr_gep, raw_ptr)?;
-        let len_gep = self
-            .gep()
-            .build_struct_gep(struct_ty, alloca, 1, "str_len_gep")
-            .map_err(|e| CompileError::LlvmError(format!("gep: {}", e)))?;
-        self.build_store(len_gep, len)?;
-        let ret_val = self.build_load(struct_ty, alloca, "string_ret_val")?;
-        self.build_return(Some(&ret_val))?;
-        Ok(())
+        let copy_fn = self
+            .module
+            .get_function("mimi_string_to_cstr_copy")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_string_to_cstr_copy",
+                    i8_ptr_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let owned_ptr = self
+            .build_call(
+                copy_fn,
+                &[
+                    BasicMetadataValueEnum::PointerValue(raw_ptr),
+                    BasicMetadataValueEnum::IntValue(len),
+                ],
+                "extern_string_owned_copy",
+            )?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("Mimi string copy returned void".into()))?
+            .into_pointer_value();
+
+        self.wrap_string_ptr_len(owned_ptr, len)
     }
 }

@@ -378,8 +378,12 @@ fn review_write_file_reports_short_write() {
 #[test]
 fn review_binary_io_missing_path_traps_both_backends() {
     let read_bytes = r#"
-func main() -> string {
+func read_bytes_value() -> string {
     read_file_bytes("/definitely/not/a/mimi/file")
+}
+func main() -> i32 {
+    let _ = read_bytes_value();
+    0
 }
 "#;
     assert_vm_traps(read_bytes, "read_file_bytes");
@@ -388,8 +392,12 @@ func main() -> string {
     }
 
     let read_partial = r#"
-func main() -> string {
+func read_partial_value() -> string {
     read_file_partial("/definitely/not/a/mimi/file", 10)
+}
+func main() -> i32 {
+    let _ = read_partial_value();
+    0
 }
 "#;
     assert_vm_traps(read_partial, "read_file_partial");
@@ -398,8 +406,12 @@ func main() -> string {
     }
 
     let read_lines = r#"
-func main() -> string {
+func read_lines_value() -> string {
     read_lines_json("/definitely/not/a/mimi/file")
+}
+func main() -> i32 {
+    let _ = read_lines_value();
+    0
 }
 "#;
     assert_vm_traps(read_lines, "read_lines_json");

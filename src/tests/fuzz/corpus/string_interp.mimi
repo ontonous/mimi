@@ -1,4 +1,9 @@
-func main() -> string {
+func interpolated_greeting() -> string {
     let name = "Mimi";
     "Hello, {name}!"
+}
+
+func main() -> i32 {
+    println(interpolated_greeting());
+    0
 }

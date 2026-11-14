@@ -45,11 +45,29 @@ impl<'a> Checker<'a> {
                 ),
             );
         }
+        let pre_flow_consumptions = self.flow_consumption_snapshot();
         let then_ty = self.check_block_expr(then_, expected, scopes);
+        let then_flow_consumptions = self.flow_consumption_snapshot();
         let Some(else_block) = else_ else {
+            let branches = if block_is_diverging(then_) {
+                Vec::new()
+            } else {
+                vec![then_flow_consumptions]
+            };
+            self.merge_flow_consumption_snapshots(pre_flow_consumptions, branches);
             return then_ty;
         };
+        self.restore_flow_consumption_snapshot(&pre_flow_consumptions);
         let else_ty = self.check_block_expr(else_block, expected, scopes);
+        let else_flow_consumptions = self.flow_consumption_snapshot();
+        let mut flow_branches = Vec::new();
+        if !block_is_diverging(then_) {
+            flow_branches.push(then_flow_consumptions);
+        }
+        if !block_is_diverging(else_block) {
+            flow_branches.push(else_flow_consumptions);
+        }
+        self.merge_flow_consumption_snapshots(pre_flow_consumptions, flow_branches);
         let then_diverges = block_is_diverging(then_);
         let else_diverges = block_is_diverging(else_block);
         // Numeric widening ({i32→i64, i32→f64, i64→f64}) is an admitted
@@ -212,9 +230,21 @@ impl<'a> Checker<'a> {
                 format!("if condition must be bool, found {}", fmt_type(&cond_ty)),
             );
         }
+        let pre_flow_consumptions = self.flow_consumption_snapshot();
         let then_ty = self.infer_block_expr(then_, scopes);
+        let then_flow_consumptions = self.flow_consumption_snapshot();
         if let Some(eb) = else_ {
+            self.restore_flow_consumption_snapshot(&pre_flow_consumptions);
             let else_ty = self.infer_block_expr(eb, scopes);
+            let else_flow_consumptions = self.flow_consumption_snapshot();
+            let mut flow_branches = Vec::new();
+            if !block_is_diverging(then_) {
+                flow_branches.push(then_flow_consumptions);
+            }
+            if !block_is_diverging(eb) {
+                flow_branches.push(else_flow_consumptions);
+            }
+            self.merge_flow_consumption_snapshots(pre_flow_consumptions, flow_branches);
             // Bug-3: use unify instead of same_type to enable bidirectional type inference.
             // This allows the expected type to propagate into both branches, so
             // `Some(1)` in an `Option<i64>` context can infer i64 from the expected type.
@@ -232,6 +262,12 @@ impl<'a> Checker<'a> {
                 Type::Name("unknown".into(), vec![])
             }
         } else {
+            let branches = if block_is_diverging(then_) {
+                Vec::new()
+            } else {
+                vec![then_flow_consumptions]
+            };
+            self.merge_flow_consumption_snapshots(pre_flow_consumptions, branches);
             then_ty
         }
     }
@@ -423,68 +459,37 @@ impl<'a> Checker<'a> {
         }
         let inner_ty = self.infer_expr(expr, scopes);
         match inner_ty.unlocated() {
+            // Direct builtin signatures use structural Type::Result; declared
+            // Result<T, E> signatures use Type::Name below.
+            Type::Result(ok, _) => ok.as_ref().clone(),
             // Built-in Result<T, E> -> ? extracts T
-            Type::Name(n, args) if n == "Result" && args.len() == 2 => args[0].clone(),
+            Type::Name(n, args)
+                if n == "Result" && args.len() == 2 && !self.types.contains_key(n) =>
+            {
+                args[0].clone()
+            }
             // Built-in Option<T> -> ? extracts T
-            Type::Name(n, args) if n == "Option" && args.len() == 1 => args[0].clone(),
+            Type::Name(n, args)
+                if n == "Option" && args.len() == 1 && !self.types.contains_key(n) =>
+            {
+                args[0].clone()
+            }
             // T? syntactic sugar for Option<T>
             Type::Option(inner) => inner.as_ref().clone(),
-            // For unparameterized enum types like `Res`, look up the type definition
-            Type::Name(name, ref args) if args.is_empty() => {
-                if let Some(tdef) = self.types.get(name) {
-                    match &tdef.kind {
-                        TypeDefKind::Enum(variants) if variants.len() == 2 => {
-                            // P1-34: Search for the "success" variant by name
-                            // convention (Ok/Some/Success/Right) instead of
-                            // blindly taking variants[0]. For custom enums like
-                            // `Res { Bad(i32) | Good(string) }`, the first
-                            // variant might be the error case.
-                            let success_variant = variants
-                                .iter()
-                                .find(|v| {
-                                    matches!(
-                                        v.name.as_str(),
-                                        "Ok" | "Some" | "Success" | "Right" | "Yes"
-                                    )
-                                })
-                                .unwrap_or(&variants[0]);
-                            match &success_variant.payload {
-                                Some(VariantPayload::Tuple(types)) if !types.is_empty() => {
-                                    types[0].clone()
-                                }
-                                _ => {
-                                    self.emit_code(
-                                        crate::diagnostic::codes::E0224,
-                                        format!(
-                                            "? operator: cannot determine success type from enum '{}'",
-                                            name
-                                        ),
-                                    );
-                                    Type::Name("unknown".into(), vec![])
-                                }
-                            }
-                        }
-                        _ => {
-                            self.emit_code(
-                                crate::diagnostic::codes::E0224,
-                                format!(
-                                    "? operator requires Result or Option type, found '{}'",
-                                    name
-                                ),
-                            );
-                            Type::Name("unknown".into(), vec![])
-                        }
-                    }
-                } else {
-                    self.emit_code(
-                        crate::diagnostic::codes::E0224,
-                        format!(
-                            "? operator requires Result or Option type, found '{}'",
-                            name
-                        ),
-                    );
-                    Type::Name("unknown".into(), vec![])
-                }
+            // User enums never become Result/Option propagation channels by
+            // matching conventional variant names. Transparent aliases have
+            // already been resolved at this checker boundary. The definition
+            // catalog guard above also keeps a nominal `Result<T, E>` or
+            // `Option<T>` from impersonating the built-ins by name.
+            Type::Name(name, args) if args.is_empty() => {
+                self.emit_code(
+                    crate::diagnostic::codes::E0224,
+                    format!(
+                        "? operator requires Result or Option type, found '{}'",
+                        name
+                    ),
+                );
+                Type::Name("unknown".into(), vec![])
             }
             Type::Infer => {
                 // _ type in let binding: infer from init expression

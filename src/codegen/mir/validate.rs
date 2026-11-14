@@ -9,8 +9,1682 @@ fn exceeds_native_u32(value: usize) -> bool {
     u64::try_from(value).map_or(true, |value| value > u64::from(u32::MAX))
 }
 
+/// Revalidate the typed owned-get V3 Checker receipt and its exact route
+/// before native codegen can consume fallible New/Set roots.
+pub(super) fn validate_ordinary_map_owned_get_result_branch_v3_native_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), NativeMirError> {
+    let expected = crate::core::mir::validate_ordinary_map_owned_get_result_branch_v3_mir_route(
+        checked, program,
+    )
+    .map_err(|message| {
+        NativeMirError::new("ordinary Map owned-Get ResultBranchV3", message)
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+    })?;
+    if receipt.profile != crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+        || !receipt.same_semantic_identity(&expected)
+    {
+        return Err(NativeMirError::new(
+            "ordinary Map owned-Get ResultBranchV3 route receipt",
+            "native route receipt differs from the exact CheckedProgram/MIR V3 receipt",
+        )
+        .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE));
+    }
+    Ok(())
+}
+
+/// Native L1 gate for the isolated `map_new -> Result<root, i32>` route.
+/// The caller must first validate the exact Checker-bound route receipt; this
+/// shape gate then admits only the canonical one-function NewResult graph.
+pub(super) fn validate_ordinary_map_new_result_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map NewResult native L1",
+            "native NewResult route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map NewResult native L1",
+            "native NewResult route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "ordinary Map NewResult native L1 has no separate Checker receipt",
+            )
+        })?;
+    crate::core::mir::validate_ordinary_map_new_result_types(function, program.type_catalog())
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    if receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        || function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+        || function
+            .ownership
+            .ordinary_map_owned_any_v2_cfg_receipt()
+            .is_some()
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ordinary Map NewResult native L1 requires the exact standalone main receipt and i32 host ABI",
+        ));
+    }
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map NewResult core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent Map-New/Set-Result SetLineage
+/// profile. The CheckedProgram and route receipt are replayed by the caller;
+/// this layer keeps the physical native adapter to one zero-argument i32
+/// `main` with the exact SetLineage source receipt.
+pub(super) fn validate_ordinary_map_set_result_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map SetResult native L1",
+            "native SetResult route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map SetResult native L1",
+            "native SetResult route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_set_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "ordinary Map SetResult native L1 has no independent Checker SetLineage receipt",
+            )
+        })?;
+    if receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ordinary Map SetResult native L1 requires the exact standalone main receipt and i32 host ABI",
+        ));
+    }
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    program
+        .type_catalog()
+        .validate_ordinary_map_owned_any_v2_root_result(&result_ty, &receipt.new_result_type)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map SetResult core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent nested Result DirectPrint slice.
+/// Its Checker receipt is deliberately separate from the flat V2 action and
+/// direct-print receipts. The caller must first replay the checked route
+/// receipt and the dedicated Core MIR route validator.
+pub(super) fn validate_ordinary_map_direct_print_result_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map nested Result DirectPrint native L1",
+            "nested Result DirectPrint requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map nested Result DirectPrint native L1",
+            "nested Result DirectPrint has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_owned_any_v2_direct_print_result_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "nested Result DirectPrint has no independent Checker source receipt",
+            )
+        })?;
+    let root_result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let pair_ty = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let unit_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Unit);
+    let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let receipt_identity_matches = receipt.owner == function.owner
+        && function.owner.0 == "function:main"
+        && function.parameters.is_empty()
+        && function.result == i32_ty;
+    let new_set_type_matches = receipt.new_result_type == receipt.set_result_type;
+    let result_point_matches = receipt.result_receipt.result == receipt.get_operation;
+    let operation_point_matches = receipt.result_receipt.operation == receipt.get_operation;
+    let binding_matches = receipt.result_receipt.binding == receipt.pair_local;
+    // These receipt type IDs are source-facing ResolvedTypes (Record and
+    // (bool, Any)); they are not the synthetic owner-v2 root/pair TypeDescs
+    // installed in MIR. The CheckedProgram/MIR route replay and the L1
+    // projection validator below bind that conversion exactly.
+    let result_receipt_matches = result_point_matches && operation_point_matches && binding_matches;
+    let print_receipt_matches =
+        receipt
+            .result_receipt
+            .payload_println
+            .as_ref()
+            .is_some_and(|print| {
+                print.call == receipt.print_operation
+                    && print.projection == receipt.payload_projection
+                    && print.result_type == unit_ty
+            });
+    let generic_v2_actions = function
+        .ownership
+        .has_checker_ordinary_map_owned_any_v2_actions();
+    let generic_v2_cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .is_some();
+    let competing_legacy_authority = function
+        .ownership
+        .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+        .is_some()
+        || function
+            .ownership
+            .ordinary_map_new_result_receipt()
+            .is_some()
+        || function
+            .ownership
+            .ordinary_map_set_lineage_receipt()
+            .is_some()
+        || function
+            .ownership
+            .ordinary_map_set_get_i32_lineage_receipt()
+            .is_some()
+        || function
+            .ownership
+            .ordinary_map_set_get_any_i32_lineage_receipt()
+            .is_some()
+        || function
+            .ownership
+            .ordinary_map_set_get_any_result_i32_lineage_receipt()
+            .is_some()
+        || function
+            .ownership
+            .ordinary_map_set_get_string_lineage_receipt()
+            .is_some();
+    if !receipt_identity_matches
+        || !result_receipt_matches
+        || !print_receipt_matches
+        || generic_v2_actions
+        || generic_v2_cfg
+        || competing_legacy_authority
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "nested Result DirectPrint requires its exact standalone Checker receipt, one zero-argument i32 main, and no competing Map/Any authority (identity_and_abi={receipt_identity_matches}, new_set_type={new_set_type_matches}, result_point={result_point_matches}, operation_point={operation_point_matches}, binding={binding_matches}, print_receipt={print_receipt_matches}, generic_v2_actions={generic_v2_actions}, generic_v2_cfg={generic_v2_cfg}, competing_legacy_authority={competing_legacy_authority})"
+            ),
+        ));
+    }
+
+    let catalog = program.type_catalog();
+    catalog
+        .validate_ordinary_map_owned_any_v2_root_result(&root_result_ty, &receipt.new_result_type)
+        .and_then(|()| {
+            catalog.validate_ordinary_map_owned_any_v2_root_result(
+                &root_result_ty,
+                &receipt.set_result_type,
+            )
+        })
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    if catalog
+        .get(&pair_ty)
+        .is_none_or(|descriptor| descriptor.kind != MirTypeKind::Tuple { arity: 2 })
+        || catalog
+            .get(&crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id())
+            .is_none_or(|descriptor| descriptor.kind != MirTypeKind::OrdinaryMapOwnedAnyV2Payload)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "nested Result DirectPrint GetAny pair or DynamicAny TypeDesc is not canonical",
+        ));
+    }
+    match receipt.shape {
+        crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultShape::HitI32
+        | crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultShape::MissI32
+        | crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultShape::SameRootMapSizeI32 => {
+            if receipt.set_payload_type != i32_ty {
+                return Err(NativeMirError::new(
+                    function.owner.0.clone(),
+                    "nested Result DirectPrint i32 profile has a noncanonical Set payload TypeDesc",
+                ));
+            }
+        }
+        crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultShape::HitString => {
+            if receipt.set_payload_type != string_ty {
+                return Err(NativeMirError::new(
+                    function.owner.0.clone(),
+                    "nested Result DirectPrint String profile has a noncanonical Set payload TypeDesc",
+                ));
+            }
+            catalog
+                .validate_owned_string(&string_ty)
+                .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+        }
+    }
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "nested Result DirectPrint core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 gate for the explicitly fallible, branch-aware computed
+/// String-key owner chain. The supplied canonical route receipt must be the
+/// exact Checker replay for this CheckedProgram/MIR pair; only this profile
+/// may authorize the Any-payload `SetAnyResult` instruction.
+pub(super) fn validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_l1_native_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), NativeMirError> {
+    let profile =
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE;
+    if receipt.profile != profile {
+        return Err(NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            "native SetAnyResult authorization requires the exact computed String-key owner-chain route profile",
+        ));
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            NativeMirError::new(
+                "ComputedStringKeyOwnerChain native L1",
+                format!("canonical route receipt does not bind this MIR: {message}"),
+            )
+        })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            format!("canonical route receipt replay failed: {message}"),
+        )
+    })?;
+    checked
+        .validate_backend(crate::core::BackendProfile::Native)
+        .map_err(|diagnostics| {
+            NativeMirError::new(
+                "ComputedStringKeyOwnerChain native L1",
+                format!(
+                    "CheckedProgram is not valid for native lowering: {}",
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        })?;
+    let replayed =
+        crate::core::mir::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route(
+            checked, program,
+        )
+        .map_err(|message| {
+            NativeMirError::new(
+                "ComputedStringKeyOwnerChain native L1",
+                format!("CheckedProgram/MIR route replay failed: {message}"),
+            )
+        })?;
+    if !receipt.same_route_identity(&replayed) {
+        return Err(NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            "supplied canonical route identity differs from the exact Checker-derived replay",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_mir_route(
+        program,
+    )
+    .map_err(|message| {
+        NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            format!("core MIR branch/CFG validation failed: {message}"),
+        )
+    })?;
+    super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_native_contract(
+        checked,
+        program,
+    )
+    .map_err(|messages| {
+        NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            messages.join("; "),
+        )
+    })?;
+
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            "native computed String-key owner chain requires exactly one checked callable",
+        ));
+    }
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program.functions().get(&owner).ok_or_else(|| {
+        NativeMirError::new(
+            "ComputedStringKeyOwnerChain native L1",
+            "exact function:main is absent",
+        )
+    })?;
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if function.owner != owner
+        || !function.parameters.is_empty()
+        || function.parameter_permissions.as_deref() != Some(&[])
+        || function.result != i32_type
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native computed String-key owner chain requires zero-argument i32 main ABI",
+        ));
+    }
+    let cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native computed String-key owner chain has no Checker CFG receipt",
+            )
+        })?;
+    let branches = cfg
+        .result_receipts
+        .iter()
+        .filter_map(|result| {
+            result
+                .computed_string_key_owner_chain
+                .as_deref()
+                .and_then(|chain| chain.result_branch.as_deref().map(|branch| (chain, branch)))
+        })
+        .collect::<Vec<_>>();
+    let [(chain, branch)] = branches.as_slice() else {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native SetAnyResult route requires exactly one Checker branch receipt",
+        ));
+    };
+    if chain.owner != function.owner
+        || branch.owner != function.owner
+        || branch.profile_version
+            != crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion::V1
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native SetAnyResult route does not have the exact V1 Checker owner/branch receipt",
+        ));
+    }
+    let result_type = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi(
+        function,
+        program.type_catalog(),
+        &result_type,
+    )?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ComputedStringKeyOwnerChain core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent three-path MapSetDropControl
+/// Result profile. The route receipt and Checker replay are repeated here so
+/// the emitter cannot be entered with a profile-only authorization token.
+pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_l1_native_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), NativeMirError> {
+    let profile =
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
+    if receipt.profile != profile {
+        return Err(NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            "native Values authorization requires the exact nested Result branch profile",
+        ));
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            NativeMirError::new(
+                "ValuesLocalIndexI32ResultBranch native L1",
+                format!("canonical route receipt does not bind this MIR: {message}"),
+            )
+        })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            format!("canonical route receipt replay failed: {message}"),
+        )
+    })?;
+    checked
+        .validate_backend(crate::core::BackendProfile::Native)
+        .map_err(|diagnostics| {
+            NativeMirError::new(
+                "ValuesLocalIndexI32ResultBranch native L1",
+                format!(
+                    "CheckedProgram is not valid for native lowering: {}",
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        })?;
+    let replayed = crate::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+        checked, program,
+    )
+    .map_err(|message| {
+        NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            format!("CheckedProgram/MIR route replay failed: {message}"),
+        )
+    })?;
+    if !receipt.same_route_identity(&replayed) {
+        return Err(NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            "supplied route identity differs from the CheckedProgram/MIR-derived replay",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_mir_route(
+        program,
+    )
+    .map_err(|message| {
+        NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            format!("Core MIR branch/CFG replay failed: {message}"),
+        )
+    })?;
+    super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_native_contract(
+        program,
+    )
+    .map_err(|messages| {
+        NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            messages.join("; "),
+        )
+    })?;
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program.functions().get(&owner).ok_or_else(|| {
+        NativeMirError::new(
+            "ValuesLocalIndexI32ResultBranch native L1",
+            "exact function:main is absent",
+        )
+    })?;
+    if program.functions().len() != 1
+        || function.owner != owner
+        || !function.parameters.is_empty()
+        || function.parameter_permissions.as_deref() != Some(&[])
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ValuesLocalIndexI32ResultBranch native L1 requires the exact zero-argument i32 main ABI",
+        ));
+    }
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ValuesLocalIndexI32ResultBranch core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent three-path MapSetDropControl
+/// Result profile. The route receipt and Checker replay are repeated here so
+/// the emitter cannot be entered with a profile-only authorization token.
+pub(super) fn validate_ordinary_map_owned_any_v2_map_set_drop_control_result_l1_native_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), NativeMirError> {
+    use crate::core::mir::{MirInstructionKind as Instruction, MirValueId};
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2MapSetDropControlResultPathKind as PathKind;
+
+    let profile =
+        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
+    if receipt.profile != profile {
+        return Err(NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            "native SetAnyResult authorization requires the exact MapSetDropControl Result-branch profile",
+        ));
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            NativeMirError::new(
+                "MapSetDropControlResult native L1",
+                format!("canonical route receipt does not bind this MIR: {message}"),
+            )
+        })?;
+    receipt.manifest_round_trip().map_err(|message| {
+        NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            format!("canonical route receipt replay failed: {message}"),
+        )
+    })?;
+    checked
+        .validate_backend(crate::core::BackendProfile::Native)
+        .map_err(|diagnostics| {
+            NativeMirError::new(
+                "MapSetDropControlResult native L1",
+                format!(
+                    "CheckedProgram is not valid for native lowering: {}",
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        })?;
+    let replayed = crate::core::mir::validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+        checked, program,
+    )
+    .map_err(|message| {
+        NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            format!("CheckedProgram/MIR route replay failed: {message}"),
+        )
+    })?;
+    if !receipt.same_route_identity(&replayed) {
+        return Err(NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            "supplied canonical route identity differs from the exact Checker-derived replay",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_mir_route(
+        program,
+    )
+    .map_err(|message| {
+        NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            format!("Core MIR branch/CFG validation failed: {message}"),
+        )
+    })?;
+
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            "native route requires exactly one checked callable",
+        ));
+    }
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program.functions().get(&owner).ok_or_else(|| {
+        NativeMirError::new(
+            "MapSetDropControlResult native L1",
+            "exact function:main is absent",
+        )
+    })?;
+    let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if function.owner != owner
+        || !function.parameters.is_empty()
+        || function.parameter_permissions.as_deref() != Some(&[])
+        || function.result != i32_ty
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native MapSetDropControlResult requires zero-argument i32 main ABI",
+        ));
+    }
+    let cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native MapSetDropControlResult has no Checker CFG receipt",
+            )
+        })?;
+    let branch = cfg
+        .map_set_drop_control_result_branch_receipt
+        .as_ref()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native MapSetDropControlResult has no independent Checker branch receipt",
+            )
+        })?;
+    let branch_profile_version = crate::core::ownership::
+        OrdinaryMapOwnedAnyV2MapSetDropControlResultBranchProfileVersion::V1;
+    let expected_paths = [
+        (PathKind::MapNewErr, vec![branch.map_new_err_arm.clone()]),
+        (
+            PathKind::MapSetErr,
+            vec![
+                branch.map_new_ok_arm.clone(),
+                branch.map_set_err_arm.clone(),
+            ],
+        ),
+        (
+            PathKind::Success,
+            vec![branch.map_new_ok_arm.clone(), branch.map_set_ok_arm.clone()],
+        ),
+    ];
+    if cfg.owner != owner
+        || branch.owner != owner
+        || branch.profile_version != branch_profile_version
+        || branch.map_new_operation == branch.map_set_operation
+        || branch.initial_root == branch.populated_root
+        || branch.paths.len() != expected_paths.len()
+        || branch
+            .paths
+            .iter()
+            .zip(expected_paths.iter())
+            .any(|(path, expected)| path.kind != expected.0 || path.arm_path != expected.1)
+        || cfg
+            .result_receipts
+            .iter()
+            .any(|result| result.computed_string_key_owner_chain.is_some())
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native MapSetDropControlResult requires its independent exact three-path Checker receipt and no computed-key receipt",
+        ));
+    }
+
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let new_result = MirValueId::new(format!("expr:{}", branch.map_new_operation.0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let set_result = MirValueId::new(format!("expr:{}", branch.map_set_operation.0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let initial_root = MirValueId::new(format!("local:{}", branch.initial_root.0 .0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let key = MirValueId::new(format!("expr:{}", branch.key.0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let payload = MirValueId::new(format!("local:{}", branch.payload.0 .0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let payload_ty = function.values.get(&payload).map(|value| &value.ty);
+    let instructions = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .collect::<Vec<_>>();
+    let exact_new = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                Instruction::OrdinaryMapOwnedAnyV2New { result } if result == &new_result
+            )
+        })
+        .count()
+        == 1;
+    let exact_set = instructions.iter().filter(|instruction| {
+        matches!(
+            &instruction.kind,
+            Instruction::OrdinaryMapOwnedAnyV2SetAnyResult { result, source, key: set_key, value }
+                if result == &set_result
+                    && source == &initial_root
+                    && set_key == &key
+                    && value == &payload
+        )
+    }).count() == 1;
+    let old_set_result_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                Instruction::OrdinaryMapOwnedAnyV2SetResult { .. }
+            )
+        })
+        .count();
+    if function.values.get(&new_result).map(|value| &value.ty) != Some(&result_ty)
+        || function.values.get(&set_result).map(|value| &value.ty) != Some(&result_ty)
+        || function.values.get(&initial_root).map(|value| &value.ty) != Some(&root_ty)
+        || function.values.get(&key).map(|value| &value.ty) != Some(&string_ty)
+        || !payload_ty.is_some_and(|payload_ty| {
+            super::ordinary_map_owned_any_v2::v2_values_is_label_type(
+                program.type_catalog(),
+                payload_ty,
+            )
+        })
+        || !exact_new
+        || !exact_set
+        || old_set_result_count != 0
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "native MapSetDropControlResult instruction/TypeDesc anchors differ (new={exact_new}, set_any_result={exact_set}, old_set_result={old_set_result_count})"
+            ),
+        ));
+    }
+    let expected_root_drops = branch
+        .paths
+        .iter()
+        .flat_map(|path| path.drops.iter())
+        .map(|drop| {
+            let value = MirValueId::new(format!("local:{}", drop.local.0 .0)).map_err(|error| {
+                NativeMirError::new(function.owner.0.clone(), error.to_string())
+            })?;
+            let instruction = format!(
+                "inst:ordinary_map_owned_any_v2_drop:{value}:{}",
+                drop.settlement_point.0
+            );
+            Ok((instruction, value))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, NativeMirError>>()?;
+    let expected_payload_drops = branch
+        .paths
+        .iter()
+        .map(|path| {
+            let drop = &path.payload_drop;
+            let value = MirValueId::new(format!("local:{}", drop.local.0 .0)).map_err(|error| {
+                NativeMirError::new(function.owner.0.clone(), error.to_string())
+            })?;
+            let instruction = format!(
+                "inst:drop.{}:{}",
+                drop.settlement_place_index, drop.settlement_point.0
+            );
+            Ok((instruction, value))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, NativeMirError>>()?;
+    let key_drop = MirValueId::new(format!("expr:{}", branch.key.0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let key_drop_instruction = format!("inst:drop.0:{}", branch.map_set_operation.0);
+    let mut expected_generic_drops = expected_payload_drops;
+    if expected_generic_drops
+        .insert(key_drop_instruction, key_drop)
+        .is_some()
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native MapSetDropControlResult key and payload Drop anchors collide",
+        ));
+    }
+    let actual_root_drops = instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.kind {
+            Instruction::OrdinaryMapOwnedAnyV2Drop { root } => {
+                Some((instruction.id.as_str().to_owned(), root.clone()))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let actual_root_drop_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                Instruction::OrdinaryMapOwnedAnyV2Drop { .. }
+            )
+        })
+        .count();
+    let actual_generic_drops = instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.kind {
+            Instruction::Drop { value } => {
+                Some((instruction.id.as_str().to_owned(), value.clone()))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let actual_generic_drop_count = instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.kind, Instruction::Drop { .. }))
+        .count();
+    if expected_root_drops.len() != 3
+        || expected_generic_drops.len() != 4
+        || actual_root_drop_count != expected_root_drops.len()
+        || actual_generic_drop_count != expected_generic_drops.len()
+        || actual_root_drops != expected_root_drops
+        || actual_generic_drops != expected_generic_drops
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native MapSetDropControlResult root/payload/key Drop instructions differ from the exact three-path Checker receipt anchors",
+        ));
+    }
+    native_ordinary_map_set_drop_control_result_variant_abi(
+        function,
+        program.type_catalog(),
+        &result_ty,
+    )?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "MapSetDropControlResult core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent New/Set/Get-i32 SetGet profile.
+/// The checked route receipt is replayed by eligibility; this layer requires
+/// the exact single-main ABI and the Copy `Result<i32, i32>` result descriptor.
+pub(super) fn validate_ordinary_map_set_get_i32_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map Set/Get-i32 native L1",
+            "native Set/Get-i32 route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map Set/Get-i32 native L1",
+            "native Set/Get-i32 route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "ordinary Map Set/Get-i32 native L1 has no independent Checker SetGet lineage receipt",
+            )
+        })?;
+    if receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ordinary Map Set/Get-i32 native L1 requires the exact standalone main receipt and i32 host ABI",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_set_get_i32_result_types(
+        function,
+        program.type_catalog(),
+    )
+    .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    program
+        .type_catalog()
+        .validate_copy_result_i32_variant(&receipt.get_result_type)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map Set/Get-i32 core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the Checker-bound fallible
+/// New/Set/GetAny/unpack-i32 composition. The outer checked route replays the
+/// composite receipt and canonical MIR graph; this gate binds the physical
+/// Result and GetAny pair ABI, the i32 unpack TypeDesc, and the required pair
+/// and MapRoot settlements to that same receipt.
+pub(super) fn validate_ordinary_map_set_get_any_i32_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map Set/GetAny-i32 native L1",
+            "native Set/GetAny-i32 route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map Set/GetAny-i32 native L1",
+            "native Set/GetAny-i32 route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_any_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "ordinary Map Set/GetAny-i32 native L1 has no composite Checker receipt",
+            )
+        })?;
+    let root_result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let pair_ty = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let payload_token_ty = crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id();
+    let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let bool_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    if receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != i32_ty
+        || receipt.get_key_type != string_ty
+        || receipt.set_i32_value != 42
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ordinary Map Set/GetAny-i32 native L1 requires the exact standalone i32 main and composite source receipt types",
+        ));
+    }
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map Set/GetAny-i32 core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+
+    let catalog = program.type_catalog();
+    crate::core::mir::validate_ordinary_map_set_get_any_i32_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    // The Result carrier is checked with the route-specific ABI function.
+    // It intentionally has no fallback to the SetResult or typed Get-i32
+    // receipts even though the physical fields happen to have the same
+    // widths.
+    let _result_abi = super::native_ordinary_map_set_get_any_i32_result_variant_abi(
+        function,
+        catalog,
+        &root_result_ty,
+    )?;
+    let pair_desc = catalog.get(&pair_ty).ok_or_else(|| {
+        NativeMirError::new(
+            pair_ty.as_str(),
+            "Set/GetAny-i32 GetAny pair TypeDesc is absent",
+        )
+    })?;
+    if pair_desc.id != pair_ty
+        || pair_desc.kind != (crate::core::mir::types::MirTypeKind::Tuple { arity: 2 })
+        || pair_desc.abi != crate::core::mir::types::MirAbiClass::Aggregate
+        || pair_desc.ownership != crate::core::mir::types::MirOwnership::Move
+        || pair_desc.layout
+            != crate::core::mir::types::MirLayout::Tuple(vec![
+                bool_ty.clone(),
+                payload_token_ty.clone(),
+            ])
+    {
+        return Err(NativeMirError::new(
+            pair_ty.as_str(),
+            "Set/GetAny-i32 GetAny pair is not the exact (bool, DynamicAny token) TypeDesc",
+        ));
+    }
+    let payload_desc = catalog.get(&payload_token_ty).ok_or_else(|| {
+        NativeMirError::new(
+            payload_token_ty.as_str(),
+            "Set/GetAny-i32 payload token TypeDesc is absent",
+        )
+    })?;
+    if payload_desc.id != payload_token_ty
+        || payload_desc.kind != crate::core::mir::types::MirTypeKind::OrdinaryMapOwnedAnyV2Payload
+        || payload_desc.layout != crate::core::mir::types::MirLayout::OrdinaryMapOwnedAnyV2Payload
+        || payload_desc.abi != crate::core::mir::types::MirAbiClass::OpaqueHandle
+    {
+        return Err(NativeMirError::new(
+            payload_token_ty.as_str(),
+            "Set/GetAny-i32 pair field 1 is not the canonical 64-bit V2 DynamicAny token",
+        ));
+    }
+    for operation in [
+        crate::core::mir::types::MirGlueOperation::MoveOut,
+        crate::core::mir::types::MirGlueOperation::Drop,
+    ] {
+        catalog
+            .validate_glue(&payload_token_ty, operation)
+            .map_err(|message| NativeMirError::new(payload_token_ty.as_str(), message))?;
+    }
+    catalog
+        .validate_copy_scalar(&i32_ty)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    catalog
+        .validate_glue(&pair_ty, crate::core::mir::types::MirGlueOperation::Drop)
+        .map_err(|message| NativeMirError::new(pair_ty.as_str(), message))?;
+
+    let local = |id: &crate::core::ResolvedLocalId| {
+        crate::core::mir::MirValueId::new(format!("local:{}", id.0 .0))
+    };
+    let pair_local = local(&receipt.get_result_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let new_result_local = local(&receipt.new_result_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let set_result_local = local(&receipt.set_result_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let initial_root = local(&receipt.initial_root_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let updated_root = local(&receipt.updated_root_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let unpack_local = local(&receipt.unpack_result_local)
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let unpack_expression =
+        crate::core::mir::MirValueId::new(format!("expr:{}", receipt.unpack_operation.0))
+            .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    if function
+        .values
+        .get(&new_result_local)
+        .map(|value| &value.ty)
+        != Some(&root_result_ty)
+        || function
+            .values
+            .get(&set_result_local)
+            .map(|value| &value.ty)
+            != Some(&root_result_ty)
+        || function.values.get(&initial_root).map(|value| &value.ty) != Some(&root_ty)
+        || function.values.get(&pair_local).map(|value| &value.ty) != Some(&pair_ty)
+        || function.values.get(&updated_root).map(|value| &value.ty) != Some(&root_ty)
+        || function.values.get(&unpack_local).map(|value| &value.ty) != Some(&i32_ty)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "Set/GetAny-i32 receipt locals do not materialize the exact root, GetAny pair, and i32 result TypeDescs",
+        ));
+    }
+
+    let instructions = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .collect::<Vec<_>>();
+    let new_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }
+                    if result == &new_result_local
+            )
+        })
+        .count();
+    let set_result_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                    result,
+                    source,
+                    ..
+                } if result == &set_result_local && source == &initial_root
+            )
+        })
+        .count();
+    let result_switch_count = function
+        .blocks
+        .values()
+        .filter(|block| {
+            matches!(
+                &block.terminator,
+                crate::core::mir::MirTerminator::SwitchMove { scrutinee, arms }
+                    if (scrutinee == &new_result_local || scrutinee == &set_result_local)
+                        && arms.len() == 2
+            )
+        })
+        .count();
+    let get_any_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                    root,
+                    ..
+                } if root == &updated_root
+            )
+        })
+        .count();
+    let unpack_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                    result,
+                    pair,
+                    ..
+                } if result == &unpack_expression && pair == &pair_local
+            )
+        })
+        .count();
+    let pair_drop_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::Drop { value } if value == &pair_local
+            )
+        })
+        .count();
+    let updated_root_drop_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                    if root == &updated_root
+            )
+        })
+        .count();
+    let initial_root_drop_count = instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                    if root == &initial_root
+            )
+        })
+        .count();
+    if new_count != 1
+        || set_result_count != 1
+        || result_switch_count != 2
+        || get_any_count != 1
+        || unpack_count != 1
+        || pair_drop_count != 1
+        || updated_root_drop_count != 1
+        || initial_root_drop_count != 2
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "Set/GetAny-i32 composite receipt is not reflected by one exact GetAny/unpack pair and the required pair/root cleanup instructions (new={new_count}, set_result={set_result_count}, result_switch={result_switch_count}, get_any={get_any_count}, unpack={unpack_count}, pair_drop={pair_drop_count}, updated_root_drop={updated_root_drop_count}, initial_root_drop={initial_root_drop_count})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent direct tuple Get source receipt.
+/// The caller first replays the exact Checker/core route receipt. This gate
+/// then admits only the isolated executable `main -> i32` graph and checks
+/// the operational root/pair/payload descriptors and exact instruction graph.
+pub(super) fn validate_ordinary_map_direct_tuple_get_unpack_l1_native_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), NativeMirError> {
+    if receipt.profile != crate::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE {
+        return Err(NativeMirError::new(
+            "ordinary Map direct tuple Get L1",
+            "native route requires the exact direct tuple L1 Core profile receipt",
+        ));
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            NativeMirError::new(
+                "ordinary Map direct tuple Get L1",
+                format!("route digest does not bind this executable MIR: {message}"),
+            )
+        })?;
+    crate::core::mir::validate_ordinary_map_direct_tuple_get_unpack_l1_reference_profile(program)
+        .map_err(|message| NativeMirError::new("ordinary Map direct tuple Get L1", message))?;
+    let function = program
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .ok_or_else(|| {
+            NativeMirError::new(
+                "ordinary Map direct tuple Get L1",
+                "exact function:main is absent",
+            )
+        })?;
+    let source = checked
+        .callable(&crate::core::NodeId("function:main".into()))
+        .and_then(|callable| {
+            callable
+                .resources
+                .ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt
+                .as_ref()
+        })
+        .ok_or_else(|| {
+            NativeMirError::new(
+                "ordinary Map direct tuple Get L1",
+                "CheckedProgram has no direct tuple source receipt",
+            )
+        })?;
+    if function.owner != source.owner
+        || function.parameters.len() != 0
+        || function.parameter_permissions.as_deref() != Some(&[])
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        || function
+            .ownership
+            .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+            != Some(source)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native direct tuple Get L1 requires the exact Checker receipt and zero-argument i32 main ABI",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_direct_tuple_get_unpack_l1_types(
+        function,
+        program.type_catalog(),
+    )
+    .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "direct tuple Get L1 MIR graph validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent fallible `map_get_any` lineage.
+/// The Core route validator rebuilds the complete MIR graph and TypeDesc
+/// catalog from the exact Checker receipt; this boundary then binds the one
+/// native operation to that receipt and to its canonical Result envelope.
+pub(super) fn validate_ordinary_map_set_get_any_result_i32_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map Set/GetAny-Result native L1",
+            "native Set/GetAny-Result route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map Set/GetAny-Result native L1",
+            "native Set/GetAny-Result route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_any_result_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native Set/GetAny-Result has no independent Checker source receipt",
+            )
+        })?;
+    let expected_envelope =
+        crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+    let expected_pair = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let expected_payload = crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id();
+    let expected_root = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let expected_string = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let expected_i32 = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let expected_bool = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    if receipt.profile_version
+        != crate::core::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion::V1
+        || receipt.get_api != crate::core::OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+        || receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != expected_i32
+        || receipt.get_key_type != expected_string
+        || receipt.get_receiver_local != receipt.updated_root_local
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native Set/GetAny-Result requires the exact MapGetAnyResult Checker receipt and zero-argument i32 main ABI",
+        ));
+    }
+    let catalog = program.type_catalog();
+    crate::core::mir::validate_ordinary_map_set_get_any_result_i32_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    let source_result_children = catalog
+        .resolved_type_children(&receipt.get_result_type)
+        .ok_or_else(|| {
+            NativeMirError::new(
+                receipt.get_result_type.as_str(),
+                "Checker GetAnyResult source Result has no resolved child TypeDescs",
+            )
+        })?;
+    let [source_pair_ty, source_error_ty] = source_result_children else {
+        return Err(NativeMirError::new(
+            receipt.get_result_type.as_str(),
+            "Checker GetAnyResult source Result does not have exactly two payload types",
+        ));
+    };
+    let source_pair_children = catalog
+        .resolved_type_children(source_pair_ty)
+        .ok_or_else(|| {
+            NativeMirError::new(
+                source_pair_ty.as_str(),
+                "Checker GetAnyResult source pair has no resolved child TypeDescs",
+            )
+        })?;
+    let [source_found_ty, source_any_ty] = source_pair_children else {
+        return Err(NativeMirError::new(
+            source_pair_ty.as_str(),
+            "Checker GetAnyResult source Ok payload is not exactly a pair",
+        ));
+    };
+    let source_result_desc = catalog.get(&receipt.get_result_type).ok_or_else(|| {
+        NativeMirError::new(
+            receipt.get_result_type.as_str(),
+            "Checker GetAnyResult source Result TypeDesc is absent",
+        )
+    })?;
+    let source_pair_desc = catalog.get(source_pair_ty).ok_or_else(|| {
+        NativeMirError::new(
+            source_pair_ty.as_str(),
+            "Checker GetAnyResult source pair TypeDesc is absent",
+        )
+    })?;
+    let source_any_desc = catalog.get(source_any_ty).ok_or_else(|| {
+        NativeMirError::new(
+            source_any_ty.as_str(),
+            "Checker GetAnyResult source Any TypeDesc is absent",
+        )
+    })?;
+    let source_result_layout_matches = matches!(
+        &source_result_desc.layout,
+        MirLayout::Result { ok, error, .. }
+            if ok == source_pair_ty && error == &expected_i32
+    );
+    if source_error_ty != &expected_i32
+        || source_found_ty != &expected_bool
+        || source_result_desc.kind != MirTypeKind::Result
+        || source_result_desc.abi != MirAbiClass::Aggregate
+        || source_result_desc.ownership != MirOwnership::Move
+        || !source_result_layout_matches
+        || source_pair_desc.kind != (MirTypeKind::Tuple { arity: 2 })
+        || source_pair_desc.abi != MirAbiClass::Aggregate
+        || source_pair_desc.ownership != MirOwnership::Move
+        || source_pair_desc.layout
+            != MirLayout::Tuple(vec![source_found_ty.clone(), source_any_ty.clone()])
+        || source_any_desc.kind != MirTypeKind::DynamicAny
+        || source_any_desc.abi != MirAbiClass::OpaqueHandle
+        || source_any_desc.layout != MirLayout::Opaque
+        || source_any_desc.ownership != MirOwnership::Move
+        || receipt.get_unpack_source_type != *source_any_ty
+        || receipt.get_unpack_target_type != expected_i32
+        || receipt.get_unpack_conversion_kind
+            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "Checker GetAnyResult source type is not exactly Result<(bool, DynamicAny), i32> with its canonical nested tuple/Any ABI",
+        ));
+    }
+    catalog
+        .validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+            &expected_envelope,
+            crate::core::mir::types::MirGlueOperation::MoveOut,
+        )
+        .map_err(|message| NativeMirError::new(expected_envelope.as_str(), message))?;
+    catalog
+        .validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+            &expected_envelope,
+            crate::core::mir::types::MirGlueOperation::Drop,
+        )
+        .map_err(|message| NativeMirError::new(expected_envelope.as_str(), message))?;
+    for operation in [
+        crate::core::mir::types::MirGlueOperation::MoveOut,
+        crate::core::mir::types::MirGlueOperation::Drop,
+    ] {
+        catalog
+            .validate_glue(&expected_pair, operation)
+            .map_err(|message| NativeMirError::new(expected_pair.as_str(), message))?;
+        catalog
+            .validate_glue(&expected_payload, operation)
+            .map_err(|message| NativeMirError::new(expected_payload.as_str(), message))?;
+    }
+    catalog
+        .validate_copy_scalar(&expected_bool)
+        .map_err(|message| NativeMirError::new(expected_bool.as_str(), message))?;
+    catalog
+        .validate_copy_scalar(&expected_i32)
+        .map_err(|message| NativeMirError::new(expected_i32.as_str(), message))?;
+
+    let result =
+        crate::core::mir::MirValueId::new(format!("local:{}", receipt.get_result_local.0 .0))
+            .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let root =
+        crate::core::mir::MirValueId::new(format!("local:{}", receipt.get_receiver_local.0 .0))
+            .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let expected_key = crate::core::mir::MirValueId::new(format!("literal:{}", receipt.get_key.0))
+        .map_err(|error| NativeMirError::new(function.owner.0.clone(), error.to_string()))?;
+    let result_type = function.values.get(&result).map(|value| &value.ty);
+    let root_type = function.values.get(&root).map(|value| &value.ty);
+    if result_type != Some(&expected_envelope) || root_type != Some(&expected_root) {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native GetAnyResult receipt locals do not have the exact Result envelope and live V2 root TypeDescs",
+        ));
+    }
+    let get_instructions = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult {
+                result: actual_result,
+                root: actual_root,
+                key,
+            } => Some((instruction, actual_result, actual_root, key)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [(instruction, actual_result, actual_root, key)] = get_instructions.as_slice() else {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "native Set/GetAny-Result requires one exact GetAnyResult operation, found {}",
+                get_instructions.len()
+            ),
+        ));
+    };
+    if *actual_result != &result
+        || *actual_root != &root
+        || *key != &expected_key
+        || *key == &result
+        || *key == &root
+    {
+        return Err(NativeMirError::new(
+            instruction.id.as_str(),
+            "native GetAnyResult result/root operands differ from their Checker receipt locals",
+        ));
+    }
+    if function.values.get(key).map(|value| &value.ty) != Some(&expected_string) {
+        return Err(NativeMirError::new(
+            instruction.id.as_str(),
+            "native GetAnyResult key is not the exact canonical String TypeDesc",
+        ));
+    }
+    let matching_key_literals = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter(|candidate| {
+            matches!(
+                &candidate.kind,
+                MirInstructionKind::Const { result: actual_key, literal }
+                    if actual_key == *key
+                        && matches!(literal, crate::core::ir::ResolvedLiteral::String(value)
+                            if value == &receipt.get_key_value)
+            )
+        })
+        .count();
+    let old_tuple_get_any_count = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter(|candidate| {
+            matches!(
+                candidate.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+            )
+        })
+        .count();
+    if matching_key_literals != 1 || old_tuple_get_any_count != 0 {
+        return Err(NativeMirError::new(
+            instruction.id.as_str(),
+            "native GetAnyResult key literal is absent, duplicated, or differs from its Checker receipt, or the legacy tuple-valued GetAny operation was substituted",
+        ));
+    }
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map Set/GetAny-Result core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
+/// Native L1 shape gate for the independent New/Set<String>/Get<String>
+/// lineage. Its Checker receipt, exact MIR graph, and Result<String, i32>
+/// ownership contract are independent of Set/Get-i32 and generic Any-owner
+/// admissions.
+pub(super) fn validate_ordinary_map_set_get_string_l1_native_route(
+    program: &MirProgram,
+) -> Result<(), NativeMirError> {
+    if program.functions().len() != 1 {
+        return Err(NativeMirError::new(
+            "ordinary Map Set/Get-String native L1",
+            "native Set/Get-String route requires exactly one checked callable",
+        ));
+    }
+    let function = program.functions().values().next().ok_or_else(|| {
+        NativeMirError::new(
+            "ordinary Map Set/Get-String native L1",
+            "native Set/Get-String route has no checked callable",
+        )
+    })?;
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_string_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "ordinary Map Set/Get-String native L1 has no independent Checker lineage receipt",
+            )
+        })?;
+    if receipt.owner != function.owner
+        || function.owner.0 != "function:main"
+        || !function.parameters.is_empty()
+        || function.result != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "ordinary Map Set/Get-String native L1 requires the exact standalone main receipt and i32 host ABI",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_set_get_string_result_types(
+        function,
+        program.type_catalog(),
+    )
+    .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    program
+        .type_catalog()
+        .validate_result_string_i32_variant(&receipt.get_result_type)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    function.validate().map_err(|errors| {
+        NativeMirError::new(
+            function.owner.0.clone(),
+            format!(
+                "ordinary Map Set/Get-String Core MIR validation failed: {}",
+                errors
+                    .into_iter()
+                    .map(|error| error.message)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(())
+}
+
 pub(super) struct NativeMirValidator<'a> {
     program: &'a MirProgram,
+    checked_get_bool_authorized: bool,
+    dynamic_keys_get_authorized: bool,
+    ordinary_map_set_get_any_result_i32_authorized: bool,
+    ordinary_map_direct_tuple_get_unpack_l1_authorized: bool,
+    ordinary_map_direct_print_result_authorized: bool,
+    computed_string_key_owner_chain_l1_authorized: bool,
+    map_set_drop_control_result_l1_authorized: bool,
+    values_local_index_i32_result_branch_l1_authorized: bool,
     errors: Vec<NativeMirError>,
     symbols: BTreeSet<String>,
 }
@@ -19,12 +1693,242 @@ impl<'a> NativeMirValidator<'a> {
     pub(super) fn new(program: &'a MirProgram) -> Self {
         Self {
             program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized:
+                validate_ordinary_map_set_get_any_result_i32_l1_native_route(program).is_ok(),
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
             errors: Vec::new(),
             symbols: BTreeSet::new(),
         }
     }
 
+    pub(super) fn with_checked_get_bool_authorization(program: &'a MirProgram) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: true,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized:
+                validate_ordinary_map_set_get_any_result_i32_l1_native_route(program).is_ok(),
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    pub(super) fn with_dynamic_keys_get_authorization(program: &'a MirProgram) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: true,
+            ordinary_map_set_get_any_result_i32_authorized:
+                validate_ordinary_map_set_get_any_result_i32_l1_native_route(program).is_ok(),
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    pub(super) fn with_direct_tuple_get_l1_authorization(program: &'a MirProgram) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized:
+                validate_ordinary_map_set_get_any_result_i32_l1_native_route(program).is_ok(),
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: true,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    pub(super) fn with_direct_print_result_authorization(program: &'a MirProgram) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized: false,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: true,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    /// Construct the validator only after the checked computed-key route has
+    /// replayed its canonical receipt and branch-aware native contract.
+    /// Generic native validation never sets this capability.
+    pub(super) fn with_computed_string_key_owner_chain_authorization(
+        program: &'a MirProgram,
+    ) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized: false,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: true,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    /// Construct the validator only after the exact MapSetDropControl
+    /// CheckedProgram/MIR route and its own native L1 receipt have replayed.
+    /// Generic native validation never sets or borrows this capability.
+    pub(super) fn with_map_set_drop_control_result_authorization(program: &'a MirProgram) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized: false,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: true,
+            values_local_index_i32_result_branch_l1_authorized: false,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    /// Construct the validator after the distinct ValuesLocalIndex i32
+    /// Result-branch Checker/MIR contract has replayed. This does not grant
+    /// MapSetDropControlResult authorization.
+    pub(super) fn with_values_local_index_i32_result_branch_authorization(
+        program: &'a MirProgram,
+    ) -> Self {
+        Self {
+            program,
+            checked_get_bool_authorized: false,
+            dynamic_keys_get_authorized: false,
+            ordinary_map_set_get_any_result_i32_authorized: false,
+            ordinary_map_direct_tuple_get_unpack_l1_authorized: false,
+            ordinary_map_direct_print_result_authorized: false,
+            computed_string_key_owner_chain_l1_authorized: false,
+            map_set_drop_control_result_l1_authorized: false,
+            values_local_index_i32_result_branch_l1_authorized: true,
+            errors: Vec::new(),
+            symbols: BTreeSet::new(),
+        }
+    }
+
+    fn ordinary_map_set_get_any_result_i32_receipt_is_valid(&self, function: &MirFunction) -> bool {
+        self.ordinary_map_set_get_any_result_i32_authorized
+            && function
+                .ownership
+                .ordinary_map_set_get_any_result_i32_lineage_receipt()
+                .is_some()
+    }
+
+    fn is_ordinary_map_set_get_any_result_i32_type(
+        &self,
+        function: &MirFunction,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        if !self.ordinary_map_set_get_any_result_i32_receipt_is_valid(function) {
+            return false;
+        }
+        let Some(receipt) = function
+            .ownership
+            .ordinary_map_set_get_any_result_i32_lineage_receipt()
+        else {
+            return false;
+        };
+        ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+            || ty
+                == &crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id()
+            || ty == &receipt.new_result_type
+            || ty == &receipt.set_result_type
+            || ty == &receipt.get_result_type
+    }
+
+    fn is_ordinary_map_values_local_index_i32_result_branch_type(
+        &self,
+        function: &MirFunction,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        self.values_local_index_i32_result_branch_l1_authorized
+            && ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+            && function
+                .ownership
+                .ordinary_map_owned_any_v2_cfg_receipt()
+                .and_then(|cfg| cfg.values_local_index_i32_result_branch_receipt.as_ref())
+                .is_some_and(|branch| {
+                    branch.owner == function.owner
+                        && branch.profile_version
+                            == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchProfileVersion::V2
+                })
+    }
+
+    fn is_ordinary_map_direct_tuple_get_unpack_l1_type(
+        &self,
+        function: &MirFunction,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        if !self.ordinary_map_direct_tuple_get_unpack_l1_authorized
+            || crate::core::mir::validate_ordinary_map_direct_tuple_get_unpack_l1_types(
+                function,
+                self.program.type_catalog(),
+            )
+            .is_err()
+        {
+            return false;
+        }
+        let Some(receipt) = function
+            .ownership
+            .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+        else {
+            return false;
+        };
+        ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+            || ty == &receipt.new_result_type
+            || receipt.sets.iter().any(|set| ty == &set.result_type)
+    }
+
     pub(super) fn validate(mut self) -> Result<(), Vec<NativeMirError>> {
+        if self.ordinary_map_direct_print_result_authorized {
+            return validate_ordinary_map_direct_print_result_l1_native_route(self.program)
+                .map_err(|error| vec![error]);
+        }
+        let has_dynamic_arg0 = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 { .. }
+                    )
+                })
+            })
+        });
+        if has_dynamic_arg0 && !self.dynamic_keys_get_authorized {
+            self.errors.push(NativeMirError::new(
+                "OrdinaryMapOwnedAnyV2.DynamicKeysGet",
+                "argv[0] projection requires the dedicated Checker/MIR native route receipt",
+            ));
+        }
         // Closure binding metadata is authority-bearing: reject forged ABI,
         // capture, call-target, and bind/invoke relations before the emitter
         // is allowed to create any LLVM declaration or instruction effect.
@@ -36,7 +1940,27 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
         }
+        if let Err(messages) = self.program.validate_nested_callable_scope_receipts() {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "nested-callable-scope",
+                    format!("pre-emission nested callable receipt validation failed: {message}"),
+                ));
+            }
+        }
         self.validate_ordinary_map_owned_any_v2_get_any_receipts();
+        if let Err(messages) =
+            super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_println_native_contract(
+                self.program,
+            )
+        {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "OrdinaryMapOwnedAnyV2.Println",
+                    message,
+                ));
+            }
+        }
         if let Err(messages) =
             super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_unpack_native_contract(
                 self.program,
@@ -61,6 +1985,54 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
         }
+        if let Err(messages) = super::ordinary_map_owned_any_v2::
+            validate_ordinary_map_owned_any_v2_values_producer_caller_native_contract(
+                self.program,
+            )
+        {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "OrdinaryMapOwnedAnyV2.ValuesProducerCaller",
+                    message,
+                ));
+            }
+        }
+        if let Err(messages) = super::ordinary_map_owned_any_v2::
+            validate_ordinary_map_owned_any_v2_map_root_producer_caller_native_contract(
+                self.program,
+            )
+        {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "OrdinaryMapOwnedAnyV2.MapRootProducerCaller",
+                    message,
+                ));
+            }
+        }
+        if let Err(messages) = super::ordinary_map_owned_any_v2::
+            validate_ordinary_map_owned_any_v2_map_root_get_any_caller_native_contract(
+                self.program,
+            )
+        {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "OrdinaryMapOwnedAnyV2.MapRootGetAnyCaller",
+                    message,
+                ));
+            }
+        }
+        if let Err(messages) = super::ordinary_map_owned_any_v2::
+            validate_ordinary_map_owned_any_v2_get_or_default_string_native_contract(
+                self.program,
+            )
+        {
+            for message in messages {
+                self.errors.push(NativeMirError::new(
+                    "OrdinaryMapOwnedAnyV2.GetOrDefaultString",
+                    message,
+                ));
+            }
+        }
         if let Err(messages) = super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_values_unpack_native_contract(self.program)
         {
             for message in messages {
@@ -70,7 +2042,36 @@ impl<'a> NativeMirValidator<'a> {
                 ));
             }
         }
+        let has_keys_snapshot = self.program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Keys { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack { .. }
+                    )
+                })
+            })
+        });
+        if has_keys_snapshot {
+            let result = if has_dynamic_arg0 && self.dynamic_keys_get_authorized {
+                super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_dynamic_keys_get_native_contract(self.program)
+                    .map(|_| ())
+            } else {
+                super::ordinary_map_owned_any_v2::validate_ordinary_map_owned_any_v2_keys_snapshot_native_contract(self.program)
+                    .map(|_| ())
+            };
+            if let Err(messages) = result {
+                for message in messages {
+                    self.errors.push(NativeMirError::new(
+                        "OrdinaryMapOwnedAnyV2.KeysSnapshot",
+                        message,
+                    ));
+                }
+            }
+        }
         self.validate_managed_any_generic_instances();
+        self.validate_generic_argument_projection_instances();
         self.errors
             .extend(super::actor_status::validate_actor_native_program(
                 self.program,
@@ -150,6 +2151,24 @@ impl<'a> NativeMirValidator<'a> {
                 function
                     .ownership
                     .has_checker_ordinary_map_owned_any_v2_actions()
+                    || (function
+                        .ownership
+                        .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                        .is_some()
+                        && crate::core::mir::validate_ordinary_map_direct_tuple_get_unpack_l1_types(
+                            function,
+                            self.program.type_catalog(),
+                        )
+                        .is_ok())
+                    || (function
+                        .ownership
+                        .ordinary_map_set_get_any_result_i32_lineage_receipt()
+                        .is_some()
+                        && crate::core::mir::validate_ordinary_map_set_get_any_result_i32_result_types(
+                            function,
+                            self.program.type_catalog(),
+                        )
+                        .is_ok())
             });
         if has_map_root_type != has_map_root_receipt {
             self.errors.push(NativeMirError::new(
@@ -460,12 +2479,67 @@ impl<'a> NativeMirValidator<'a> {
                 crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { .. } => {
                     catalog.validate_managed_any_trap_cleanup_instance(instance, function)
                 }
-                _ => unreachable!("profile discriminator was checked above"),
+                _ => Err(
+                    "ManagedAny generic instance contract changed after profile validation"
+                        .to_string(),
+                ),
             };
             if let Err(message) = validation {
                 self.errors.push(NativeMirError::new(
                     subject,
                     format!("ManagedAny generic receipt/shape validation failed: {message}"),
+                ));
+            }
+        }
+    }
+
+    /// Recheck the small generic projection ABI before native LLVM emission.
+    /// Core construction also validates this contract, but the native
+    /// consumer keeps its own gate so a future MIR construction path cannot
+    /// silently turn the parameter index into a backend assumption.
+    fn validate_generic_argument_projection_instances(&mut self) {
+        for instance in self.program.instances().values() {
+            let crate::core::mir::MirGenericInstanceContract::ScalarArgumentProjection {
+                parameter_index,
+                parameter_count,
+            } = &instance.contract
+            else {
+                continue;
+            };
+            let Some(concrete) = instance.arguments.first() else {
+                self.errors.push(NativeMirError::new(
+                    instance.id.to_string(),
+                    "generic argument projection has no concrete substitution",
+                ));
+                continue;
+            };
+            if let Err(message) = self
+                .program
+                .type_catalog()
+                .validate_scalar_generic_arguments(&instance.arguments)
+            {
+                self.errors.push(NativeMirError::new(
+                    instance.id.to_string(),
+                    format!("generic argument projection substitution rejected: {message}"),
+                ));
+                continue;
+            }
+            let Some(function) = self.program.functions().get(&instance.function) else {
+                self.errors.push(NativeMirError::new(
+                    instance.id.to_string(),
+                    "generic argument projection target is absent",
+                ));
+                continue;
+            };
+            if let Err(message) = crate::core::mir::validate_generic_argument_projection_shape(
+                function,
+                concrete,
+                *parameter_index,
+                *parameter_count,
+            ) {
+                self.errors.push(NativeMirError::new(
+                    instance.id.to_string(),
+                    format!("generic argument projection receipt rejected: {message}"),
                 ));
             }
         }
@@ -512,6 +2586,8 @@ impl<'a> NativeMirValidator<'a> {
                             | MirInstructionKind::OrdinaryMapOwnerLifecycleSize { .. }
                             | MirInstructionKind::OrdinaryMapOwnerLifecycleContains { .. }
                             | MirInstructionKind::OrdinaryMapOwnerLifecycleDrop { .. }
+                            | MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson { .. }
+                            | MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln { .. }
                     )
                 })
             });
@@ -529,7 +2605,9 @@ impl<'a> NativeMirValidator<'a> {
                     matches!(
                         instruction.kind,
                         MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
                             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
@@ -555,11 +2633,17 @@ impl<'a> NativeMirValidator<'a> {
                         instruction.kind,
                         MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Values { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2Keys { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { .. }
                             | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
                     )
@@ -1168,6 +3252,41 @@ impl<'a> NativeMirValidator<'a> {
 
     fn validate_ordinary_map_owned_any_v2_get_any_receipts(&mut self) {
         let subject = "OrdinaryMapOwnedAnyV2.GetAny";
+        if self.ordinary_map_direct_tuple_get_unpack_l1_authorized {
+            let direct_count = self
+                .program
+                .functions()
+                .values()
+                .flat_map(|function| function.blocks.values())
+                .flat_map(|block| block.instructions.iter())
+                .filter(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { .. }
+                    )
+                })
+                .count();
+            if direct_count != 1
+                || self.program.functions().len() != 1
+                || self
+                    .program
+                    .functions()
+                    .values()
+                    .next()
+                    .is_none_or(|function| {
+                        function
+                            .ownership
+                            .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                            .is_none()
+                    })
+            {
+                self.errors.push(NativeMirError::new(
+                    subject,
+                    "direct tuple native authorization requires exactly one receipt-bound GetAny operation",
+                ));
+            }
+            return;
+        }
         let get_any_instruction_count = self
             .program
             .functions()
@@ -1322,6 +3441,13 @@ impl<'a> NativeMirValidator<'a> {
                     .type_catalog()
                     .validate_copy_scalar(&i32_type)
                     .is_ok()
+            } else if self.checked_get_bool_authorized
+                && value.ty == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool)
+            {
+                self.program
+                    .type_catalog()
+                    .validate_copy_scalar(&value.ty)
+                    .is_ok()
             } else if value.ty == string_type {
                 let catalog = self.program.type_catalog();
                 catalog.validate_owned_string(&string_type).is_ok()
@@ -1435,6 +3561,56 @@ impl<'a> NativeMirValidator<'a> {
         }
     }
 
+    fn validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+        &mut self,
+        function: &MirFunction,
+        result: &MirValueId,
+        subject: &str,
+    ) {
+        let Some(result_value) = function.values.get(result) else {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "ordinary Map/Any owner-v2 GetAnyResult result is absent from the MIR value catalog",
+            ));
+            return;
+        };
+        let envelope_ty =
+            crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+        let pair_ty = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+        let payload_ty = crate::core::mir::types::ordinary_map_owned_any_v2_payload_type_id();
+        let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let bool_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+        let catalog = self.program.type_catalog();
+        if result_value.ty != envelope_ty {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "ordinary Map/Any owner-v2 GetAnyResult result is not the exact canonical Result<(bool, DynamicAny-owner), i32> envelope TypeDesc",
+            ));
+            return;
+        }
+        for operation in [
+            crate::core::mir::types::MirGlueOperation::MoveOut,
+            crate::core::mir::types::MirGlueOperation::Drop,
+        ] {
+            if let Err(message) = catalog
+                .validate_ordinary_map_owned_any_v2_get_any_result_envelope(&envelope_ty, operation)
+            {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+            if let Err(message) = catalog.validate_glue(&pair_ty, operation) {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+            if let Err(message) = catalog.validate_glue(&payload_ty, operation) {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+        }
+        for ty in [&bool_ty, &i32_ty] {
+            if let Err(message) = catalog.validate_copy_scalar(ty) {
+                self.errors.push(NativeMirError::new(subject, message));
+            }
+        }
+    }
+
     fn validate_ordinary_map_owned_any_v2_set_payload(
         &mut self,
         function: &MirFunction,
@@ -1450,8 +3626,12 @@ impl<'a> NativeMirValidator<'a> {
         };
         let catalog = self.program.type_catalog();
         let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
         let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
         let valid_i32 = value_type == i32_type && catalog.validate_copy_scalar(&i32_type).is_ok();
+        let valid_bool = self.checked_get_bool_authorized
+            && value_type == bool_type
+            && catalog.validate_copy_scalar(&bool_type).is_ok();
         let valid_string =
             value_type == string_type && catalog.validate_owned_string(&string_type).is_ok();
         let valid_label = catalog.get(&value_type).is_some_and(|descriptor| {
@@ -1460,13 +3640,15 @@ impl<'a> NativeMirValidator<'a> {
             };
             let string_type =
                 crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
-            fields.len() == 1
-                && fields[0].name == "text"
-                && fields[0].ty == string_type
-                && catalog.validate_owned_string(&string_type).is_ok()
-                && validate_native_non_copy_record_type(catalog, &value_type).is_ok()
+            fields.first().is_some_and(|field| {
+                fields.len() == 1
+                    && field.name == "text"
+                    && field.ty == string_type
+                    && catalog.validate_owned_string(&string_type).is_ok()
+                    && validate_native_non_copy_record_type(catalog, &value_type).is_ok()
+            })
         });
-        if !valid_i32 && !valid_string && !valid_label {
+        if !valid_i32 && !valid_bool && !valid_string && !valid_label {
             self.errors.push(NativeMirError::new(
                 subject,
                 "ordinary Map/Any owner-v2 Set value is outside the canonical i32/String/Label TypeDesc profile",
@@ -1537,6 +3719,38 @@ impl<'a> NativeMirValidator<'a> {
                     "ordinary Map owned-Get result is not canonical Result<{}, i32>",
                     if ok_is_string { "String" } else { "i32" }
                 ),
+            ));
+        }
+    }
+
+    fn validate_ordinary_map_owned_get_root_result(
+        &mut self,
+        function: &MirFunction,
+        value: &MirValueId,
+        subject: &str,
+    ) {
+        let expected =
+            crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+        let valid = function.values.get(value).is_some_and(|value| {
+            value.ty == expected
+                && self
+                    .program
+                    .type_catalog()
+                    .get(&expected)
+                    .is_some_and(|descriptor| {
+                        descriptor.kind == MirTypeKind::Result
+                            && matches!(
+                                &descriptor.layout,
+                                MirLayout::Result { ok, error, .. }
+                                    if ok == &crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+                                        && error == &crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+                            )
+                    })
+        });
+        if !valid {
+            self.errors.push(NativeMirError::new(
+                subject,
+                "ordinary Map owned-Get New/Set Result is not the canonical V1-root/i32 carrier",
             ));
         }
     }
@@ -1729,6 +3943,16 @@ impl<'a> NativeMirValidator<'a> {
                     }
                 }
             }
+        } else if self.is_ordinary_map_set_get_any_result_i32_type(function, ty)
+            || self.is_ordinary_map_direct_tuple_get_unpack_l1_type(function, ty)
+            || self.is_ordinary_map_values_local_index_i32_result_branch_type(function, ty)
+        {
+            // The combined Map/Any route owns the exact non-Copy Result
+            // TypeDescs through its independent Checker lineage receipt. Its
+            // full variant, child, glue, and MIR shape contract is replayed
+            // before this validator is constructed; generic Result support
+            // remains deliberately narrower.
+            true
         } else if is_session {
             match self.program.type_catalog().validate_session_channel(ty) {
                 Ok(()) => true,
@@ -2212,12 +4436,84 @@ impl<'a> NativeMirValidator<'a> {
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
                 self.validate_value(function, result, "ordinary Map/Any owner-v2 New result");
-                self.validate_ordinary_map_owned_any_v2_value(
-                    function,
-                    result,
-                    subject,
-                    "New result",
-                );
+                if self.values_local_index_i32_result_branch_l1_authorized {
+                    let branch = function
+                        .ownership
+                        .ordinary_map_owned_any_v2_cfg_receipt()
+                        .and_then(|cfg| cfg.values_local_index_i32_result_branch_receipt.as_ref());
+                    let Some(branch) = branch else {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "ValuesLocalIndexI32ResultBranch New has no distinct Checker branch receipt",
+                        ));
+                        return;
+                    };
+                    let expected =
+                        MirValueId::new(format!("expr:{}", branch.map_new_operation.0)).ok();
+                    let result_type =
+                        crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                    if branch.owner != function.owner
+                        || branch.profile_version
+                            != crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchProfileVersion::V2
+                        || expected.as_ref() != Some(result)
+                        || function.values.get(result).map(|value| &value.ty) != Some(&result_type)
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "ValuesLocalIndexI32ResultBranch New differs from its exact Checker operation/Result TypeDesc",
+                        ));
+                        return;
+                    }
+                    if let Err(error) = super::ordinary_map_owned_any_v2::native_values_local_index_i32_result_branch_variant_abi(
+                        function,
+                        self.program.type_catalog(),
+                        &result_type,
+                    ) {
+                        self.errors.push(error);
+                    }
+                    return;
+                } else if self.map_set_drop_control_result_l1_authorized {
+                    let branch = function
+                        .ownership
+                        .ordinary_map_owned_any_v2_cfg_receipt()
+                        .and_then(|cfg| cfg.map_set_drop_control_result_branch_receipt.as_ref());
+                    let Some(branch) = branch else {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "MapSetDropControlResult New has no dedicated Checker branch receipt",
+                        ));
+                        return;
+                    };
+                    let expected =
+                        MirValueId::new(format!("expr:{}", branch.map_new_operation.0)).ok();
+                    let result_type =
+                        crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                    if branch.owner != function.owner
+                        || expected.as_ref() != Some(result)
+                        || function.values.get(result).map(|value| &value.ty) != Some(&result_type)
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "MapSetDropControlResult New differs from its exact Checker operation/Result TypeDesc",
+                        ));
+                    }
+                    if let Err(error) = native_ordinary_map_set_drop_control_result_variant_abi(
+                        function,
+                        self.program.type_catalog(),
+                        &result_type,
+                    ) {
+                        self.errors.push(error);
+                    }
+                } else if !self.ordinary_map_direct_tuple_get_unpack_l1_authorized
+                    && !self.ordinary_map_set_get_any_result_i32_receipt_is_valid(function)
+                {
+                    self.validate_ordinary_map_owned_any_v2_value(
+                        function,
+                        result,
+                        subject,
+                        "New result",
+                    );
+                }
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
                 result,
@@ -2248,6 +4544,328 @@ impl<'a> NativeMirValidator<'a> {
                         subject,
                         "ordinary Map/Any owner-v2 Set source and result must be distinct roots",
                     ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. } => {
+                if !(self.ordinary_map_direct_tuple_get_unpack_l1_authorized
+                    && function
+                        .ownership
+                        .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+                        .is_some())
+                    && !self.ordinary_map_set_get_any_result_i32_receipt_is_valid(function)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any SetResult requires the dedicated Checker SetLineage native route",
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_value(function, result, "ordinary Map/Any SetAnyResult result");
+                self.validate_value(function, source, "ordinary Map/Any SetAnyResult source");
+                self.validate_value(function, key, "ordinary Map/Any SetAnyResult key");
+                self.validate_value(function, value, "ordinary Map/Any SetAnyResult value");
+                if self.values_local_index_i32_result_branch_l1_authorized {
+                    use crate::core::ownership::{
+                        OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchProfileVersion as BranchVersion,
+                        OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultPathKind as PathKind,
+                    };
+                    let cfg = function.ownership.ordinary_map_owned_any_v2_cfg_receipt();
+                    let branch = cfg
+                        .and_then(|cfg| cfg.values_local_index_i32_result_branch_receipt.as_ref());
+                    let Some(branch) = branch else {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "ValuesLocalIndexI32ResultBranch SetAnyResult has no distinct Checker branch receipt",
+                        ));
+                        return;
+                    };
+                    let expected_result =
+                        MirValueId::new(format!("expr:{}", branch.map_set_operation.0)).ok();
+                    let expected_source =
+                        MirValueId::new(format!("local:{}", branch.initial_root.0 .0)).ok();
+                    let expected_key = MirValueId::new(format!("expr:{}", branch.key_node.0)).ok();
+                    let expected_value =
+                        MirValueId::new(format!("expr:{}", branch.payload_node.0)).ok();
+                    let result_type =
+                        crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+                    let string_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                    let i32_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    let expected_paths = [
+                        (PathKind::MapNewErr, vec![branch.map_new_err_arm.clone()]),
+                        (
+                            PathKind::MapSetErr,
+                            vec![
+                                branch.map_new_ok_arm.clone(),
+                                branch.map_set_err_arm.clone(),
+                            ],
+                        ),
+                        (
+                            PathKind::Success,
+                            vec![branch.map_new_ok_arm.clone(), branch.map_set_ok_arm.clone()],
+                        ),
+                    ];
+                    let paths_match = branch.paths.len() == expected_paths.len()
+                        && branch.paths.iter().zip(expected_paths.iter()).all(
+                            |(path, expected)| {
+                                path.kind == expected.0 && path.arm_path == expected.1
+                            },
+                        );
+                    if cfg.is_none_or(|cfg| cfg.owner != function.owner)
+                        || branch.owner != function.owner
+                        || branch.profile_version != BranchVersion::V2
+                        || branch.map_new_operation == branch.map_set_operation
+                        || branch.initial_root == branch.populated_root
+                        || branch.payload_type != i32_type
+                        || !paths_match
+                        || expected_result.as_ref() != Some(result)
+                        || expected_source.as_ref() != Some(source)
+                        || expected_key.as_ref() != Some(key)
+                        || expected_value.as_ref() != Some(value)
+                        || function.values.get(result).map(|value| &value.ty) != Some(&result_type)
+                        || function.values.get(source).map(|value| &value.ty) != Some(&root_type)
+                        || function.values.get(key).map(|value| &value.ty) != Some(&string_type)
+                        || function.values.get(value).map(|value| &value.ty) != Some(&i32_type)
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "ValuesLocalIndexI32ResultBranch SetAnyResult differs from its exact three-path Checker receipt and operand TypeDescs",
+                        ));
+                        return;
+                    }
+                    self.validate_ordinary_map_owned_any_v2_value(
+                        function,
+                        source,
+                        subject,
+                        "SetAnyResult source",
+                    );
+                    self.validate_ordinary_map_string_value(
+                        function,
+                        key,
+                        subject,
+                        "SetAnyResult key",
+                    );
+                    self.validate_ordinary_map_owned_any_v2_set_payload(function, value, subject);
+                    if let Err(error) = super::ordinary_map_owned_any_v2::native_values_local_index_i32_result_branch_variant_abi(
+                        function,
+                        self.program.type_catalog(),
+                        &result_type,
+                    ) {
+                        self.errors.push(error);
+                    }
+                    return;
+                } else if self.map_set_drop_control_result_l1_authorized {
+                    let cfg = function.ownership.ordinary_map_owned_any_v2_cfg_receipt();
+                    let branch =
+                        cfg.and_then(|cfg| cfg.map_set_drop_control_result_branch_receipt.as_ref());
+                    let Some(branch) = branch else {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "MapSetDropControlResult SetAnyResult has no dedicated Checker branch receipt",
+                        ));
+                        return;
+                    };
+                    let expected_result =
+                        MirValueId::new(format!("expr:{}", branch.map_set_operation.0)).ok();
+                    let expected_source =
+                        MirValueId::new(format!("local:{}", branch.initial_root.0 .0)).ok();
+                    let expected_key = MirValueId::new(format!("expr:{}", branch.key.0)).ok();
+                    let expected_value =
+                        MirValueId::new(format!("local:{}", branch.payload.0 .0)).ok();
+                    let result_type =
+                        crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+                    let string_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                    let valid_paths = {
+                        use crate::core::ownership::OrdinaryMapOwnedAnyV2MapSetDropControlResultPathKind as PathKind;
+                        let expected = [
+                            (PathKind::MapNewErr, vec![branch.map_new_err_arm.clone()]),
+                            (
+                                PathKind::MapSetErr,
+                                vec![
+                                    branch.map_new_ok_arm.clone(),
+                                    branch.map_set_err_arm.clone(),
+                                ],
+                            ),
+                            (
+                                PathKind::Success,
+                                vec![branch.map_new_ok_arm.clone(), branch.map_set_ok_arm.clone()],
+                            ),
+                        ];
+                        branch.paths.len() == expected.len()
+                            && branch
+                                .paths
+                                .iter()
+                                .zip(expected.iter())
+                                .all(|(path, expected)| {
+                                    path.kind == expected.0 && path.arm_path == expected.1
+                                })
+                    };
+                    if cfg.is_none_or(|cfg| cfg.owner != function.owner)
+                        || branch.owner != function.owner
+                        || branch.profile_version
+                            != crate::core::ownership::
+                                OrdinaryMapOwnedAnyV2MapSetDropControlResultBranchProfileVersion::V1
+                        || branch.map_new_operation == branch.map_set_operation
+                        || branch.initial_root == branch.populated_root
+                        || !valid_paths
+                        || expected_result.as_ref() != Some(result)
+                        || expected_source.as_ref() != Some(source)
+                        || expected_key.as_ref() != Some(key)
+                        || expected_value.as_ref() != Some(value)
+                        || function.values.get(result).map(|value| &value.ty) != Some(&result_type)
+                        || function.values.get(source).map(|value| &value.ty) != Some(&root_type)
+                        || function.values.get(key).map(|value| &value.ty) != Some(&string_type)
+                        || !function.values.get(value).is_some_and(|value| {
+                            self.program.type_catalog().get(&value.ty).is_some_and(|desc| {
+                                matches!(&desc.layout, MirLayout::Record { fields, .. }
+                                    if matches!(
+                                        fields.as_slice(),
+                                        [field] if field.name == "text" && field.ty == string_type
+                                    ))
+                            })
+                        })
+                    {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            "MapSetDropControlResult SetAnyResult differs from its exact three-path Checker receipt and operand TypeDescs",
+                        ));
+                        return;
+                    }
+                    self.validate_ordinary_map_owned_any_v2_value(
+                        function,
+                        source,
+                        subject,
+                        "SetAnyResult source",
+                    );
+                    self.validate_ordinary_map_string_value(
+                        function,
+                        key,
+                        subject,
+                        "SetAnyResult key",
+                    );
+                    self.validate_ordinary_map_owned_any_v2_set_payload(function, value, subject);
+                    if let Err(error) = native_ordinary_map_set_drop_control_result_variant_abi(
+                        function,
+                        self.program.type_catalog(),
+                        &result_type,
+                    ) {
+                        self.errors.push(error);
+                    }
+                    return;
+                }
+                if !self.computed_string_key_owner_chain_l1_authorized {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any SetAnyResult requires the dedicated computed String-key owner-chain native route",
+                    ));
+                    return;
+                }
+
+                let cfg = function.ownership.ordinary_map_owned_any_v2_cfg_receipt();
+                let branches = cfg
+                    .into_iter()
+                    .flat_map(|cfg| &cfg.result_receipts)
+                    .filter_map(|result_receipt| {
+                        result_receipt
+                            .computed_string_key_owner_chain
+                            .as_deref()
+                            .and_then(|chain| {
+                                chain.result_branch.as_deref().map(|branch| (chain, branch))
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let [(chain, branch)] = branches.as_slice() else {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any SetAnyResult requires one exact Checker branch receipt",
+                    ));
+                    return;
+                };
+                let expected_result =
+                    MirValueId::new(format!("expr:{}", branch.map_set_operation.0)).ok();
+                let expected_source =
+                    MirValueId::new(format!("local:{}", branch.initial_root.0 .0)).ok();
+                let expected_key = chain
+                    .map_set
+                    .key
+                    .as_ref()
+                    .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok());
+                let expected_value = chain
+                    .map_set
+                    .value
+                    .as_ref()
+                    .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok());
+                let result_type =
+                    crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+                let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+                let string_type =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+                let value_type = function.values.get(value).map(|value| &value.ty);
+                let label_type = value_type.is_some_and(|ty| {
+                    let Some(descriptor) = catalog.get(ty) else {
+                        return false;
+                    };
+                    let MirLayout::Record { fields, .. } = &descriptor.layout else {
+                        return false;
+                    };
+                    let [field] = fields.as_slice() else {
+                        return false;
+                    };
+                    field.name == "text"
+                        && field.ty == string_type
+                        && catalog.validate_owned_string(&string_type).is_ok()
+                        && validate_native_non_copy_record_type(catalog, ty).is_ok()
+                });
+                if cfg.is_none_or(|cfg| cfg.owner != function.owner)
+                    || chain.owner != function.owner
+                    || branch.owner != function.owner
+                    || branch.profile_version
+                        != crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion::V1
+                    || chain.map_set.kind
+                        != crate::core::ownership::OrdinaryMapOwnedAnyV2ActionKind::Set
+                    || branch.map_set_operation != chain.map_set.point
+                    || chain.map_set.source_local.as_ref() != Some(&branch.initial_root)
+                    || expected_result.as_ref() != Some(result)
+                    || expected_source.as_ref() != Some(source)
+                    || expected_key.as_ref() != Some(key)
+                    || expected_value.as_ref() != Some(value)
+                    || function.values.get(result).map(|value| &value.ty) != Some(&result_type)
+                    || function.values.get(source).map(|value| &value.ty) != Some(&root_type)
+                    || function.values.get(key).map(|value| &value.ty) != Some(&string_type)
+                    || chain.map_set.value_type.as_ref() != value_type
+                    || !label_type
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any SetAnyResult operands/types differ from the exact Checker Set branch or Label payload receipt",
+                    ));
+                }
+                self.validate_ordinary_map_owned_any_v2_value(
+                    function,
+                    source,
+                    subject,
+                    "SetAnyResult source",
+                );
+                self.validate_ordinary_map_string_value(function, key, subject, "SetAnyResult key");
+                self.validate_ordinary_map_owned_any_v2_set_payload(function, value, subject);
+                if let Err(error) =
+                    native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi(
+                        function,
+                        catalog,
+                        &result_type,
+                    )
+                {
+                    self.errors.push(error);
                 }
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
@@ -2319,6 +4937,139 @@ impl<'a> NativeMirValidator<'a> {
                 self.validate_ordinary_map_string_value(function, key, subject, "GetAny key");
                 self.validate_ordinary_map_owned_any_v2_get_any_result(function, result, subject);
             }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult { result, root, key } => {
+                self.validate_value(
+                    function,
+                    result,
+                    "ordinary Map/Any owner-v2 GetAnyResult result",
+                );
+                self.validate_value(
+                    function,
+                    root,
+                    "ordinary Map/Any owner-v2 GetAnyResult root",
+                );
+                self.validate_value(function, key, "ordinary Map/Any owner-v2 GetAnyResult key");
+                self.validate_ordinary_map_owned_any_v2_value(
+                    function,
+                    root,
+                    subject,
+                    "GetAnyResult root",
+                );
+                self.validate_ordinary_map_string_value(function, key, subject, "GetAnyResult key");
+                self.validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+                    function, result, subject,
+                );
+                if !self.ordinary_map_set_get_any_result_i32_receipt_is_valid(function) {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any GetAnyResult requires its distinct exact Checker Set/GetAnyResult-i32 native route receipt",
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultI32 {
+                result,
+                root,
+                key,
+                default,
+                ..
+            } => {
+                self.validate_value(
+                    function,
+                    result,
+                    "ordinary Map/Any owner-v2 GetOrDefault<i32> result",
+                );
+                self.validate_value(
+                    function,
+                    root,
+                    "ordinary Map/Any owner-v2 GetOrDefault<i32> root",
+                );
+                self.validate_value(
+                    function,
+                    key,
+                    "ordinary Map/Any owner-v2 GetOrDefault<i32> key",
+                );
+                self.validate_value(
+                    function,
+                    default,
+                    "ordinary Map/Any owner-v2 GetOrDefault<i32> default",
+                );
+                self.validate_ordinary_map_owned_any_v2_value(
+                    function,
+                    root,
+                    subject,
+                    "GetOrDefault<i32> root",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    key,
+                    subject,
+                    "GetOrDefault<i32> key",
+                );
+                self.validate_ordinary_map_owned_any_v2_i32(
+                    function,
+                    default,
+                    subject,
+                    "GetOrDefault<i32> default",
+                );
+                self.validate_ordinary_map_owned_any_v2_i32(
+                    function,
+                    result,
+                    subject,
+                    "GetOrDefault<i32> result",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultString {
+                result,
+                root,
+                key,
+                default,
+                ..
+            } => {
+                self.validate_value(
+                    function,
+                    result,
+                    "ordinary Map/Any owner-v2 GetOrDefault<String> result",
+                );
+                self.validate_value(
+                    function,
+                    root,
+                    "ordinary Map/Any owner-v2 GetOrDefault<String> root",
+                );
+                self.validate_value(
+                    function,
+                    key,
+                    "ordinary Map/Any owner-v2 GetOrDefault<String> key",
+                );
+                self.validate_value(
+                    function,
+                    default,
+                    "ordinary Map/Any owner-v2 GetOrDefault<String> default",
+                );
+                self.validate_ordinary_map_owned_any_v2_value(
+                    function,
+                    root,
+                    subject,
+                    "GetOrDefault<String> root",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    key,
+                    subject,
+                    "GetOrDefault<String> key",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    default,
+                    subject,
+                    "GetOrDefault<String> default",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    result,
+                    subject,
+                    "GetOrDefault<String> result",
+                );
+            }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, pair, .. } => {
                 self.validate_value(function, result, "ordinary Map/Any owner-v2 unpack result");
                 self.validate_value(function, pair, "ordinary Map/Any owner-v2 unpack pair");
@@ -2333,6 +5084,34 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors.push(NativeMirError::new(
                         subject,
                         "ordinary Map/Any owner-v2 unpack pair is not the exact (bool, DynamicAny) result TypeDesc",
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Println { result, pair, .. } => {
+                self.validate_value(function, result, "ordinary Map/Any owner-v2 println result");
+                self.validate_value(function, pair, "ordinary Map/Any owner-v2 println pair");
+                let pair_type =
+                    crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+                let unit_type =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Unit);
+                if function
+                    .values
+                    .get(pair)
+                    .is_none_or(|value| value.ty != pair_type)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any owner-v2 println pair is not the exact (bool, DynamicAny) result TypeDesc",
+                    ));
+                }
+                if function
+                    .values
+                    .get(result)
+                    .is_none_or(|value| value.ty != unit_type)
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any owner-v2 println result is not canonical Unit",
                     ));
                 }
             }
@@ -2381,6 +5160,61 @@ impl<'a> NativeMirValidator<'a> {
                 // the exact Checker receipt before any LLVM declarations.
                 // This instruction arm keeps ValuesUnpack in the admitted
                 // native shape once that whole-program contract succeeds.
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Keys { result, root } => {
+                self.validate_value(function, result, "ordinary Map/Any owner-v2 Keys result");
+                self.validate_value(function, root, "ordinary Map/Any owner-v2 Keys root");
+                self.validate_ordinary_map_owned_any_v2_value(function, root, subject, "Keys root");
+                let Some(result_value) = function.values.get(result) else {
+                    return;
+                };
+                if let Err(message) = catalog.validate_owned_string_list(&result_value.ty) {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        format!(
+                            "ordinary Map/Any owner-v2 Keys result TypeDesc is invalid: {message}"
+                        ),
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack { result, keys, .. } => {
+                self.validate_value(
+                    function,
+                    result,
+                    "ordinary Map/Any owner-v2 KeysUnpack result",
+                );
+                self.validate_value(
+                    function,
+                    keys,
+                    "ordinary Map/Any owner-v2 KeysUnpack snapshot",
+                );
+                if let Some(keys_value) = function.values.get(keys) {
+                    if let Err(message) = catalog.validate_owned_string_list(&keys_value.ty) {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            format!("ordinary Map/Any owner-v2 KeysUnpack List TypeDesc is invalid: {message}"),
+                        ));
+                    }
+                }
+                if let Some(result_value) = function.values.get(result) {
+                    if let Err(message) = catalog.validate_owned_string(&result_value.ty) {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            format!("ordinary Map/Any owner-v2 KeysUnpack String TypeDesc is invalid: {message}"),
+                        ));
+                    }
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 { result, .. } => {
+                self.validate_value(function, result, "DynamicKeysGet argv[0] String result");
+                if let Some(result_value) = function.values.get(result) {
+                    if let Err(message) = catalog.validate_owned_string(&result_value.ty) {
+                        self.errors.push(NativeMirError::new(
+                            subject,
+                            format!("DynamicKeysGet argv[0] String TypeDesc is invalid: {message}"),
+                        ));
+                    }
+                }
             }
             MirInstructionKind::OrdinaryMapOwnedAnyV2IsEmpty { result, root } => {
                 self.validate_value(function, result, "ordinary Map/Any owner-v2 IsEmpty result");
@@ -2438,6 +5272,10 @@ impl<'a> NativeMirValidator<'a> {
                 self.validate_value(function, result, "ordinary Map owned-Get New result");
                 self.validate_ordinary_map_owned_get_value(function, result, subject, "New result");
             }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { result } => {
+                self.validate_value(function, result, "ordinary Map owned-Get NewResult result");
+                self.validate_ordinary_map_owned_get_root_result(function, result, subject);
+            }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set {
                 result,
                 source,
@@ -2461,6 +5299,31 @@ impl<'a> NativeMirValidator<'a> {
                     key,
                     subject,
                     "owned-Get Set key",
+                );
+                self.validate_ordinary_map_owned_get_set_payload(function, value, subject);
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                self.validate_value(function, result, "ordinary Map owned-Get SetResult result");
+                self.validate_value(function, source, "ordinary Map owned-Get SetResult source");
+                self.validate_value(function, key, "ordinary Map owned-Get SetResult key");
+                self.validate_value(function, value, "ordinary Map owned-Get SetResult value");
+                self.validate_ordinary_map_owned_get_root_result(function, result, subject);
+                self.validate_ordinary_map_owned_get_value(
+                    function,
+                    source,
+                    subject,
+                    "SetResult source",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    key,
+                    subject,
+                    "owned-Get SetResult key",
                 );
                 self.validate_ordinary_map_owned_get_set_payload(function, value, subject);
             }
@@ -2642,6 +5505,53 @@ impl<'a> NativeMirValidator<'a> {
                     self.errors.push(NativeMirError::new(
                         subject,
                         "ordinary Map owner lifecycle Drop has no canonical explicit Drop glue",
+                    ));
+                }
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson {
+                result, root, ..
+            } => {
+                self.validate_value(function, result, "ordinary Map observer JSON result");
+                self.validate_value(function, root, "ordinary Map observer JSON root");
+                self.validate_ordinary_map_owner_value(
+                    function,
+                    root,
+                    subject,
+                    "observer JSON root",
+                );
+                self.validate_ordinary_map_string_value(
+                    function,
+                    result,
+                    subject,
+                    "observer JSON result",
+                );
+            }
+            MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln {
+                result, root, ..
+            } => {
+                self.validate_value(function, result, "ordinary Map observer println result");
+                self.validate_value(function, root, "ordinary Map observer println root");
+                self.validate_ordinary_map_owner_value(
+                    function,
+                    root,
+                    subject,
+                    "observer println root",
+                );
+                let unit_type =
+                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Unit);
+                if !function
+                    .values
+                    .get(result)
+                    .is_some_and(|value| value.ty == unit_type)
+                    || !self
+                        .program
+                        .type_catalog()
+                        .get(&unit_type)
+                        .is_some_and(|descriptor| descriptor.is_canonical_ffi_unit())
+                {
+                    self.errors.push(NativeMirError::new(
+                        subject,
+                        "ordinary Map observer println result is not canonical Unit",
                     ));
                 }
             }
@@ -3255,6 +6165,10 @@ impl<'a> NativeMirValidator<'a> {
                         | MirBuiltinKind::PrintlnInt
                         | MirBuiltinKind::PrintlnString
                         | MirBuiltinKind::PrintlnFloat
+                        | MirBuiltinKind::Assert
+                        | MirBuiltinKind::AssertEq
+                        | MirBuiltinKind::AssertNe
+                        | MirBuiltinKind::AssertApproxEq
                 );
                 if !supported_kind {
                     self.errors.push(NativeMirError::new(
@@ -3295,7 +6209,10 @@ impl<'a> NativeMirValidator<'a> {
                         let Some(argument_value) = function.values.get(argument) else {
                             continue;
                         };
-                        let ownership_ok = if *kind == MirBuiltinKind::PrintlnString {
+                        let ownership_ok = if *kind == MirBuiltinKind::PrintlnString
+                            || matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe)
+                                && desc.abi == MirAbiClass::StringHandle
+                        {
                             self.program
                                 .type_catalog()
                                 .validate_owned_string(&argument_value.ty)
@@ -4092,6 +7009,17 @@ impl<'a> NativeMirValidator<'a> {
         ) {
             self.errors.push(NativeMirError::new(subject, message));
         }
+        if self.is_ordinary_map_set_get_any_result_i32_type(function, &result_value.ty)
+            || self.is_ordinary_map_direct_tuple_get_unpack_l1_type(function, &result_value.ty)
+            || self.is_ordinary_map_values_local_index_i32_result_branch_type(
+                function,
+                &result_value.ty,
+            )
+        {
+            // The exact New/Set/GetAny Result constructor graph is covered by
+            // the independent route receipt replayed at admission.
+            return;
+        }
         if let Err(message) =
             native_non_copy_variant_payload_type(self.program.type_catalog(), &result_value.ty)
         {
@@ -4135,7 +7063,11 @@ impl<'a> NativeMirValidator<'a> {
                 self.errors.push(NativeMirError::new(subject, message));
                 return;
             }
-        } else if !self.validate_copy_variant_type(&scrutinee_value.ty, subject) {
+        } else if !self.is_ordinary_map_values_local_index_i32_result_branch_type(
+            function,
+            &scrutinee_value.ty,
+        ) && !self.validate_copy_variant_type(&scrutinee_value.ty, subject)
+        {
             return;
         }
         if !literal_switch {
@@ -4256,6 +7188,18 @@ impl<'a> NativeMirValidator<'a> {
         let Some(scrutinee_value) = function.values.get(scrutinee) else {
             return;
         };
+        if self.is_ordinary_map_set_get_any_result_i32_type(function, &scrutinee_value.ty)
+            || self.is_ordinary_map_direct_tuple_get_unpack_l1_type(function, &scrutinee_value.ty)
+            || self.is_ordinary_map_values_local_index_i32_result_branch_type(
+                function,
+                &scrutinee_value.ty,
+            )
+        {
+            // The route receipt binds all three Result::Ok/Err switches to
+            // their exact arm blocks, so the generic managed-Result gate is
+            // not the authority for these synthetic Result carriers.
+            return;
+        }
         if let Err(message) =
             native_non_copy_variant_payload_type(self.program.type_catalog(), &scrutinee_value.ty)
         {
@@ -5399,12 +8343,23 @@ func i32_or_zero(value: Result<i32, i32>) -> i32 {
 }
 
 func main() -> i32 {
-    let empty = map_new()
-    let full = map_set(empty, "answer", 42)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "answer", 42) {
+                Ok(full) => {
     let result = map_get_i32(full, "answer")
     drop(empty)
     drop(full)
     i32_or_zero(result)
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 "#,
         )
@@ -5414,14 +8369,25 @@ func main() -> i32 {
         canonical_program(
             r#"
 func main() -> i32 {
-    let empty = map_new()
-    let populated = map_set(empty, "answer", 42)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "answer", 42) {
+                Ok(populated) => {
     let snapshot = values(populated)
     let count = len(snapshot)
     drop(snapshot)
     drop(empty)
     drop(populated)
     count
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 "#,
         )
@@ -5434,8 +8400,10 @@ func main() -> i32 {
 type Label { text: string }
 func main() -> i32 {
     let label = Label { text: "answer" }
-    let empty = map_new()
-    let populated = map_set(empty, "answer", label)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "answer", label) {
+                Ok(populated) => {
     let pair = map_get(populated, "answer")
     let _found = pair.0
     drop(pair)
@@ -5443,6 +8411,19 @@ func main() -> i32 {
     drop(populated)
     drop(label)
     0
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(label)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            drop(label)
+            status
+        },
+    }
 }
 "#,
         );
@@ -5625,15 +8606,36 @@ func main() -> i32 {
     fn concrete_any_snapshot_program() -> MirProgram {
         canonical_program(
             r#"
-func snapshot() {
-    let root = map_new()
-    let numbers = map_set(root, "number", 42)
-    let mixed = map_set(numbers, "label", "owned")
+func snapshot() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "number", 42) {
+                Ok(numbers) => {
+                    match map_set(numbers, "label", "owned") {
+                        Ok(mixed) => {
     let result = map_get(mixed, "label")
     drop(root)
     drop(numbers)
     drop(mixed)
-    result
+                            let found = result.0
+                            drop(result)
+                            if found { 1 } else { 0 }
+                        },
+                        Err(status) => {
+                            drop(root)
+                            drop(numbers)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 
 func main() -> i32 {
@@ -5650,10 +8652,13 @@ func main() -> i32 {
             r#"
 func carry<T>(value: T) -> T { value }
 
-func main() -> string {
-    let root = map_new()
-    let numbers = map_set(root, "number", 42)
-    let mixed = map_set(numbers, "label", "owned")
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "number", 42) {
+                Ok(numbers) => {
+                    match map_set(numbers, "label", "owned") {
+                        Ok(mixed) => {
     let snapshot_value = map_get(mixed, "label")
     drop(root)
     drop(numbers)
@@ -5661,12 +8666,27 @@ func main() -> string {
     let first = snapshot_value.1
     let alias = first
     let second = carry(alias)
-    let text: string = second
     drop(first)
     drop(alias)
     drop(second)
     drop(snapshot_value)
-    text
+                            0
+                        },
+                        Err(status) => {
+                            drop(root)
+                            drop(numbers)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 "#,
         )
@@ -5977,9 +8997,13 @@ func main() -> string {
         let legacy = canonical_program(
             r#"
 func old_map_profile() -> i32 {
-    let root = map_new()
+    match map_new() {
+        Ok(root) => {
     drop(root)
     0
+        },
+        Err(_) => 0,
+    }
 }
 func main() -> i32 { 0 }
 "#,

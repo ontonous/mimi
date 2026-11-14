@@ -42,14 +42,17 @@ func main() -> i32 {
 #[test]
 fn boundary_unicode_string() {
     let src = r#"
-func main() -> string {
+func unicode_value() -> string {
     "你好，世界！🚀"
 }
+func main() -> i32 {
+    println(unicode_value());
+    0
+}
 "#;
-    assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("你好，世界！🚀".to_string()))
-    );
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(0));
+    assert_eq!(stdout.trim(), "你好，世界！🚀");
 }
 
 #[test]
@@ -123,12 +126,15 @@ func main() -> i32 {
 #[test]
 fn boundary_empty_string() {
     let src = r#"
-func main() -> string {
+func empty_value() -> string {
     ""
 }
+func main() -> i32 {
+    println(empty_value());
+    0
+}
 "#;
-    assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("".to_string()))
-    );
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(0));
+    assert_eq!(stdout, "\n");
 }

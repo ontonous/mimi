@@ -305,18 +305,18 @@ fn audit_stdlib_trim_left_right_whitespace_set() {
     // trim_left/trim_right only stripped " " while the docs (and trim())
     // cover space/tab/newline/CR.
     let src = r#"
-func main() -> string {
+func observed_trim_left_right_whitespace_set() -> string {
     let a = trim_left("\t\n hello \t")
     let b = trim_right("\t hello \t\n ")
     let c = trim_left("   a b ")
     let d = trim_right("a b   ")
     a + "|" + b + "|" + c + "|" + d
 }
+func main() -> i32 {
+    if observed_trim_left_right_whitespace_set() == "hello \t|\t hello|a b |a b" { 0 } else { 1 }
+}
 "#;
-    assert_eq!(
-        run_with_stdlib("strings.mimi", src),
-        interp::Value::String(crate::interp::SharedString::new("hello \t|\t hello|a b |a b".to_string()))
-    );
+    assert_eq!(run_with_stdlib("strings.mimi", src), interp::Value::Int(0));
 }
 
 // ===== strings.mimi — fix 6: words() drops empty tokens =====================
@@ -587,8 +587,10 @@ fn audit_stdlib_tcp_recv_eof_is_ok_empty() {
     let src = format!(
         r#"
 func main() -> i32 {{
-    let fd = tcp_socket()
-    if fd < 0 {{ return 1 }}
+    let fd = match tcp_socket() {{
+        Ok(socket_fd) => socket_fd,
+        Err(_) => return 1,
+    }}
     let ret = connect(fd, "127.0.0.1", {})
     if ret < 0 {{ close_fd(fd); return 2 }}
     let r = tcp_recv(fd, 64)
@@ -624,8 +626,10 @@ func main() -> i32 {{
     let cg_src = format!(
         r#"
 func main() -> i32 {{
-    let fd = tcp_socket()
-    if fd < 0 {{ return 1 }}
+    let fd = match tcp_socket() {{
+        Ok(socket_fd) => socket_fd,
+        Err(_) => return 1,
+    }}
     let ret = connect(fd, "127.0.0.1", {})
     if ret < 0 {{ close_fd(fd); return 2 }}
     let r = tcp_recv(fd, 64)
@@ -753,8 +757,10 @@ fn audit2_std_net_recv_on_dead_fd_error_dual() {
     // 1): compile_recv must surface NULL as an error, matching the VM.
     let src = r#"
 func main() -> i32 {
-    let fd = tcp_socket()
-    if fd < 0 { return 1 }
+    let fd = match tcp_socket() {
+        Ok(socket_fd) => socket_fd,
+        Err(_) => return 1,
+    }
     close_fd(fd)
     let r = tcp_recv(fd, 64)
     match r {
@@ -783,8 +789,10 @@ func main() -> i32 {
     }
     let cg_src = r#"
 func main() -> i32 {
-    let fd = tcp_socket()
-    if fd < 0 { return 1 }
+    let fd = match tcp_socket() {
+        Ok(socket_fd) => socket_fd,
+        Err(_) => return 1,
+    }
     close_fd(fd)
     let r = tcp_recv(fd, 64)
     match r {
@@ -1161,4 +1169,42 @@ func main() -> i32 {
         "[]\n[]\n[hel...]\n[hello]",
         "codegen truncate must match the VM"
     );
+}
+
+#[test]
+fn audit_std_net_tcp_socket_result_source_contract() {
+    fn function_source<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing stdlib function {signature}"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("unterminated stdlib function {signature}"));
+        &rest[..end]
+    }
+
+    let stdlib = audit2_stdlib_src("net.mimi");
+    let socket = function_source(&stdlib, "pub func tcp_socket()");
+    assert!(socket.contains("pub func tcp_socket() -> Result<i64, NetError>"));
+    assert!(socket.contains("let fd = socket(AF_INET, SOCK_STREAM, 0)"));
+    assert!(socket.contains("if fd < 0 { Err(SocketCreate) } else { Ok(fd) }"));
+    assert!(!stdlib.contains("pub func tcp_socket() -> i64"));
+
+    for signature in ["pub func tcp_connect(", "pub func tcp_listen("] {
+        let function = function_source(&stdlib, signature);
+        assert!(function.contains("match tcp_socket()"));
+        assert!(function.contains("Err(error) => return Err(error)"));
+        assert!(!function.contains("if fd < 0"));
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let matrix_generator = std::fs::read_to_string(manifest.join("scripts/gen-stdlib-matrix.py"))
+        .expect("read stdlib matrix generator");
+    assert!(matrix_generator
+        .contains("\"net.tcp_socket\": {\"ret_shape\": \"result\", \"args\": \"\"}"));
+    assert!(matrix_generator.contains(
+        "\"net\": \"match tcp_socket() { Ok(v) => { println(v) } Err(e) => { println(e) } }\""
+    ));
+    assert!(!matrix_generator.contains("tcp_socket() >= 0"));
 }

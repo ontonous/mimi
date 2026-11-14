@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::Duration;
@@ -12,7 +13,7 @@ const MULTI_PORT: i32 = 31078;
 const WRAP_PORT: i32 = 31079;
 
 const SERVER_ECHO: &str = r#"
-func main() -> string {
+func server_echo() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "socket failed" }
     let ret = bind(fd, PORT)
@@ -27,10 +28,15 @@ func main() -> string {
     close_fd(fd)
     data
 }
+
+func main() -> i32 {
+    let _result = server_echo()
+    0
+}
 "#;
 
 const CLIENT_ECHO: &str = r#"
-func main() -> string {
+func client_echo() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "client socket failed" }
     let ret = connect(fd, "127.0.0.1", PORT)
@@ -40,6 +46,11 @@ func main() -> string {
     close_fd(fd)
     data
 }
+
+func main() -> i32 {
+    let _result = client_echo()
+    0
+}
 "#;
 
 #[test]
@@ -47,22 +58,26 @@ fn net_echo_server() {
     let server_src = SERVER_ECHO.replace("PORT", &ECHO_PORT.to_string());
     let client_src = CLIENT_ECHO.replace("PORT", &ECHO_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || {
+        bytecode_call_named(&server_src, "server_echo", vec![])
+            .expect("bytecode server helper should run")
+    });
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = bytecode_call_named(&client_src, "client_echo", vec![])
+        .expect("bytecode client helper should run");
     let server_result = server.join().unwrap();
 
     assert_eq!(
         server_result,
-        interp::Value::String(crate::interp::SharedString::new("hello".to_string())),
+        interp::Value::String(SharedString::new("hello".to_string())),
         "Server should receive 'hello', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(crate::interp::SharedString::new("echo: hello".to_string())),
+        interp::Value::String(SharedString::new("echo: hello".to_string())),
         "Client should receive 'echo: hello', got {:?}",
         client_result
     );
@@ -74,7 +89,7 @@ fn net_echo_server_sequential() {
     // Each step blocks until the counterparty's action completes, ensuring ordering
     // without relying on TCP message boundaries.
     let server_src = r#"
-func main() -> string {
+func sequential_server() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "socket failed" }
     let ret = bind(fd, PORT)
@@ -91,11 +106,16 @@ func main() -> string {
     close_fd(fd)
     msg1 + msg2
 }
+
+func main() -> i32 {
+    let _result = sequential_server()
+    0
+}
 "#
     .replace("PORT", &MULTI_PORT.to_string());
 
     let client_src = r#"
-func main() -> string {
+func sequential_client() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "client socket failed" }
     let ret = connect(fd, "127.0.0.1", PORT)
@@ -107,25 +127,34 @@ func main() -> string {
     close_fd(fd)
     resp1 + resp2
 }
+
+func main() -> i32 {
+    let _result = sequential_client()
+    0
+}
 "#
     .replace("PORT", &MULTI_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || {
+        bytecode_call_named(&server_src, "sequential_server", vec![])
+            .expect("bytecode sequential server helper should run")
+    });
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = bytecode_call_named(&client_src, "sequential_client", vec![])
+        .expect("bytecode sequential client helper should run");
     let server_result = server.join().unwrap();
 
     assert_eq!(
         server_result,
-        interp::Value::String(crate::interp::SharedString::new("abcd".to_string())),
+        interp::Value::String(SharedString::new("abcd".to_string())),
         "Server should receive 'ab' + 'cd', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(crate::interp::SharedString::new("ack1: aback2: cd".to_string())),
+        interp::Value::String(SharedString::new("ack1: aback2: cd".to_string())),
         "Client should receive ack'd responses, got {:?}",
         client_result
     );
@@ -135,7 +164,7 @@ func main() -> string {
 fn net_echo_server_accept_wrapper() {
     // Test that tcp_accept wrapper works end-to-end
     let server_src = r#"
-func main() -> string {
+func accept_wrapper_server() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "socket failed" }
     let ret = bind(fd, PORT)
@@ -150,11 +179,16 @@ func main() -> string {
     close_fd(fd)
     data
 }
+
+func main() -> i32 {
+    let _result = accept_wrapper_server()
+    0
+}
 "#
     .replace("PORT", &WRAP_PORT.to_string());
 
     let client_src = r#"
-func main() -> string {
+func accept_wrapper_client() -> string {
     let fd = socket(2, 1, 0)
     if fd < 0 { return "client socket failed" }
     let ret = connect(fd, "127.0.0.1", PORT)
@@ -164,25 +198,34 @@ func main() -> string {
     close_fd(fd)
     data
 }
+
+func main() -> i32 {
+    let _result = accept_wrapper_client()
+    0
+}
 "#
     .replace("PORT", &WRAP_PORT.to_string());
 
-    let server = std::thread::spawn(move || run_source(&server_src));
+    let server = std::thread::spawn(move || {
+        bytecode_call_named(&server_src, "accept_wrapper_server", vec![])
+            .expect("bytecode accept-wrapper server helper should run")
+    });
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let client_result = run_source(&client_src);
+    let client_result = bytecode_call_named(&client_src, "accept_wrapper_client", vec![])
+        .expect("bytecode accept-wrapper client helper should run");
     let server_result = server.join().unwrap();
 
     assert_eq!(
         server_result,
-        interp::Value::String(crate::interp::SharedString::new("world".to_string())),
+        interp::Value::String(SharedString::new("world".to_string())),
         "Server should receive 'world', got {:?}",
         server_result
     );
     assert_eq!(
         client_result,
-        interp::Value::String(crate::interp::SharedString::new("received: world".to_string())),
+        interp::Value::String(SharedString::new("received: world".to_string())),
         "Client should receive 'received: world', got {:?}",
         client_result
     );
@@ -338,7 +381,10 @@ fn dual_net_tcp_client_echo() {
         let echo_server = start_echo_server(DUAL_PORT2 as u16);
         std::thread::sleep(Duration::from_millis(200));
         let src = TCP_CLIENT_PROG.replace("PORT", &DUAL_PORT2.to_string());
-        let codegen_result = compile_and_run(&src);
+        // Network builtins are still exercised through the explicitly
+        // test-only legacy LLVM adapter. The production checked route is
+        // canonical-only and must not regain this surface-AST fallback.
+        let codegen_result = checked_codegen_compile_and_run(&src);
         assert!(
             codegen_result.is_ok(),
             "Codegen should succeed: {:?}",
@@ -361,7 +407,10 @@ fn codegen_net_tcp_client_echo() {
     std::thread::sleep(Duration::from_millis(100));
 
     let src = TCP_CLIENT_PROG.replace("PORT", &CODEGEN_PORT.to_string());
-    let codegen_result = compile_and_run(&src);
+    // Keep this backend smoke test on the named test-only compatibility
+    // adapter; production routing is checked independently and has no legacy
+    // retry for an uncovered network Flow.
+    let codegen_result = checked_codegen_compile_and_run(&src);
     assert!(
         codegen_result.is_ok(),
         "Codegen should succeed: {:?}",

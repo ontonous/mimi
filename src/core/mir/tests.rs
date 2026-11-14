@@ -1,5 +1,8 @@
 use super::*;
-use crate::core::ir::{PrimitiveType, ResolvedType, ResolvedTypeTable};
+use crate::core::ir::{
+    PrimitiveType, ResolvedExprKind, ResolvedPatternKind, ResolvedStmtKind, ResolvedType,
+    ResolvedTypeTable,
+};
 use crate::core::mir::types::{MirGlueKind, MirLayout, MirOwnership, MirTypeKind};
 
 fn type_id(table: &mut ResolvedTypeTable, ty: ResolvedType) -> ResolvedTypeId {
@@ -12,6 +15,47 @@ fn checked_program(source: &str) -> crate::core::CheckedProgram {
         .parse_file()
         .expect("parse");
     crate::core::check_program(&file).expect("check")
+}
+
+#[test]
+fn keys_snapshot_checked_route_executes_in_reference_after_owner_drops() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_keys_snapshot.mimi"
+    ));
+    let canonical = reference::MirProgram::from_checked_program(&checked)
+        .expect("exact KeysSnapshot source lowers to canonical MIR");
+    let route = validate_ordinary_map_owned_any_v2_keys_snapshot_route(&checked, &canonical)
+        .expect("exact Checker/MIR pair validates the KeysSnapshot route");
+    assert_eq!(
+        route.profile,
+        ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE
+    );
+
+    let main = canonical
+        .functions()
+        .get(&crate::core::NodeId("function:main".into()))
+        .expect("fixture main function");
+    let checker_route = main
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+        .expect("Checker-owned owner-v2 source receipt");
+    let [source_receipt] = checker_route.keys_snapshot_receipts.as_slice() else {
+        panic!("exact KeysSnapshot fixture has one Checker ownership receipt");
+    };
+    assert_eq!(source_receipt.static_key_utf8.as_slice(), b"answer");
+    assert_eq!(
+        main.ownership.checker_ordinary_map_owned_any_v2.len(),
+        5,
+        "New, Set, Keys, and the two Map-root drops are all receipted"
+    );
+
+    let reference = reference::MirReferenceInterpreter::new(&canonical)
+        .with_route_receipt(&route)
+        .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
+        .expect("validated KeysSnapshot route executes in the reference interpreter");
+    assert_eq!(reference.value, reference::MirRuntimeValue::Int(0));
+    assert_eq!(reference.output, "answer\n");
 }
 
 #[test]
@@ -275,6 +319,7 @@ fn owned_get_profile_receipt_binds_typed_get_and_root_lifecycle() {
         proof_worklist: None,
         ownership: MirOwnershipSummary {
             checker_ordinary_map_owned_get_i32_string_v1: receipts,
+            checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt: None,
             ..MirOwnershipSummary::default()
         },
     };
@@ -408,6 +453,58 @@ fn owned_get_profile_receipt_binds_typed_get_and_root_lifecycle() {
         })
         .expect("typed owned-get instruction");
     assert_eq!(mir_instruction_value_uses(&getter.kind), [root, key]);
+}
+
+#[test]
+fn canonical_ownership_summary_reports_map_root_get_any_caller_receipt() {
+    use crate::core::ir::ResolvedLocalId;
+    use crate::core::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion as CallerProfile;
+    use crate::core::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt as CallerReceipt;
+
+    let node = |value: &str| NodeId(value.to_owned());
+    let local = |value: &str| ResolvedLocalId(node(value));
+    let receipt = CallerReceipt {
+        profile_version: CallerProfile::V1,
+        producer_owner: node("function:map_root_producer"),
+        producer_map_set_operation: node("operation:producer_set"),
+        producer_return_value: node("expression:producer_return"),
+        producer_final_local: local("local:producer_root"),
+        producer_final_binding_point: node("point:producer_root_binding"),
+        logical_root: crate::core::ownership::ResourceId(node("resource:logical_root")),
+        caller_owner: node("function:get_any_caller"),
+        call_node: node("expression:producer_call"),
+        call_target: node("function:map_root_producer"),
+        caller_root_local: local("local:caller_root"),
+        caller_root_binding_point: node("point:caller_root_binding"),
+        caller_root_type: types::ordinary_map_owned_any_v2_type_id(),
+        get_any_node: node("expression:get_any"),
+        get_any_receiver_node: node("expression:get_any_receiver"),
+        get_any_key_node: node("expression:get_any_key"),
+        pair_local: local("local:get_any_pair"),
+        pair_binding_point: node("point:pair_binding"),
+        pair_type: types::ordinary_map_owned_any_v2_get_result_type_id(),
+        unpack_projection: node("projection:pair_string"),
+        unpack_cast: node("expression:unpack_string"),
+        unpack_local: local("local:unpacked_string"),
+        unpack_binding_point: node("point:string_binding"),
+        string_type: crate::core::ir::primitive_type_id(PrimitiveType::String),
+        pair_drop_point: node("point:pair_drop"),
+        root_drop_point: node("point:root_drop"),
+        string_drop_point: node("point:string_drop"),
+        string_drop_place_index: 0,
+        caller_return: node("expression:caller_return"),
+        caller_return_type: crate::core::ir::primitive_type_id(PrimitiveType::I32),
+        caller_return_literal: crate::core::ir::ResolvedLiteral::Int(0),
+    };
+    let canonical = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt: Some(Box::new(receipt)),
+        ..MirOwnershipSummary::default()
+    }
+    .canonical_text();
+
+    assert!(
+        canonical.contains("checker_ordinary_map_owned_any_v2_map_root_get_any_caller receipt=")
+    );
 }
 
 #[test]
@@ -595,6 +692,204 @@ fn canonical_ffi_endpoint_predicate_rejects_forged_metadata() {
         forged_catalog.replace_for_test_only(i64_id.clone(), forged);
         assert!(!forged_catalog.is_canonical_ffi_endpoint(&i64_id, false));
     }
+}
+
+#[test]
+fn ffi_record_verifier_receipt_is_verifier_only_and_binds_repr_c_field_order() {
+    let checked = checked_program(
+        r#"
+#[repr(C)] type Pair { low: i32, high: i64 }
+extern "C" { func foreign(value: Pair) -> Pair requires: value.low >= 0; }
+func caller(value: Pair) -> Pair {
+    requires: value.low >= 0
+    foreign(value)
+}
+func main() -> i64 { 0 }
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR retains a checker-sealed record FFI receipt");
+    let (instruction, receipt) = program.ffi_calls().iter().next().expect("FFI call receipt");
+    let function = program
+        .functions()
+        .get(&receipt.caller)
+        .expect("FFI caller body");
+    let verifier_errors = validate_ffi_call_contract_verifier_record_receipt(
+        program.type_catalog(),
+        function,
+        instruction,
+        &receipt.callee,
+        receipt.result.as_ref(),
+        &receipt.arguments,
+        receipt,
+    );
+    assert!(verifier_errors.is_empty(), "{verifier_errors:?}");
+    let execution_errors = validate_ffi_call_contract_receipt(
+        program.type_catalog(),
+        function,
+        instruction,
+        &receipt.callee,
+        receipt.result.as_ref(),
+        &receipt.arguments,
+        receipt,
+    );
+    assert!(
+        !execution_errors.is_empty(),
+        "record endpoints must remain outside ScalarFfi execution admission"
+    );
+
+    let mut forged_variadic = receipt.clone();
+    forged_variadic.variadic = true;
+    let variadic_errors = validate_ffi_call_contract_verifier_record_receipt(
+        program.type_catalog(),
+        function,
+        instruction,
+        &receipt.callee,
+        receipt.result.as_ref(),
+        &receipt.arguments,
+        &forged_variadic,
+    );
+    assert!(
+        variadic_errors
+            .iter()
+            .any(|error| error.contains("does not admit variadic declarations")),
+        "variadic record receipts must be rejected explicitly: {variadic_errors:?}"
+    );
+
+    let record_id = &receipt.parameter_types[0];
+    let original = program
+        .type_catalog()
+        .get(record_id)
+        .expect("record TypeDesc")
+        .clone();
+    assert!(program
+        .type_catalog()
+        .is_canonical_ffi_verifier_record(record_id));
+    let original_abi_text = original.abi_canonical_text();
+    assert!(original_abi_text.contains("repr_c=true"));
+    assert!(original_abi_text.contains("field:low"));
+    assert!(original_abi_text.contains("field:high"));
+
+    let validate_forged = |descriptor: types::MirTypeDesc| {
+        let mut catalog = program.type_catalog().clone();
+        catalog.replace_for_test_only(record_id.clone(), descriptor);
+        validate_ffi_call_contract_verifier_record_receipt(
+            &catalog,
+            function,
+            instruction,
+            &receipt.callee,
+            receipt.result.as_ref(),
+            &receipt.arguments,
+            receipt,
+        )
+    };
+
+    let mut forged_repr = original.clone();
+    forged_repr
+        .native_record_abi
+        .as_mut()
+        .expect("native declaration identity")
+        .repr_c = false;
+    assert_ne!(forged_repr.abi_canonical_text(), original_abi_text);
+    assert!(
+        !validate_forged(forged_repr).is_empty(),
+        "tampered repr(C) identity must be rejected"
+    );
+
+    let mut forged_order = original.clone();
+    forged_order
+        .native_record_abi
+        .as_mut()
+        .expect("native declaration identity")
+        .fields
+        .reverse();
+    assert_ne!(forged_order.abi_canonical_text(), original_abi_text);
+    assert!(
+        !validate_forged(forged_order).is_empty(),
+        "tampered native declaration order must be rejected"
+    );
+
+    let mut forged_layout_order = original;
+    let MirLayout::Record { fields, .. } = &mut forged_layout_order.layout else {
+        panic!("Pair TypeDesc must have record layout");
+    };
+    fields.reverse();
+    assert!(
+        !validate_forged(forged_layout_order).is_empty(),
+        "tampered canonical layout order must disagree with the native receipt"
+    );
+}
+
+#[test]
+fn ffi_record_verifier_catalog_rejects_non_repr_generic_string_tuple_and_enum_shapes() {
+    let checked = checked_program(
+        r#"
+#[repr(C)] type Good { value: i32, tail: i64 }
+type Plain { value: i32 }
+#[repr(C)] type Generic<T> { value: T }
+#[repr(C)] type WithString { value: i32, label: string }
+#[repr(C)] type WithF32 { value: f32 }
+type Choice { Empty, Value(i32) }
+func consume(good: Good, plain: Plain, generic: Generic<i32>, with_string: WithString, with_f32: WithF32, choice: Choice, pair: (i32, i64)) -> i64 {
+    drop(plain);
+    drop(generic);
+    drop(with_string);
+    drop(with_f32);
+    drop(choice);
+    drop(pair);
+    good.tail
+}
+func main() -> i64 { 0 }
+"#,
+    );
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked).expect("MIR type catalog");
+    let record_id = |name: &str| {
+        catalog
+            .iter()
+            .find_map(|(id, descriptor)| match &descriptor.layout {
+                MirLayout::Record { nominal, .. } if nominal.as_str().ends_with(name) => {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} record TypeDesc"))
+    };
+    let good = record_id("Good");
+    assert!(catalog.is_canonical_ffi_verifier_record(&good));
+    for (name, reason) in [
+        ("Plain", "missing repr(C)"),
+        ("Generic", "generic binder"),
+        ("WithString", "managed String field"),
+        ("WithF32", "f32 outside the verifier leaf domain"),
+    ] {
+        let id = record_id(name);
+        assert!(
+            !catalog.is_canonical_ffi_verifier_record(&id),
+            "{name} must be outside the record proof profile ({reason})"
+        );
+    }
+    assert!(catalog.iter().any(|(id, descriptor)| {
+        descriptor.kind == MirTypeKind::Nominal
+            && matches!(&descriptor.layout, MirLayout::Enum { .. })
+            && id.as_str().ends_with("Choice")
+    }));
+    let choice = catalog
+        .iter()
+        .find_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::Nominal
+                && matches!(&descriptor.layout, MirLayout::Enum { .. })
+                && id.as_str().ends_with("Choice"))
+            .then_some(id.clone())
+        })
+        .expect("enum TypeDesc");
+    assert!(!catalog.is_canonical_ffi_verifier_record(&choice));
+    let tuple = checked
+        .resolved_types()
+        .iter()
+        .find_map(|(id, ty)| matches!(ty, ResolvedType::Tuple(_)).then_some(id.clone()))
+        .expect("tuple TypeDesc identity");
+    assert!(catalog.get(&tuple).is_some());
+    assert!(!catalog.is_canonical_ffi_verifier_record(&tuple));
 }
 
 #[test]
@@ -3448,13 +3743,26 @@ fn generic_result_f64_unwrap_err_preserves_the_canonical_trap() {
     let checked = checked_program(source);
     let program = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("generic Result<T, i32> f64 Err MIR");
+    let helper = crate::core::NodeId("function:unwrap_f64_err".into());
+    assert!(
+        program.functions().contains_key(&helper),
+        "the f64 Result trap belongs to the exact helper owner"
+    );
     let error = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
-        .execute(&crate::core::NodeId("function:main".into()), &[])
+        .execute(&helper, &[])
         .expect_err("generic Result f64 unwrap Err must trap");
     assert!(
         error.to_string().contains("E0800"),
         "unexpected trap: {error}"
     );
+
+    let bytecode = crate::interp::bytecode::mir::compile_mir_program(&program)
+        .expect("generic Result f64 unwrap Err bytecode");
+    assert!(bytecode.ast.is_none());
+    let bytecode_error = crate::interp::bytecode::BytecodeVM::new(bytecode)
+        .call_named(&helper.0, Vec::new())
+        .expect_err("bytecode Err(7).unwrap must trap in the exact helper owner");
+    assert_eq!(bytecode_error.code(), "E0800");
 }
 
 #[test]
@@ -4821,9 +5129,13 @@ fn result_i64_unwrap_remains_fail_closed_outside_copy_result_i32_island() {
 #[test]
 fn option_f64_unwrap_or_remains_fail_closed_outside_copy_projection_island() {
     let source = r#"
-        func main() -> f64 {
+        func unwrap_option_f64() -> f64 {
             let value: Option<f64> = Some(41.0)
             value.unwrap_or(0.0)
+        }
+        func main() -> i64 {
+            let value = unwrap_option_f64()
+            0
         }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -4842,6 +5154,339 @@ fn option_f64_unwrap_or_remains_fail_closed_outside_copy_projection_island() {
         )),
         "unexpected fail-closed diagnostics: {errors:?}"
     );
+}
+
+#[test]
+fn ffi_verifier_singleton_for_keeps_checked_construction_projection_call_and_drop() {
+    let source = r#"
+        extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+        func one_positive(value: i32) -> i32 {
+            requires: value == 0
+            for item in [value + 1] { positive(item); }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let checked = checked_program(source);
+    let owner = NodeId("function:one_positive".into());
+    let callable = checked.callable(&owner).expect("checked caller");
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked).expect("Checker TypeDesc");
+    let program = reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+        .expect("isolated FFI verifier singleton loop");
+    let function = program
+        .functions()
+        .get(&owner)
+        .expect("materialized caller");
+    function.validate().expect("canonical singleton-loop MIR");
+
+    let ResolvedStmtKind::For { pattern, body, .. } = &callable
+        .body
+        .root
+        .statements
+        .iter()
+        .find(|statement| matches!(&statement.kind, ResolvedStmtKind::For { .. }))
+        .expect("source singleton loop")
+        .kind
+    else {
+        unreachable!();
+    };
+    let ResolvedPatternKind::Binding { local, .. } = &pattern.kind else {
+        panic!("direct element binding");
+    };
+    let ResolvedStmtKind::Expr(call_expression) = &body.statements[0].kind else {
+        panic!("single body call");
+    };
+    let ResolvedExprKind::Call(source_call) = &call_expression.kind else {
+        panic!("resolved body call");
+    };
+
+    let block = function.blocks.get(&function.entry).expect("entry block");
+    let construct_index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::ConstructList {
+                    elements,
+                    list_construct_contract: Some(_),
+                    ..
+                } if elements.len() == 1
+            )
+        })
+        .expect("Checker-receipted one-element List construction");
+    let (list, element_input) = match &block.instructions[construct_index].kind {
+        MirInstructionKind::ConstructList {
+            result, elements, ..
+        } => (result.clone(), elements[0].clone()),
+        _ => unreachable!(),
+    };
+    let element_eval_index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Binary { result, .. } if result == &element_input
+            )
+        })
+        .expect("element expression is evaluated exactly as checked");
+    let zero_index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Const {
+                    literal: crate::core::ir::ResolvedLiteral::Int(0),
+                    ..
+                }
+            )
+        })
+        .expect("synthetic literal zero index");
+    let (index_value, projected) = match &block.instructions[zero_index + 1].kind {
+        MirInstructionKind::Project {
+            result,
+            base,
+            projection: MirProjection::Index(index),
+            list_index_contract: Some(_),
+        } if base == &list => (index.clone(), result.clone()),
+        other => panic!("expected checked List index projection, got {other:?}"),
+    };
+    assert!(matches!(
+        &block.instructions[zero_index].kind,
+        MirInstructionKind::Const { result, .. } if result == &index_value
+    ));
+    let checked_binding = MirValueId::new(format!("local:{}", local.0 .0)).expect("local id");
+    assert!(
+        block.instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            MirInstructionKind::Move { result, source }
+                if result == &checked_binding && source == &projected
+        )),
+        "the extracted element must be installed under the Checker local identity"
+    );
+
+    let exact_call_id = MirInstructionId::new(format!("inst:call:{}", call_expression.node_id.0))
+        .expect("source callsite id");
+    let call_index = block
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == exact_call_id)
+        .expect("original Checker callsite identity");
+    assert!(matches!(
+        &block.instructions[call_index].kind,
+        MirInstructionKind::Call {
+            callee,
+            arguments,
+            ..
+        } if callee == &source_call.callee && arguments.len() == 1
+    ));
+    let drop_index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == &list)
+        })
+        .expect("Checker-authorized iterable scope Drop");
+    assert!(
+        element_eval_index < construct_index
+            && construct_index < zero_index
+            && zero_index < call_index
+            && call_index < drop_index,
+        "construction, checked index and body call must precede scope cleanup"
+    );
+
+    let normal = super::lower::lower_callable_with_type_catalog(callable, &catalog)
+        .expect_err("ordinary Phase 0 and backend lowering must keep For fail-closed");
+    assert!(normal.iter().any(|error| {
+        error
+            .message
+            .contains("structured control flow is not lowered by MIR Phase 0")
+    }));
+}
+
+#[test]
+fn verifier_only_ffi_caller_lowers_checker_owned_constants() {
+    let checked = checked_program(
+        r#"
+            const SOURCE_VALUE: i32 = 41
+            extern "C" { func foreign_identity(value: i32) -> i32; }
+            func caller() -> i32 { foreign_identity(SOURCE_VALUE) }
+            func main() -> i64 { 0 }
+        "#,
+    );
+    let owner = NodeId("function:caller".into());
+    let mir = reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+        .expect("verifier-only source builder retains Checker constants");
+    let caller = mir.functions().get(&owner).expect("isolated caller body");
+    assert!(caller.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Const {
+                    literal: crate::core::ir::ResolvedLiteral::Int(41),
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn checked_scalar_ffi_singleton_for_uses_only_the_verifier_owner_slice() {
+    let checked = checked_program(
+        r#"
+            extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+            func main() -> i64 {
+                for item in [1] { positive(item); }
+                0
+            }
+        "#,
+    );
+
+    let executable_route = materialize_canonical_mir_route(&checked, None)
+        .expect_err("the singleton For remains outside executable MIR route admission");
+    assert!(executable_route
+        .to_string()
+        .contains("structured control flow is not lowered by MIR Phase 0"));
+
+    let owner = NodeId("function:main".into());
+    let verifier_slice = reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner)
+        .expect("the exact Checker-backed verifier-only owner slice");
+    assert_eq!(
+        verifier_slice.purpose(),
+        reference::MirProgramPurpose::VerifierOnly
+    );
+
+    let has_z3 = crate::verifier::is_z3_available();
+    let results = crate::verifier::verify_ffi_checked(&checked)
+        .expect("the exact singleton-For owner slice is verifier-admissible");
+    assert_eq!(results.len(), 1, "main's FFI call remains visible");
+    if has_z3 {
+        assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(
+            results[0].artifact.as_ref().unwrap().engine,
+            crate::verifier::ProofArtifact::ENGINE_MIR
+        );
+    } else {
+        assert_eq!(
+            results[0].status,
+            crate::verifier::VerifStatus::InfrastructureError
+        );
+        assert!(results[0].artifact.is_none());
+    }
+}
+
+#[test]
+fn scalar_ffi_singleton_for_near_miss_keeps_the_complete_route_error() {
+    let checked = checked_program(
+        r#"
+            extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+            func main() -> i64 {
+                let items: List<i32> = [1]
+                for item in items { positive(item); }
+                0
+            }
+        "#,
+    );
+    let owner = NodeId("function:main".into());
+    assert!(reference::MirProgram::from_checked_program_ffi_caller(&checked, &owner).is_err());
+
+    let error = crate::verifier::verify_ffi_checked(&checked)
+        .expect_err("a named iterable is not eligible for the verifier-only singleton-For slice");
+    assert!(
+        error.contains("structured control flow is not lowered by MIR Phase 0"),
+        "the complete ScalarFfi materialization failure must remain visible: {error}"
+    );
+}
+
+#[test]
+fn ffi_verifier_singleton_for_rejects_unsupported_shapes_and_exits() {
+    let source = r#"
+        extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+        func many_elements(value: i32) -> i32 {
+            for item in [value, value + 1] { positive(item); }
+            0
+        }
+        func named_iterable(value: i32) -> i32 {
+            let xs: List<i32> = [value]
+            for item in xs { positive(item); }
+            0
+        }
+        func multiple_body_calls(value: i32) -> i32 {
+            for item in [value] { positive(item); positive(item); }
+            0
+        }
+        func break_exit(value: i32) -> i32 {
+            for item in [value] { positive(item); break; }
+            0
+        }
+        func return_exit(value: i32) -> i32 {
+            for item in [value] { return positive(item); }
+            0
+        }
+        func main() -> i64 { 0 }
+    "#;
+    let checked = checked_program(source);
+    let catalog = types::MirTypeCatalog::from_checked_program(&checked).expect("Checker TypeDesc");
+    for name in [
+        "many_elements",
+        "named_iterable",
+        "multiple_body_calls",
+        "break_exit",
+        "return_exit",
+    ] {
+        let owner = NodeId(format!("function:{name}"));
+        let callable = checked.callable(&owner).expect("checked negative caller");
+        let errors = super::lower::lower_ffi_verifier_caller(callable, &catalog, None)
+            .expect_err("unsupported singleton-loop shape must remain fail-closed");
+        assert!(!errors.is_empty(), "{name} unexpectedly lowered");
+    }
+
+    // The special lowering never becomes a general production lowering
+    // allowance: even the admitted loop remains outside the ordinary Phase 0
+    // entry point. A mutated typed body is rejected at the body-shape gate.
+    let one = checked_program(
+        r#"
+            extern "C" { func positive(value: i32) -> i32 requires: value > 0; }
+            func one(value: i32) -> i32 {
+                for item in [value] { positive(item); }
+                0
+            }
+            func main() -> i64 { 0 }
+        "#,
+    );
+    let owner = NodeId("function:one".into());
+    let mut forged = one.callable(&owner).expect("checked caller").clone();
+    let ResolvedStmtKind::For { pattern, body, .. } = &mut forged.body.root.statements[0].kind
+    else {
+        panic!("source singleton loop");
+    };
+    let ResolvedPatternKind::Binding { local, .. } = &pattern.kind else {
+        panic!("direct binding");
+    };
+    let ResolvedStmtKind::Expr(call_expression) = &body.statements[0].kind else {
+        panic!("source call");
+    };
+    let ResolvedExprKind::Call(call) = &call_expression.kind else {
+        panic!("resolved source call");
+    };
+    let assigned_value = call.arguments[0].value.clone();
+    let conversion = call.arguments[0].conversion.clone();
+    let statement = &mut body.statements[0];
+    statement.kind = ResolvedStmtKind::Assign {
+        target: crate::core::ir::ResolvedPlace::root(local.clone()),
+        value: assigned_value,
+        conversion,
+    };
+    let forged_catalog =
+        types::MirTypeCatalog::from_checked_program(&one).expect("Checker TypeDesc");
+    let errors = super::lower::lower_ffi_verifier_caller(&forged, &forged_catalog, None)
+        .expect_err("an assignment to the bound item must not bypass the body gate");
+    assert!(errors
+        .iter()
+        .any(|error| error.message.contains("one direct FFI call expression")));
 }
 
 #[test]
@@ -6265,15 +6910,17 @@ fn checker_loan_start_is_bound_to_mir_and_end_receipt_by_identity() {
 
 fn synthetic_loan_receipt_fixture() -> (crate::core::mir::reference::MirProgram, NodeId, MirFunction)
 {
-    let checked = checked_program("func main(value: i64) -> i64 { *(&value) }");
+    let checked = checked_program(
+        "func borrow_receipt(value: i64) -> i64 { *(&value) }\nfunc main() -> i64 { borrow_receipt(0) }",
+    );
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("single-expression borrow MIR");
-    let owner = NodeId("function:main".into());
+    let owner = NodeId("function:borrow_receipt".into());
     let function = canonical
         .functions()
         .get(&owner)
         .cloned()
-        .expect("main MIR");
+        .expect("borrow helper MIR");
     let start = function
         .ownership
         .events
@@ -6664,7 +7311,14 @@ func main() -> i32 { read(7) }
 
 #[test]
 fn consuming_variant_payload_uses_the_canonical_drop_plan() {
-    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let source = r#"
+func make_owned_option() -> Option<string> { Some("owned") }
+func main() -> i32 {
+    let value = make_owned_option()
+    drop(value)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -6674,8 +7328,8 @@ fn consuming_variant_payload_uses_the_canonical_drop_plan() {
         .expect("move-owned variant glue must be materialized");
     let main = canonical
         .functions()
-        .get(&crate::core::NodeId("function:main".into()))
-        .expect("main MIR");
+        .get(&crate::core::NodeId("function:make_owned_option".into()))
+        .expect("option-producing helper MIR");
     let instruction = main
         .blocks
         .values()
@@ -6715,7 +7369,14 @@ fn consuming_variant_payload_uses_the_canonical_drop_plan() {
 
 #[test]
 fn consuming_variant_payload_identity_drift_is_rejected_before_consumers() {
-    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let source = r#"
+func make_owned_option() -> Option<string> { Some("owned") }
+func main() -> i32 {
+    let value = make_owned_option()
+    drop(value)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -6723,7 +7384,7 @@ fn consuming_variant_payload_identity_drift_is_rejected_before_consumers() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("move-owned variant glue must be materialized");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_owned_option".into());
     let mut forged = canonical
         .functions()
         .get(&owner)
@@ -6779,6 +7440,58 @@ fn flow_move_receipt_reaches_the_consuming_transition_argument() {
         unreachable!();
     };
     assert!(main.values.contains_key(&arguments[0]));
+}
+
+#[test]
+fn flow_transition_argument_arity_is_checked_against_contract() {
+    let source = r#"
+flow Counter {
+    state Zero { n: i32 }
+    state Active { n: i32 }
+    transition inc(Zero, amount: i32) -> Active {
+        return Active { n: self.n + amount }
+    }
+}
+func main() -> i32 {
+    let c = Zero { n: 41 }
+    let active = Counter::inc(c, 1)
+    active.n
+}
+"#;
+    let canonical =
+        crate::core::mir::reference::MirProgram::from_checked_program(&checked_program(source))
+            .expect("parameterized cross-state Flow lowers to canonical MIR");
+    let owner = crate::core::NodeId("function:main".into());
+    let mut functions = canonical.functions().clone();
+    let main = functions.get_mut(&owner).expect("main MIR");
+    let flow_transition = main
+        .blocks
+        .values_mut()
+        .flat_map(|block| block.instructions.iter_mut())
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::FlowTransition { .. }))
+        .expect("parameterized FlowTransition instruction");
+    let MirInstructionKind::FlowTransition { arguments, .. } = &mut flow_transition.kind else {
+        unreachable!();
+    };
+    assert_eq!(arguments.len(), 2, "source state + event parameter");
+    arguments.pop();
+
+    let errors =
+        crate::core::mir::reference::MirProgram::with_type_catalog_and_instances_and_transitions(
+            functions,
+            canonical.type_catalog().clone(),
+            canonical.instances().clone(),
+            canonical.transitions().clone(),
+        )
+        .expect_err("canonical validation must reject an omitted Flow event argument");
+    assert!(
+        errors.iter().any(|error| {
+            error
+                .message
+                .contains("FlowTransition argument arity disagrees with its contract")
+        }),
+        "{errors:?}"
+    );
 }
 
 #[test]
@@ -7362,7 +8075,19 @@ fn list_len_operation_materializes_type_desc_receipt() {
 
 #[test]
 fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
-    let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = reverse(values); drop(values); reversed }";
+    let source = r#"
+func make_reversed_values() -> List<i32> {
+    let values = [1, 2, 3]
+    let reversed = reverse(values)
+    drop(values)
+    reversed
+}
+func main() -> i32 {
+    let reversed = make_reversed_values()
+    drop(reversed)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7370,7 +8095,7 @@ fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_reversed_values".into());
     let function = canonical.functions().get(&owner).expect("main");
     let (list_ty, result_ty, receipt) = function
         .blocks
@@ -7417,7 +8142,19 @@ fn list_reverse_operation_materializes_clone_based_type_desc_receipt() {
 
 #[test]
 fn list_reverse_method_materializes_the_same_canonical_operation_receipt() {
-    let source = "func main() -> List<i32> { let values = [1, 2, 3]; let reversed = values.reverse(); drop(values); reversed }";
+    let source = r#"
+func make_reversed_values_method() -> List<i32> {
+    let values = [1, 2, 3]
+    let reversed = values.reverse()
+    drop(values)
+    reversed
+}
+func main() -> i32 {
+    let reversed = make_reversed_values_method()
+    drop(reversed)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7425,7 +8162,7 @@ fn list_reverse_method_materializes_the_same_canonical_operation_receipt() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_reversed_values_method".into());
     let function = canonical.functions().get(&owner).expect("main");
     let receipt = function
         .blocks
@@ -7457,7 +8194,19 @@ fn list_reverse_method_materializes_the_same_canonical_operation_receipt() {
 
 #[test]
 fn list_concat_method_materializes_two_input_move_receipt_and_consumes_both_sources() {
-    let source = "func main() -> List<i32> { let left = [1, 2]; let right = [3, 4]; let joined = left.concat(right); joined }";
+    let source = r#"
+func concatenate_values() -> List<i32> {
+    let left = [1, 2]
+    let right = [3, 4]
+    let joined = left.concat(right)
+    joined
+}
+func main() -> i32 {
+    let joined = concatenate_values()
+    drop(joined)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7465,7 +8214,7 @@ fn list_concat_method_materializes_two_input_move_receipt_and_consumes_both_sour
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:concatenate_values".into());
     let function = canonical.functions().get(&owner).expect("main");
     let (left, right, receipt) = function
         .blocks
@@ -7521,7 +8270,19 @@ fn list_concat_method_materializes_two_input_move_receipt_and_consumes_both_sour
 
 #[test]
 fn canonical_list_concat_receipt_rejects_missing_second_input_type() {
-    let source = "func main() -> List<i32> { let left = [1]; let right = [2]; let joined = left.concat(right); joined }";
+    let source = r#"
+func concatenate_values() -> List<i32> {
+    let left = [1]
+    let right = [2]
+    let joined = left.concat(right)
+    joined
+}
+func main() -> i32 {
+    let joined = concatenate_values()
+    drop(joined)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7529,7 +8290,7 @@ fn canonical_list_concat_receipt_rejects_missing_second_input_type() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:concatenate_values".into());
     let mut forged = canonical.functions().get(&owner).cloned().expect("main");
     let instruction = forged
         .blocks
@@ -7567,7 +8328,18 @@ fn canonical_list_concat_receipt_rejects_missing_second_input_type() {
 
 #[test]
 fn canonical_list_concat_rejects_aliasing_move_inputs_before_consumers() {
-    let source = "func main() -> List<i32> { let values = [1, 2]; let joined = values.concat(values); joined }";
+    let source = r#"
+func aliasing_concat() -> List<i32> {
+    let values = [1, 2]
+    let joined = values.concat(values)
+    joined
+}
+func main() -> i32 {
+    let joined = aliasing_concat()
+    drop(joined)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7695,7 +8467,18 @@ fn canonical_nested_concat_receipt_rejects_forged_scalar_mode() {
 
 #[test]
 fn non_copy_record_projection_lowers_to_explicit_move_project() {
-    let source = "type Named { name: string, count: i32 }\nfunc main() -> string { let p = Named { name: \"owned\", count: 41 }; p.name }";
+    let source = r#"
+type Named { name: string, count: i32 }
+func project_name() -> string {
+    let p = Named { name: "owned", count: 41 }
+    p.name
+}
+func main() -> i32 {
+    let name = project_name()
+    drop(name)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7703,7 +8486,7 @@ fn non_copy_record_projection_lowers_to_explicit_move_project() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:project_name".into());
     let function = canonical.functions().get(&owner).expect("main");
     assert!(function.blocks.values().any(|block| {
         block
@@ -7826,7 +8609,14 @@ fn managed_generic_list_projection_fails_closed_before_consumers() {
 
 #[test]
 fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
-    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let source = r#"
+func make_owned_pair() -> (string, i32) { ("owned", 41) }
+func main() -> i32 {
+    let pair = make_owned_pair()
+    drop(pair)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7869,7 +8659,14 @@ fn non_copy_tuple_materializes_field_drop_schedule_before_backend() {
 
 #[test]
 fn lowers_move_owned_option_payload_to_explicit_mir_node() {
-    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let source = r#"
+func make_owned_option() -> Option<string> { Some("owned") }
+func main() -> i32 {
+    let value = make_owned_option()
+    drop(value)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7879,8 +8676,8 @@ fn lowers_move_owned_option_payload_to_explicit_mir_node() {
         .expect("move-owned variant glue must be materialized");
     let main = canonical
         .functions()
-        .get(&crate::core::NodeId("function:main".into()))
-        .expect("main MIR");
+        .get(&crate::core::NodeId("function:make_owned_option".into()))
+        .expect("option-producing helper MIR");
     assert!(main.blocks.values().any(|block| {
         block.instructions.iter().any(|instruction| {
             matches!(
@@ -7893,7 +8690,14 @@ fn lowers_move_owned_option_payload_to_explicit_mir_node() {
 
 #[test]
 fn rejects_shallow_variant_construction_before_any_backend() {
-    let source = "func main() -> Option<string> { Some(\"owned\") }";
+    let source = r#"
+func make_owned_option() -> Option<string> { Some("owned") }
+func main() -> i32 {
+    let value = make_owned_option()
+    drop(value)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -7901,7 +8705,7 @@ fn rejects_shallow_variant_construction_before_any_backend() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_owned_option".into());
     let mut function = canonical
         .functions()
         .get(&owner)
@@ -8200,7 +9004,14 @@ fn materializes_record_with_move_owned_variant_field() {
 
 #[test]
 fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
-    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let source = r#"
+func make_owned_pair() -> (string, i32) { ("owned", 41) }
+func main() -> i32 {
+    let pair = make_owned_pair()
+    drop(pair)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -8208,7 +9019,7 @@ fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_owned_pair".into());
     let function = canonical.functions().get(&owner).cloned().expect("main");
     let tuple_id = function
         .values
@@ -8248,7 +9059,14 @@ fn malformed_aggregate_drop_schedule_is_rejected_before_backend() {
 
 #[test]
 fn rejects_reuse_of_tuple_field_after_aggregate_construction() {
-    let source = "func main() -> (string, i32) { (\"owned\", 41) }";
+    let source = r#"
+func make_owned_pair() -> (string, i32) { ("owned", 41) }
+func main() -> i32 {
+    let pair = make_owned_pair()
+    drop(pair)
+    0
+}
+"#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
     let file = crate::parser::Parser::new(tokens)
         .parse_file()
@@ -8256,7 +9074,7 @@ fn rejects_reuse_of_tuple_field_after_aggregate_construction() {
     let checked = crate::core::check_program(&file).expect("check");
     let canonical = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
         .expect("canonical MIR");
-    let owner = crate::core::NodeId("function:main".into());
+    let owner = crate::core::NodeId("function:make_owned_pair".into());
     let mut function = canonical.functions().get(&owner).cloned().expect("main");
     let block = function
         .blocks
@@ -9854,18 +10672,36 @@ fn verifier_and_native_reject_two_complete_but_incompatible_map_profiles() {
     let checked = checked_program(
         r#"
             func legacy_map_profile() -> i32 {
-                let root = map_new()
-                let updated = map_set(root, "legacy", 1)
-                let size = map_size(updated)
-                drop(updated)
-                size
+                match map_new() {
+                    Ok(root) => {
+                        match map_set(root, "legacy", 1) {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                drop(updated)
+                                size
+                            },
+                            Err(status) => { drop(root); status },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
             func main() -> i32 {
-                let root = map_new()
-                let updated = map_set(root, "typed", 2)
-                let size = map_size(updated)
-                drop(updated)
-                size
+                match map_new() {
+                    Ok(root) => {
+                        match map_set(root, "typed", 2) {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                drop(updated)
+                                size
+                            },
+                            Err(status) => { drop(root); status },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#,
     );
@@ -9892,12 +10728,21 @@ fn verifier_and_native_reject_two_complete_but_incompatible_map_profiles() {
             type Point { x: i32 }
             func main() -> i32 {
                 let point = Point { x: 7 }
-                let root = map_new()
-                let updated = map_set(root, "answer", point.x)
-                let size = map_size(updated)
-                drop(updated)
-                let outside_profile = map_get(map_new(), "unreceipted")
-                size
+                match map_new() {
+                    Ok(root) => {
+                        match map_set(root, "answer", point.x) {
+                            Ok(updated) => {
+                                drop(root)
+                                let size = map_size(updated)
+                                let outside_profile = map_get(updated, "unreceipted")
+                                drop(updated)
+                                size
+                            },
+                            Err(status) => { drop(root); status },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#,
     );
@@ -9937,12 +10782,27 @@ fn ordinary_map_alias_clone_and_automatic_cleanup_are_checker_sealed() {
     let checked = checked_program(
         r#"
 func main() -> i32 {
-    let source = map_new()
-    let numbers = map_set(source, "number", 42)
-    let mixed = map_set(numbers, "text", "owned")
-    let alias = mixed
-    drop(mixed)
-    map_size(alias) - 2
+    match map_new() {
+        Ok(source) => {
+            match map_set(source, "number", 42) {
+                Ok(numbers) => {
+                    drop(source)
+                    match map_set(numbers, "text", "owned") {
+                        Ok(mixed) => {
+                            drop(numbers)
+                            let alias = mixed
+                            drop(mixed)
+                            let size = map_size(alias)
+                            size - 2
+                        },
+                        Err(status) => { drop(numbers); status },
+                    }
+                },
+                Err(status) => { drop(source); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
@@ -10010,14 +10870,22 @@ fn ordinary_map_v1_reuses_direct_string_key_without_cloning_or_early_drop() {
         r#"
 func main() -> i32 {
     let key = "pre" + "fix"
-    let source = map_new()
-    let updated = map_set(source, key, 7)
-    let removed = map_remove(updated, key)
-    let present = has_key(source, key)
-    drop(source)
-    drop(updated)
-    drop(removed)
-    if present { 1 } else { 0 }
+    match map_new() {
+        Ok(source) => {
+            match map_set(source, key, 7) {
+                Ok(updated) => {
+                    let removed = map_remove(updated, key)
+                    let present = has_key(source, key)
+                    drop(source)
+                    drop(updated)
+                    drop(removed)
+                    0
+                },
+                Err(status) => { drop(source); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
@@ -10102,14 +10970,22 @@ fn ordinary_map_v1_straight_line_direct_local_key_receipt_is_checker_sealed() {
         r#"
 func main() -> i32 {
     let key = "pre" + "fix"
-    let source = map_new()
-    let updated = map_set(source, key, 7)
-    let removed = map_remove(updated, key)
-    let present = has_key(source, key)
-    drop(source)
-    drop(updated)
-    drop(removed)
-    0
+    match map_new() {
+        Ok(source) => {
+            match map_set(source, key, 7) {
+                Ok(updated) => {
+                    let removed = map_remove(updated, key)
+                    let present = has_key(source, key)
+                    drop(source)
+                    drop(updated)
+                    drop(removed)
+                    if present { 1 } else { 0 }
+                },
+                Err(status) => { drop(source); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
@@ -10192,13 +11068,21 @@ fn ordinary_map_owned_get_v1_preserves_direct_local_key_receipts() {
         r#"
 func main() -> i32 {
     let key = "answer"
-    let source = map_new()
-    let updated = map_set(source, key, 17)
-    let integer = map_get_i32(updated, key)
-    drop(source)
-    drop(updated)
-    drop(integer)
-    0
+    match map_new() {
+        Ok(source) => {
+            match map_set(source, key, 17) {
+                Ok(updated) => {
+                    drop(source)
+                    let integer = map_get_i32(updated, key)
+                    drop(updated)
+                    drop(integer)
+                    0
+                },
+                Err(status) => { drop(source); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
@@ -10269,17 +11153,646 @@ func main() -> i32 {
 }
 
 #[test]
+fn ordinary_map_owned_get_v1_rejects_coherent_entry_action_reordering() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(first) => {
+            let first_value = map_get_i32(first, "first")
+            match map_new() {
+                Ok(second) => {
+                    let second_value = map_get_i32(second, "second")
+                    drop(first)
+                    drop(second)
+                    drop(first_value)
+                    drop(second_value)
+                    0
+                },
+                Err(status) => {
+                    drop(first)
+                    drop(first_value)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("straight-line typed owned-get uses the entry-closed V1 profile");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let cfg_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+        .as_ref()
+        .expect("owned-get CFG receipt");
+    assert_eq!(
+        cfg_receipt.profile_version,
+        crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1
+    );
+
+    let mut reordered = function.clone();
+    let drop_instructions = reordered
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop)
+        .map(|action| action.instruction.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(drop_instructions.len(), 2, "two independent Map roots");
+
+    let first_index = reordered.blocks[&reordered.entry]
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == drop_instructions[0])
+        .expect("first Map drop instruction");
+    let second_index = reordered.blocks[&reordered.entry]
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == drop_instructions[1])
+        .expect("second Map drop instruction");
+    assert!(first_index < second_index);
+    reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("entry block")
+        .instructions
+        .swap(first_index, second_index);
+
+    let instruction_order = reordered.blocks[&reordered.entry]
+        .instructions
+        .iter()
+        .enumerate()
+        .map(|(index, instruction)| (instruction.id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    reordered
+        .ownership
+        .checker_ordinary_map_owned_get_i32_string_v1
+        .sort_by_key(|action| {
+            instruction_order
+                .get(&action.instruction)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+
+    let errors = reordered
+        .validate()
+        .expect_err("MIR action order cannot be made authoritative by reordering receipts");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("entry MIR action order disagrees with Checker CFG point order")),
+        "expected Checker point-rank rejection, got {errors:?}"
+    );
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_settled_tail_rejects_resealed_instruction_reordering() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            let observed = found == true
+            if observed { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
+}
+
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("Checker-receipted V2 settled branch-tail MIR");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let cfg_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .clone();
+    let flow = cfg_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.flow.as_ref())
+        .expect("V2 Checker branch-tail CFG receipt");
+    let drop_action = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .find(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop)
+        .expect("root Drop action");
+    let source_entry = flow
+        .reachable_blocks
+        .get(&flow.entry)
+        .expect("Checker entry block");
+    let selector = match &source_entry.terminator {
+        crate::core::cfg::Terminator::Branch { condition, .. } => condition,
+        other => panic!("settled tail starts with a branch selector, got {other:?}"),
+    };
+    let drop_source_position = source_entry
+        .points
+        .iter()
+        .position(|(point, _)| point == &drop_action.point)
+        .expect("root Drop source point is in the Checker entry");
+    let selector_source_position = source_entry
+        .points
+        .iter()
+        .position(|(point, _)| point == selector)
+        .expect("branch selector source point is in the Checker entry");
+    assert!(drop_source_position < selector_source_position);
+
+    let selector_value =
+        MirValueId::new(format!("expr:{}", selector.0)).expect("canonical branch selector value");
+    let entry_block = function
+        .blocks
+        .get(&function.entry)
+        .expect("MIR entry block");
+    let instruction_origins = checker_managed_any_instruction_origins(function);
+    let selector_instruction_index = entry_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Clone { result, .. } if result == &selector_value
+            )
+        })
+        .expect("final selector load has a MIR Clone instruction");
+    let drop_instruction_index = entry_block
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == drop_action.instruction)
+        .expect("root Drop is physically in the entry block");
+    let selector_operand_index = entry_block
+        .instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| {
+            matches!(&instruction.kind, MirInstructionKind::Clone { .. })
+                && instruction_origins
+                    .get(&instruction.id)
+                    .and_then(|origin| {
+                        source_entry
+                            .points
+                            .iter()
+                            .position(|(point, _)| point == origin)
+                    })
+                    .is_some_and(|point_index| {
+                        drop_source_position < point_index && point_index < selector_source_position
+                    })
+        })
+        .map(|(index, _)| index)
+        .min()
+        .expect("selector expression has a source-marked local operand Clone");
+    assert!(drop_instruction_index < selector_operand_index);
+    assert!(selector_operand_index < selector_instruction_index);
+
+    let mut reordered = function.clone();
+    let moved_drop = {
+        let entry = reordered
+            .blocks
+            .get_mut(&reordered.entry)
+            .expect("MIR entry block");
+        entry.instructions.remove(drop_instruction_index)
+    };
+    // Removing an earlier instruction shifts this operand left by one, so
+    // inserting at its original index places the Drop after the operand but
+    // before the remaining selector computation and entry Branch.
+    reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("MIR entry block")
+        .instructions
+        .insert(selector_operand_index, moved_drop);
+
+    reseal_checker_managed_any_instructions(&mut reordered);
+    assert_eq!(
+        reordered
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt,
+        cfg_receipt,
+        "the adversary leaves the Checker CFG receipt untouched"
+    );
+
+    let errors = reordered
+        .validate()
+        .expect_err("physical owner Drop order cannot contradict Checker points");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("settled-tail V2 owner action follows a branch selector dependency")),
+        "expected source-point order rejection, got {errors:?}"
+    );
+}
+
+fn checker_managed_any_instruction_origins(
+    function: &MirFunction,
+) -> BTreeMap<MirInstructionId, NodeId> {
+    function
+        .ownership
+        .checker_managed_any
+        .as_ref()
+        .expect("private Checker ManagedAny body seal")
+        .instructions
+        .iter()
+        .map(|(_, origin, instruction)| (instruction.id.clone(), origin.clone()))
+        .collect()
+}
+
+fn reseal_checker_managed_any_instructions(function: &mut MirFunction) {
+    let instruction_origins = checker_managed_any_instruction_origins(function);
+    let resealed_instructions = function
+        .blocks
+        .values()
+        .flat_map(|block| {
+            block.instructions.iter().map(|instruction| {
+                (
+                    block.id.clone(),
+                    instruction_origins
+                        .get(&instruction.id)
+                        .expect("instruction retains its Checker source origin")
+                        .clone(),
+                    instruction.clone(),
+                )
+            })
+        })
+        .collect();
+    function
+        .ownership
+        .checker_managed_any
+        .as_mut()
+        .expect("private Checker ManagedAny body seal")
+        .instructions = resealed_instructions;
+}
+
+fn settled_selector_dependency_indices(function: &MirFunction) -> Vec<usize> {
+    let entry = function
+        .blocks
+        .get(&function.entry)
+        .expect("MIR entry block");
+    let selector = match &entry.terminator {
+        MirTerminator::Branch { condition, .. } => condition.clone(),
+        other => panic!("settled selector fixture has an entry branch, got {other:?}"),
+    };
+    let mut definitions = BTreeMap::<MirValueId, usize>::new();
+    for (index, instruction) in entry.instructions.iter().enumerate() {
+        for result in super::lower::instruction_results(&instruction.kind) {
+            definitions.insert(result.clone(), index);
+        }
+    }
+
+    let mut dependencies = BTreeSet::new();
+    let mut visited_values = BTreeSet::new();
+    let mut pending_values = vec![selector];
+    while let Some(value) = pending_values.pop() {
+        if !visited_values.insert(value.clone()) {
+            continue;
+        }
+        let Some(index) = definitions.get(&value).copied() else {
+            assert!(
+                function.parameters.contains(&value),
+                "settled selector dependency has a sealed entry definition: {value}"
+            );
+            continue;
+        };
+        if dependencies.insert(index) {
+            pending_values.extend(super::mir_instruction_value_uses(
+                &entry.instructions[index].kind,
+            ));
+        }
+    }
+    dependencies.into_iter().collect()
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_rejects_owner_drop_moved_before_earlier_selector_dependency() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            let observed = found == true
+            drop(pair)
+            drop(root)
+            if observed { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("typed Checker-receipted V2 owner and settled branch-tail MIR");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let cfg_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .clone();
+    let flow = cfg_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.flow.as_ref())
+        .expect("V2 Checker branch-tail CFG receipt");
+    let source_entry = flow
+        .reachable_blocks
+        .get(&flow.entry)
+        .expect("Checker entry block");
+    let drop_actions = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop)
+        .collect::<Vec<_>>();
+    let [drop_action] = drop_actions.as_slice() else {
+        panic!("fixture has exactly one V2 owner Drop action, got {drop_actions:?}");
+    };
+    let drop_source_position = source_entry
+        .points
+        .iter()
+        .position(|(point, _)| point == &drop_action.point)
+        .expect("root Drop source point is in the Checker entry");
+    let instruction_origins = checker_managed_any_instruction_origins(function);
+    let entry_block = function
+        .blocks
+        .get(&function.entry)
+        .expect("MIR entry block");
+    let drop_instruction_index = entry_block
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == drop_action.instruction)
+        .expect("root Drop is physically in the entry block");
+    let (dependency_index, dependency_id, dependency_source_position) =
+        settled_selector_dependency_indices(function)
+            .into_iter()
+            .filter_map(|index| {
+                let instruction = &entry_block.instructions[index];
+                let origin = instruction_origins.get(&instruction.id)?;
+                let source_position = source_entry
+                    .points
+                    .iter()
+                    .position(|(point, _)| point == origin)?;
+                Some((index, instruction.id.clone(), source_position))
+            })
+            .filter(|(_, _, source_position)| *source_position < drop_source_position)
+            .min_by_key(|(_, _, source_position)| *source_position)
+            .expect("observed's earlier definition is in the branch selector dependency cone");
+    assert!(
+        dependency_source_position < drop_source_position,
+        "the selector dependency's Checker point precedes the V2 root Drop"
+    );
+    assert!(
+        dependency_index < drop_instruction_index,
+        "the original MIR places the earlier selector dependency before the root Drop"
+    );
+
+    let mut reordered = function.clone();
+    let moved_drop = reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("MIR entry block")
+        .instructions
+        .remove(drop_instruction_index);
+    reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("MIR entry block")
+        .instructions
+        .insert(dependency_index, moved_drop);
+    reseal_checker_managed_any_instructions(&mut reordered);
+    assert_eq!(
+        reordered
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt,
+        cfg_receipt,
+        "the adversary leaves the Checker CFG receipt untouched"
+    );
+    let reordered_entry = reordered
+        .blocks
+        .get(&reordered.entry)
+        .expect("reordered MIR entry block");
+    let reordered_drop_index = reordered_entry
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == drop_action.instruction)
+        .expect("reordered root Drop");
+    let reordered_dependency_index = reordered_entry
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == dependency_id)
+        .expect("reordered selector dependency");
+    assert!(reordered_drop_index < reordered_dependency_index);
+
+    let errors = reordered
+        .validate()
+        .expect_err("a V2 owner Drop cannot physically precede its earlier selector dependency");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("settled-tail V2 owner action precedes a branch selector dependency")),
+        "expected reverse source/physical order rejection, got {errors:?}"
+    );
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_rejects_result_owner_drop_moved_after_selector_dependency() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            let observed = found == true
+            if observed { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("typed Checker-receipted V2 result owner and settled branch-tail MIR");
+    let function = program
+        .functions()
+        .get(&NodeId("function:main".into()))
+        .expect("main MIR");
+    let cfg_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .clone();
+    let flow = cfg_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.flow.as_ref())
+        .expect("V2 Checker branch-tail CFG receipt");
+    let source_entry = flow
+        .reachable_blocks
+        .get(&flow.entry)
+        .expect("Checker entry block");
+    let result_owner = cfg_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.result_receipts.first())
+        .expect("GetAny result owner receipt for pair");
+    let settlement_point = result_owner
+        .settlement_point
+        .as_ref()
+        .expect("pair has an explicit settlement Drop");
+    let settlement_source_position = source_entry
+        .points
+        .iter()
+        .position(|(point, _)| point == settlement_point)
+        .expect("pair Drop source point is in the Checker entry");
+    let selector_source_position = match &source_entry.terminator {
+        crate::core::cfg::Terminator::Branch { condition, .. } => source_entry
+            .points
+            .iter()
+            .position(|(point, _)| point == condition)
+            .expect("branch selector source point is in the Checker entry"),
+        other => panic!("settled tail starts with a branch selector, got {other:?}"),
+    };
+    assert!(
+        settlement_source_position < selector_source_position,
+        "the pair settlement precedes the branch selector in Checker source order"
+    );
+
+    let instruction_origins = checker_managed_any_instruction_origins(function);
+    let entry_block = function
+        .blocks
+        .get(&function.entry)
+        .expect("MIR entry block");
+    let binding_value = MirValueId::new(format!("local:{}", result_owner.binding.0 .0))
+        .expect("pair binding has canonical MIR value identity");
+    let settlement_drop = function
+        .ownership
+        .checker_managed_any
+        .as_ref()
+        .expect("private Checker ManagedAny body seal")
+        .instructions
+        .iter()
+        .find(|(_, origin, instruction)| {
+            origin == settlement_point
+                && matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value } if value == &binding_value
+                )
+        })
+        .map(|(_, _, instruction)| instruction.id.clone())
+        .expect("pair settlement is sealed to its exact MIR Drop");
+    let settlement_drop_index = entry_block
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == settlement_drop)
+        .expect("pair settlement Drop is physically in the entry block");
+    let (dependency_index, dependency_id, dependency_source_position) =
+        settled_selector_dependency_indices(function)
+            .into_iter()
+            .filter_map(|index| {
+                let instruction = &entry_block.instructions[index];
+                let origin = instruction_origins.get(&instruction.id)?;
+                let source_position = source_entry
+                    .points
+                    .iter()
+                    .position(|(point, _)| point == origin)?;
+                Some((index, instruction.id.clone(), source_position))
+            })
+            .filter(|(_, _, source_position)| *source_position > settlement_source_position)
+            .min_by_key(|(_, _, source_position)| *source_position)
+            .expect("observed's selector dependency follows the pair settlement");
+    assert!(
+        settlement_source_position < dependency_source_position,
+        "the pair settlement's Checker point precedes this selector dependency"
+    );
+    assert!(
+        settlement_drop_index < dependency_index,
+        "the original MIR places the pair settlement before the later selector dependency"
+    );
+
+    let mut reordered = function.clone();
+    let moved_drop = reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("MIR entry block")
+        .instructions
+        .remove(settlement_drop_index);
+    reordered
+        .blocks
+        .get_mut(&reordered.entry)
+        .expect("MIR entry block")
+        .instructions
+        .insert(dependency_index, moved_drop);
+    reseal_checker_managed_any_instructions(&mut reordered);
+    assert_eq!(
+        reordered
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt,
+        cfg_receipt,
+        "the adversary leaves the Checker CFG receipt untouched"
+    );
+    let reordered_entry = reordered
+        .blocks
+        .get(&reordered.entry)
+        .expect("reordered MIR entry block");
+    let reordered_drop_index = reordered_entry
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == settlement_drop)
+        .expect("reordered pair settlement Drop");
+    let reordered_dependency_index = reordered_entry
+        .instructions
+        .iter()
+        .position(|instruction| instruction.id == dependency_id)
+        .expect("reordered selector dependency");
+    assert!(reordered_drop_index > reordered_dependency_index);
+
+    let errors = reordered
+        .validate()
+        .expect_err("a result-owner settlement Drop cannot follow a later selector dependency");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("settled-tail V2 owner action follows a branch selector dependency")),
+        "expected result-owner settlement order rejection, got {errors:?}"
+    );
+}
+
+#[test]
 fn ordinary_map_owned_get_clone_and_scope_cleanup_keep_their_separate_identity() {
     let checked = checked_program(
         r#"
 func main() -> i32 {
-    let source = map_new()
-    let full = map_set(source, "text", "kept")
-    let alias = full
-    let snapshot = map_get_string(alias, "text")
-    drop(full)
-    drop(snapshot)
-    map_size(alias) - 1
+    match map_new() {
+        Ok(source) => {
+            match map_set(source, "text", "kept") {
+                Ok(full) => {
+                    drop(source)
+                    let alias = full
+                    drop(full)
+                    let snapshot = map_get_string(alias, "text")
+                    drop(snapshot)
+                    let size = map_size(alias)
+                    size - 1
+                },
+                Err(status) => { drop(source); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
@@ -10338,13 +11851,22 @@ func main() -> i32 { mimi_mir_ordinary_map_domain_own_string(0 as i64, 0 as i64)
 fn ordinary_map_owned_get_string_unwrap_preserves_its_result_snapshot() {
     let source = r#"
 func main() -> i32 {
-    let empty = map_new()
-    let mixed = map_set(empty, "text", "kept")
-    let snapshot = map_get_string(mixed, "text")
-    let text = snapshot.unwrap()
-    drop(snapshot)
-    drop(text)
-    0
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "text", "kept") {
+                Ok(mixed) => {
+                    drop(empty)
+                    let snapshot = map_get_string(mixed, "text")
+                    let text = snapshot.unwrap()
+                    drop(snapshot)
+                    drop(text)
+                    0
+                },
+                Err(status) => { drop(empty); status },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#;
     let checked = checked_program(source);
@@ -10414,4 +11936,2149 @@ func main() -> i32 {
         .execute(&NodeId("function:main".into()), &[])
         .expect("the source Result and projected String have independent destruction");
     assert_eq!(value, super::reference::MirRuntimeValue::Int(0));
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_scalar_tail_binds_source_load_and_return_after_resealing() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            let alternate = 77
+            let alternate_flag = true
+            if found { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("entry-settled scalar tail has complete source coverage");
+    let function = &program.functions()[&NodeId("function:main".into())];
+    let body = checked.resolved_body(&function.owner).unwrap();
+    let local = |name: &str| {
+        let binding = body
+            .locals
+            .values()
+            .find(|local| local.display_name == name)
+            .unwrap();
+        MirValueId::new(format!("local:{}", binding.id.0 .0)).unwrap()
+    };
+    let alternate = local("alternate");
+    let alternate_flag = local("alternate_flag");
+    let mut wrong_return = function.clone();
+    for block in wrong_return.blocks.values_mut() {
+        if let MirTerminator::Return { value, .. } = &mut block.terminator {
+            *value = Some(alternate.clone());
+        }
+    }
+    reseal_checker_managed_any_instructions(&mut wrong_return);
+    wrong_return
+        .ownership
+        .checker_managed_any
+        .as_mut()
+        .unwrap()
+        .terminators = wrong_return
+        .blocks
+        .values()
+        .map(|block| (block.id.clone(), block.terminator.clone()))
+        .collect();
+    assert!(wrong_return
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| { error.message.contains("scalar-tail source return") }));
+
+    let mut wrong_load = function.clone();
+    let condition = match &wrong_load.blocks[&wrong_load.entry].terminator {
+        MirTerminator::Branch { condition, .. } => condition.clone(),
+        _ => panic!("the source if is the first selector"),
+    };
+    let instruction = wrong_load.blocks.get_mut(&wrong_load.entry).unwrap().instructions
+        .iter_mut().find(|instruction| {
+            matches!(&instruction.kind, MirInstructionKind::Clone { result, .. } if result == &condition)
+        }).unwrap();
+    if let MirInstructionKind::Clone { source, .. } = &mut instruction.kind {
+        *source = alternate_flag;
+    }
+    reseal_checker_managed_any_instructions(&mut wrong_load);
+    assert!(wrong_load
+        .validate()
+        .unwrap_err()
+        .iter()
+        .any(|error| { error.message.contains("scalar-tail source expression") }));
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_scalar_tail_supports_finite_serial_and_nested_selectors() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            let first = found && false
+            let second = first || true
+            if second { if found { 1 } else { 2 } } else { 3 }
+        },
+        Err(status) => status,
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked)
+        .expect("source-bound serial and nested scalar selectors have a complete receipt");
+    let result = super::reference::MirReferenceInterpreter::new(&program)
+        .execute(&NodeId("function:main".into()), &[])
+        .unwrap();
+    assert_eq!(result, super::reference::MirRuntimeValue::Int(2));
+}
+
+#[test]
+fn ordinary_map_owned_any_v2_scalar_tail_string_drop_requires_exact_mir_settlement() {
+    let checked = checked_program(
+        r#"
+func main() -> i32 {
+    let key = "missing"
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, key)
+            let same = key == "missing"
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            drop(key)
+            if found && same { 1 } else { 0 }
+        },
+        Err(status) => { drop(key); status },
+    }
+}
+"#,
+    );
+    let program = reference::MirProgram::from_checked_program(&checked).unwrap();
+    let function = &program.functions()[&NodeId("function:main".into())];
+    let flow = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+        .unwrap()
+        .flow
+        .as_ref()
+        .unwrap();
+    let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail) =
+        &flow.proof
+    else {
+        panic!("scalar source authority");
+    };
+    let (binding, drop) = tail.string_drops.first_key_value().unwrap();
+    let value = MirValueId::new(format!("local:{}", binding.0 .0)).unwrap();
+    let id = format!("inst:drop.{}:{}", drop.place_index, drop.point.0);
+    assert!(function.blocks[&function.entry].instructions.iter().any(|instruction| {
+        instruction.id.as_str() == id && matches!(&instruction.kind, MirInstructionKind::Drop { value: actual } if actual == &value)
+    }));
+    assert!(function
+        .blocks
+        .iter()
+        .filter(|(block, _)| *block != &function.entry)
+        .all(|(_, block)| !block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(&instruction.kind, MirInstructionKind::Drop { .. }))));
+    for mutation in [
+        "missing",
+        "wrong index",
+        "synthetic scope",
+        "wrong local",
+        "wrong source origin",
+        "extra prefix drop",
+        "drop before key use",
+        "drop before later binary read",
+    ] {
+        let mut forged = function.clone();
+        for block in forged.blocks.values_mut() {
+            if mutation == "missing" {
+                block
+                    .instructions
+                    .retain(|instruction| instruction.id.as_str() != id);
+            } else if mutation == "extra prefix drop" {
+                if let Some(index) = block
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.id.as_str() == id)
+                {
+                    let mut duplicate = block.instructions[index].clone();
+                    duplicate.id =
+                        MirInstructionId::new(format!("inst:drop.extra-prefix:{}", drop.point.0))
+                            .unwrap();
+                    block.instructions.insert(index + 1, duplicate);
+                }
+            } else if matches!(
+                mutation,
+                "drop before key use" | "drop before later binary read"
+            ) {
+                if let Some(index) = block
+                    .instructions
+                    .iter()
+                    .position(|instruction| instruction.id.as_str() == id)
+                {
+                    let instruction = block.instructions.remove(index);
+                    let first_key_use = block
+                        .instructions
+                        .iter()
+                        .position(|instruction| {
+                            if mutation == "drop before key use" {
+                                matches!(&instruction.kind,
+                                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { key, .. }
+                                        if key == &value)
+                            } else {
+                                matches!(&instruction.kind,
+                                    MirInstructionKind::Binary { left, right, .. }
+                                        if left == &value || right == &value)
+                            }
+                        })
+                        .unwrap();
+                    block.instructions.insert(first_key_use, instruction);
+                }
+            } else if mutation != "wrong source origin" {
+                for instruction in &mut block.instructions {
+                    if instruction.id.as_str() == id {
+                        match mutation {
+                            "wrong index" => {
+                                instruction.id = MirInstructionId::new(format!(
+                                    "inst:drop.{}:{}",
+                                    drop.place_index + 1,
+                                    drop.point.0
+                                ))
+                                .unwrap()
+                            }
+                            "synthetic scope" => {
+                                instruction.id = MirInstructionId::new(format!(
+                                    "inst:drop.managed_scope:{}",
+                                    drop.point.0
+                                ))
+                                .unwrap()
+                            }
+                            _ => {
+                                instruction.kind = MirInstructionKind::Drop {
+                                    value: function.blocks[&function.entry]
+                                        .instructions
+                                        .iter()
+                                        .find_map(|instruction| match &instruction.kind {
+                                            MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                                                result,
+                                            } => Some(result.clone()),
+                                            _ => None,
+                                        })
+                                        .unwrap(),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Reseal every changed instruction while retaining the independent
+        // typed source commitment and its original exact Drop identity.
+        let origins = checker_managed_any_instruction_origins(function);
+        forged
+            .ownership
+            .checker_managed_any
+            .as_mut()
+            .unwrap()
+            .instructions = forged
+            .blocks
+            .values()
+            .flat_map(|block| {
+                block.instructions.iter().map(|instruction| {
+                    (
+                        block.id.clone(),
+                        if mutation == "wrong source origin" && instruction.id.as_str() == id {
+                            drop.loads.first().unwrap().0.clone()
+                        } else {
+                            origins
+                                .get(&instruction.id)
+                                .cloned()
+                                .unwrap_or_else(|| drop.point.clone())
+                        },
+                        instruction.clone(),
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            forged
+                .validate()
+                .unwrap_err()
+                .iter()
+                .any(|error| error.message.contains("scalar-tail source String Drop")),
+            "{mutation}"
+        );
+    }
+}
+
+const ORDINARY_MAP_NEW_RESULT_L1_SOURCE: &str = r#"
+    func main() -> i32 {
+        let outcome = map_new()
+        match outcome {
+            Ok(root) => {
+                let size = map_size(root)
+                drop(root)
+                size
+            },
+            Err(status) => status
+        }
+    }
+"#;
+
+const ORDINARY_MAP_NEW_RESULT_L2_SOURCE: &str = r#"
+    func main() -> i32 {
+        requires: true
+        ensures: result == 0 || result == 3
+        let outcome = map_new()
+        match outcome {
+            Ok(root) => {
+                let size = map_size(root)
+                drop(root)
+                size
+            },
+            Err(status) => status
+        }
+    }
+"#;
+
+fn ordinary_map_new_result_l1_program() -> reference::MirProgram {
+    let checked = checked_program(ORDINARY_MAP_NEW_RESULT_L1_SOURCE);
+    reference::MirProgram::from_checked_program_map_new_result(
+        &checked,
+        &crate::core::NodeId("function:main".into()),
+    )
+    .expect("exact Checker NewResult source lowers through pending direct L1 constructor")
+}
+
+fn ordinary_map_new_result_l2_pair(
+    source: &str,
+) -> (crate::core::CheckedProgram, reference::MirProgram) {
+    let checked = checked_program(source);
+    let owner = crate::core::NodeId("function:main".into());
+    let program =
+        reference::MirProgram::from_checked_program_map_new_result_for_verifier(&checked, &owner)
+            .expect(
+            "exact Checker NewResult source lowers through the isolated L2 verifier constructor",
+        );
+    (checked, program)
+}
+
+#[test]
+fn ordinary_map_new_result_l2_replays_checked_receipts_contracts_and_recoverable_err3() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let (checked, program) = ordinary_map_new_result_l2_pair(ORDINARY_MAP_NEW_RESULT_L2_SOURCE);
+    let receipt = validate_ordinary_map_new_result_l2_verifier_route(&checked, &program)
+        .expect("L2 binds the exact CheckedProgram, graph, source census, contracts and worklist");
+    assert_eq!(receipt.profile, ORDINARY_MAP_NEW_RESULT_L2_VERIFIER_PROFILE);
+    let main = &program.functions()[&crate::core::NodeId("function:main".into())];
+    assert_eq!(
+        main.contracts.len(),
+        2,
+        "requires and ensures remain attached"
+    );
+    assert!(
+        main.proof_worklist.is_none(),
+        "direct contracts need no body worklist"
+    );
+    program
+        .validate_owner_proof_worklist(&main.owner)
+        .expect("the independent checked-source census validates direct contract coverage");
+
+    let results = crate::verifier::verify_mir_with_ordinary_map_new_result_l2_verifier_route(
+        &checked,
+        &program,
+        &receipt,
+        "ordinary-map-new-result-l2-source".into(),
+    )
+    .expect("the dedicated Checker-aware L2 verifier accepts the exact graph");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        results[0].message
+    );
+    assert!(!results[0].message.contains("E0800"));
+
+    for (ensures, expected) in [
+        (
+            "result == 0",
+            "the capacity Err(3) path is recoverable and disproves success-only",
+        ),
+        (
+            "result == 3",
+            "the successful empty root path disproves capacity-only",
+        ),
+    ] {
+        let source =
+            ORDINARY_MAP_NEW_RESULT_L2_SOURCE.replace("result == 0 || result == 3", ensures);
+        let (checked, program) = ordinary_map_new_result_l2_pair(&source);
+        let receipt = validate_ordinary_map_new_result_l2_verifier_route(&checked, &program)
+            .expect("the exact source contract change keeps L2 route authority");
+        let results = crate::verifier::verify_mir_with_ordinary_map_new_result_l2_verifier_route(
+            &checked,
+            &program,
+            &receipt,
+            "ordinary-map-new-result-l2-branch-check".into(),
+        )
+        .expect("both NewResult branches are normal symbolic outcomes");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].status,
+            crate::verifier::VerifStatus::Disproven,
+            "{expected}: {}",
+            results[0].message
+        );
+        assert!(
+            !results[0].message.contains("E0800"),
+            "{}",
+            results[0].message
+        );
+    }
+}
+
+#[test]
+fn ordinary_map_new_result_l2_bridges_new_and_size_calls_without_clearing_proof_census() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    let source = ORDINARY_MAP_NEW_RESULT_L2_SOURCE.replace(
+        "ensures: result == 0 || result == 3",
+        "ensures: result == 0 || result == 3\n        math: { 1 + 1 == 2; };",
+    );
+    let (checked, program) = ordinary_map_new_result_l2_pair(&source);
+    let receipt = validate_ordinary_map_new_result_l2_verifier_route(&checked, &program)
+        .expect("Checker call bridge retains the exact proof boundary/source census");
+    let main = &program.functions()[&crate::core::NodeId("function:main".into())];
+    let source_receipt = main.ownership.ordinary_map_new_result_receipt().unwrap();
+    let worklist = main
+        .proof_worklist
+        .as_ref()
+        .expect("direct Math obligation retains an executable worklist");
+    assert_eq!(worklist.expected_calls.len(), 2);
+    assert_eq!(
+        worklist.expected_scoped_boundaries,
+        std::slice::from_ref(&source_receipt.match_node)
+    );
+    assert_eq!(
+        worklist.boundaries.len(),
+        1,
+        "the exact match boundary remains in the census"
+    );
+    fn collect_calls<'a>(block: &'a MirProofBlock, calls: &mut Vec<&'a MirProofCallPoint>) {
+        for operation in &block.operations {
+            match operation {
+                MirProofOperation::Call(call) => calls.push(call),
+                MirProofOperation::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    collect_calls(then_block, calls);
+                    collect_calls(else_block, calls);
+                }
+                MirProofOperation::Scope(inner) => collect_calls(inner, calls),
+                MirProofOperation::Loop {
+                    condition_calls,
+                    body,
+                    ..
+                } => {
+                    calls.extend(condition_calls.iter());
+                    collect_calls(body, calls);
+                }
+                MirProofOperation::Bind { .. }
+                | MirProofOperation::Eval { .. }
+                | MirProofOperation::Assign { .. }
+                | MirProofOperation::Math(_)
+                | MirProofOperation::Break { .. }
+                | MirProofOperation::Continue { .. }
+                | MirProofOperation::Return { .. }
+                | MirProofOperation::Exit => {}
+            }
+        }
+    }
+    let mut calls = Vec::new();
+    collect_calls(&worklist.root, &mut calls);
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().any(|call| {
+        call.call_node == source_receipt.operation
+            && call.instruction.as_str()
+                == format!(
+                    "inst:ordinary_map_new_result:new:{}",
+                    source_receipt.operation.0
+                )
+    }));
+    assert!(calls.iter().any(|call| {
+        call.call_node == source_receipt.size_operation
+            && call.instruction.as_str()
+                == format!(
+                    "inst:ordinary_map_new_result:size:{}",
+                    source_receipt.size_operation.0
+                )
+            && call.match_path
+                == checked
+                    .callable(&source_receipt.owner)
+                    .unwrap()
+                    .proof_point_worklist()
+                    .calls
+                    .iter()
+                    .find(|point| point.call_node == source_receipt.size_operation)
+                    .unwrap()
+                    .match_path
+    }));
+    assert!(
+        calls[0].order < calls[1].order,
+        "source call evaluation order is preserved"
+    );
+
+    let results = crate::verifier::verify_mir_with_ordinary_map_new_result_l2_verifier_route(
+        &checked,
+        &program,
+        &receipt,
+        "ordinary-map-new-result-l2-math-census".into(),
+    )
+    .expect("canonical New/Size operations and proof worklist verify together");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::Proven,
+        "{}",
+        results[0].message
+    );
+}
+
+#[test]
+fn ordinary_map_new_result_l2_rejects_forged_graph_receipt_and_route_digest() {
+    let (checked, program) = ordinary_map_new_result_l2_pair(ORDINARY_MAP_NEW_RESULT_L2_SOURCE);
+    let owner = crate::core::NodeId("function:main".into());
+    let receipt = validate_ordinary_map_new_result_l2_verifier_route(&checked, &program)
+        .expect("the base L2 route is exact");
+
+    let mut forged_receipt = program.clone();
+    let function = forged_receipt.function_mut_for_test(&owner).unwrap();
+    function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_new_result
+        .as_mut()
+        .unwrap()
+        .status_type = crate::core::ir::primitive_type_id(PrimitiveType::I64);
+    assert!(validate_ordinary_map_new_result_l2_verifier_route(&checked, &forged_receipt).is_err());
+    assert!(receipt.validate_against_program(&forged_receipt).is_err());
+
+    let mut forged_digest = receipt.clone();
+    forged_digest.ownership_digest = "0".repeat(64);
+    assert!(forged_digest.validate_against_program(&program).is_err());
+
+    let source = program.functions()[&owner]
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .unwrap()
+        .clone();
+    let mut missing_drop = program.clone();
+    missing_drop
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .blocks
+        .get_mut(&MirBlockId::new(source.ok_block.0 .0.clone()).unwrap())
+        .unwrap()
+        .instructions
+        .pop();
+    assert!(validate_ordinary_map_new_result_l2_verifier_route(&checked, &missing_drop).is_err());
+    assert!(receipt.validate_against_program(&missing_drop).is_err());
+
+    let mut bad_status = program.clone();
+    bad_status
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .blocks
+        .get_mut(&MirBlockId::new(source.err_block.0 .0.clone()).unwrap())
+        .unwrap()
+        .terminator = MirTerminator::Goto {
+        edge: MirEdgeId::new(source.err_join_edge.0 .0.clone()).unwrap(),
+        target: MirBlockId::new(source.join.0 .0.clone()).unwrap(),
+        arguments: vec![MirValueId::new(format!("local:{}", source.root_local.0 .0)).unwrap()],
+    };
+    assert!(validate_ordinary_map_new_result_l2_verifier_route(&checked, &bad_status).is_err());
+}
+
+#[test]
+fn ordinary_map_new_result_l1_core_route_receipt_is_exact_and_revalidates() {
+    let program = ordinary_map_new_result_l1_program();
+    let receipt = validate_ordinary_map_new_result_l1_core_mir_route(&program)
+        .expect("the pending Checker receipt derives an independent Core MIR route receipt");
+    assert_eq!(receipt.profile, ORDINARY_MAP_NEW_RESULT_L1_CORE_PROFILE);
+    receipt
+        .validate_against_program(&program)
+        .expect("the route receipt revalidates its exact New/Ok/Err/settlement MIR graph");
+    let main = &program.functions()[&crate::core::NodeId("function:main".into())];
+    assert!(
+        main.contracts.is_empty(),
+        "the source has no verifier obligations"
+    );
+    let verifier_error =
+        crate::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new())
+            .expect_err("a valid Core audit receipt does not grant verifier capability");
+    assert!(verifier_error.contains("audit-only and has no verifier capability"));
+    let raw_error = crate::verifier::verify_mir(&program, String::new())
+        .expect_err("raw verify_mir cannot accept a NewResult graph without its Checker authority");
+    assert!(
+        raw_error.contains("not admitted by default MIR verification")
+            && raw_error.contains("dedicated Checker-aware L2 verifier route"),
+        "raw verifier rejection remains specific: {raw_error}"
+    );
+    for profile in ["verifier-mir-v1", "arbitrary-profile"] {
+        let relabeled = program.route_receipt(profile);
+        let error =
+            crate::verifier::verify_mir_with_route_receipt(&program, &relabeled, String::new())
+                .expect_err(
+                    "NewResult operation/descriptor signals survive route profile relabeling",
+                );
+        assert!(error.contains("exact CheckedProgram-aware L2 verifier route"));
+    }
+
+    let mut forged_receipt = receipt.clone();
+    forged_receipt.ownership_digest = "0".repeat(64);
+    assert!(
+        forged_receipt.validate_against_program(&program).is_err(),
+        "a syntactically valid digest cannot replace the ownership identity"
+    );
+}
+
+#[test]
+fn ordinary_map_new_result_l1_core_route_rejects_graph_and_scope_forgery() {
+    let program = ordinary_map_new_result_l1_program();
+    let route_receipt = validate_ordinary_map_new_result_l1_core_mir_route(&program)
+        .expect("exact source has an independent Core route receipt");
+    let owner = crate::core::NodeId("function:main".into());
+    let function = program.functions()[&owner].clone();
+    let source = function
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .expect("the Checker source receipt is embedded in MIR")
+        .clone();
+    let err = MirBlockId::new(source.err_block.0 .0.clone()).unwrap();
+    let ok = MirBlockId::new(source.ok_block.0 .0.clone()).unwrap();
+
+    let mut missing_drop = program.clone();
+    missing_drop
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .blocks
+        .get_mut(&ok)
+        .unwrap()
+        .instructions
+        .pop();
+    assert!(validate_ordinary_map_new_result_l1_core_mir_route(&missing_drop).is_err());
+    assert!(route_receipt
+        .validate_against_program(&missing_drop)
+        .is_err());
+
+    let mut extra_size = program.clone();
+    {
+        let forged = extra_size.function_mut_for_test(&owner).unwrap();
+        let value = MirValueId::new("forged:new-result:extra-size").unwrap();
+        forged.values.insert(
+            value.clone(),
+            MirValue {
+                id: value.clone(),
+                ty: crate::core::ir::primitive_type_id(PrimitiveType::I32),
+            },
+        );
+        forged.blocks.get_mut(&ok).unwrap().instructions.insert(
+            0,
+            MirInstruction {
+                id: MirInstructionId::new("forged:new-result:extra-size-op").unwrap(),
+                kind: MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                    result: value,
+                    root: MirValueId::new(format!("local:{}", source.root_local.0 .0)).unwrap(),
+                },
+            },
+        );
+    }
+    assert!(validate_ordinary_map_new_result_l1_core_mir_route(&extra_size).is_err());
+    assert!(route_receipt.validate_against_program(&extra_size).is_err());
+
+    let mut rewritten_err = program.clone();
+    let status = MirValueId::new(format!("local:{}", source.status_local.0 .0)).unwrap();
+    let size = MirValueId::new(format!("local:{}", source.size_local.0 .0)).unwrap();
+    assert_ne!(status, size);
+    rewritten_err
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .blocks
+        .get_mut(&err)
+        .unwrap()
+        .terminator = MirTerminator::Goto {
+        edge: MirEdgeId::new(source.err_join_edge.0 .0.clone()).unwrap(),
+        target: MirBlockId::new(source.join.0 .0.clone()).unwrap(),
+        arguments: vec![size],
+    };
+    assert!(validate_ordinary_map_new_result_l1_core_mir_route(&rewritten_err).is_err());
+    assert!(route_receipt
+        .validate_against_program(&rewritten_err)
+        .is_err());
+
+    let helper = crate::core::NodeId("function:helper".into());
+    let mut extra_callable = program.clone();
+    let mut helper_function = function;
+    helper_function.owner = helper;
+    extra_callable.replace_function_for_test_only(helper_function);
+    assert!(validate_ordinary_map_new_result_l1_core_mir_route(&extra_callable).is_err());
+    assert!(route_receipt
+        .validate_against_program(&extra_callable)
+        .is_err());
+}
+
+#[test]
+fn ordinary_map_new_result_l1_ok_reference_matches_bytecode() {
+    let program = ordinary_map_new_result_l1_program();
+    let owner = crate::core::NodeId("function:main".into());
+    let function = &program.functions()[&owner];
+    let receipt = function
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .unwrap();
+    assert!(function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .is_empty());
+    assert!(function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .is_none());
+    assert_eq!(function.blocks.len(), 4);
+    let result = MirValueId::new(format!("local:{}", receipt.result_local.0 .0)).unwrap();
+    assert_eq!(
+        function.values[&result].ty,
+        types::ordinary_map_owned_any_v2_root_result_type_id()
+    );
+    let err = MirBlockId::new(receipt.err_block.0 .0.clone()).unwrap();
+    assert!(function.blocks[&err].instructions.is_empty());
+    assert!(function.blocks[&err]
+        .parameters
+        .iter()
+        .all(|parameter| function.values[&parameter.value].ty
+            == crate::core::ir::primitive_type_id(PrimitiveType::I32)));
+    let reference = reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .unwrap();
+    assert_eq!(reference, reference::MirRuntimeValue::Int(0));
+    let bytecode = crate::interp::bytecode::mir::compile_mir_map_new_result(&program).unwrap();
+    assert!(bytecode.functions[0].code.iter().any(|op| matches!(
+        op,
+        crate::interp::bytecode::Op::MirOrdinaryMapOwnedAnyV2NewResult { .. }
+    )));
+    let before_bytecode = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("ownership domains before bytecode NewResult route");
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    let actual = vm.run_value_for_ordinary_map_failure_model_test().unwrap();
+    assert!(matches!(actual, crate::interp::Value::Int(0)));
+    assert_eq!(
+        crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains after bytecode NewResult route"),
+        before_bytecode,
+        "bytecode New, real Size, and exact Drop leave no root behind"
+    );
+    assert_eq!(
+        vm.ordinary_map_owned_any_v2_live_owner_occurrences_for_test(),
+        0
+    );
+    assert_eq!(
+        vm.ordinary_map_new_result_live_runtime_root_occurrences_for_test(),
+        0
+    );
+}
+
+#[test]
+fn ordinary_map_new_result_l1_capacity_is_err3_without_root_or_trap() {
+    reference::with_ordinary_map_new_result_status_for_test(3, || {
+        let raw = reference::ordinary_map_new_result_reference_value().unwrap();
+        assert!(
+            matches!(raw, reference::MirRuntimeValue::Variant { variant, payload, .. }
+            if variant.0 == "builtin:variant:Result::Err" && payload == vec![reference::MirRuntimeValue::Int(3)])
+        );
+        let program = ordinary_map_new_result_l1_program();
+        let result = reference::MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .unwrap();
+        assert_eq!(result, reference::MirRuntimeValue::Int(3));
+    });
+    // Bytecode uses the real New ABI and turns only its exact Capacity result
+    // into Result::Err(3).
+    let before_runtime_capacity = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("ownership domains before runtime New Capacity");
+    crate::runtime::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(0, || {
+        let program = ordinary_map_new_result_l1_program();
+        let bytecode = crate::interp::bytecode::mir::compile_mir_map_new_result(&program).unwrap();
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+        assert!(matches!(
+            vm.run_value_for_ordinary_map_failure_model_test().unwrap(),
+            crate::interp::Value::Int(3)
+        ));
+        assert_eq!(
+            vm.ordinary_map_new_result_live_runtime_root_occurrences_for_test(),
+            0
+        );
+        assert_eq!(
+            crate::runtime::ordinary_map_domain_live_counts_for_test()
+                .expect("ownership domains after real New Capacity"),
+            before_runtime_capacity,
+            "the real New ABI returns exactly Capacity with no published handle"
+        );
+    });
+}
+
+#[test]
+fn ordinary_map_new_result_l1_invalid_invariant_statuses_fail_closed() {
+    let program = ordinary_map_new_result_l1_program();
+    for status in [-1, 1, 2, 4, i32::MAX] {
+        reference::with_ordinary_map_new_result_status_for_test(status, || {
+            let error = reference::MirReferenceInterpreter::new(&program)
+                .execute(&crate::core::NodeId("function:main".into()), &[])
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("[E0800] ordinary Map NewResult invalid"));
+        });
+    }
+}
+
+#[test]
+fn ordinary_map_new_result_l1_bytecode_size_error_drops_only_its_exact_handle() {
+    let before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("ownership domains before unrelated owner setup");
+    let unrelated = crate::runtime::OwnedAnyV2Root::try_new()
+        .expect("an unrelated runtime owner remains live during bytecode unwind");
+    let unrelated_handle = unrelated.handle();
+    let with_unrelated = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("ownership domains with one unrelated root");
+    assert_eq!(with_unrelated.roots, before.roots + 1);
+
+    let program = ordinary_map_new_result_l1_program();
+    let bytecode = crate::interp::bytecode::mir::compile_mir_map_new_result(&program).unwrap();
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    let error =
+        crate::interp::bytecode::vm::with_ordinary_map_new_result_size_failure_for_test(|| {
+            vm.run_value_for_ordinary_map_failure_model_test()
+        })
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("ordinary Map NewResult Size failure injected"));
+    assert_eq!(
+        vm.ordinary_map_new_result_live_runtime_root_occurrences_for_test(),
+        0,
+        "error cleanup clears the exact owner before recycling registers"
+    );
+    assert_eq!(
+        crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains after NewResult Size failure"),
+        with_unrelated,
+        "unwind retires only the root created by this NewResult"
+    );
+    assert_eq!(unrelated.handle(), unrelated_handle);
+    assert_eq!(unrelated.size(), Ok(0));
+    assert!(unrelated.try_drop().is_ok());
+    assert_eq!(
+        crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("ownership domains after retiring the unrelated root"),
+        before
+    );
+}
+
+#[test]
+fn ordinary_map_new_result_l1_rejects_forged_receipt_edges_and_generic_clone() {
+    let program = ordinary_map_new_result_l1_program();
+    let owner = crate::core::NodeId("function:main".into());
+    let original = program.functions()[&owner].clone();
+    let receipt = original
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .unwrap()
+        .clone();
+    let err_block = MirBlockId::new(receipt.err_block.0 .0.clone()).unwrap();
+    for mutation in 0..5 {
+        let mut forged = original.clone();
+        match mutation {
+            0 => {
+                forged
+                    .ownership
+                    .checker_ordinary_map_owned_any_v2_new_result
+                    .as_mut()
+                    .unwrap()
+                    .root_local = receipt.status_local.clone()
+            }
+            1 => {
+                let MirTerminator::SwitchMove { arms, .. } =
+                    &mut forged.blocks.get_mut(&forged.entry).unwrap().terminator
+                else {
+                    unreachable!()
+                };
+                arms.swap(0, 1);
+                let target = arms[0].target.clone();
+                arms[0].target = arms[1].target.clone();
+                arms[1].target = target;
+            }
+            2 => {
+                let root = MirValueId::new(format!("local:{}", receipt.root_local.0 .0)).unwrap();
+                forged.blocks.get_mut(&err_block).unwrap().parameters[0].value = root;
+            }
+            3 => {
+                let ok = MirBlockId::new(receipt.ok_block.0 .0.clone()).unwrap();
+                forged.blocks.get_mut(&ok).unwrap().instructions.pop();
+            }
+            _ => {
+                let source =
+                    MirValueId::new(format!("local:{}", receipt.result_local.0 .0)).unwrap();
+                let result = MirValueId::new("forged:clone:root-result").unwrap();
+                forged.values.insert(
+                    result.clone(),
+                    MirValue {
+                        id: result.clone(),
+                        ty: types::ordinary_map_owned_any_v2_root_result_type_id(),
+                    },
+                );
+                forged
+                    .blocks
+                    .get_mut(&forged.entry)
+                    .unwrap()
+                    .instructions
+                    .push(MirInstruction {
+                        id: MirInstructionId::new("forged:generic:clone").unwrap(),
+                        kind: MirInstructionKind::Clone { result, source },
+                    });
+            }
+        }
+        assert!(forged.validate().is_err(), "mutation {mutation}");
+        assert!(reference::MirProgram::with_type_catalog(
+            BTreeMap::from([(owner.clone(), forged)]),
+            program.type_catalog().clone()
+        )
+        .is_err());
+    }
+    let result_ty = types::ordinary_map_owned_any_v2_root_result_type_id();
+    assert!(
+        !program
+            .type_catalog()
+            .get(&result_ty)
+            .unwrap()
+            .needs_clone_glue
+    );
+    assert!(program
+        .type_catalog()
+        .validate_glue(&result_ty, types::MirGlueOperation::Clone)
+        .is_err());
+}
+
+#[test]
+fn ordinary_map_new_result_l1_rejects_old_routes_bytecode_forgery_and_production_run() {
+    use crate::interp::bytecode::instr::CanonicalMapAnyOwnerV1BytecodeReceipt;
+    let program = ordinary_map_new_result_l1_program();
+    let core_route = validate_ordinary_map_new_result_l1_core_mir_route(&program)
+        .expect("the isolated Core MIR receipt validates without opening consumers");
+    assert!(crate::interp::bytecode::mir::compile_mir_program(&program).is_err());
+    assert!(
+        crate::interp::bytecode::mir::compile_mir_program_with_route_receipt(&program, &core_route)
+            .is_err()
+    );
+    let old = program.route_receipt(CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2.as_str());
+    assert!(
+        crate::interp::bytecode::mir::compile_mir_program_with_route_receipt(&program, &old)
+            .is_err()
+    );
+    assert!(crate::codegen::mir::validate_mir_native(&program).is_err());
+    assert!(crate::verifier::validate_mir_capabilities(&program).is_err());
+    let bytecode = crate::interp::bytecode::mir::compile_mir_map_new_result(&program).unwrap();
+    assert_eq!(
+        crate::interp::bytecode::BytecodeVM::new(bytecode.clone())
+            .run_value()
+            .expect("the exact NewResult bytecode route executes in production"),
+        crate::interp::Value::Int(0)
+    );
+    for mutation in 0..4 {
+        let mut forged = (*bytecode).clone();
+        match mutation {
+            0 => forged.canonical_map_any_owner_v1_receipt = None,
+            1 => forged.canonical_map_any_owner_v1_receipt = Some(
+                CanonicalMapAnyOwnerV1BytecodeReceipt::capture_with_ordinary_map_owner_lifecycle_i32_string_v1(forged.entry, &forged.functions)),
+            2 => {
+                let op = forged.functions[0].code.iter_mut().find(|op|
+                    matches!(op, crate::interp::bytecode::Op::MirOrdinaryMapOwnedAnyV2NewResult { .. })).unwrap();
+                let crate::interp::bytecode::Op::MirOrdinaryMapOwnedAnyV2NewResult { rd } = *op else { unreachable!() };
+                *op = crate::interp::bytecode::Op::MirOrdinaryMapOwnedAnyV2New { rd };
+            }
+            _ => {
+                let root_move = forged.functions[0]
+                    .code
+                    .iter()
+                    .find(|op| matches!(op, crate::interp::bytecode::Op::Move { .. }))
+                    .copied()
+                    .expect("the exact source emits one root payload move");
+                forged.functions[0].code.push(root_move);
+            }
+        }
+        assert!(
+            crate::interp::bytecode::BytecodeVM::new(std::sync::Arc::new(forged))
+                .run_value_for_ordinary_map_failure_model_test()
+                .is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_map_new_result_l1_supported_and_unsupported_sources_keep_default_route_closed() {
+    for source in [
+        ORDINARY_MAP_NEW_RESULT_L1_SOURCE.to_owned(),
+        ORDINARY_MAP_NEW_RESULT_L1_SOURCE.replace("Err(status) => status", "Err(status) => 7"),
+        ORDINARY_MAP_NEW_RESULT_L1_SOURCE.replace("Err(status) => status", "_ => 7"),
+        ORDINARY_MAP_NEW_RESULT_L1_SOURCE.replace("drop(root)", ""),
+    ] {
+        let checked = checked_program(&source);
+        let admission = classify_canonical_mir_route_admission(&checked);
+        assert_eq!(
+            admission.ordinary_map_owned_any_v2,
+            OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage
+        );
+        assert!(materialize_canonical_mir_route(&checked, None).is_err());
+    }
+    const {
+        assert!(!ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
+    };
+}
+
+#[test]
+fn ordinary_map_new_result_l1_rejects_forged_descriptor_and_err_root_glue() {
+    let program = ordinary_map_new_result_l1_program();
+    let result_ty = types::ordinary_map_owned_any_v2_root_result_type_id();
+    for mutation in 0..3 {
+        let mut catalog = program.type_catalog().clone();
+        let mut descriptor = catalog.get(&result_ty).unwrap().clone();
+        match mutation {
+            0 => {
+                descriptor.needs_clone_glue = true;
+                descriptor.glue.clone = MirGlueKind::Aggregate;
+            }
+            1 => {
+                descriptor.variant_drop_plan.as_mut().unwrap()[1].fields[0].ty =
+                    types::ordinary_map_owned_any_v2_type_id()
+            }
+            _ => descriptor.ownership = MirOwnership::Copy,
+        }
+        catalog.replace_for_test_only(result_ty.clone(), descriptor);
+        assert!(
+            reference::MirProgram::with_type_catalog(program.functions().clone(), catalog).is_err(),
+            "mutation {mutation}"
+        );
+    }
+}
+
+fn ordinary_map_set_get_i32_fixture() -> (crate::core::CheckedProgram, reference::MirProgram) {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_i32_lineage.mimi"
+    ));
+    let owner = crate::core::NodeId("function:main".into());
+    let receipt = checked
+        .callable(&owner)
+        .and_then(|callable| {
+            callable
+                .resources
+                .ordinary_map_owned_any_v2_set_get_i32_lineage_receipt
+                .as_ref()
+        })
+        .expect("exact fixture yields a source-bound Set/Get-i32 receipt");
+    crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_i32_lineage_receipt(
+        receipt,
+        &checked.callable(&owner).unwrap().cfg,
+        &checked.callable(&owner).unwrap().body,
+        &checked.callable(&owner).unwrap().signature,
+        checked.resolved_types(),
+    )
+    .expect("the exact Checker receipt replays against its source artifacts");
+    let program =
+        reference::MirProgram::from_checked_program_map_set_get_i32_result(&checked, &owner)
+            .expect("exact fixture materializes source-bound Set/Get-i32 MIR");
+    (checked, program)
+}
+
+const ORDINARY_MAP_SET_GET_STRING_SOURCE: &str = include_str!(
+    "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_string_lineage.mimi"
+);
+
+fn ordinary_map_set_get_string_fixture() -> (crate::core::CheckedProgram, reference::MirProgram) {
+    let checked = checked_program(ORDINARY_MAP_SET_GET_STRING_SOURCE);
+    let owner = crate::core::NodeId("function:main".into());
+    let receipt = checked
+        .callable(&owner)
+        .and_then(|callable| {
+            callable
+                .resources
+                .ordinary_map_owned_any_v2_set_get_string_lineage_receipt
+                .as_ref()
+        })
+        .expect("exact source yields its independent String Set/Get receipt");
+    crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_string_lineage_receipt(
+        receipt,
+        &checked.callable(&owner).unwrap().cfg,
+        &checked.callable(&owner).unwrap().body,
+        &checked.callable(&owner).unwrap().signature,
+        checked.resolved_types(),
+    )
+    .expect("the String Checker receipt replays against its exact source CFG");
+    let program =
+        reference::MirProgram::from_checked_program_map_set_get_string_result(&checked, &owner)
+            .expect("exact source materializes dedicated SetString/GetString MIR");
+    (checked, program)
+}
+
+fn ordinary_map_set_get_string_l2_checked_fixture() -> crate::core::CheckedProgram {
+    let source = ORDINARY_MAP_SET_GET_STRING_SOURCE.replacen(
+        "func main() -> i32 {",
+        "func main() -> i32 {\n    ensures: result == 42 || result == 2 || result == 3",
+        1,
+    );
+    checked_program(&source)
+}
+
+fn ordinary_map_set_get_string_false_claim_l2_checked_fixture() -> crate::core::CheckedProgram {
+    let source = ORDINARY_MAP_SET_GET_STRING_SOURCE.replacen(
+        "func main() -> i32 {",
+        "func main() -> i32 {\n    ensures: result == 42 || result == 3",
+        1,
+    );
+    checked_program(&source)
+}
+
+#[test]
+fn ordinary_map_set_get_string_receipt_routes_and_executes_independently() {
+    let owner = crate::core::NodeId("function:main".into());
+    let (checked, expected) = ordinary_map_set_get_string_fixture();
+    assert!(has_ordinary_map_set_get_string_route_candidate(&checked));
+    let program = materialize_ordinary_map_set_get_string_route(&checked)
+        .expect("exact Checker receipt materializes and passes L1 Core replay");
+    assert_eq!(program, expected);
+    let route = validate_ordinary_map_set_get_string_l1_core_mir_route(&program)
+        .expect("String lineage graph carries its dedicated L1 receipt");
+    assert_eq!(route.profile, ORDINARY_MAP_SET_GET_STRING_L1_CORE_PROFILE);
+    assert_ne!(route.profile, ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE);
+    route
+        .validate_against_program(&program)
+        .expect("the String profile receipt replays against its graph");
+
+    assert!(
+        materialize_ordinary_map_set_get_string_verifier_route(&checked).is_err(),
+        "contract-free source must not materialize the String L2 verifier profile"
+    );
+    let verifier_checked = ordinary_map_set_get_string_l2_checked_fixture();
+    let verifier = materialize_ordinary_map_set_get_string_verifier_route(&verifier_checked)
+        .expect("exact direct Ensures source materializes the isolated L2 String profile");
+    let verifier_receipt =
+        validate_ordinary_map_set_get_string_l2_verifier_route(&verifier_checked, &verifier)
+            .expect("the L2 route is bound to the complete CheckedProgram");
+    assert_eq!(
+        verifier_receipt.profile,
+        ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+    );
+
+    let false_claim_checked = ordinary_map_set_get_string_false_claim_l2_checked_fixture();
+    assert!(
+        !has_ordinary_map_set_get_string_route_candidate(&false_claim_checked),
+        "a verifier-only false claim must not select the contract-free L1 execution route"
+    );
+    assert!(materialize_ordinary_map_set_get_string_route(&false_claim_checked).is_err());
+    let false_claim_verifier =
+        materialize_ordinary_map_set_get_string_verifier_route(&false_claim_checked)
+            .expect("the exact false claim reaches the L2 verifier profile for Disproven");
+    let false_claim_receipt = validate_ordinary_map_set_get_string_l2_verifier_route(
+        &false_claim_checked,
+        &false_claim_verifier,
+    )
+    .expect("the false claim retains exact Checked contracts and the Checker-rooted worklist");
+    assert_eq!(
+        false_claim_receipt.profile,
+        ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+    );
+    assert_eq!(
+        false_claim_verifier.functions()[&owner]
+            .proof_worklist
+            .as_ref()
+            .expect("false claim retains all three Checker-rooted calls")
+            .expected_calls
+            .len(),
+        3
+    );
+
+    let verifier_function = &verifier.functions()[&owner];
+    assert_eq!(verifier_function.contracts.len(), 1);
+    assert_eq!(
+        verifier_function.contracts[0].kind,
+        MirContractKind::Ensures
+    );
+    assert_eq!(
+        verifier_function
+            .proof_worklist
+            .as_ref()
+            .expect("String L2 retains the exact Checker-rooted call worklist")
+            .expected_calls
+            .len(),
+        3
+    );
+    let function = &program.functions()[&owner];
+    assert_eq!(function.blocks.len(), 13);
+    assert_eq!(
+        function.ownership.checker_ordinary_map_owned_any_v2.len(),
+        0
+    );
+    assert_eq!(
+        function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetStringResult { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetStringResult { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        reference::MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("Reference settles the source and detached String owners"),
+        reference::MirRuntimeValue::Int(42)
+    );
+
+    {
+        let status = 2;
+        reference::with_ordinary_map_set_string_status_for_test(status, || {
+            assert_eq!(
+                reference::MirReferenceInterpreter::new(&program)
+                    .execute(&owner, &[])
+                    .expect("only the exact Set String capacity status propagates through Err"),
+                reference::MirRuntimeValue::Int(i64::from(status))
+            );
+        });
+    }
+    for status in [1, 18] {
+        reference::with_ordinary_map_set_string_status_for_test(status, || {
+            let error = reference::MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect_err("InvalidInput and TypeMismatch remain fail-closed");
+            assert!(
+                error.message.contains(&format!("status {status}")),
+                "{error}"
+            );
+        });
+    }
+    assert_eq!(
+        reference::ordinary_map_set_string_status_for_test(),
+        None,
+        "Set status injection must be restored before testing Get status edges"
+    );
+    for status in 1..=3 {
+        reference::with_ordinary_map_get_string_status_for_test(status, || {
+            assert_eq!(
+                reference::MirReferenceInterpreter::new(&program)
+                    .execute(&owner, &[])
+                    .expect("documented GetStringResult status propagates through Err"),
+                reference::MirRuntimeValue::Int(i64::from(status))
+            );
+        });
+    }
+    assert_eq!(
+        reference::ordinary_map_get_string_status_for_test(),
+        None,
+        "Get status injection must be restored before testing invalid Get status"
+    );
+    reference::with_ordinary_map_get_string_status_for_test(4, || {
+        let error = reference::MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("GetStringResult internal status is not source Err");
+        assert!(error.message.contains("internal status"), "{error}");
+    });
+    reference::with_ordinary_map_set_string_status_for_test(17, || {
+        let error = reference::MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("original nonrecoverable Set status remains an internal failure");
+        assert!(error.message.contains("status 17"), "{error}");
+    });
+
+    let changed_key = r#"
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let text = "payload"
+            let changed = map_set(root, "answer", text)
+            drop(text)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let lookup = map_get_string(updated, "other")
+                    match lookup {
+                        Ok(value) => { drop(updated); drop(value); 0 },
+                        Err(status) => { drop(updated); status },
+                    }
+                },
+                Err(status) => { drop(root); status },
+            }
+        },
+        Err(status) => status,
+    }
+}
+"#;
+    let near_miss = checked_program(changed_key);
+    assert!(!has_ordinary_map_set_get_string_route_candidate(&near_miss));
+    assert!(materialize_ordinary_map_set_get_string_route(&near_miss).is_err());
+
+    for near_miss_source in [
+        ORDINARY_MAP_SET_GET_STRING_SOURCE.replace("value == \"payload\"", "value != \"payload\""),
+        ORDINARY_MAP_SET_GET_STRING_SOURCE
+            .replace("value == \"payload\"", "value == \"different\""),
+        ORDINARY_MAP_SET_GET_STRING_SOURCE.replace(
+            "if matches { 42 } else { 0 }",
+            "if matches { 0 } else { 42 }",
+        ),
+        ORDINARY_MAP_SET_GET_STRING_SOURCE.replace(
+            "drop(updated)\n                            drop(value)",
+            "drop(value)\n                            drop(updated)",
+        ),
+    ] {
+        let near_miss = checked_program(&near_miss_source);
+        assert!(
+            !has_ordinary_map_set_get_string_route_candidate(&near_miss),
+            "payload, result-branch, and cleanup near-misses must not acquire the String receipt"
+        );
+        assert!(materialize_ordinary_map_set_get_string_route(&near_miss).is_err());
+    }
+
+    let exact_l2 = ORDINARY_MAP_SET_GET_STRING_SOURCE.replacen(
+        "func main() -> i32 {",
+        "func main() -> i32 {\n    ensures: result == 42 || result == 2 || result == 3",
+        1,
+    );
+    let nested_ensure = ORDINARY_MAP_SET_GET_STRING_SOURCE.replacen(
+        "            let lookup = map_get_string(updated, \"answer\")",
+        "            ensures: result == 42 || result == 2 || result == 3\n            let lookup = map_get_string(updated, \"answer\")",
+        1,
+    );
+    let interleaved_ensure = exact_l2
+        .replacen(
+            "    ensures: result == 42 || result == 2 || result == 3\n",
+            "",
+            1,
+        )
+        .replacen(
+            "    let created = map_new()",
+            "    let created = map_new()\n    ensures: result == 42 || result == 2 || result == 3",
+            1,
+        );
+    for near_miss_source in [
+        exact_l2.replace(
+            "result == 42 || result == 2 || result == 3",
+            "result == 42 || result == 2 || result == 4",
+        ),
+        exact_l2.replace(
+            "result == 42 || result == 2 || result == 3",
+            "result == 42 || result == 3 || result == 2",
+        ),
+        exact_l2.replacen(
+            "    ensures: result == 42 || result == 2 || result == 3",
+            "    requires: true\n    ensures: result == 42 || result == 2 || result == 3",
+            1,
+        ),
+        exact_l2.replacen(
+            "    ensures: result == 42 || result == 2 || result == 3",
+            "    ensures: result == 42 || result == 2 || result == 3\n    ensures: true",
+            1,
+        ),
+        interleaved_ensure,
+        nested_ensure,
+    ] {
+        if let Ok(near_miss) = std::panic::catch_unwind(|| checked_program(&near_miss_source)) {
+            assert!(
+                materialize_ordinary_map_set_get_string_verifier_route(&near_miss).is_err(),
+                "wrong, extra, interleaved, or nested String proof roots must fail closed"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_map_set_get_i32_route_replays_the_exact_checker_receipt() {
+    let (checked, expected) = ordinary_map_set_get_i32_fixture();
+    assert!(has_ordinary_map_set_get_i32_route_candidate(&checked));
+    let program = materialize_ordinary_map_set_get_i32_route(&checked)
+        .expect("exact Checker receipt materializes and passes independent Core L1 replay");
+    assert_eq!(program, expected);
+    let route = validate_ordinary_map_set_get_i32_l1_core_mir_route(&program)
+        .expect("exact Set/Get-i32 MIR graph carries its L1 Core route receipt");
+    assert_eq!(route.profile, ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE);
+    assert_ne!(
+        route.profile, ORDINARY_MAP_SET_RESULT_L1_CORE_PROFILE,
+        "SetResult cannot authorize the later typed Get lineage"
+    );
+    route
+        .validate_against_program(&program)
+        .expect("the profile receipt replays against the unchanged graph");
+
+    let owner = crate::core::NodeId("function:main".into());
+    let mut forged = program.clone();
+    forged
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .ownership
+        .checker_ordinary_map_owned_any_v2_set_get_i32_lineage_commitment =
+        Some("forged-route-lineage".into());
+    assert!(validate_ordinary_map_set_get_i32_l1_core_mir_route(&forged).is_err());
+    assert!(route.validate_against_program(&forged).is_err());
+
+    let wrong_key = include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_i32_lineage.mimi"
+    )
+    .replacen(
+        "map_get_i32(updated, \"answer\")",
+        "map_get_i32(updated, \"different\")",
+        1,
+    );
+    let near_miss = checked_program(&wrong_key);
+    assert!(!has_ordinary_map_set_get_i32_route_candidate(&near_miss));
+    assert!(materialize_ordinary_map_set_get_i32_route(&near_miss).is_err());
+}
+
+#[test]
+fn ordinary_map_set_get_i32_result_materializes_and_executes_exact_source() {
+    let (_checked, program) = ordinary_map_set_get_i32_fixture();
+    let owner = crate::core::NodeId("function:main".into());
+    let function = &program.functions()[&owner];
+    assert_eq!(function.blocks.len(), 10);
+    assert_eq!(
+        function.ownership.checker_ordinary_map_owned_any_v2.len(),
+        0
+    );
+    assert_eq!(
+        function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+            ))
+            .count(),
+        1
+    );
+    let get_block = function
+        .blocks
+        .values()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+                )
+            })
+        })
+        .expect("Set-success block has the dedicated GetI32Result instruction");
+    let get_index = get_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+            )
+        })
+        .unwrap();
+    let get_key = match &get_block.instructions[get_index].kind {
+        MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { key, .. } => key,
+        _ => unreachable!(),
+    };
+    let updated_root = match &get_block.instructions[get_index].kind {
+        MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { root, .. } => root,
+        _ => unreachable!(),
+    };
+    assert!(
+        matches!(
+            get_block.instructions.get(get_index + 1).map(|instruction| &instruction.kind),
+            Some(MirInstructionKind::Drop { value }) if value == get_key
+        ),
+        "Get key is dropped immediately after the borrowed lookup"
+    );
+    let updated_root_drops = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                    if root == updated_root
+            )
+        })
+        .count();
+    assert_eq!(
+        updated_root_drops, 2,
+        "both Get Result arms settle the updated root"
+    );
+
+    assert_eq!(
+        reference::MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect("Reference executes both Result matches and all root drops"),
+        reference::MirRuntimeValue::Int(42)
+    );
+}
+
+#[test]
+fn ordinary_map_set_get_i32_result_propagates_status_and_rejects_forgery() {
+    let (_checked, program) = ordinary_map_set_get_i32_fixture();
+    let owner = crate::core::NodeId("function:main".into());
+    let updated_root = program.functions()[&owner]
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .find_map(|instruction| match &instruction.kind {
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { root, .. } => {
+                Some(root.clone())
+            }
+            _ => None,
+        })
+        .expect("the source-bound GetI32Result borrows the updated root");
+    for status in 1..=3 {
+        reference::with_ordinary_map_set_get_i32_status_for_test(status, || {
+            assert_eq!(
+                reference::MirReferenceInterpreter::new(&program)
+                    .execute(&owner, &[])
+                    .expect("documented Get status is the exact Result::Err payload"),
+                reference::MirRuntimeValue::Int(i64::from(status))
+            );
+        });
+    }
+    reference::with_ordinary_map_set_get_i32_status_for_test(4, || {
+        let error = reference::MirReferenceInterpreter::new(&program)
+            .execute(&owner, &[])
+            .expect_err("unknown Get status is an internal invariant error");
+        assert!(
+            error.message.contains("invalid invariant status"),
+            "{error}"
+        );
+    });
+    reference::with_ordinary_map_set_result_status_for_test(2, || {
+        assert_eq!(
+            reference::MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("Set-capacity status propagates unchanged"),
+            reference::MirRuntimeValue::Int(2)
+        );
+    });
+    reference::with_ordinary_map_new_result_status_for_test(3, || {
+        assert_eq!(
+            reference::MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("outer New status propagates unchanged"),
+            reference::MirRuntimeValue::Int(3)
+        );
+    });
+
+    let mut forged = program.clone();
+    forged
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .ownership
+        .checker_ordinary_map_owned_any_v2_set_get_i32_lineage_commitment =
+        Some("forged-set-get-i32-commitment".into());
+    assert!(forged.functions()[&owner].validate().is_err());
+
+    let mut missing_get_drop = program.clone();
+    let function = missing_get_drop.function_mut_for_test(&owner).unwrap();
+    let block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+                )
+            })
+        })
+        .unwrap();
+    let index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result { .. }
+            )
+        })
+        .unwrap();
+    block.instructions.remove(index + 1);
+    assert!(
+        function.validate().is_err(),
+        "the Get key Drop is mandatory"
+    );
+
+    let mut missing_get_root_drop = program.clone();
+    let function = missing_get_root_drop.function_mut_for_test(&owner).unwrap();
+    let block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                        if root == &updated_root
+                )
+            })
+        })
+        .unwrap();
+    let index = block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                        if root == &updated_root
+            )
+        })
+        .unwrap();
+    block.instructions.remove(index);
+    assert!(
+        function.validate().is_err(),
+        "both Get Result arms must drop the updated root"
+    );
+
+    let source_without_exact_key = include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_get_i32_lineage.mimi"
+    )
+    .replacen(
+        "map_get_i32(updated, \"answer\")",
+        "map_get_i32(updated, \"different\")",
+        1,
+    );
+    let changed = checked_program(&source_without_exact_key);
+    assert!(
+        changed
+            .callable(&owner)
+            .unwrap()
+            .resources
+            .ordinary_map_owned_any_v2_set_get_i32_lineage_receipt
+            .is_none(),
+        "a changed Get key withholds the independent source receipt"
+    );
+    assert!(
+        reference::MirProgram::from_checked_program_map_set_get_i32_result(&changed, &owner)
+            .is_err()
+    );
+}
+
+fn ordinary_map_set_result_l1_fixture() -> (crate::core::CheckedProgram, reference::MirProgram) {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_result_lineage.mimi"
+    ));
+    let owner = crate::core::NodeId("function:main".into());
+    let program = reference::MirProgram::from_checked_program_map_set_result(&checked, &owner)
+        .expect("exact fixture materializes its Checker-bound SetResult MIR");
+    (checked, program)
+}
+
+#[test]
+fn ordinary_map_set_result_l1_executes_exact_fixture_in_reference_and_bytecode() {
+    let (checked, program) = ordinary_map_set_result_l1_fixture();
+    let owner = crate::core::NodeId("function:main".into());
+    let route = validate_ordinary_map_set_result_l1_core_mir_route(&program)
+        .expect("exact Checker-bound SetResult graph validates in Core");
+    assert_eq!(route.profile, ORDINARY_MAP_SET_RESULT_L1_CORE_PROFILE);
+    let function = &program.functions()[&owner];
+    assert_eq!(function.blocks.len(), 7);
+    assert_eq!(
+        function
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            ))
+            .count(),
+        1
+    );
+    let key = super::MirValueId::new("literal:ordinary_map_set_lineage:answer").unwrap();
+    let set_block = function
+        .blocks
+        .values()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { key: observed, .. }
+                        if observed == &key
+                )
+            })
+        })
+        .expect("SetResult and its key cleanup share the exact block");
+    let set_index = set_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { key: observed, .. }
+                    if observed == &key
+            )
+        })
+        .expect("the exact SetResult instruction is present");
+    assert!(
+        matches!(
+            set_block
+                .instructions
+                .get(set_index + 1)
+                .map(|instruction| &instruction.kind),
+            Some(MirInstructionKind::Drop { value }) if value == &key
+        ),
+        "the owned SetResult key is retired on both Result branches before branching"
+    );
+
+    let reference = reference::MirReferenceInterpreter::new(&program)
+        .execute(&owner, &[])
+        .expect("Reference executes both Result branches and ownership settlement");
+    assert_eq!(reference, reference::MirRuntimeValue::Int(1));
+
+    let before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("runtime ownership baseline before SetResult Bytecode");
+    let bytecode = crate::interp::bytecode::mir::compile_mir_program_with_map_set_result_route(
+        &checked, &program,
+    )
+    .expect("CheckedProgram-aware SetResult adapter compiles the exact route");
+    assert!(bytecode.functions[0].code.iter().any(|op| matches!(
+        op,
+        crate::interp::bytecode::Op::MirOrdinaryMapOwnedAnyV2SetResult { .. }
+    )));
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    assert_eq!(
+        vm.run_value()
+            .expect("Bytecode runs New, SetResult, Size, and exact Drops"),
+        crate::interp::Value::Int(1)
+    );
+    assert_eq!(
+        crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("runtime ownership after SetResult Bytecode"),
+        before,
+        "success must retire both the original and updated roots"
+    );
+    assert_eq!(
+        vm.ordinary_map_new_result_live_runtime_root_occurrences_for_test(),
+        0
+    );
+}
+
+#[test]
+fn ordinary_map_set_result_l1_propagates_exact_set_and_outer_new_statuses() {
+    let (checked, program) = ordinary_map_set_result_l1_fixture();
+    let owner = crate::core::NodeId("function:main".into());
+    reference::with_ordinary_map_set_result_status_for_test(2, || {
+        assert_eq!(
+            reference::MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("Set capacity is a recoverable Err(2)"),
+            reference::MirRuntimeValue::Int(2)
+        );
+    });
+    reference::with_ordinary_map_new_result_status_for_test(3, || {
+        assert_eq!(
+            reference::MirReferenceInterpreter::new(&program)
+                .execute(&owner, &[])
+                .expect("outer New capacity propagates its exact Err(3)"),
+            reference::MirRuntimeValue::Int(3)
+        );
+    });
+
+    let bytecode = crate::interp::bytecode::mir::compile_mir_program_with_map_set_result_route(
+        &checked, &program,
+    )
+    .expect("CheckedProgram-aware SetResult adapter compiles the exact route");
+    let before = crate::runtime::ordinary_map_domain_live_counts_for_test()
+        .expect("runtime ownership baseline before Set capacity");
+    let actual =
+        crate::runtime::with_ordinary_map_owned_any_v2_root_publish_failure_for_test(1, || {
+            let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+            let result = vm.run_value();
+            (
+                result,
+                vm.ordinary_map_new_result_live_runtime_root_occurrences_for_test(),
+            )
+        });
+    let (result, live_result_roots) = actual;
+    assert_eq!(
+        result.expect("Set publication capacity is a Result value"),
+        crate::interp::Value::Int(2)
+    );
+    assert_eq!(live_result_roots, 0);
+    assert_eq!(
+        crate::runtime::ordinary_map_domain_live_counts_for_test()
+            .expect("runtime ownership after Set capacity"),
+        before,
+        "the old root remains owned until its branch Drop, with no published Set root"
+    );
+}
+
+#[test]
+fn ordinary_map_set_result_l2_proves_finite_error_domain_and_rejects_forgery() {
+    let (checked, program) = ordinary_map_set_result_l1_fixture();
+    let owner = crate::core::NodeId("function:main".into());
+    let route = validate_ordinary_map_set_result_l1_core_mir_route(&program)
+        .expect("valid SetResult L1 route");
+
+    let mut forged = program.clone();
+    let function = forged.function_mut_for_test(&owner).unwrap();
+    function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_set_lineage_commitment =
+        Some("forged-set-lineage-commitment".into());
+    assert!(validate_ordinary_map_set_result_l1_core_mir_route(&forged).is_err());
+    assert!(route.validate_against_program(&forged).is_err());
+    assert!(
+        crate::interp::bytecode::mir::compile_mir_program_with_map_set_result_route(
+            &checked, &forged
+        )
+        .is_err()
+    );
+
+    let mut wrong_operand = program.clone();
+    let function = wrong_operand.function_mut_for_test(&owner).unwrap();
+    let set = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+        .find(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            )
+        })
+        .expect("the exact SetResult operation exists");
+    let MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { key, value, .. } = &mut set.kind
+    else {
+        unreachable!()
+    };
+    std::mem::swap(key, value);
+    assert!(validate_ordinary_map_set_result_l1_core_mir_route(&wrong_operand).is_err());
+
+    let mut missing_key_drop = program.clone();
+    let function = missing_key_drop.function_mut_for_test(&owner).unwrap();
+    let set_block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+                )
+            })
+        })
+        .expect("the exact SetResult block exists");
+    let set_index = set_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            )
+        })
+        .expect("the exact SetResult instruction exists");
+    assert!(matches!(
+        set_block
+            .instructions
+            .get(set_index + 1)
+            .map(|instruction| &instruction.kind),
+        Some(MirInstructionKind::Drop { .. })
+    ));
+    let key_drop = set_block.instructions[set_index + 1].clone();
+    set_block.instructions.remove(set_index + 1);
+    assert!(
+        validate_ordinary_map_set_result_l1_core_mir_route(&missing_key_drop).is_err(),
+        "the exact SetResult route rejects omission of its owned key cleanup"
+    );
+
+    let mut wrong_key_drop = program.clone();
+    let function = wrong_key_drop.function_mut_for_test(&owner).unwrap();
+    let drop = function
+        .blocks
+        .values_mut()
+        .flat_map(|block| &mut block.instructions)
+        .find(|instruction| matches!(instruction.kind, MirInstructionKind::Drop { .. }))
+        .expect("the exact key Drop exists");
+    let MirInstructionKind::Drop { value } = &mut drop.kind else {
+        unreachable!()
+    };
+    *value = super::MirValueId::new("literal:ordinary_map_set_lineage:42").unwrap();
+    assert!(validate_ordinary_map_set_result_l1_core_mir_route(&wrong_key_drop).is_err());
+
+    let mut duplicate_key_drop = program.clone();
+    let function = duplicate_key_drop.function_mut_for_test(&owner).unwrap();
+    let set_block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+                )
+            })
+        })
+        .unwrap();
+    let set_index = set_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            )
+        })
+        .unwrap();
+    set_block
+        .instructions
+        .insert(set_index + 2, key_drop.clone());
+    assert!(validate_ordinary_map_set_result_l1_core_mir_route(&duplicate_key_drop).is_err());
+
+    let mut displaced_key_drop = program.clone();
+    let function = displaced_key_drop.function_mut_for_test(&owner).unwrap();
+    let set_block = function
+        .blocks
+        .values_mut()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+                )
+            })
+        })
+        .unwrap();
+    let set_index = set_block
+        .instructions
+        .iter()
+        .position(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+            )
+        })
+        .unwrap();
+    set_block.instructions.swap(set_index, set_index + 1);
+    assert!(validate_ordinary_map_set_result_l1_core_mir_route(&displaced_key_drop).is_err());
+
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
+    // These Err branches return normally from main: a successful Set yields
+    // size 1, Set capacity failure yields 2, and New capacity failure yields 3.
+    // The exact postcondition is therefore the finite set {1, 2, 3}.
+    let fixture = include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_result_lineage.mimi"
+    );
+    let finite_domain_source = fixture.replacen(
+        "func main() -> i32 {",
+        "func main() -> i32 {\n    ensures: result == 1 || result == 2 || result == 3",
+        1,
+    );
+    let source_hash = blake3::hash(finite_domain_source.as_bytes())
+        .to_hex()
+        .to_string();
+    let checked_with_contract = checked_program(&finite_domain_source);
+    let proven_program = materialize_ordinary_map_set_result_verifier_route(&checked_with_contract)
+        .expect("exact Checker receipt admits the proof-bearing SetResult route");
+    let receipt =
+        validate_ordinary_map_set_result_l2_verifier_route(&checked_with_contract, &proven_program)
+            .expect("the exact SetResult L2 route binds source, census, and MIR");
+    assert_eq!(receipt.profile, ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE);
+    let results = crate::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+        &checked_with_contract,
+        &proven_program,
+        &receipt,
+        source_hash.clone(),
+    )
+    .expect("the verifier discharges the finite {1,2,3} result contract");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].func_name, "function:main");
+    assert_eq!(results[0].status, crate::verifier::VerifStatus::Proven);
+    assert!(results[0].constraint_count > 0);
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("a real SetResult proof carries its provenance artifact");
+    assert_eq!(artifact.source_hash, source_hash);
+    assert_eq!(artifact.mir_hash, receipt.mir_digest);
+    assert_eq!(artifact.mir_route_receipt.as_ref(), Some(&receipt));
+
+    let wrong_profile = proven_program.route_receipt("verifier-mir-v1");
+    let error = crate::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+        &checked_with_contract,
+        &proven_program,
+        &wrong_profile,
+        "wrong-set-result-profile".into(),
+    )
+    .expect_err("a broad verifier receipt cannot authorize the SetResult L2 route");
+    assert!(error.contains("requires exact route profile"), "{error}");
+
+    let mut missing_err_branch = proven_program.clone();
+    let function = missing_err_branch.function_mut_for_test(&owner).unwrap();
+    let removed_err_arm = function.blocks.values_mut().find_map(|block| {
+        let MirTerminator::SwitchMove { arms, .. } = &mut block.terminator else {
+            return None;
+        };
+        let before = arms.len();
+        arms.retain(|arm| {
+            !matches!(
+                &arm.case,
+                MirSwitchCase::Variant(variant)
+                    if variant.0 == "builtin:variant:Result::Err"
+            )
+        });
+        Some(before != arms.len())
+    });
+    assert_eq!(removed_err_arm, Some(true));
+    assert!(
+        validate_ordinary_map_set_result_l2_verifier_route(
+            &checked_with_contract,
+            &missing_err_branch,
+        )
+        .is_err(),
+        "the exact L2 route rejects a graph with its Result::Err arm removed"
+    );
+
+    for (label, ensures, counterexample) in [
+        (
+            "omitted-set-err-2",
+            "result == 1 || result == 3",
+            "counterexample: result = 2",
+        ),
+        (
+            "omitted-new-err-3",
+            "result == 1 || result == 2",
+            "counterexample: result = 3",
+        ),
+    ] {
+        let source = fixture.replacen(
+            "func main() -> i32 {",
+            &format!("func main() -> i32 {{\n    ensures: {ensures}"),
+            1,
+        );
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        let checked = checked_program(&source);
+        let program = materialize_ordinary_map_set_result_verifier_route(&checked)
+            .unwrap_or_else(|error| panic!("{label} exact route: {error}"));
+        let receipt = validate_ordinary_map_set_result_l2_verifier_route(&checked, &program)
+            .unwrap_or_else(|error| panic!("{label} exact receipt: {error}"));
+        let results = crate::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+            &checked,
+            &program,
+            &receipt,
+            source_hash,
+        )
+        .unwrap_or_else(|error| panic!("{label} verifier route: {error}"));
+        assert_eq!(results.len(), 1, "{label}");
+        assert_eq!(
+            results[0].status,
+            crate::verifier::VerifStatus::Disproven,
+            "{label}"
+        );
+        assert!(results[0].constraint_count > 0, "{label}");
+        assert!(
+            results[0].message.contains(counterexample),
+            "{label}: {}",
+            results[0].message
+        );
+    }
+}
+
+#[test]
+fn ordinary_map_set_result_l2_is_neutral_and_checker_bound() {
+    let checked = checked_program(include_str!(
+        "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_set_result_lineage.mimi"
+    ));
+    let program = materialize_ordinary_map_set_result_verifier_route(&checked)
+        .expect("contract-free exact SetResult graph has an L2 no-obligation projection");
+    let receipt = validate_ordinary_map_set_result_l2_verifier_route(&checked, &program)
+        .expect("CheckedProgram source receipt and full census validate");
+    assert_eq!(receipt.profile, ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE);
+    let results = crate::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+        &checked,
+        &program,
+        &receipt,
+        "ordinary-map-set-result-no-obligations".into(),
+    )
+    .expect("dedicated L2 route returns neutral status without symbolic proof");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].func_name, "function:main");
+    assert_eq!(
+        results[0].status,
+        crate::verifier::VerifStatus::NoObligations
+    );
+    assert_eq!(results[0].constraint_count, 0);
+    assert!(results[0].artifact.is_none());
+    assert!(results[0].message.contains("were not proven"));
+
+    assert!(crate::verifier::verify_mir_with_route_receipt(
+        &program,
+        &receipt,
+        "generic-must-reject-set-result".into(),
+    )
+    .expect_err("generic verifier entry stays closed for SetResult")
+    .contains("exact CheckedProgram-aware L2 verifier route"));
+
+    let mut forged = program.clone();
+    let owner = crate::core::NodeId("function:main".into());
+    forged
+        .function_mut_for_test(&owner)
+        .unwrap()
+        .ownership
+        .checker_ordinary_map_owned_any_v2_set_lineage_commitment =
+        Some("forged-l2-set-lineage".into());
+    assert!(validate_ordinary_map_set_result_l2_verifier_route(&checked, &forged).is_err());
+    assert!(
+        crate::verifier::verify_mir_with_ordinary_map_set_result_l2_verifier_route(
+            &checked,
+            &forged,
+            &receipt,
+            "forged-set-result-route".into(),
+        )
+        .is_err()
+    );
 }

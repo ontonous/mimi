@@ -856,7 +856,7 @@ fn compact_empty_map_table(t: &mut Table<super::MimiMap>) {
 
 /// Count currently allocated production Map slots for the test-only
 /// MapRoot lifecycle probe.
-#[cfg(any(test, mimi_test_ub_symbols))]
+#[cfg(any(test, mimi_test_ub_symbols, feature = "ordinary-map-set-result-l3"))]
 pub fn mimi_test_map_live_count() -> i64 {
     let t = lock_maps();
     i64::try_from(

@@ -723,3 +723,31 @@ fn audit_lsp_document_cache_enforces_hard_total_bytes() {
     );
     assert!(server.documents.contains_key("file:///new"));
 }
+
+#[test]
+fn lsp_semantic_query_missing_target_is_structured_and_fail_closed() {
+    let uri = "file:///query-target.mimi";
+    let server = audit2_lsp_open(uri, "func main() -> i32 { 0 }\n");
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 91,
+        "method": "mimi/query",
+        "params": {
+            "textDocument": { "uri": uri },
+            "query": "impact"
+        }
+    });
+    let (_server, response) = crate::lsp::flow::transition(server, &request);
+    let response = response.expect("mimi/query request must receive a response");
+    assert_eq!(response["id"], 91);
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(response["error"]["data"]["query"], "impact");
+    assert_eq!(response["error"]["data"]["identity"], "<missing-target>");
+    assert_eq!(response["error"]["data"]["status"], "unknown");
+    assert_eq!(response["error"]["data"]["trust"], "unsupported");
+    assert_eq!(response["error"]["data"]["requires_target"], true);
+    assert!(
+        response.get("result").is_none(),
+        "must not fall back to calls/holes"
+    );
+}

@@ -23,6 +23,97 @@ fn result<'a>(results: &'a [VerificationResult], name: &str) -> &'a Verification
         .unwrap_or_else(|| panic!("missing {name}: {results:?}"))
 }
 
+fn synthetic_result(func_name: &str, status: VerifStatus) -> VerificationResult {
+    VerificationResult {
+        func_name: func_name.to_string(),
+        status,
+        message: String::new(),
+        diagnostic: None,
+        duration_us: 0,
+        constraint_count: 0,
+        artifact: None,
+        trusted_subset_domain: None,
+    }
+}
+
+#[test]
+fn dual_peer_coverage_requires_proof_results_from_both_engines() {
+    let resolved_only = vec![synthetic_result("resolved_owner", VerifStatus::Proven)];
+    let mir_empty = Vec::new();
+    let gaps = peer_coverage_boundaries(&resolved_only, &mir_empty);
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].owner.0, "resolved_owner");
+    assert!(gaps[0].reason.contains("Resolved"));
+
+    let resolved_empty = Vec::new();
+    let mir_only = vec![synthetic_result("mir_owner", VerifStatus::Proven)];
+    let gaps = peer_coverage_boundaries(&resolved_empty, &mir_only);
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].owner.0, "mir_owner");
+    assert!(gaps[0].reason.contains("Resolved peer"));
+
+    let resolved_without_obligation =
+        vec![synthetic_result("shared_owner", VerifStatus::NoObligations)];
+    let mir_proof = vec![synthetic_result("shared_owner", VerifStatus::Proven)];
+    assert!(peer_coverage_boundaries(&resolved_without_obligation, &mir_proof).is_empty());
+
+    let no_obligations = vec![synthetic_result(
+        "resolved_only",
+        VerifStatus::NoObligations,
+    )];
+    assert!(peer_coverage_boundaries(&no_obligations, &mir_empty).is_empty());
+}
+
+fn assert_extern_declaration_boundary(
+    source: &str,
+    symbol: &str,
+    expected_contract: bool,
+    expected_exact_reference: bool,
+) {
+    let (_, checked, source_hash) = build_checked(source);
+    let declaration = checked
+        .ffi_declarations()
+        .values()
+        .find(|declaration| declaration.symbol == symbol)
+        .expect("checker-owned extern declaration descriptor");
+    assert_eq!(
+        declaration.has_declared_contract(),
+        expected_contract,
+        "extern contract census for {symbol}"
+    );
+    let exact_reference = checked.call_sites_sorted().into_iter().any(|site| {
+        matches!(
+            site.resolved_callee.as_ref(),
+            Some(crate::core::ResolvedCallee::Extern(owner))
+                if owner == &declaration.declaration
+        )
+    });
+    assert_eq!(
+        exact_reference, expected_exact_reference,
+        "exact typed extern reference census for {symbol}"
+    );
+
+    let crate::core::mir::verification::MirVerificationPreparation::Deferred(boundaries) =
+        crate::core::mir::verification::prepare_verification_request(&checked)
+    else {
+        panic!("extern declaration obligation must defer the whole request");
+    };
+    assert!(boundaries.iter().any(|boundary| {
+        boundary.owner == declaration.declaration
+            && boundary.reason.contains("FFI compatibility owner")
+    }));
+
+    if require_solver() {
+        let results = verify_checked(&checked, source_hash).expect("deferred extern request");
+        let positive = result(&results, "positive");
+        assert_eq!(positive.status, VerifStatus::NotInTrustedSubset);
+        assert!(
+            positive.artifact.is_none(),
+            "deferred request has no artifact"
+        );
+    }
+}
+
 const GUARDED_FLOW: &str = r#"
 flow Account {
     state Open { count: i32 }
@@ -37,21 +128,12 @@ flow Account {
 "#;
 
 #[test]
-fn typed_flow_guard_and_entry_invariant_preserve_legacy_positive_without_owner_access() {
+fn typed_flow_guard_and_entry_invariant_prove_without_legacy_owner_access() {
     if !require_solver() {
         return;
     }
-    let (file, checked, source_hash) = build_checked(GUARDED_FLOW);
-    let old = crate::verifier::flow::flow_verify_file_with_hashes(
-        &file,
-        source_hash.clone(),
-        crate::verifier::ctx::compute_resolved_ir_hash(&checked),
-    )
-    .expect("legacy reference");
-    assert_eq!(result(&old, "Account::close").status, VerifStatus::Proven);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let (_, checked, source_hash) = build_checked(GUARDED_FLOW);
     let actual = verify_checked(&checked, source_hash.clone()).expect("typed verification");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let actual = result(&actual, "Account::close");
     assert_eq!(actual.status, VerifStatus::Proven);
     let artifact = actual.artifact.as_ref().expect("real MIR proof artifact");
@@ -88,18 +170,12 @@ func main() -> i32 { 0 }
     let mir_digest = request.program().canonical_digest();
 
     for dual in [false, true] {
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let results = if dual {
             verify_checked_dual(&checked, source_hash.clone())
         } else {
             verify_checked(&checked, source_hash.clone())
         }
         .expect("ordinary scalar contract verification");
-        assert!(
-            crate::core::CheckedProgram::test_legacy_body_access().is_empty(),
-            "ordinary scalar {dual} entry touched a retained verifier body: {:?}",
-            crate::core::CheckedProgram::test_legacy_body_access()
-        );
         for (name, status) in [
             ("positive", VerifStatus::Proven),
             ("false_claim", VerifStatus::Disproven),
@@ -130,31 +206,100 @@ func main() -> i32 { 0 }
 }
 
 #[test]
-fn typed_flow_false_ensures_preserves_legacy_negative_without_owner_access() {
+fn typed_request_skips_unreferenced_contractless_extern_and_emits_mir_artifact() {
+    let source = r#"
+extern "C" {
+    func unused(value: i32) -> i32;
+}
+func positive(value: i32) -> i32 {
+    requires: value > 0
+    ensures: result > 0
+    value
+}
+"#;
+    let (_, checked, source_hash) = build_checked(source);
+    let declaration = checked
+        .ffi_declarations()
+        .values()
+        .find(|declaration| declaration.symbol == "unused")
+        .expect("checker-owned unused extern descriptor");
+    assert!(!declaration.has_declared_contract());
+    assert!(!checked.call_sites_sorted().into_iter().any(|site| {
+        matches!(
+            site.resolved_callee.as_ref(),
+            Some(crate::core::ResolvedCallee::Extern(owner))
+                if owner == &declaration.declaration
+        )
+    }));
+    let Preparation::Complete(request) = prepare(&checked) else {
+        panic!("unused contractless extern must not defer the ordinary proof root");
+    };
+    let mir_digest = request.program().canonical_digest();
+
+    if !require_solver() {
+        return;
+    }
+    let results = verify_checked(&checked, source_hash.clone()).expect("complete MIR request");
+    let positive = result(&results, "positive");
+    assert_eq!(positive.status, VerifStatus::Proven, "{positive:#?}");
+    let artifact = positive.artifact.as_ref().expect("complete MIR artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    assert_eq!(artifact.source_hash, source_hash);
+    assert_eq!(artifact.mir_hash, mir_digest);
+}
+
+#[test]
+fn typed_request_keeps_called_contractless_extern_deferred_without_artifact() {
+    assert_extern_declaration_boundary(
+        r#"
+extern "C" {
+    func foreign(value: i32) -> i32;
+}
+func positive(value: i32) -> i32 {
+    requires: value > 0
+    ensures: result > 0
+    foreign(value)
+}
+"#,
+        "foreign",
+        false,
+        true,
+    );
+}
+
+#[test]
+fn typed_request_keeps_uncalled_contract_bearing_extern_deferred_without_artifact() {
+    assert_extern_declaration_boundary(
+        r#"
+extern "C" {
+    func unused(value: i32) -> i32 requires: value >= 0 ensures: result >= value;
+}
+func positive(value: i32) -> i32 {
+    requires: value > 0
+    ensures: result > 0
+    value
+}
+"#,
+        "unused",
+        true,
+        false,
+    );
+}
+
+#[test]
+fn typed_flow_false_ensures_is_rejected_without_legacy_owner_access() {
     if !require_solver() {
         return;
     }
     let source = GUARDED_FLOW.replace("ensures: amount > 0", "ensures: amount < 0");
-    let (file, checked, source_hash) = build_checked(&source);
-    let old = crate::verifier::flow::flow_verify_file_with_hashes(
-        &file,
-        source_hash.clone(),
-        String::new(),
-    )
-    .expect("legacy reference");
-    assert_eq!(
-        result(&old, "Account::close").status,
-        VerifStatus::Disproven
-    );
+    let (_, checked, source_hash) = build_checked(&source);
     for dual in [false, true] {
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         let actual = if dual {
             verify_checked_dual(&checked, source_hash.clone())
         } else {
             verify_checked(&checked, source_hash.clone())
         }
         .expect("typed negative");
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         assert_eq!(
             result(&actual, "Account::close").status,
             VerifStatus::Disproven
@@ -167,15 +312,11 @@ fn typed_flow_actual_caller_must_establish_source_invariant_and_guard() {
     if !require_solver() {
         return;
     }
-    let source = format!("{GUARDED_FLOW}\nfunc main() -> i32 {{ let rejected = Account::close(Open {{ count: 3 }}, 0)\n drop(rejected)\n 0 }}");
-    let (_, checked, source_hash) = build_checked(&source);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let actual = verify_checked(&checked, source_hash).expect("typed call-site obligation");
-    let legacy_accesses = crate::core::CheckedProgram::test_legacy_body_access();
-    assert!(
-        legacy_accesses.is_empty(),
-        "typed caller results={actual:#?}; legacy body accesses={legacy_accesses:#?}"
+    let source = format!(
+        "{GUARDED_FLOW}\nfunc main() -> i32 {{ let rejected = Account::close(Open {{ count: 3 }}, 0)\n drop(rejected)\n 0 }}"
     );
+    let (_, checked, source_hash) = build_checked(&source);
+    let actual = verify_checked(&checked, source_hash).expect("typed call-site obligation");
     let caller = result(&actual, "main");
     assert_eq!(
         caller.status,
@@ -197,9 +338,7 @@ fn typed_transition_guard_cannot_assume_away_its_own_zero_division() {
         )
         .replace("invariant: amount >= 0", "invariant: true");
     let (_, checked, source_hash) = build_checked(&source);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed guard definedness");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(
         result(&actual, "Account::close").status,
         VerifStatus::Disproven
@@ -216,9 +355,7 @@ fn typed_transition_body_overflow_is_an_actual_obligation() {
     }
     let source = GUARDED_FLOW.replace("count: self.count }", "count: self.count + 1 }");
     let (_, checked, source_hash) = build_checked(&source);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed body trap");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(
         result(&actual, "Account::close").status,
         VerifStatus::Disproven
@@ -239,28 +376,18 @@ fn typed_flow_source_fields_bound_actual_state_arithmetic_and_caller_input() {
         )
         .replace("count: self.count }", "count: self.count + 1 }");
     let (_, checked, source_hash) = build_checked(&source);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed state-field arithmetic");
-    let legacy_accesses = crate::core::CheckedProgram::test_legacy_body_access();
-    assert!(
-        legacy_accesses.is_empty(),
-        "typed source-field results={actual:#?}; legacy body accesses={legacy_accesses:#?}"
-    );
     assert_eq!(
         result(&actual, "Account::close").status,
         VerifStatus::Proven,
         "typed source-field result={:#?}; all results={actual:#?}",
         result(&actual, "Account::close")
     );
-    let invalid = format!("{source}\nfunc main() -> i32 {{ let rejected = Account::close(Open {{ count: -1 }}, 1)\n drop(rejected)\n 0 }}");
-    let (_, checked, source_hash) = build_checked(&invalid);
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
-    let actual = verify_checked(&checked, source_hash).expect("typed invalid source");
-    let legacy_accesses = crate::core::CheckedProgram::test_legacy_body_access();
-    assert!(
-        legacy_accesses.is_empty(),
-        "typed invalid caller results={actual:#?}; legacy body accesses={legacy_accesses:#?}"
+    let invalid = format!(
+        "{source}\nfunc main() -> i32 {{ let rejected = Account::close(Open {{ count: -1 }}, 1)\n drop(rejected)\n 0 }}"
     );
+    let (_, checked, source_hash) = build_checked(&invalid);
+    let actual = verify_checked(&checked, source_hash).expect("typed invalid source");
     assert_eq!(
         result(&actual, "main").status,
         VerifStatus::Disproven,
@@ -284,13 +411,7 @@ fn typed_fails_return_preserves_source_payload_and_same_graph_execution() {
         }
     };
     let canonical = request.program();
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed fails source proof");
-    let legacy_accesses = crate::core::CheckedProgram::test_legacy_body_access();
-    assert!(
-        legacy_accesses.is_empty(),
-        "typed fails results={actual:#?}; legacy body accesses={legacy_accesses:#?}"
-    );
     assert_eq!(
         result(&actual, "F::go").status,
         VerifStatus::Proven,
@@ -326,7 +447,7 @@ fn typed_fails_return_preserves_source_payload_and_same_graph_execution() {
 }
 
 #[test]
-fn typed_ordinary_invariants_establish_before_assumption_and_preserve_existing_results() {
+fn typed_ordinary_invariants_establish_before_assumption_on_resolved_route() {
     if !require_solver() {
         return;
     }
@@ -344,19 +465,8 @@ func forged(x: i32) -> i32 {
     42
 }
 "#;
-    let (file, checked, source_hash) = build_checked(source);
-    let old = crate::verifier::flow::flow_verify_file_with_hashes(
-        &file,
-        source_hash.clone(),
-        String::new(),
-    )
-    .expect("legacy reference");
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
+    let (_, checked, source_hash) = build_checked(source);
     let actual = verify_checked(&checked, source_hash).expect("typed invariants");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
-    for name in ["established", "forged"] {
-        assert_eq!(result(&actual, name).status, result(&old, name).status);
-    }
     assert_eq!(result(&actual, "established").status, VerifStatus::Proven);
     assert_eq!(result(&actual, "forged").status, VerifStatus::Disproven);
     assert!(result(&actual, "forged")
@@ -388,9 +498,7 @@ fn typed_dual_uses_distinct_resolved_and_mir_consumers_and_retains_weaker_conclu
         right.artifact.as_ref().expect("MIR artifact").engine,
         ProofArtifact::ENGINE_MIR
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual = verify_checked_dual(&checked, source_hash).expect("typed independent dual");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let merged = result(&dual, "Account::close");
     if crate::verifier::verdict_class(&left.status) != crate::verifier::verdict_class(&right.status)
         && crate::verifier::verdict_class(&left.status) != crate::verifier::VerdictClass::NoOpinion
@@ -444,9 +552,7 @@ fn typed_flow_math_points_reach_both_independent_proof_consumers() {
         ProofArtifact::ENGINE_MIR
     );
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual = verify_checked_dual(&checked, source_hash).expect("independent dual verification");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(result(&dual, "Account::close").status, VerifStatus::Proven);
 }
 
@@ -491,9 +597,7 @@ func leaked(x: i32) -> i32 {
         result(&resolved_results, "leaked").status,
         VerifStatus::Disproven
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual = verify_checked_dual(&checked, source_hash).expect("independent branch consumers");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(result(&dual, "branch").status, VerifStatus::Proven);
     assert_eq!(result(&dual, "leaked").status, VerifStatus::Disproven);
 
@@ -550,10 +654,8 @@ func looped(x: i32) -> i32 {
         "Resolved loop result={:#?}",
         result(&resolved_results, "looped")
     );
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let dual = verify_checked_dual(&checked, "stationary-loop-dual".into())
         .expect("independent loop consumers");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     assert_eq!(result(&dual, "looped").status, VerifStatus::Proven);
 }
 
@@ -587,7 +689,6 @@ func guarded(x: i32) -> i32 {
     assert_eq!(guarded.status, VerifStatus::NotInTrustedSubset);
     assert!(guarded.artifact.is_none());
 
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let deferred = verify_checked(&checked, "nested-requires-entry-scope".into())
         .expect("typed coverage boundary remains callable");
     let guarded = result(&deferred, "guarded");
@@ -595,7 +696,6 @@ func guarded(x: i32) -> i32 {
     assert!(guarded
         .message
         .contains(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE));
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
 }
 
 #[test]
@@ -620,6 +720,44 @@ fn typed_request_does_not_hoist_nested_contracts_or_claim_loop_induction() {
                 .any(|boundary| boundary.reason.contains("nested")
                     || boundary.reason.contains("loop"))
         );
+
+        if source.contains("func looped") {
+            let callable = checked
+                .callable(&NodeId("function:looped".into()))
+                .expect("root-invariant loop callable");
+            assert!(callable
+                .contracts
+                .iter()
+                .any(|contract| contract.kind == crate::core::ir::ContractKind::Invariant));
+
+            let worklist = callable.proof_point_worklist();
+            let loop_node = worklist
+                .loop_nodes()
+                .into_iter()
+                .next()
+                .expect("typed while point");
+            assert!(
+                worklist.loop_invariant_nodes().is_empty(),
+                "the callable-entry invariant must not become a loop invariant"
+            );
+            assert!(
+                worklist.boundaries.iter().any(|boundary| {
+                    boundary.point == loop_node && boundary.reason.contains("loop needs")
+                }),
+                "effectful loop without its own induction receipt must be deferred"
+            );
+
+            if require_solver() {
+                let results = verify_checked(&checked, "root-invariant-effectful-loop".into())
+                    .expect("deferred loop verification");
+                let looped = result(&results, "looped");
+                assert_eq!(looped.status, VerifStatus::NotInTrustedSubset);
+                assert!(
+                    looped.artifact.is_none(),
+                    "deferred loop must emit no artifact"
+                );
+            }
+        }
     }
 }
 
@@ -706,9 +844,7 @@ flow Account {
     );
     let (_, checked, source_hash) = build_checked(&trapping);
     assert!(matches!(prepare(&checked), Preparation::Complete(_)));
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed MIR contract check");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let transition = result(&actual, "Account::close");
     assert_eq!(transition.status, VerifStatus::Disproven, "{transition:#?}");
     assert!(transition.message.contains("undefined"), "{transition:#?}");
@@ -721,9 +857,7 @@ flow Account {
     );
     let (_, checked, source_hash) = build_checked(&safe);
     assert!(matches!(prepare(&checked), Preparation::Complete(_)));
-    crate::core::CheckedProgram::reset_test_legacy_body_access();
     let actual = verify_checked(&checked, source_hash).expect("typed MIR short-circuit proof");
-    assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
     let transition = result(&actual, "Account::close");
     assert_eq!(transition.status, VerifStatus::Proven, "{transition:#?}");
     assert_eq!(

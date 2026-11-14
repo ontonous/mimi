@@ -1,6 +1,11 @@
 type Address { city: string; zip: i32 }
 type Person { name: string; addr: Address }
-func main() -> string {
+func nested_person_city() -> string {
     let p = Person { name: "Alice", addr: Address { city: "NYC", zip: 10001 } };
     p.addr.city
+}
+
+func main() -> i32 {
+    println(nested_person_city());
+    0
 }

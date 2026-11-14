@@ -11,14 +11,14 @@ use crate::core::cfg::{
 };
 use crate::core::{
     CanonicalResourceAction, CheckedConversion, Loan, NodeId, ResolvedBody, ResolvedCallable,
-    ResolvedExpr, ResolvedExprKind, ResolvedLocalId, ResolvedPattern, ResolvedPatternKind,
-    ResolvedPlace, ResolvedProjection, ResolvedStmt, ResolvedStmtKind, ResolvedTypeId,
-    ResourceFact, ResourceId,
+    ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedLocalId, ResolvedPattern,
+    ResolvedPatternKind, ResolvedPlace, ResolvedProjection, ResolvedStmt, ResolvedStmtKind,
+    ResolvedTypeId, ResourceFact, ResourceId,
 };
 
 use super::{TypedLoopInvariantPoint, TypedProofPointId, TypedProofScopeFrame};
 
-pub const TYPED_LOOP_PROOF_SCHEMA_VERSION: u32 = 3;
+pub const TYPED_LOOP_PROOF_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TypedLoopExpressionRole {
@@ -75,6 +75,10 @@ pub struct TypedLoopBranchGuard {
 pub struct TypedLoopEdgeSite {
     pub site: NodeId,
     pub kind: TypedLoopEdgeKind,
+    /// Exact lexical loop receiving a source `break` or `continue`. The
+    /// checker only admits these terminal edges for the current loop when no
+    /// nested loop is present; MIR independently binds the CFG target.
+    pub target_loop: Option<NodeId>,
     pub guards: Vec<TypedLoopBranchGuard>,
     /// Exact CFG terminal for this source-level edge occurrence. This binds
     /// the lexical guard path to the real break/continue/return/backedge
@@ -92,8 +96,26 @@ pub struct TypedLoopEdgeSite {
 struct ScannedLoopEdge {
     site: NodeId,
     kind: TypedLoopEdgeKind,
+    target_loop: Option<NodeId>,
     guards: Vec<TypedLoopBranchGuard>,
     terminal_value: Option<NodeId>,
+}
+
+/// Narrow source profile for a loop that contains exactly one by-value scalar
+/// FFI call on a straight-line path which terminates at one exact break. Any
+/// other body path may break or continue before the call. The exact guard
+/// chain reaching the call is separate from the call point's lexical guards:
+/// a branch before a later sibling statement affects execution without
+/// enclosing that statement lexically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedLoopFfiCallPath {
+    pub loop_node: NodeId,
+    pub condition_node: NodeId,
+    pub call_statement: NodeId,
+    pub call_node: NodeId,
+    pub call_guards: Vec<TypedLoopBranchGuard>,
+    pub terminal_break: NodeId,
+    pub terminal_block: BasicBlockId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +179,10 @@ pub struct TypedLoopProofReceipt {
     /// calls with an empty declared effect list. A consumer requires a
     /// matching ordered CallProofPoint and may not infer purity from `[]`.
     pub call_nodes: Vec<NodeId>,
+    /// Present only for the closed, immutable, at-most-once FFI path profile
+    /// above. The general call census remains complete regardless of whether
+    /// this profile can be issued.
+    pub ffi_call_path: Option<TypedLoopFfiCallPath>,
     /// Every expression carrying checker effects, in evaluation traversal
     /// order. This list is independent of whether the expression is a call.
     pub effect_nodes: Vec<NodeId>,
@@ -206,6 +232,7 @@ impl TypedLoopProofReceipt {
         absorb!(self.body_edges);
         absorb!(self.old_snapshot);
         absorb!(self.call_nodes);
+        absorb!(self.ffi_call_path);
         absorb!(self.effect_nodes);
         absorb!(self.cfg_blocks);
         absorb!(self.cfg_edges);
@@ -1141,7 +1168,7 @@ pub fn derive_typed_loop_proof_receipt(
         ));
     }
 
-    let mut scan = SourceLoopScan::new(&callable.body);
+    let mut scan = SourceLoopScan::new(&callable.body, loop_node);
     // The condition is evaluated on the header before every body execution.
     // Its calls/effects are part of this loop receipt even when the body is
     // empty or has no proof points.
@@ -1151,6 +1178,7 @@ pub fn derive_typed_loop_proof_receipt(
         scan.edges.push(ScannedLoopEdge {
             site: body.node_id.clone(),
             kind: TypedLoopEdgeKind::BodyFallthrough,
+            target_loop: None,
             guards,
             terminal_value: None,
         });
@@ -1375,6 +1403,7 @@ pub fn derive_typed_loop_proof_receipt(
             .into_iter()
             .collect(),
         call_nodes: scan.call_nodes,
+        ffi_call_path: None,
         effect_nodes: scan.effect_nodes,
         cfg_blocks,
         cfg_edges,
@@ -1386,6 +1415,7 @@ pub fn derive_typed_loop_proof_receipt(
         expression_sites,
         private_source_witness: [0; 32],
     };
+    receipt.ffi_call_path = derive_typed_loop_ffi_call_path(callable, &receipt);
     receipt.private_source_witness = receipt.compute_private_source_witness();
     Ok(receipt)
 }
@@ -1415,8 +1445,324 @@ pub fn validate_typed_loop_proof_receipt(
     Ok(())
 }
 
+fn loop_profile_scalar_type(ty: &ResolvedTypeId) -> bool {
+    use crate::core::ir::PrimitiveType as P;
+
+    [P::I32, P::I64, P::Bool]
+        .into_iter()
+        .any(|primitive| *ty == super::primitive_type_id(primitive))
+}
+
+/// Values used to steer a certified loop path must be immutable local scalar
+/// reads and total scalar operations. In particular, this rejects globals,
+/// projections, calls, references, and aggregate/string state that an
+/// unknown FFI effect could influence between iterations.
+fn loop_profile_stable_scalar_expression(body: &ResolvedBody, expression: &ResolvedExpr) -> bool {
+    use ResolvedExprKind as E;
+
+    if !expression.effects.is_empty() || !loop_profile_scalar_type(&expression.ty) {
+        return false;
+    }
+    match &expression.kind {
+        E::Literal(_) | E::Constant(_) => true,
+        E::Load(place) => {
+            place.projections.is_empty()
+                && body
+                    .locals
+                    .get(&place.base)
+                    .is_some_and(|local| !local.mutable && local.ty == expression.ty)
+        }
+        E::Unary { op, operand } => {
+            matches!(op, super::ResolvedUnaryOp::Not)
+                && loop_profile_stable_scalar_expression(body, operand)
+        }
+        E::Binary { op, left, right } => {
+            matches!(
+                op,
+                super::ResolvedBinaryOp::Equal
+                    | super::ResolvedBinaryOp::NotEqual
+                    | super::ResolvedBinaryOp::Less
+                    | super::ResolvedBinaryOp::Greater
+                    | super::ResolvedBinaryOp::LessEqual
+                    | super::ResolvedBinaryOp::GreaterEqual
+                    | super::ResolvedBinaryOp::LogicalAnd
+                    | super::ResolvedBinaryOp::LogicalOr
+            ) && loop_profile_stable_scalar_expression(body, left)
+                && loop_profile_stable_scalar_expression(body, right)
+        }
+        E::Cast { value, conversion } => {
+            matches!(
+                conversion.kind,
+                crate::core::ir::CheckedConversionKind::Identity
+                    | crate::core::ir::CheckedConversionKind::NumericWiden
+            ) && loop_profile_stable_scalar_expression(body, value)
+        }
+        _ => false,
+    }
+}
+
+/// A branch block is accepted as a loop-prefix selector only when it either
+/// falls through empty or consists of exactly one direct break/continue.
+/// `None` means it contains any unsupported work.
+fn loop_profile_branch_falls_through(block: &crate::core::ir::ResolvedBlock) -> Option<bool> {
+    if block.result.is_some() {
+        return None;
+    }
+    match block.statements.as_slice() {
+        [] => Some(true),
+        [statement] => match &statement.kind {
+            ResolvedStmtKind::Break(None) | ResolvedStmtKind::Continue => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Derive the only loop-call profile currently admitted by the FFI path
+/// checker: one direct scalar extern call, reached through a pure immutable
+/// guard prefix, followed in the same CFG block by an unconditional break.
+/// Other paths may break or continue before that call. The source receipt and
+/// CFG provide the exact condition, guards, terminal target, and call identity;
+/// this profile never claims that the loop body executes.
+pub fn derive_typed_loop_ffi_call_path(
+    callable: &ResolvedCallable,
+    receipt: &TypedLoopProofReceipt,
+) -> Option<TypedLoopFfiCallPath> {
+    use crate::core::ir::PrimitiveType;
+
+    let statement = find_unique_while_statement(&callable.body.root, &receipt.loop_node).ok()?;
+    let ResolvedStmtKind::While { condition, body } = &statement.kind else {
+        return None;
+    };
+    if condition.node_id != receipt.condition_node
+        || body.node_id != receipt.body_node
+        || !receipt.invariant_points.is_empty()
+        || !receipt.writes.is_empty()
+        || !receipt.effect_nodes.is_empty()
+        || !receipt.loans.is_empty()
+        || receipt
+            .resource_actions
+            .iter()
+            .any(|action| action.kind != crate::core::ownership::CanonicalActionKind::Read)
+        || !loop_profile_stable_scalar_expression(&callable.body, condition)
+        || condition.ty != super::primitive_type_id(PrimitiveType::Bool)
+        || receipt.body_edges.is_empty()
+        || receipt.body_edges.iter().any(|edge| {
+            !edge.reachable
+                || edge.target_loop.as_ref() != Some(&receipt.loop_node)
+                || !matches!(
+                    edge.kind,
+                    TypedLoopEdgeKind::Break | TypedLoopEdgeKind::Continue
+                )
+        })
+    {
+        return None;
+    }
+
+    let mut call_guards = Vec::new();
+    let mut call_statement = None;
+    let mut call_node = None;
+    let mut terminal_break = None;
+    let mut saw_call = false;
+    let mut saw_terminal_break = false;
+    let mut prefix_branch_count = 0usize;
+    for (index, nested) in body.statements.iter().enumerate() {
+        if !saw_call {
+            if let ResolvedStmtKind::Expr(expression) = &nested.kind {
+                if let ResolvedExprKind::If {
+                    condition: branch_condition,
+                    then_block,
+                    else_block,
+                } = &expression.kind
+                {
+                    prefix_branch_count += 1;
+                    if prefix_branch_count > 1 {
+                        return None;
+                    }
+                    if !loop_profile_stable_scalar_expression(&callable.body, branch_condition)
+                        || branch_condition.ty != super::primitive_type_id(PrimitiveType::Bool)
+                    {
+                        return None;
+                    }
+                    let then_falls_through = loop_profile_branch_falls_through(then_block)?;
+                    let else_falls_through = loop_profile_branch_falls_through(else_block)?;
+                    if then_falls_through == else_falls_through {
+                        return None;
+                    }
+                    call_guards.push(TypedLoopBranchGuard {
+                        statement: nested.node_id.clone(),
+                        expression: expression.node_id.clone(),
+                        condition: branch_condition.node_id.clone(),
+                        then_arm: then_falls_through,
+                    });
+                    continue;
+                }
+                if let ResolvedExprKind::Call(call) = &expression.kind {
+                    if !matches!(call.callee, ResolvedCallee::Extern(_))
+                        || !call.type_arguments.is_empty()
+                        || call.result != expression.ty
+                        || !loop_profile_scalar_type(&call.result)
+                        || !expression.effects.is_empty()
+                        || !call.effects.is_empty()
+                        || call.arguments.iter().any(|argument| {
+                            !loop_profile_stable_scalar_expression(&callable.body, &argument.value)
+                                || !loop_profile_scalar_type(&argument.conversion.from)
+                                || !loop_profile_scalar_type(&argument.conversion.to)
+                                || !matches!(
+                                    argument.conversion.kind,
+                                    crate::core::ir::CheckedConversionKind::Identity
+                                        | crate::core::ir::CheckedConversionKind::NumericWiden
+                                )
+                        })
+                    {
+                        return None;
+                    }
+                    saw_call = true;
+                    call_statement = Some(nested.node_id.clone());
+                    call_node = Some(expression.node_id.clone());
+                    continue;
+                }
+            }
+            return None;
+        }
+
+        if saw_terminal_break || index + 1 != body.statements.len() {
+            return None;
+        }
+        if matches!(&nested.kind, ResolvedStmtKind::Break(None)) {
+            saw_terminal_break = true;
+            terminal_break = Some(nested.node_id.clone());
+        } else {
+            return None;
+        }
+    }
+    let call_node_ref = call_node.as_ref()?;
+    if !saw_call
+        || !saw_terminal_break
+        || body.result.is_some()
+        || receipt.call_nodes.as_slice() != std::slice::from_ref(call_node_ref)
+    {
+        return None;
+    }
+
+    let call_statement = call_statement?;
+    let call_node = call_node?;
+    let terminal_break = terminal_break?;
+    if call_guards.len() != prefix_branch_count || call_guards.len() > 1 {
+        return None;
+    }
+    let expected_body_edge_count = 1 + usize::from(!call_guards.is_empty());
+    if receipt.body_edges.len() != expected_body_edge_count {
+        return None;
+    }
+    let terminal_break_edges = receipt
+        .body_edges
+        .iter()
+        .filter(|edge| {
+            edge.site == terminal_break
+                && edge.kind == TypedLoopEdgeKind::Break
+                && edge.target_loop.as_ref() == Some(&receipt.loop_node)
+                && edge.guards == call_guards
+        })
+        .collect::<Vec<_>>();
+    if terminal_break_edges.len() != 1 {
+        return None;
+    }
+    if let Some(call_guard) = call_guards.first() {
+        let early_terminal_edges = receipt
+            .body_edges
+            .iter()
+            .filter(|edge| edge.site != terminal_break)
+            .collect::<Vec<_>>();
+        let [early_terminal] = early_terminal_edges.as_slice() else {
+            return None;
+        };
+        let mut complementary_guard = call_guard.clone();
+        complementary_guard.then_arm = !complementary_guard.then_arm;
+        if early_terminal.guards != [complementary_guard]
+            || early_terminal.target_loop.as_ref() != Some(&receipt.loop_node)
+            || !matches!(
+                early_terminal.kind,
+                TypedLoopEdgeKind::Break | TypedLoopEdgeKind::Continue
+            )
+        {
+            return None;
+        }
+    }
+    let call_blocks = receipt
+        .cfg_blocks
+        .iter()
+        .filter(|block| {
+            block
+                .points
+                .iter()
+                .any(|point| point.source.node == call_node)
+        })
+        .collect::<Vec<_>>();
+    let [call_block] = call_blocks.as_slice() else {
+        return None;
+    };
+    let break_edge = terminal_break_edges[0];
+    let call_point_occurrences = receipt
+        .cfg_blocks
+        .iter()
+        .flat_map(|block| block.points.iter())
+        .filter(|point| point.source.node == call_node)
+        .count();
+    let break_point_occurrences = receipt
+        .cfg_blocks
+        .iter()
+        .flat_map(|block| block.points.iter())
+        .filter(|point| point.source.node == terminal_break)
+        .count();
+    if call_point_occurrences != 1 || break_point_occurrences != 1 {
+        return None;
+    }
+    let body_entry = receipt
+        .cfg_edges
+        .iter()
+        .find(|edge| edge.id.0 .0 == format!("{}/cfg:edge:while-body", receipt.loop_node.0))?
+        .to
+        .clone();
+    if call_block.id != break_edge.cfg_terminal_block
+        || !receipt.cfg_reachable_blocks.contains(&call_block.id)
+        || !cfg_guard_path_reaches(
+            &callable.cfg,
+            &body_entry,
+            &call_block.id,
+            &receipt.loop_node,
+            &call_guards,
+        )
+        .ok()?
+    {
+        return None;
+    }
+    let call_point_index = call_block
+        .points
+        .iter()
+        .position(|point| point.source.node == call_node)?;
+    let break_point_index = call_block
+        .points
+        .iter()
+        .position(|point| point.source.node == terminal_break)?;
+    if call_point_index >= break_point_index {
+        return None;
+    }
+
+    Some(TypedLoopFfiCallPath {
+        loop_node: receipt.loop_node.clone(),
+        condition_node: receipt.condition_node.clone(),
+        call_statement,
+        call_node,
+        call_guards,
+        terminal_break,
+        terminal_block: call_block.id.clone(),
+    })
+}
+
 struct SourceLoopScan<'a> {
     body: &'a ResolvedBody,
+    loop_node: NodeId,
     writes: Vec<TypedLoopWriteSite>,
     edges: Vec<ScannedLoopEdge>,
     call_nodes: Vec<NodeId>,
@@ -1428,9 +1774,10 @@ struct SourceLoopScan<'a> {
 type GuardPath = Vec<TypedLoopBranchGuard>;
 
 impl<'a> SourceLoopScan<'a> {
-    fn new(body: &'a ResolvedBody) -> Self {
+    fn new(body: &'a ResolvedBody, loop_node: &NodeId) -> Self {
         Self {
             body,
+            loop_node: loop_node.clone(),
             writes: Vec::new(),
             edges: Vec::new(),
             call_nodes: Vec::new(),
@@ -1472,6 +1819,7 @@ impl<'a> SourceLoopScan<'a> {
                         self.edges.push(ScannedLoopEdge {
                             site: statement.node_id.clone(),
                             kind: TypedLoopEdgeKind::Break,
+                            target_loop: Some(self.loop_node.clone()),
                             guards: path,
                             terminal_value: value.as_ref().map(|value| value.node_id.clone()),
                         });
@@ -1479,6 +1827,7 @@ impl<'a> SourceLoopScan<'a> {
                     ResolvedStmtKind::Continue => self.edges.push(ScannedLoopEdge {
                         site: statement.node_id.clone(),
                         kind: TypedLoopEdgeKind::Continue,
+                        target_loop: Some(self.loop_node.clone()),
                         guards: path,
                         terminal_value: None,
                     }),
@@ -1489,6 +1838,7 @@ impl<'a> SourceLoopScan<'a> {
                         self.edges.push(ScannedLoopEdge {
                             site: statement.node_id.clone(),
                             kind: TypedLoopEdgeKind::Return,
+                            target_loop: None,
                             guards: path,
                             terminal_value: value.as_ref().map(|value| value.node_id.clone()),
                         });
@@ -2398,6 +2748,7 @@ fn bind_source_edges_to_cfg(
         result.push(TypedLoopEdgeSite {
             site: source.site,
             kind: source.kind,
+            target_loop: source.target_loop,
             guards: source.guards,
             cfg_terminal_block: terminal_block.clone(),
             cfg_terminal_edge: terminal_edge,
@@ -2481,6 +2832,17 @@ fn validate_loop_cfg_sites(
 
     let mut mapped_terminal_edges = BTreeSet::new();
     for site in source_sites {
+        let expected_target_loop = matches!(
+            site.kind,
+            TypedLoopEdgeKind::Break | TypedLoopEdgeKind::Continue
+        )
+        .then(|| loop_node.clone());
+        if site.target_loop != expected_target_loop {
+            return Err(format!(
+                "loop edge site '{}' has an incorrect lexical loop target",
+                site.site.0
+            ));
+        }
         if !blocks
             .iter()
             .any(|block| block.id == site.cfg_terminal_block)
@@ -2878,6 +3240,35 @@ fn loop_cfg_slice(
 mod tests {
     use super::*;
 
+    fn checked_loop_receipt(
+        checked: &crate::core::CheckedProgram,
+        name: &str,
+    ) -> (
+        NodeId,
+        crate::core::ir::ResolvedCallable,
+        TypedLoopProofReceipt,
+    ) {
+        let owner = NodeId(format!("function:{name}"));
+        let callable = checked
+            .callables()
+            .get(&owner)
+            .expect("checked loop callable")
+            .clone();
+        let statement = callable
+            .body
+            .root
+            .statements
+            .iter()
+            .find(|statement| matches!(&statement.kind, ResolvedStmtKind::While { .. }))
+            .expect("while statement");
+        let scope = vec![TypedProofScopeFrame::Block(
+            callable.body.root.node_id.clone(),
+        )];
+        let receipt = derive_typed_loop_proof_receipt(&callable, &statement.node_id, &scope, &[])
+            .expect("loop source receipt");
+        (statement.node_id.clone(), callable, receipt)
+    }
+
     #[test]
     fn typed_loop_receipt_binds_condition_calls_and_exact_cfg_ownership() {
         let source = r#"
@@ -3069,5 +3460,231 @@ func main() -> i32 { 0 }
             &invariants,
         )
         .is_err());
+    }
+
+    #[test]
+    fn typed_loop_ffi_profile_binds_only_one_immutable_call_reaching_path() {
+        let source = r#"
+extern "C" {
+    func positive(value: i32) -> i32 requires: value > 0;
+    func unknown_guard(value: i32) -> bool;
+}
+func while_positive(value: i32) -> i32 {
+    while value >= 0 { positive(value); break; }
+    0
+}
+func while_continue_positive(value: i32) -> i32 {
+    while value >= 0 {
+        if value == 0 { continue; }
+        positive(value);
+        break;
+    }
+    0
+}
+func while_break_positive(value: i32) -> i32 {
+    while value >= 0 {
+        if value == 0 { break; }
+        positive(value);
+        break;
+    }
+    0
+}
+func while_mutates(value: i32) -> i32 {
+    let mut current = value
+    while current > 0 {
+        current = current - 1
+        positive(current);
+        break;
+    }
+    0
+}
+func while_extra_call(value: i32) -> i32 {
+    while value > 0 {
+        positive(value);
+        positive(value);
+        break;
+    }
+    0
+}
+func while_effectful_guard(value: i32) -> i32 {
+    while value > 0 {
+        if unknown_guard(value) { break; }
+        positive(value);
+        break;
+    }
+    0
+}
+func while_multiple_prefixes(value: i32) -> i32 {
+    while value >= 0 {
+        if value == 0 { continue; }
+        if value == 1 { break; }
+        positive(value);
+        break;
+    }
+    0
+}
+func while_nested(value: i32) -> i32 {
+    while value > 0 {
+        while value > 0 { break; }
+        positive(value);
+        break;
+    }
+    0
+}
+func main() -> i32 { 0 }
+"#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("checked loop fixtures");
+
+        for name in [
+            "while_positive",
+            "while_continue_positive",
+            "while_break_positive",
+        ] {
+            let (loop_node, callable, receipt) = checked_loop_receipt(&checked, name);
+            let profile = receipt
+                .ffi_call_path
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} should have an exact FFI loop profile"));
+            assert_eq!(profile.loop_node, loop_node, "{name} loop identity");
+            assert_eq!(
+                profile.condition_node, receipt.condition_node,
+                "{name} guard"
+            );
+            assert_eq!(receipt.call_nodes, vec![profile.call_node.clone()]);
+            assert_eq!(
+                profile.call_guards.len(),
+                if name == "while_positive" { 0 } else { 1 }
+            );
+            assert_eq!(receipt.body_edges.len(), 1 + profile.call_guards.len());
+            assert_eq!(
+                receipt
+                    .body_edges
+                    .iter()
+                    .filter(|edge| edge.site == profile.terminal_break
+                        && edge.kind == TypedLoopEdgeKind::Break
+                        && edge.guards == profile.call_guards)
+                    .count(),
+                1,
+                "{name} call path must terminate at its exact break"
+            );
+            for edge in &receipt.body_edges {
+                assert!(
+                    edge.reachable,
+                    "{name} has no unreachable call alternatives"
+                );
+                assert_eq!(edge.target_loop, Some(loop_node.clone()));
+                assert!(matches!(
+                    edge.kind,
+                    TypedLoopEdgeKind::Break | TypedLoopEdgeKind::Continue
+                ));
+            }
+            if name == "while_continue_positive" {
+                let guard = &profile.call_guards[0];
+                assert!(!guard.then_arm, "the call follows the value!=0 edge");
+                let continue_edge = receipt
+                    .body_edges
+                    .iter()
+                    .find(|edge| edge.kind == TypedLoopEdgeKind::Continue)
+                    .expect("the value==0 path continues without calling");
+                assert!(continue_edge.guards[0].then_arm);
+                assert_ne!(continue_edge.guards, profile.call_guards);
+            }
+            validate_typed_loop_proof_receipt(
+                &receipt,
+                &callable,
+                &loop_node,
+                &[TypedProofScopeFrame::Block(
+                    callable.body.root.node_id.clone(),
+                )],
+                &[],
+            )
+            .expect("exact source/CFG/ownership rederivation");
+        }
+
+        for name in [
+            "while_mutates",
+            "while_extra_call",
+            "while_effectful_guard",
+            "while_multiple_prefixes",
+        ] {
+            let (_, _, receipt) = checked_loop_receipt(&checked, name);
+            assert!(
+                receipt.ffi_call_path.is_none(),
+                "{name} is outside the exact immutable at-most-once profile"
+            );
+        }
+        let nested_owner = NodeId("function:while_nested".into());
+        let nested = checked
+            .callables()
+            .get(&nested_owner)
+            .expect("nested callable");
+        let nested_loop = nested
+            .body
+            .root
+            .statements
+            .iter()
+            .find(|statement| matches!(&statement.kind, ResolvedStmtKind::While { .. }))
+            .expect("outer while");
+        let nested_scope = vec![TypedProofScopeFrame::Block(
+            nested.body.root.node_id.clone(),
+        )];
+        assert!(
+            derive_typed_loop_proof_receipt(nested, &nested_loop.node_id, &nested_scope, &[])
+                .is_err(),
+            "nested loop paths remain outside the source receipt profile"
+        );
+
+        let (loop_node, callable, receipt) =
+            checked_loop_receipt(&checked, "while_continue_positive");
+        let mut forged = receipt.clone();
+        forged
+            .ffi_call_path
+            .as_mut()
+            .expect("exact loop profile")
+            .terminal_break = NodeId("forged:break".into());
+        assert!(!forged.has_valid_source_witness());
+        assert!(validate_typed_loop_proof_receipt(
+            &forged,
+            &callable,
+            &loop_node,
+            &[TypedProofScopeFrame::Block(
+                callable.body.root.node_id.clone()
+            )],
+            &[],
+        )
+        .is_err());
+
+        let profile = receipt.ffi_call_path.as_ref().expect("exact loop profile");
+        let break_cfg_edge = cfg_edge_id(&profile.terminal_break, "break");
+        let mut forged_cfg = callable.clone();
+        let header = forged_cfg
+            .cfg
+            .edges
+            .get(&cfg_edge_id(&loop_node, "while-enter"))
+            .expect("loop entry edge")
+            .to
+            .clone();
+        forged_cfg
+            .cfg
+            .edges
+            .get_mut(&break_cfg_edge)
+            .expect("exact call-path break edge")
+            .to = header;
+        assert!(
+            derive_typed_loop_proof_receipt(
+                &forged_cfg,
+                &loop_node,
+                &[TypedProofScopeFrame::Block(
+                    callable.body.root.node_id.clone()
+                )],
+                &[],
+            )
+            .is_err(),
+            "a call-site receipt cannot survive a changed source break target"
+        );
     }
 }

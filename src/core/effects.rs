@@ -358,6 +358,7 @@ pub(crate) fn infer_items_with_sources(
     let mut top_level_names = HashMap::<String, Vec<String>>::new();
     let mut method_names = HashMap::<String, Vec<String>>::new();
     let mut extern_names = HashSet::new();
+    let constructor_names = effect_constructor_names(items);
     for item in items {
         match item {
             Item::Func(function) => {
@@ -445,6 +446,7 @@ pub(crate) fn infer_items_with_sources(
             &top_level_names,
             &method_names,
             &extern_names,
+            &constructor_names,
         );
         direct.insert(callable.node_key.clone(), effects);
     }
@@ -546,6 +548,41 @@ pub(crate) fn infer_items_with_sources(
         analysis.summaries.insert(callable.summary_key, summary);
     }
     analysis
+}
+
+/// Names that the checker registers as value constructors. Keep this directory
+/// tied to the corresponding declared type identity: records and aliases are
+/// not callable constructors, and duplicate variant names stay unresolved.
+fn effect_constructor_names(items: &[Item]) -> HashSet<String> {
+    let mut counts = HashMap::<String, usize>::new();
+    for item in items {
+        let Item::Type(definition) = item else {
+            continue;
+        };
+        match &definition.kind {
+            crate::ast::TypeDefKind::Newtype(_) => {
+                *counts.entry(definition.name.clone()).or_default() += 1;
+            }
+            crate::ast::TypeDefKind::Enum(variants)
+                if !matches!(
+                    definition.meta.origin,
+                    crate::ast::AstOrigin::Desugared("flow_matrix.fault_nominal")
+                ) =>
+            {
+                for variant in variants {
+                    *counts.entry(variant.name.clone()).or_default() += 1;
+                }
+            }
+            crate::ast::TypeDefKind::Alias(_)
+            | crate::ast::TypeDefKind::Record(_)
+            | crate::ast::TypeDefKind::Enum(_)
+            | crate::ast::TypeDefKind::Union(_) => {}
+        }
+    }
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1).then_some(name))
+        .collect()
 }
 
 /// Strict public-boundary check for module/interface builders.  This is kept
@@ -826,6 +863,15 @@ struct ScanEnv<'a> {
     top_level_names: &'a HashMap<String, Vec<String>>,
     method_names: &'a HashMap<String, Vec<String>>,
     extern_names: &'a HashSet<String>,
+    constructor_names: &'a HashSet<String>,
+}
+
+fn is_declared_user_constructor(name: &str, env: &ScanEnv<'_>) -> bool {
+    env.constructor_names.contains(name)
+        && !env.scope.contains_key(name)
+        && !env.top_level_names.contains_key(name)
+        && !env.method_names.contains_key(name)
+        && !env.extern_names.contains(name)
 }
 
 fn lexical_scope_for_block(
@@ -861,6 +907,7 @@ fn scan_callable_block(
     top_level_names: &HashMap<String, Vec<String>>,
     method_names: &HashMap<String, Vec<String>>,
     extern_names: &HashSet<String>,
+    constructor_names: &HashSet<String>,
 ) {
     let scope = lexical_scope_for_block(block, owner, inherited_scope);
     let env = ScanEnv {
@@ -869,6 +916,7 @@ fn scan_callable_block(
         top_level_names,
         method_names,
         extern_names,
+        constructor_names,
     };
     for statement in block {
         scan_stmt(statement, effects, &env);
@@ -903,6 +951,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
             if let Some(other) = else_ {
                 scan_callable_block(
@@ -913,6 +962,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                     env.top_level_names,
                     env.method_names,
                     env.extern_names,
+                    env.constructor_names,
                 );
             }
         }
@@ -928,6 +978,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
             if let Some(other) = else_ {
                 scan_callable_block(
@@ -938,6 +989,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                     env.top_level_names,
                     env.method_names,
                     env.extern_names,
+                    env.constructor_names,
                 );
             }
         }
@@ -951,6 +1003,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Stmt::WhileLet { init, body, .. } => {
@@ -963,6 +1016,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Stmt::Loop(body)
@@ -984,6 +1038,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Stmt::For { iterable, body, .. } => {
@@ -996,6 +1051,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Stmt::Assign { target, value } => {
@@ -1017,6 +1073,7 @@ fn scan_stmt(statement: &Stmt, effects: &mut DirectEffects, env: &ScanEnv<'_>) {
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Stmt::Func(_) => {}
@@ -1030,35 +1087,40 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
         Expr::Call(callee, arguments) => {
             match callee.unlocated() {
                 Expr::Ident(name) => {
-                    let builtin_facets = builtin_effects(name);
-                    if !builtin_facets.is_empty() {
-                        for effect in builtin_facets.iter() {
-                            effects.add(effect, format!("builtin '{name}'"));
-                        }
-                    } else if crate::core::builtins::is_builtin_callable(name)
-                        || crate::core::builtins::is_language_intrinsic_callable(name)
-                        || crate::core::builtins::is_language_constructor(name)
-                    {
-                        // Known pure builtin/intrinsic.
-                    } else if let Some(target) = env.scope.get(name) {
-                        if let Some(target) = target {
-                            effects.callees.insert(target.clone());
-                        } else {
-                            effects.add(
-                                EffectKind::Unknown,
-                                format!("ambiguous nested call '{name}'"),
-                            );
-                        }
-                    } else if env.extern_names.contains(name) {
-                        effects.add(EffectKind::Unknown, format!("extern '{name}'"));
-                    } else if let Some(targets) = env.top_level_names.get(name) {
-                        effects.callees.extend(targets.iter().cloned());
-                    } else if let Some(targets) = env.method_names.get(name) {
-                        // Preserve the checker pass's historical support for
-                        // unqualified method calls inside an impl/actor body.
-                        effects.callees.extend(targets.iter().cloned());
+                    if is_declared_user_constructor(name, env) {
+                        // A declared newtype or enum variant constructor is a
+                        // known pure data operation.
                     } else {
-                        effects.add(EffectKind::Unknown, format!("dynamic call '{name}'"));
+                        let builtin_facets = builtin_effects(name);
+                        if !builtin_facets.is_empty() {
+                            for effect in builtin_facets.iter() {
+                                effects.add(effect, format!("builtin '{name}'"));
+                            }
+                        } else if crate::core::builtins::is_builtin_callable(name)
+                            || crate::core::builtins::is_language_intrinsic_callable(name)
+                            || crate::core::builtins::is_language_constructor(name)
+                        {
+                            // Known pure builtin/intrinsic.
+                        } else if let Some(target) = env.scope.get(name) {
+                            if let Some(target) = target {
+                                effects.callees.insert(target.clone());
+                            } else {
+                                effects.add(
+                                    EffectKind::Unknown,
+                                    format!("ambiguous nested call '{name}'"),
+                                );
+                            }
+                        } else if env.extern_names.contains(name) {
+                            effects.add(EffectKind::Unknown, format!("extern '{name}'"));
+                        } else if let Some(targets) = env.top_level_names.get(name) {
+                            effects.callees.extend(targets.iter().cloned());
+                        } else if let Some(targets) = env.method_names.get(name) {
+                            // Preserve the checker pass's historical support for
+                            // unqualified method calls inside an impl/actor body.
+                            effects.callees.extend(targets.iter().cloned());
+                        } else {
+                            effects.add(EffectKind::Unknown, format!("dynamic call '{name}'"));
+                        }
                     }
                 }
                 Expr::Field(_, method) => {
@@ -1093,6 +1155,7 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
             env.top_level_names,
             env.method_names,
             env.extern_names,
+            env.constructor_names,
         ),
         Expr::If { cond, then_, else_ } => {
             scan_expr(cond, effects, env);
@@ -1104,6 +1167,7 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
             if let Some(other) = else_ {
                 scan_callable_block(
@@ -1114,6 +1178,7 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
                     env.top_level_names,
                     env.method_names,
                     env.extern_names,
+                    env.constructor_names,
                 );
             }
         }
@@ -1126,6 +1191,7 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
                 env.top_level_names,
                 env.method_names,
                 env.extern_names,
+                env.constructor_names,
             );
         }
         Expr::Binary(_, left, right) => {
@@ -1186,7 +1252,19 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
             }
         }
         Expr::Turbofish(name, _, arguments) => {
-            if let Some(target) = env.scope.get(name) {
+            let builtin_facets = builtin_effects(name);
+            if !builtin_facets.is_empty() {
+                for effect in builtin_facets.iter() {
+                    effects.add(effect, format!("builtin '{name}'"));
+                }
+            } else if crate::core::builtins::is_builtin_callable(name)
+                || crate::core::builtins::is_language_intrinsic_callable(name)
+                || crate::core::builtins::is_language_constructor(name)
+            {
+                // This name belongs to the closed checker builtin catalog.
+                // Its finite effect summary is empty; effectful builtins take
+                // the branch above and retain their declared facets.
+            } else if let Some(target) = env.scope.get(name) {
                 if let Some(target) = target {
                     effects.callees.insert(target.clone());
                 } else {
@@ -1434,7 +1512,10 @@ pub fn builtin_effects(name: &str) -> EffectSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{AstNodeMeta, AstOrigin, Block, ExternBlock, ExternFunc, FuncDef, Item};
+    use crate::ast::{
+        AstNodeMeta, AstOrigin, Block, ExternBlock, ExternFunc, FuncDef, Item, Type, TypeDef,
+        TypeDefKind, Variant, VariantPayload,
+    };
 
     fn function(name: &str, body: Block) -> FuncDef {
         FuncDef {
@@ -1461,6 +1542,18 @@ mod tests {
             Box::new(Expr::Ident(name.to_string())),
             Vec::new(),
         ))
+    }
+
+    fn type_definition(name: &str, kind: TypeDefKind) -> TypeDef {
+        TypeDef {
+            meta: AstNodeMeta::synthetic(AstOrigin::User),
+            name: name.into(),
+            pub_: false,
+            kind,
+            generics: Vec::new(),
+            derives: Vec::new(),
+            attributes: Vec::new(),
+        }
     }
 
     #[test]
@@ -1530,6 +1623,74 @@ mod tests {
         );
         let analysis = infer_items(&[Item::Func(function)]);
         assert!(analysis.summary("f").unwrap().inferred.is_unknown());
+    }
+
+    #[test]
+    fn declared_enum_and_newtype_constructors_are_pure_but_unknown_calls_stay_unknown() {
+        let shape = type_definition(
+            "Shape",
+            TypeDefKind::Enum(vec![Variant {
+                meta: AstNodeMeta::synthetic(AstOrigin::User),
+                name: "Circle".into(),
+                payload: Some(VariantPayload::Tuple(vec![Type::Name(
+                    "f64".into(),
+                    vec![],
+                )])),
+            }]),
+        );
+        let user_id = type_definition(
+            "UserId",
+            TypeDefKind::Newtype(Type::Name("i32".into(), vec![])),
+        );
+        let constructors = function(
+            "kernel_constructors",
+            vec![
+                Stmt::Expr(Expr::Call(
+                    Box::new(Expr::Ident("Circle".into())),
+                    vec![Expr::Literal(Lit::Float(2.0))],
+                )),
+                Stmt::Expr(Expr::Call(
+                    Box::new(Expr::Ident("UserId".into())),
+                    vec![Expr::Literal(Lit::Int(7))],
+                )),
+            ],
+        );
+        let unknown = function("unknown_target", vec![call("not_declared")]);
+
+        let analysis = infer_items(&[
+            Item::Type(shape),
+            Item::Type(user_id),
+            Item::Func(constructors),
+            Item::Func(unknown),
+        ]);
+        assert!(analysis
+            .summary("kernel_constructors")
+            .expect("constructor summary")
+            .is_pure());
+        assert!(analysis
+            .summary("unknown_target")
+            .expect("unknown call summary")
+            .inferred
+            .is_unknown());
+    }
+
+    #[test]
+    fn generic_session_open_keeps_its_known_finite_effect() {
+        let open = function(
+            "open_session",
+            vec![Stmt::Expr(Expr::Turbofish(
+                "session_open".into(),
+                vec![Type::Name("Half".into(), vec![])],
+                vec![],
+            ))],
+        );
+        let analysis = infer_items(&[Item::Func(open)]);
+        let summary = analysis
+            .summary("open_session")
+            .expect("session_open summary");
+
+        assert_eq!(summary.inferred.to_vec(), ["shared.modify"]);
+        assert!(!summary.inferred.is_unknown());
     }
 
     #[test]

@@ -9682,8 +9682,8 @@ impl<'ctx> CodeGenerator<'ctx> {
     }
 
     /// Phase D (0.39.75): 收 cap 的 fs API——SystemToken 能力门禁在 args[1]
-    /// （运行时忽略：线性消费由 checker/CFG 保证），path 在 args[0]。复用
-    /// read_file 核心（Result<string,string> 布局一致）。
+    /// （checker/CFG 负责线性消费，runtime registry checks the concrete path），
+    /// path 在 args[0]。复用 read_file 核心（Result<string,string> 布局一致）。
     pub(super) fn compile_read_file_guarded(
         &self,
         args: &[BasicMetadataValueEnum<'ctx>],
@@ -9694,6 +9694,82 @@ impl<'ctx> CodeGenerator<'ctx> {
                     .to_string(),
             ));
         }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let token = match args[1] {
+            BasicMetadataValueEnum::IntValue(value) => value,
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "read_file_guarded capability must be a SystemToken".into(),
+                ))
+            }
+        };
+        // C-02: checker-side SystemToken shape is complemented by a dynamic
+        // host-owned directory check immediately before the filesystem open.
+        let i32_ty = self.context.i32_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let check_fn = self
+            .module
+            .get_function("mimi_capability_check_path")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_capability_check_path",
+                    i32_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(i32_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let check = self
+            .builder
+            .build_call(
+                check_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(token),
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_zero()),
+                ],
+                "read_file_capability_check",
+            )
+            .map_err(|error| CompileError::LlvmError(format!("capability check error: {error}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("capability check returned void".into()))?
+            .into_int_value();
+        let denied = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                check,
+                i32_ty.const_zero(),
+                "read_file_capability_denied",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability compare error: {error}"))
+            })?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("read_file_guarded: no enclosing function".into())
+        })?;
+        let denied_bb = self
+            .context
+            .append_basic_block(function, "read_file_capability_denied_bb");
+        let allowed_bb = self
+            .context
+            .append_basic_block(function, "read_file_capability_allowed_bb");
+        self.builder
+            .build_conditional_branch(denied, denied_bb, allowed_bb)
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability branch error: {error}"))
+            })?;
+        self.builder.position_at_end(denied_bb);
+        self.emit_io_trap(
+            "read_file_guarded: capability scope denied",
+            "read_file_capability",
+        )?;
+        self.builder.position_at_end(allowed_bb);
         self.compile_read_file_inner(&args[0])
     }
 
@@ -10074,6 +10150,93 @@ impl<'ctx> CodeGenerator<'ctx> {
         // ── Merge ──
         self.builder.position_at_end(merge_bb);
         self.build_load(result_ty, result_alloca, "read_file_loaded")
+    }
+
+    pub(super) fn compile_write_file_guarded(
+        &self,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> MimiResult<BasicValueEnum<'ctx>> {
+        if args.len() != 3 {
+            return Err(CompileError::WrongArgCount(
+                "write_file_guarded expects 3 arguments (path, content, a SystemToken capability)"
+                    .to_string(),
+            ));
+        }
+        let path_ptr = self.extract_raw_str_ptr(&args[0])?;
+        let token = match args[2] {
+            BasicMetadataValueEnum::IntValue(value) => value,
+            _ => {
+                return Err(CompileError::TypeMismatch(
+                    "write_file_guarded capability must be a SystemToken".into(),
+                ))
+            }
+        };
+        let i32_ty = self.context.i32_type();
+        let i8_ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let check_fn = self
+            .module
+            .get_function("mimi_capability_check_path")
+            .unwrap_or_else(|| {
+                self.module.add_function(
+                    "mimi_capability_check_path",
+                    i32_ty.fn_type(
+                        &[
+                            BasicMetadataTypeEnum::IntType(self.context.i64_type()),
+                            BasicMetadataTypeEnum::PointerType(i8_ptr_ty),
+                            BasicMetadataTypeEnum::IntType(i32_ty),
+                        ],
+                        false,
+                    ),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+        let check = self
+            .builder
+            .build_call(
+                check_fn,
+                &[
+                    BasicMetadataValueEnum::IntValue(token),
+                    BasicMetadataValueEnum::PointerValue(path_ptr),
+                    BasicMetadataValueEnum::IntValue(i32_ty.const_int(1, false)),
+                ],
+                "write_file_capability_check",
+            )
+            .map_err(|error| CompileError::LlvmError(format!("capability check error: {error}")))?
+            .try_as_basic_value_opt()
+            .ok_or_else(|| CompileError::LlvmError("capability check returned void".into()))?
+            .into_int_value();
+        let denied = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                check,
+                i32_ty.const_zero(),
+                "write_file_capability_denied",
+            )
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability compare error: {error}"))
+            })?;
+        let function = self.current_function().ok_or_else(|| {
+            CompileError::LlvmError("write_file_guarded: no enclosing function".into())
+        })?;
+        let denied_bb = self
+            .context
+            .append_basic_block(function, "write_file_capability_denied_bb");
+        let allowed_bb = self
+            .context
+            .append_basic_block(function, "write_file_capability_allowed_bb");
+        self.builder
+            .build_conditional_branch(denied, denied_bb, allowed_bb)
+            .map_err(|error| {
+                CompileError::LlvmError(format!("capability branch error: {error}"))
+            })?;
+        self.builder.position_at_end(denied_bb);
+        self.emit_io_trap(
+            "write_file_guarded: capability scope denied",
+            "write_file_capability",
+        )?;
+        self.builder.position_at_end(allowed_bb);
+        self.compile_write_file(&args[..2])
     }
 
     pub(super) fn compile_write_file(

@@ -36,29 +36,40 @@ pub use mir::{
     compile_mir_program_with_computed_string_key_owner_chain_route,
     compile_mir_program_with_dynamic_keys_get_route,
     compile_mir_program_with_empty_root_root_queries_v1_route,
-    compile_mir_program_with_keys_snapshot_route,
-    compile_mir_program_with_map_new_result_route,
+    compile_mir_program_with_keys_snapshot_route, compile_mir_program_with_map_new_result_route,
     compile_mir_program_with_map_root_get_any_caller_route,
     compile_mir_program_with_map_root_producer_caller_route,
+    compile_mir_program_with_map_set_get_i32_route,
+    compile_mir_program_with_map_set_get_string_route,
+    compile_mir_program_with_map_set_result_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_clone_isolation_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_direct_print_result_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_i32_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_string_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_is_empty_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_record_unit_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_set_get_any_i32_route,
+    compile_mir_program_with_ordinary_map_owned_any_v2_set_get_any_result_i32_route,
     compile_mir_program_with_ordinary_map_owned_any_v2_zero_miss_i32_route,
+    compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route,
     compile_mir_program_with_route_manifest, compile_mir_program_with_route_receipt,
     compile_mir_program_with_values_crosscall_string_caller_index1_route,
     compile_mir_program_with_values_crosscall_string_caller_route,
     compile_mir_program_with_values_field_move_route,
     compile_mir_program_with_values_heterogeneous_string_index1_route,
+    compile_mir_program_with_values_local_index_i32_result_branch_route,
     compile_mir_program_with_values_local_index_i32_route,
     compile_mir_program_with_values_mixed_snapshot_remove_route,
     compile_mir_program_with_values_mixed_snapshot_route,
     compile_mir_program_with_values_producer_caller_route,
+    compile_mir_program_with_values_result_crosscall_string_caller_index1_route,
+    compile_mir_program_with_values_result_crosscall_string_caller_route,
     compile_mir_program_with_values_snapshot_replacement_route,
 };
 pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};
@@ -926,18 +937,9 @@ mod tests {
     #[test]
     fn canonical_mir_managed_any_println_formats_i32_and_preserves_the_source_owner() {
         // Keep this route to one MapGet owner and print its Any field directly.
-        let source = r#"
-            func main() -> i32 {
-                let empty = map_new()
-                let root = map_set(empty, "zero", 42)
-                let pair = map_get(root, "zero")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
-            }
-        "#;
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_i32.mimi"
+        );
         let bytecode = compile_canonical_mir_source(source);
         let println_ops = bytecode
             .functions
@@ -967,14 +969,25 @@ mod tests {
     fn canonical_mir_managed_any_println_preserves_string_nul_and_utf8_bytes() {
         let source = r#"
             func main() -> i32 {
-                let empty = map_new()
-                let root = map_set(empty, "k", "owned\0🧪值")
-                let pair = map_get(root, "k")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "k", "owned\0🧪值") {
+                            Ok(root) => {
+                                let pair = map_get(root, "k")
+                                drop(empty)
+                                drop(root)
+                                println(pair.1)
+                                drop(pair)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
         let bytecode = compile_canonical_mir_source(source);
@@ -1003,14 +1016,25 @@ mod tests {
         let source = r#"
             func main() -> i32 {
                 println("prefix must not escape preflight")
-                let empty = map_new()
-                let root = map_set(empty, "k", "payload")
-                let pair = map_get(root, "k")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "k", "payload") {
+                            Ok(root) => {
+                                let pair = map_get(root, "k")
+                                drop(empty)
+                                drop(root)
+                                println(pair.1)
+                                drop(pair)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
             }
         "#;
 
@@ -1059,18 +1083,9 @@ mod tests {
 
     #[test]
     fn canonical_mir_managed_any_println_invalid_runtime_descriptor_emits_no_partial_output() {
-        let source = r#"
-            func main() -> i32 {
-                let empty = map_new()
-                let root = map_set(empty, "k", "payload")
-                let pair = map_get(root, "k")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
-            }
-        "#;
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_string.mimi"
+        );
         let bytecode = compile_canonical_mir_source(source);
         let main = bytecode.entry;
         let forged_any = crate::interp::value::CanonicalManagedAnyI32StringV1::from_string(

@@ -41,7 +41,7 @@ fn e0208_assign_immutable() {
 #[test]
 fn e0211_arg_type_mismatch() {
     assert_err_code(
-        "func greet(n: string) -> string { n }\nfunc main() -> string { greet(42) }",
+        "func greet(n: string) -> string { n }\nfunc main() -> i32 { greet(42); 0 }",
         crate::diagnostic::codes::E0211,
     );
 }
@@ -97,6 +97,116 @@ fn e0224_question_on_i32() {
     assert_err_code(
         r"func main() -> i32 { let x = 42; x? }",
         crate::diagnostic::codes::E0224,
+    );
+}
+
+#[test]
+fn e0224_question_on_result_with_wrong_arity() {
+    let errors =
+        check_source("func unwrap_one(r: Result<i32>) -> i32 { r? }\nfunc main() -> i32 { 0 }")
+            .expect_err("`?` must reject a Result type with only one type argument");
+    let e0224_count = errors
+        .iter()
+        .filter(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0224))
+        .count();
+    assert_eq!(e0224_count, 1, "expected exactly one E0224, got {errors:?}");
+}
+
+#[test]
+fn e0224_question_on_user_enum_has_exact_diagnostic_and_span() {
+    let src = r#"type Outcome { Ok(i32) | Err(string) }
+func fail() -> Outcome { Err("boom") }
+func main() -> i32 {
+    fail()?
+    0
+}"#;
+    let errors = check_source(src).expect_err("a user enum must not be accepted by `?`");
+    assert_eq!(errors.len(), 1, "expected one diagnostic, got {errors:?}");
+    let diagnostic = &errors[0];
+    assert_eq!(
+        diagnostic.code.as_deref(),
+        Some(crate::diagnostic::codes::E0224)
+    );
+    assert_eq!(
+        diagnostic.message,
+        "? operator requires Result or Option type, found 'Outcome'"
+    );
+    assert_eq!(
+        (
+            diagnostic.span.start_line,
+            diagnostic.span.start_col,
+            diagnostic.span.end_line,
+            diagnostic.span.end_col,
+        ),
+        (4, 5, 4, 12),
+        "E0224 must cover the call through the trailing question mark"
+    );
+    assert_eq!(
+        crate::diagnostic::format::format_diagnostic(diagnostic, Some(src), "<test>"),
+        "error[E0224] <test>:4:5-12 ? operator requires Result or Option type, found 'Outcome' | src:     fail()?\n"
+    );
+}
+
+#[test]
+fn result_option_question_accepts_builtins_and_transparent_aliases() {
+    let src = r#"
+type MyResult = Result<i32, string>
+type MyOption = Option<i32>
+
+func propagate_result(r: Result<i32, string>) -> Result<i32, string> {
+    let value = r?
+    Ok(value)
+}
+
+func propagate_option(o: Option<i32>) -> Option<i32> {
+    let value = o?
+    Some(value)
+}
+
+func propagate_result_alias(r: MyResult) -> MyResult {
+    let value = r?
+    Ok(value)
+}
+
+func propagate_option_alias(o: MyOption) -> MyOption {
+    let value = o?
+    Some(value)
+}
+
+func main() -> i32 { 0 }
+"#;
+    check_source(src).unwrap_or_else(|errors| {
+        panic!("Result, Option, and their transparent aliases must support `?`: {errors:?}")
+    });
+}
+
+#[test]
+fn e0224_question_rejects_nominal_types_named_result_or_option() {
+    let src = r#"
+type Result<T, E> { Success(T) | Failure(E) }
+type Option<T> { Present(T) | Absent }
+
+func propagate_nominal_result(value: Result<i32, string>) -> Result<i32, string> {
+    let payload = value?
+    Success(payload)
+}
+
+func propagate_nominal_option(value: Option<i32>) -> Option<i32> {
+    let payload = value?
+    Present(payload)
+}
+
+func main() -> i32 { 0 }
+"#;
+    let errors =
+        check_source(src).expect_err("nominal types cannot impersonate builtin Result/Option");
+    let e0224_count = errors
+        .iter()
+        .filter(|error| error.code.as_deref() == Some(crate::diagnostic::codes::E0224))
+        .count();
+    assert_eq!(
+        e0224_count, 2,
+        "both nominal lookalikes need E0224: {errors:?}"
     );
 }
 

@@ -14,6 +14,7 @@
 //!
 //! - **SharedHandleTable**: Maps opaque handles (i64) to `Arc<RwLock<Value>>`
 
+use crate::interp::SharedString;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -789,14 +790,23 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
                     );
                     return std::ptr::null_mut();
                 }
+                // Stage an empty shared owner before allocating the C buffer.
+                // Replacing the handle avoids infallible COW when another Value
+                // still shares the source. Failure leaves the source untouched.
+                let Ok(empty) = SharedString::try_new(String::new()) else {
+                    return std::ptr::null_mut();
+                };
                 let len = s.len();
-                let ptr = libc::malloc(len + 1) as *mut u8;
+                let Some(allocation_len) = len.checked_add(1) else {
+                    return std::ptr::null_mut();
+                };
+                let ptr = libc::malloc(allocation_len) as *mut u8;
                 if ptr.is_null() {
                     return std::ptr::null_mut();
                 }
                 std::ptr::copy_nonoverlapping(s.as_bytes().as_ptr(), ptr, len);
                 *ptr.add(len) = 0;
-                crate::interp::SharedString::make_mut(s).clear();
+                *s = empty;
                 ptr as *mut std::ffi::c_char
             }
             _ => std::ptr::null_mut(),
@@ -806,7 +816,10 @@ pub unsafe extern "C" fn mimi_string_into_raw(mimi_string: *mut Value) -> *mut s
 
 /// Convert a raw C string back to a Mimi string.
 /// The caller should NOT free the original C string after this call.
-/// Returns a new Mimi Value (caller takes ownership).
+/// Returns a new Mimi Value (caller takes ownership), or null for invalid UTF-8.
+/// The input buffer is consumed and freed even when UTF-8 validation fails.
+/// This follows the strict UTF-8 ingress contract used by native extern returns;
+/// invalid byte sequences are rejected rather than replaced lossily.
 /// Note: This function allocates a new Value on the heap.
 ///
 /// # Safety
@@ -823,11 +836,15 @@ pub unsafe extern "C" fn mimi_string_from_raw(c_str: *mut std::ffi::c_char) -> *
     // SAFETY: `c_str` was null-checked above and must be a valid C string
     // allocated with libc::malloc (see Safety docs).
     unsafe {
-        let s = std::ffi::CStr::from_ptr(c_str)
-            .to_string_lossy()
-            .into_owned();
+        let s = match std::ffi::CStr::from_ptr(c_str).to_str() {
+            Ok(text) => text.to_owned(),
+            Err(_) => {
+                libc::free(c_str as *mut libc::c_void);
+                return std::ptr::null_mut();
+            }
+        };
         libc::free(c_str as *mut libc::c_void);
-        let value = Box::new(Value::String(crate::interp::SharedString::new(s)));
+        let value = Box::new(Value::String(SharedString::new(s)));
         Box::into_raw(value)
     }
 }
@@ -1263,7 +1280,7 @@ mod tests {
 
     #[test]
     fn string_c_api_len_and_borrow() {
-        let value = Box::new(Value::String(crate::interp::SharedString::new("hello".to_string())));
+        let value = Box::new(Value::String(SharedString::new("hello".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1286,7 +1303,7 @@ mod tests {
 
     #[test]
     fn string_c_api_free_all_clears_pending() {
-        let value = Box::new(Value::String(crate::interp::SharedString::new("bulk".to_string())));
+        let value = Box::new(Value::String(SharedString::new("bulk".to_string())));
         let raw = Box::into_raw(value);
 
         // SAFETY: raw is a freshly created valid Mimi string value.
@@ -1305,7 +1322,9 @@ mod tests {
     #[test]
     fn string_into_raw_from_raw_use_libc_malloc_buffers() {
         // SAFETY: fresh heap Value wrapping a String; ownership passes to raw.
-        let raw = Box::into_raw(Box::new(Value::String(crate::interp::SharedString::new("hello".to_string()))));
+        let raw = Box::into_raw(Box::new(Value::String(SharedString::new(
+            "hello".to_string(),
+        ))));
         // SAFETY: raw is a valid heap Value; ownership of string content transfers.
         let c_str = unsafe { mimi_string_into_raw(raw) };
         assert!(!c_str.is_null());
@@ -1324,7 +1343,9 @@ mod tests {
 
         // Round-trip through mimi_string_from_raw should consume the libc buffer.
         // SAFETY: fresh heap Value wrapping a String.
-        let raw2 = Box::into_raw(Box::new(Value::String(crate::interp::SharedString::new("world".to_string()))));
+        let raw2 = Box::into_raw(Box::new(Value::String(SharedString::new(
+            "world".to_string(),
+        ))));
         // SAFETY: raw2 is a valid heap Value; ownership of string content transfers.
         let c_str2 = unsafe { mimi_string_into_raw(raw2) };
         assert!(!c_str2.is_null());
@@ -1346,6 +1367,112 @@ mod tests {
             mimi_value_free(value);
             mimi_value_free(raw2);
         }
+    }
+
+    fn malloc_c_bytes(bytes: &[u8]) -> *mut std::ffi::c_char {
+        // SAFETY: all test payloads are small; malloc returns writable storage
+        // for the payload and one trailing NUL, or null checked immediately.
+        let buffer = unsafe { libc::malloc(bytes.len() + 1) }.cast::<u8>();
+        assert!(!buffer.is_null(), "allocate C-owned test input");
+        // SAFETY: the source slice is live, the new allocation has len+1 bytes,
+        // and the allocations do not overlap. The last byte is in bounds.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len());
+            *buffer.add(bytes.len()) = 0;
+        }
+        buffer.cast()
+    }
+
+    #[test]
+    fn string_from_raw_rejects_invalid_utf8_instead_of_replacing_bytes() {
+        for bytes in [
+            &b"\xff"[..],
+            &b"\xc3"[..],
+            &b"\xe2\x28\xa1"[..],
+            &b"\xed\xa0\x80"[..],
+            &b"\xf4\x90\x80\x80"[..],
+            &b"prefix\xffsuffix"[..],
+        ] {
+            let input = malloc_c_bytes(bytes);
+            // SAFETY: input is a live NUL-terminated libc allocation. The API
+            // takes ownership and frees it on rejection; do not free it again.
+            let value = unsafe { mimi_string_from_raw(input) };
+            assert!(
+                value.is_null(),
+                "invalid UTF-8 must fail closed: {bytes:x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_from_raw_preserves_valid_utf8_and_c_terminator_semantics() {
+        for text in ["", "ASCII", "雪🦀", "caf\u{e9}"] {
+            let input = malloc_c_bytes(text.as_bytes());
+            // SAFETY: input is a live libc-owned UTF-8 C string. Ownership is
+            // transferred and the returned Value becomes this test's owner.
+            let value = unsafe { mimi_string_from_raw(input) };
+            assert!(!value.is_null());
+            // SAFETY: value is the live boxed Value returned by from_raw.
+            assert!(matches!(unsafe { &*value }, Value::String(actual) if actual.as_str() == text));
+            // SAFETY: value is released exactly once with its matching API.
+            unsafe { mimi_value_free(value) };
+        }
+        let input = malloc_c_bytes(b"valid\0\xff");
+        // SAFETY: input is a libc-owned C string. Bytes following the first
+        // NUL are outside its text; the entire allocation still transfers.
+        let value = unsafe { mimi_string_from_raw(input) };
+        assert!(!value.is_null());
+        // SAFETY: value is a live boxed Value returned by from_raw.
+        assert!(matches!(unsafe { &*value }, Value::String(actual) if actual.as_str() == "valid"));
+        // SAFETY: value is the sole returned allocation and is freed once.
+        unsafe { mimi_value_free(value) };
+        // SAFETY: null input is explicitly rejected without dereferencing.
+        assert!(unsafe { mimi_string_from_raw(std::ptr::null_mut()) }.is_null());
+    }
+
+    #[test]
+    fn string_into_raw_shared_success_clears_only_the_transferred_value() {
+        let value = Value::String(SharedString::new("雪 shared payload".into()));
+        let sibling = value.clone();
+        let raw = Box::into_raw(Box::new(value));
+        // SAFETY: raw is an exclusive live boxed Value; success transfers its
+        // contents, while the sibling retains its independently owned handle.
+        let transferred = unsafe { mimi_string_into_raw(raw) };
+        assert!(!transferred.is_null());
+        // SAFETY: transferred is the live NUL-terminated libc allocation.
+        let text = unsafe { std::ffi::CStr::from_ptr(transferred) };
+        assert_eq!(text.to_bytes(), "雪 shared payload".as_bytes());
+        // SAFETY: raw remains a live boxed Value after its contents transfer.
+        assert!(matches!(unsafe { &*raw }, Value::String(text) if text.is_empty()));
+        assert!(matches!(sibling, Value::String(text) if text.as_str() == "雪 shared payload"));
+        // SAFETY: these distinct allocations are freed once via matching APIs.
+        unsafe {
+            mimi_string_free_raw(transferred);
+            mimi_value_free(raw);
+        }
+    }
+
+    #[test]
+    fn string_into_raw_rejection_preserves_shared_source_and_sibling() {
+        let value = Value::String(SharedString::new("prefix\0suffix".into()));
+        let sibling = value.clone();
+        let raw = Box::into_raw(Box::new(value));
+        // SAFETY: raw is an exclusive live boxed Value; embedded NUL rejection
+        // must leave its contents and the sibling's contents unchanged.
+        let transferred = unsafe { mimi_string_into_raw(raw) };
+        assert!(transferred.is_null());
+        // SAFETY: failure retains the live boxed Value owned by this test.
+        let source = unsafe { &*raw };
+        assert_eq!(source, &sibling);
+        let (Value::String(source), Value::String(sibling)) = (source, &sibling) else {
+            panic!("rejected transfer must retain both string values");
+        };
+        assert!(
+            SharedString::ptr_eq(source, sibling),
+            "rejection must not detach a shared source"
+        );
+        // SAFETY: raw remains the sole boxed Value and is freed exactly once.
+        unsafe { mimi_value_free(raw) };
     }
 
     #[test]
@@ -1437,7 +1564,9 @@ mod tests {
 
         // SAFETY: fresh heap Value wrapping a String.
         let make_value = || {
-            let v = Box::new(Value::String(crate::interp::SharedString::new("0123456789abcdef".to_string())));
+            let v = Box::new(Value::String(SharedString::new(
+                "0123456789abcdef".to_string(),
+            )));
             Box::into_raw(v)
         };
 

@@ -216,6 +216,9 @@ pub(super) fn native_list_kind(
             format!("List element TypeDesc '{}' is absent", element.as_str()),
         )
     })?;
+    if catalog.validate_owned_string_list(ty).is_ok() {
+        return Ok(crate::runtime::ListElementKind::String as i8);
+    }
     if matches!(element_desc.layout, MirLayout::List { .. }) {
         return Ok(crate::runtime::ListElementKind::List as i8);
     }
@@ -453,6 +456,913 @@ impl NativeVariantAbi {
             .iter()
             .filter(move |slot| slot.variant == variant)
     }
+}
+
+/// Native ABI for the isolated, separately receipted NewResult constructor.
+/// This never changes `native_variant_abi`: the latter continues to reject
+/// non-Copy Results whose Clone glue is unsupported.
+pub(super) fn native_ordinary_map_new_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    function
+        .ownership
+        .ordinary_map_new_result_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native NewResult ABI has no separate Checker receipt",
+            )
+        })?;
+    crate::core::mir::validate_ordinary_map_new_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native NewResult ABI is outside the exact checker-receipted Result<root, i32> shape",
+        ));
+    }
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "NewResult TypeDesc is absent"))?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native NewResult TypeDesc is not a Result layout",
+        ));
+    };
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1), ("Err", error, 2)] {
+        let id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let variant = variants
+            .iter()
+            .find(|variant| variant.id == id)
+            .ok_or_else(|| {
+                NativeMirError::new(ty.as_str(), format!("NewResult {name} variant is absent"))
+            })?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("NewResult {name} payload differs from its canonical TypeDesc"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant.id.clone(),
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    let first_payload_type = ok.clone();
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        first_payload_type,
+    ))
+}
+
+/// Native ABI for the direct tuple-Get L1 route's operational Root Result.
+/// Its Checker receipt is independent from the standalone NewResult receipt,
+/// so the route contract is replayed here before exposing the same bounded
+/// `{ i8, root-handle, i32 }` carrier to `SwitchMove` emission.
+pub(super) fn native_ordinary_map_direct_tuple_get_l1_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    if function
+        .ownership
+        .ordinary_map_direct_tuple_get_unpack_l1_receipt()
+        .is_none()
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "direct tuple Get L1 Result ABI has no Checker route receipt",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_direct_tuple_get_unpack_l1_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "direct tuple Get L1 Result ABI is outside the exact operational Root Result TypeDesc",
+        ));
+    }
+    let descriptor = catalog.get(ty).ok_or_else(|| {
+        NativeMirError::new(ty.as_str(), "direct tuple Get L1 Result TypeDesc is absent")
+    })?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "direct tuple Get L1 TypeDesc is not a Result layout",
+        ));
+    };
+    if ok != &crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+        || error != &crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        || variants.len() != 2
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "direct tuple Get L1 Result TypeDesc does not carry the exact Root/i32 payload pair",
+        ));
+    }
+
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1), ("Err", error, 2)] {
+        let id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let variant = variants
+            .iter()
+            .find(|variant| variant.id == id)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    ty.as_str(),
+                    format!("direct tuple Get L1 {name} variant is absent"),
+                )
+            })?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!(
+                        "direct tuple Get L1 {name} payload differs from its canonical TypeDesc"
+                    ),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: id,
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        ok.clone(),
+    ))
+}
+
+/// Physical `{ i8, i64, i32 }` layout for only the exact Checker NewResult
+/// receipt. It is deliberately separate from `native_basic_type` so no
+/// ordinary or generic Result gains a new admission path.
+pub(super) fn native_ordinary_map_new_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) = native_ordinary_map_new_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Native ABI for the independent New/SetResult SetLineage profile. Its
+/// source authority is the complete SetLineage receipt; it must not borrow
+/// the standalone NewResult receipt as route authorization.
+pub(super) fn native_ordinary_map_set_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native SetResult ABI is outside its canonical Result<root, i32> shape",
+        ));
+    }
+    if let Some(receipt) = function
+        .ownership
+        .ordinary_map_set_get_i32_lineage_receipt()
+    {
+        if receipt.owner != function.owner {
+            return Err(NativeMirError::new(
+                function.owner.0.clone(),
+                "native SetResult ABI is outside its exact Checker Set/Get-i32 lineage receipt",
+            ));
+        }
+        crate::core::mir::validate_ordinary_map_set_get_i32_result_types(function, catalog)
+            .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+        catalog
+            .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.set_result_type)
+            .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    } else {
+        let receipt = function
+            .ownership
+            .ordinary_map_set_lineage_receipt()
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    function.owner.0.clone(),
+                    "native SetResult ABI has no independent Checker SetLineage receipt",
+                )
+            })?;
+        if receipt.owner != function.owner {
+            return Err(NativeMirError::new(
+                function.owner.0.clone(),
+                "native SetResult ABI is outside its exact Checker SetLineage receipt",
+            ));
+        }
+        catalog
+            .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.new_result_type)
+            .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    }
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "SetResult TypeDesc is absent"))?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native SetResult TypeDesc is not a Result layout",
+        ));
+    };
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1), ("Err", error, 2)] {
+        let id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let variant = variants
+            .iter()
+            .find(|variant| variant.id == id)
+            .ok_or_else(|| {
+                NativeMirError::new(ty.as_str(), format!("SetResult {name} variant is absent"))
+            })?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("SetResult {name} payload differs from its canonical TypeDesc"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant.id.clone(),
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        ok.clone(),
+    ))
+}
+
+/// Native ABI for the fallible Any-payload Set used only by the explicit
+/// computed String-key owner-chain branch profile. Its source authority is
+/// the exact Checker result-branch receipt; this helper deliberately does
+/// not reuse or widen the narrow i32 SetResult receipt.
+pub(super) fn native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+        OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion as ChainVersion,
+        OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion as BranchVersion,
+    };
+
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "computed String-key owner-chain SetAnyResult ABI requires the exact Result<owner-v2 root, i32> TypeDesc",
+        ));
+    }
+    let cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "computed String-key owner-chain SetAnyResult ABI has no Checker CFG receipt",
+            )
+        })?;
+    if cfg.owner != function.owner {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "computed String-key owner-chain SetAnyResult CFG owner differs from its MIR function",
+        ));
+    }
+    let branches = cfg
+        .result_receipts
+        .iter()
+        .filter_map(|result| {
+            result
+                .computed_string_key_owner_chain
+                .as_deref()
+                .and_then(|chain| chain.result_branch.as_deref().map(|branch| (chain, branch)))
+        })
+        .collect::<Vec<_>>();
+    let [(chain, branch)] = branches.as_slice() else {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "computed String-key owner-chain SetAnyResult ABI requires one exact Checker branch receipt",
+        ));
+    };
+    if chain.owner != function.owner
+        || branch.owner != function.owner
+        || chain.profile_version != ChainVersion::V1
+        || branch.profile_version != BranchVersion::V1
+        || chain.map_new.kind != ActionKind::New
+        || chain.map_set.kind != ActionKind::Set
+        || branch.map_new_operation != chain.map_new.point
+        || branch.map_set_operation != chain.map_set.point
+        || branch.initial_root != chain.map_new.local
+        || branch.populated_root != chain.map_set.local
+        || chain.map_set.source_local.as_ref() != Some(&branch.initial_root)
+        || chain.map_set.key.is_none()
+        || chain.map_set.value.is_none()
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "computed String-key owner-chain SetAnyResult ABI is outside the exact New/Set branch identities",
+        ));
+    }
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let error_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    native_exact_ordinary_map_result_variant_abi(catalog, ty, &root_ty, &error_ty)
+}
+
+/// Native ABI for the independent three-path MapSetDropControl Result
+/// profile. It reads only that profile's Checker branch receipt and never
+/// borrows the computed-string owner-chain receipt.
+pub(super) fn native_ordinary_map_set_drop_control_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2MapSetDropControlResultBranchProfileVersion as BranchVersion;
+
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "MapSetDropControlResult ABI requires the exact Result<owner-v2 root, i32> TypeDesc",
+        ));
+    }
+    let cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "MapSetDropControlResult ABI has no Checker CFG receipt",
+            )
+        })?;
+    let branch = cfg
+        .map_set_drop_control_result_branch_receipt
+        .as_ref()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "MapSetDropControlResult ABI has no independent Checker branch receipt",
+            )
+        })?;
+    if cfg.owner != function.owner
+        || branch.owner != function.owner
+        || branch.profile_version != BranchVersion::V1
+        || branch.map_new_operation == branch.map_set_operation
+        || branch.initial_root == branch.populated_root
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "MapSetDropControlResult ABI is outside its exact Checker owner/New/Set receipt",
+        ));
+    }
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let error_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    native_exact_ordinary_map_result_variant_abi(catalog, ty, &root_ty, &error_ty)
+}
+
+/// Physical `{ i8, i64, i32 }` layout for only the independent
+/// MapSetDropControl Result-branch receipt.
+pub(super) fn native_ordinary_map_set_drop_control_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_set_drop_control_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Physical `{ i8, root-handle, i32 }` carrier for only the exact
+/// computed String-key owner-chain SetAnyResult branch receipt.
+pub(super) fn native_ordinary_map_computed_string_key_owner_chain_set_any_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_computed_string_key_owner_chain_set_any_result_variant_abi(
+            function, catalog, ty,
+        )?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Physical `{ i8, i64, i32 }` layout authorized by the independent
+/// Checker SetLineage receipt.
+pub(super) fn native_ordinary_map_set_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) = native_ordinary_map_set_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Native Result ABI for the composite fallible New/Set/GetAny/unpack-i32
+/// lineage. Its authorization is bound only to the dedicated composite
+/// Checker receipt, even though the physical Result carrier matches the
+/// SetResult profile.
+pub(super) fn native_ordinary_map_set_get_any_i32_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_any_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native Set/GetAny-i32 Result ABI has no composite Checker receipt",
+            )
+        })?;
+    let expected_result = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if receipt.owner != function.owner || ty != &expected_result {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native Set/GetAny-i32 Result ABI is outside its exact composite Checker receipt",
+        ));
+    }
+    catalog
+        .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.new_result_type)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    catalog
+        .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.set_result_type)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+
+    let descriptor = catalog.get(ty).ok_or_else(|| {
+        NativeMirError::new(ty.as_str(), "Set/GetAny-i32 Result TypeDesc is absent")
+    })?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native Set/GetAny-i32 TypeDesc is not a Result layout",
+        ));
+    };
+    let expected_ok = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let expected_error = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if descriptor.id != *ty
+        || descriptor.kind != MirTypeKind::Result
+        || ok != &expected_ok
+        || error != &expected_error
+        || variants.len() != 2
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native Set/GetAny-i32 Result TypeDesc is not exactly Result<MapRoot, i32>",
+        ));
+    }
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1_u32), ("Err", error, 2_u32)] {
+        let variant_id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let (_, variant) = catalog
+            .validated_variant_switch_case(ty, &variant_id)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("Set/GetAny-i32 {name} payload differs from its canonical TypeDesc"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant_id,
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        ok.clone(),
+    ))
+}
+
+/// Physical `{ i8, i64, i32 }` carrier for the exact composite
+/// Set/GetAny-i32 receipt. This helper has no fallback to SetResult,
+/// SetGet-i32, CheckedGet, or a generic Result ABI.
+pub(super) fn native_ordinary_map_set_get_any_i32_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_set_get_any_i32_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Native ABI for the fallible `map_get_any` composite lineage's Map-root
+/// `Result`. This shares the physical Map-root carrier with the older
+/// Set/GetAny-i32 profile, but its authorization is bound only to the
+/// Result-valued GetAny receipt.
+pub(super) fn native_ordinary_map_set_get_any_result_i32_root_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let receipt = function
+        .ownership
+        .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native Set/GetAny-Result-i32 root ABI has no dedicated Checker receipt",
+            )
+        })?;
+    if receipt.owner != function.owner
+        || ty != &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+    {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native Set/GetAny-Result-i32 root ABI is outside its exact Checker receipt",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_set_get_any_result_i32_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let error_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    native_exact_ordinary_map_result_variant_abi(catalog, ty, &root_ty, &error_ty)
+}
+
+/// Native ABI for `Result<(bool, V2-owned Any), i32>` returned by the
+/// fallible GetAny instruction. This envelope has its own TypeDesc and may be
+/// materialized only under its exact source receipt.
+pub(super) fn native_ordinary_map_set_get_any_result_i32_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let receipt = function
+        .ownership
+        .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native GetAny Result ABI has no dedicated Checker receipt",
+            )
+        })?;
+    let expected_ty =
+        crate::core::mir::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+    if receipt.owner != function.owner || ty != &expected_ty {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native GetAny Result ABI is outside its exact Checker receipt",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_set_get_any_result_i32_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    catalog
+        .validate_ordinary_map_owned_any_v2_get_any_result_envelope(
+            ty,
+            crate::core::mir::types::MirGlueOperation::Drop,
+        )
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    let pair_ty = crate::core::mir::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let error_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    native_exact_ordinary_map_result_variant_abi(catalog, ty, &pair_ty, &error_ty)
+}
+
+fn native_exact_ordinary_map_result_variant_abi(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    expected_ok: &crate::core::ResolvedTypeId,
+    expected_error: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "exact Map Result TypeDesc is absent"))?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "exact Map Result TypeDesc does not use a Result layout",
+        ));
+    };
+    if descriptor.id != *ty
+        || descriptor.kind != MirTypeKind::Result
+        || ok != expected_ok
+        || error != expected_error
+        || variants.len() != 2
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "exact Map Result TypeDesc has unexpected Ok/Err payload identities",
+        ));
+    }
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1_u32), ("Err", error, 2_u32)] {
+        let variant_id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let (_, variant) = catalog
+            .validated_variant_switch_case(ty, &variant_id)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("Map Result {name} field differs from its exact TypeDesc"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant_id,
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        ok.clone(),
+    ))
+}
+
+/// Physical `{ i8, root, i32 }` carrier for the Result-valued GetAny
+/// profile's persistent Map roots.
+pub(super) fn native_ordinary_map_set_get_any_result_i32_root_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_set_get_any_result_i32_root_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Physical `{ i8, (bool, V2 Any), i32 }` GetAny Result carrier.
+pub(super) fn native_ordinary_map_set_get_any_result_i32_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_set_get_any_result_i32_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+/// Physical Set/Get-String result ABIs authorized by the independent String
+/// lineage receipt. The root result is the same `{i8, i64, i32}` carrier as
+/// SetResult, but its authority is deliberately kept separate from the i32
+/// and Set-only receipts. The detached String result uses the canonical
+/// move-owned `Result<String, i32>` ABI.
+pub(super) fn native_ordinary_map_set_get_string_result_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let receipt = function
+        .ownership
+        .ordinary_map_set_get_string_lineage_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native Set/Get-String ABI has no independent Checker lineage receipt",
+            )
+        })?;
+    if receipt.owner != function.owner {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native Set/Get-String ABI is outside its exact Checker lineage receipt",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_set_get_string_result_types(function, catalog)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+
+    if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id() {
+        catalog
+            .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.set_result_type)
+            .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+        let descriptor = catalog.get(ty).ok_or_else(|| {
+            NativeMirError::new(ty.as_str(), "Set/Get-String root Result TypeDesc is absent")
+        })?;
+        let MirLayout::Result {
+            ok,
+            error,
+            variants,
+        } = &descriptor.layout
+        else {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                "Set/Get-String root Result TypeDesc is not a Result layout",
+            ));
+        };
+        if ok != &crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+            || error != &crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        {
+            return Err(NativeMirError::new(
+                ty.as_str(),
+                "Set/Get-String root Result payloads are not the exact MapRoot/i32 pair",
+            ));
+        }
+        let mut payload_fields = Vec::with_capacity(2);
+        for (name, expected_type, physical_field) in [("Ok", ok, 1_u32), ("Err", error, 2_u32)] {
+            let id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+            let variant = variants
+                .iter()
+                .find(|variant| variant.id == id)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        ty.as_str(),
+                        format!("Set/Get-String {name} variant is absent"),
+                    )
+                })?;
+            let field = match variant.fields.as_slice() {
+                [field] if field.ty == *expected_type => field,
+                _ => {
+                    return Err(NativeMirError::new(
+                        ty.as_str(),
+                        format!(
+                            "Set/Get-String {name} payload differs from its canonical TypeDesc"
+                        ),
+                    ));
+                }
+            };
+            if variant.fields.len() != 1 {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("Set/Get-String {name} variant has a noncanonical payload arity"),
+                ));
+            }
+            payload_fields.push(NativeVariantPayloadSlot {
+                variant: id,
+                field: field.id.clone(),
+                physical_field,
+                ty: field.ty.clone(),
+            });
+        }
+        return Ok((
+            NativeVariantAbi {
+                tag_field: 0,
+                payload_field: 1,
+                payload_types: vec![ok.clone(), error.clone()],
+                payload_fields,
+            },
+            ok.clone(),
+        ));
+    }
+
+    if ty == &receipt.get_result_type {
+        catalog
+            .validate_result_string_i32_variant(ty)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        return native_variant_abi(catalog, ty, true);
+    }
+
+    Err(NativeMirError::new(
+        ty.as_str(),
+        "native Set/Get-String ABI type is outside its exact String lineage receipt",
+    ))
+}
+
+pub(super) fn native_ordinary_map_set_get_string_result_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_set_get_string_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
 }
 
 /// Materialize the target-facing field contract for a native variant value.
@@ -855,7 +1765,10 @@ pub(super) fn native_basic_type<'ctx>(
                 ));
             }
             let MirLayout::Tuple(elements) = &desc.layout else {
-                unreachable!("the exact layout was checked above")
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    "ordinary Map/Any owner-v2 GetAny result has an inconsistent tuple layout",
+                ));
             };
             let fields = elements
                 .iter()

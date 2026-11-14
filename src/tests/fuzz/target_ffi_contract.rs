@@ -118,9 +118,13 @@ proptest! {
             Ok(f) => f,
             Err(_) => return Ok(()),
         };
+        let checked = match core::check_program(&file) {
+            Ok(program) => program,
+            Err(_) => return Ok(()),
+        };
         let context = inkwell::context::Context::create();
         let mut cg = crate::codegen::CodeGenerator::new(&context, "ffi_test");
-        let result = cg.compile_file(&file);
+        let result = cg.compile_checked(&checked);
         // Must not panic. It may fail with "undefined external function" but
         // that's expected — the extern is intentionally not linked.
         prop_assert!(result.is_ok() || result.is_err(),

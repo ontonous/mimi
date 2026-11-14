@@ -2,7 +2,34 @@
 ///
 /// These exercise parser, typechecker, interpreter and codegen with
 /// boundary conditions that are known to trigger edge cases.
-use crate::tests::{check_source, run_source};
+use crate::tests::{check_source, compile_and_run, run_source, run_source_with_stdout};
+
+fn assert_float_helper_seed(src: &str, expected: f64) {
+    let (bytecode_value, bytecode_stdout) = run_source_with_stdout(src);
+    assert_eq!(bytecode_value, crate::interp::Value::Int(0));
+    let bytecode_float = bytecode_stdout
+        .trim()
+        .parse::<f64>()
+        .expect("Bytecode helper output should be a float");
+    assert_eq!(bytecode_float, expected);
+
+    let native_stdout = compile_and_run(src).expect("native float helper seed should run");
+    let native_float = native_stdout
+        .trim()
+        .parse::<f64>()
+        .expect("native helper output should be a float");
+    assert_eq!(native_float, expected);
+}
+
+fn assert_string_helper_seed(src: &str, expected: &str) {
+    let expected_stdout = format!("{}\n", expected);
+    let (bytecode_value, bytecode_stdout) = run_source_with_stdout(src);
+    assert_eq!(bytecode_value, crate::interp::Value::Int(0));
+    assert_eq!(bytecode_stdout, expected_stdout, "Bytecode helper output");
+
+    let native_stdout = compile_and_run(src).expect("native string helper seed should run");
+    assert_eq!(native_stdout, expected_stdout, "native helper output");
+}
 
 /// Empty program (no items).
 #[test]
@@ -36,29 +63,37 @@ fn corpus_max_i64() {
 /// Float edge cases.
 #[test]
 fn corpus_float_zero() {
-    let src = r#"func main() -> f64 { 0.0 }"#;
-    let val = run_source(src);
-    assert_eq!(val, crate::interp::Value::Float(0.0));
+    let src = r#"
+func corpus_float_value() -> f64 { 0.0 }
+func main() -> i32 { println(corpus_float_value()); 0 }
+"#;
+    assert_float_helper_seed(src, 0.0);
 }
 
 #[test]
 fn corpus_float_negative() {
-    let src = r#"func main() -> f64 { -2.5 }"#;
-    let val = run_source(src);
-    assert_eq!(val, crate::interp::Value::Float(-2.5));
+    let src = r#"
+func corpus_float_value() -> f64 { -2.5 }
+func main() -> i32 { println(corpus_float_value()); 0 }
+"#;
+    assert_float_helper_seed(src, -2.5);
 }
 
 /// String edge cases.
 #[test]
 fn corpus_string_special_chars() {
-    let src = r#"func main() -> string { "tab:\tnewline:\nbackslash:\\quote:\"" }"#;
-    let _ = run_source(src);
+    let src = r#"
+func corpus_string_value() -> string { "tab:\tnewline:\nbackslash:\\quote:\"" }
+func main() -> i32 { println(corpus_string_value()); 0 }
+"#;
+    assert_string_helper_seed(src, "tab:\tnewline:\nbackslash:\\quote:\"");
 }
 
 #[test]
 fn corpus_string_multiline() {
-    let src = "func main() -> string { \"line1\\nline2\" }";
-    let _ = run_source(src);
+    let src = "func corpus_string_value() -> string { \"line1\\nline2\" }\n\
+               func main() -> i32 { println(corpus_string_value()); 0 }";
+    assert_string_helper_seed(src, "line1\nline2");
 }
 
 /// Boolean operations.

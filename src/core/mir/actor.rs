@@ -7,8 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::ir::{
-    Permission, ResolvedActorInitializerKind, ResolvedCall, ResolvedCallee, ResolvedLiteral,
-    ResolvedLocalId, ResolvedScalarActorReceipt, ResolvedTypeId,
+    Permission, PrimitiveType, ResolvedActorFlowDescriptor, ResolvedActorFlowTransitionDescriptor,
+    ResolvedActorInitializerKind, ResolvedCall, ResolvedCallee, ResolvedLiteral, ResolvedLocalId,
+    ResolvedScalarActorReceipt, ResolvedTypeId,
 };
 use crate::core::{CheckedProgram, EffectId, NodeId};
 
@@ -166,7 +167,11 @@ pub struct MirActorFieldContract {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirActorMethodContract {
+    /// Source mailbox identity used by `MirActorOperation::Call`.
     pub owner: NodeId,
+    /// Checker body identity. For a `runs Flow` event this is the transition
+    /// body, while `owner` remains the synthetic Actor dispatch method.
+    pub body_owner: NodeId,
     pub index: usize,
     pub self_local: ResolvedLocalId,
     pub self_value: MirValueId,
@@ -178,6 +183,8 @@ pub struct MirActorMethodContract {
     /// Only parameter zero changes to the internal state TypeDesc.
     pub execution_parameter_types: Vec<ResolvedTypeId>,
     pub result_type: ResolvedTypeId,
+    pub execution_result_type: ResolvedTypeId,
+    pub flow_transition: Option<ResolvedActorFlowTransitionDescriptor>,
     /// Exact checker effect summary. Nested helper bodies may contribute the
     /// conservative `unknown` effect; it is still part of the source receipt
     /// and cannot be substituted by a caller-provided effect.
@@ -196,6 +203,7 @@ pub struct MirActorContract {
     pub actor: NodeId,
     pub handle_type: ResolvedTypeId,
     pub state_type: ResolvedTypeId,
+    pub flow: Option<ResolvedActorFlowDescriptor>,
     pub fields: Vec<MirActorFieldContract>,
     pub methods: Vec<MirActorMethodContract>,
     checker_snapshot: CheckedActorSnapshot,
@@ -244,7 +252,7 @@ impl MirActorCatalog {
             actor
                 .methods
                 .iter()
-                .find(|method| &method.owner == owner)
+                .find(|method| &method.owner == owner || &method.body_owner == owner)
                 .map(|method| (actor, method))
         })
     }
@@ -452,6 +460,17 @@ impl MirActorCatalog {
                         method.owner.0
                     ));
                 }
+                if method.body_owner == method.owner && method.flow_transition.is_some()
+                    || method.flow_transition.as_ref().is_some_and(|transition| {
+                        transition.method_owner != method.owner
+                            || transition.body_owner != method.body_owner
+                    })
+                {
+                    errors.push(format!(
+                        "Actor method '{}' source/body transition identities disagree",
+                        method.owner.0
+                    ));
+                }
             }
             if types.get(&contract.handle_type) != Some(&contract.handle_descriptor())
                 || types.get(&contract.state_type) != Some(&contract.state_descriptor())
@@ -460,6 +479,46 @@ impl MirActorCatalog {
                     "Actor '{}' handle/state TypeDesc disagrees with its checker contract",
                     key.0
                 ));
+            }
+            if let Some(flow) = &contract.flow {
+                let root_nominal = crate::core::NominalTypeId::new(flow.root_state.0.clone()).ok();
+                let root_state_ok = types.get(&flow.root_state_type).is_some_and(|descriptor| {
+                    let MirLayout::Record { nominal, fields } = &descriptor.layout else {
+                        return false;
+                    };
+                    matches!(&descriptor.kind, MirTypeKind::Nominal)
+                        && root_nominal.as_ref() == Some(nominal)
+                        && fields.len() == 1
+                        && flow.payload.as_slice().first().is_some_and(|payload| {
+                            fields[0].id == payload.field
+                                && fields[0].name == payload.name
+                                && fields[0].ty == payload.ty
+                        })
+                });
+                let payload_ok = flow.payload.as_slice().first().is_some_and(|payload| {
+                    flow.payload.len() == 1
+                        && contract.fields.len() == 1
+                        && contract.fields[0].index == 0
+                        && contract.fields[0].field == payload.field
+                        && contract.fields[0].name == payload.name
+                        && contract.fields[0].ty == payload.ty
+                        && types.get(&payload.ty).is_some_and(|descriptor| {
+                            matches!(&descriptor.kind, MirTypeKind::Primitive(PrimitiveType::I32))
+                                && descriptor.layout == MirLayout::Scalar
+                                && descriptor.abi
+                                    == (MirAbiClass::Integer {
+                                        bits: 32,
+                                        signed: true,
+                                    })
+                                && descriptor.has_canonical_copy_noop_metadata()
+                        })
+                });
+                if !root_state_ok || !payload_ok {
+                    errors.push(format!(
+                        "Actor '{}' Flow root-state TypeDesc/field shape differs from its checked receipt",
+                        key.0
+                    ));
+                }
             }
             for ty in contract.fields.iter().map(|field| &field.ty).chain(
                 contract.methods.iter().flat_map(|method| {
@@ -470,6 +529,13 @@ impl MirActorCatalog {
                         .chain(std::iter::once(&method.result_type))
                 }),
             ) {
+                let flow_state_result = contract
+                    .flow
+                    .as_ref()
+                    .is_some_and(|flow| ty == &flow.root_state_type);
+                if flow_state_result {
+                    continue;
+                }
                 if let Err(message) = types.validate_copy_scalar(ty) {
                     errors.push(message);
                 }
@@ -518,23 +584,34 @@ fn checked_actor_contract(
         .scalar_i32_receipt(program)
         .map_err(|error| error.to_string())?;
     let mut method_receivers = BTreeMap::new();
-    for method in &descriptor.methods {
+    for method in declaration.dispatch_methods() {
+        let flow_transition = descriptor.flow.as_ref().and_then(|flow| {
+            flow.transitions
+                .iter()
+                .find(|transition| transition.method_owner == method.owner)
+        });
+        let body_owner = flow_transition
+            .map(|transition| &transition.body_owner)
+            .unwrap_or(&method.owner);
+        let expected_signature = flow_transition
+            .map(|transition| &transition.body_signature)
+            .unwrap_or(&method.signature);
         let callable = program
-            .callable(&method.owner)
-            .ok_or_else(|| format!("Actor method '{}' has no checker body", method.owner.0))?;
-        if callable.body.parameters.len() != method.signature.parameters.len()
+            .callable(body_owner)
+            .ok_or_else(|| format!("Actor body '{}' has no checker body", body_owner.0))?;
+        if callable.body.parameters.len() != expected_signature.parameters.len()
             || !callable.body.captures.is_empty()
         {
             return Err(format!(
-                "Actor method '{}' has an incomplete receiver/signature contract",
-                method.owner.0
+                "Actor body '{}' has an incomplete receiver/signature contract",
+                body_owner.0
             ));
         }
         for (local, parameter) in callable
             .body
             .parameters
             .iter()
-            .zip(&method.signature.parameters)
+            .zip(&expected_signature.parameters)
         {
             if !callable
                 .body
@@ -543,8 +620,8 @@ fn checked_actor_contract(
                 .is_some_and(|entry| entry.id == *local && entry.ty == parameter.ty)
             {
                 return Err(format!(
-                    "Actor method '{}' parameter local identity/type disagrees",
-                    method.owner.0
+                    "Actor body '{}' parameter local identity/type disagrees",
+                    body_owner.0
                 ));
             }
         }
@@ -552,8 +629,8 @@ fn checked_actor_contract(
             .body
             .parameters
             .first()
-            .ok_or_else(|| format!("Actor method '{}' has no self local", method.owner.0))?;
-        method_receivers.insert(method.owner.clone(), receiver.clone());
+            .ok_or_else(|| format!("Actor body '{}' has no receiver local", body_owner.0))?;
+        method_receivers.insert(body_owner.clone(), receiver.clone());
     }
     materialize_snapshot(CheckedActorSnapshot {
         declaration,
@@ -563,10 +640,8 @@ fn checked_actor_contract(
 
 fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContract, String> {
     let descriptor = snapshot.declaration.descriptor();
-    if descriptor.fields.len() > 64
-        || descriptor.methods.is_empty()
-        || descriptor.methods.len() > 64
-    {
+    let dispatch_methods = snapshot.declaration.dispatch_methods();
+    if descriptor.fields.len() > 64 || dispatch_methods.is_empty() || dispatch_methods.len() > 64 {
         return Err(format!(
             "Actor '{}' exceeds the bounded scalar state/dispatch contract",
             descriptor.actor.0
@@ -574,36 +649,61 @@ fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContra
     }
     let state_type = actor_state_type_id(&descriptor.actor);
     let mut fields = Vec::new();
-    for (index, field) in descriptor.fields.iter().enumerate() {
-        let ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(initial)) =
-            &field.initializer.kind
-        else {
-            return Err(format!(
-                "Actor field '{}' has no materialized i32 initializer",
-                field.field.0
-            ));
-        };
-        let initial_value = i32::try_from(*initial)
-            .map_err(|_| format!("Actor field '{}' initializer overflows i32", field.field.0))?;
-        fields.push(MirActorFieldContract {
-            field: field.field.clone(),
-            initializer: field.initializer.node_id.clone(),
-            name: field.name.clone(),
-            index,
-            ty: field.ty.clone(),
-            mutable: field.mutable,
-            initial_value,
-        });
+    if let Some(flow) = &descriptor.flow {
+        for (index, field) in flow.payload.iter().enumerate() {
+            fields.push(MirActorFieldContract {
+                field: field.field.clone(),
+                initializer: NodeId(format!("{}/actor-flow-root-default", field.field.0)),
+                name: field.name.clone(),
+                index,
+                ty: field.ty.clone(),
+                mutable: false,
+                initial_value: 0,
+            });
+        }
+    } else {
+        for (index, field) in descriptor.fields.iter().enumerate() {
+            let ResolvedActorInitializerKind::Literal(ResolvedLiteral::Int(initial)) =
+                &field.initializer.kind
+            else {
+                return Err(format!(
+                    "Actor field '{}' has no materialized i32 initializer",
+                    field.field.0
+                ));
+            };
+            let initial_value = i32::try_from(*initial).map_err(|_| {
+                format!("Actor field '{}' initializer overflows i32", field.field.0)
+            })?;
+            fields.push(MirActorFieldContract {
+                field: field.field.clone(),
+                initializer: field.initializer.node_id.clone(),
+                name: field.name.clone(),
+                index,
+                ty: field.ty.clone(),
+                mutable: field.mutable,
+                initial_value,
+            });
+        }
     }
     let mut methods = Vec::new();
-    for (index, method) in descriptor.methods.iter().enumerate() {
+    for (index, method) in dispatch_methods.iter().enumerate() {
+        let flow_transition = descriptor.flow.as_ref().and_then(|flow| {
+            flow.transitions
+                .iter()
+                .find(|transition| transition.method_owner == method.owner)
+                .cloned()
+        });
+        let body_owner = flow_transition
+            .as_ref()
+            .map(|transition| transition.body_owner.clone())
+            .unwrap_or_else(|| method.owner.clone());
         let self_local = snapshot
             .method_receivers
-            .get(&method.owner)
+            .get(&body_owner)
             .ok_or_else(|| {
                 format!(
-                    "Actor method '{}' has no checker self identity",
-                    method.owner.0
+                    "Actor body '{}' has no checker receiver identity",
+                    body_owner.0
                 )
             })?
             .clone();
@@ -636,17 +736,48 @@ fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContra
             ));
         }
         let mut execution_parameter_types = source_parameter_types.clone();
+        let execution_result_type;
+        if let Some(transition) = &flow_transition {
+            execution_parameter_types = transition
+                .body_signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.ty.clone())
+                .collect();
+            let flow = descriptor
+                .flow
+                .as_ref()
+                .ok_or_else(|| "Flow transition has no root-state descriptor".to_string())?;
+            if execution_parameter_types.first() != Some(&flow.root_state_type)
+                || transition.body_signature.result != flow.root_state_type
+            {
+                return Err(format!(
+                    "Flow transition '{}' does not use the exact root state ABI",
+                    transition.body_owner.0
+                ));
+            }
+            // The closed mailbox ABI stores this one-field root state as an
+            // i32 slot. ActorLowerer applies the checked one-field record
+            // projection/construction law at the worker boundary.
+            execution_parameter_types[0] = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+            execution_result_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        } else {
+            execution_result_type = method.signature.result.clone();
+        }
         let Some(receiver_type) = execution_parameter_types.first_mut() else {
             return Err(format!(
-                "Actor method '{}' lacks a self signature",
+                "Actor method '{}' lacks an execution receiver signature",
                 method.owner.0
             ));
         };
-        *receiver_type = state_type.clone();
+        if flow_transition.is_none() {
+            *receiver_type = state_type.clone();
+        }
         let self_value = MirValueId::new(format!("local:{}", self_local.0 .0))
             .map_err(|error| error.to_string())?;
         methods.push(MirActorMethodContract {
             owner: method.owner.clone(),
+            body_owner,
             index,
             self_local,
             self_value,
@@ -654,6 +785,8 @@ fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContra
             source_receiver_permission,
             execution_parameter_types,
             result_type: method.signature.result.clone(),
+            execution_result_type,
+            flow_transition,
             source_effects: method.signature.effects.clone(),
         });
     }
@@ -662,6 +795,7 @@ fn materialize_snapshot(snapshot: CheckedActorSnapshot) -> Result<MirActorContra
         actor: descriptor.actor.clone(),
         handle_type: descriptor.handle_type.clone(),
         state_type,
+        flow: descriptor.flow.clone(),
         fields,
         methods,
         checker_snapshot: snapshot,
@@ -687,6 +821,7 @@ impl MirActorContract {
                 actor: self.actor.clone(),
             },
             layout: MirLayout::Handle,
+            native_record_abi: None,
             session_protocol: None,
             ownership: MirOwnership::Copy,
             abi: MirAbiClass::OpaqueHandle,
@@ -720,6 +855,7 @@ impl MirActorContract {
                     })
                     .collect(),
             },
+            native_record_abi: None,
             session_protocol: None,
             ownership: MirOwnership::WeakBorrow,
             abi: MirAbiClass::Pointer,
@@ -765,11 +901,18 @@ impl MirActorContract {
             text.push_str(&format!("method index={} ", method.index));
             for value in [
                 &method.owner.0,
+                &method.body_owner.0,
                 &method.self_local.0 .0,
                 method.self_value.as_str(),
                 method.result_type.as_str(),
+                method.execution_result_type.as_str(),
             ] {
                 frame(&mut text, value);
+            }
+            if let Some(transition) = &method.flow_transition {
+                frame(&mut text, &format!("flow-transition:{:?}", transition));
+            } else {
+                frame(&mut text, "actor-method");
             }
             text.push_str("source-effects ");
             for effect in &method.source_effects {
@@ -784,6 +927,18 @@ impl MirActorContract {
             ));
             for ty in &method.execution_parameter_types {
                 frame(&mut text, ty.as_str());
+            }
+            text.push('\n');
+        }
+        if let Some(flow) = &self.flow {
+            text.push_str("flow ");
+            for value in [
+                &flow.flow.0,
+                &flow.flow_owner.0,
+                &flow.root_state.0,
+                flow.root_state_type.as_str(),
+            ] {
+                frame(&mut text, value);
             }
             text.push('\n');
         }

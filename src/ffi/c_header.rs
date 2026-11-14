@@ -122,22 +122,169 @@ impl CHeaderGenerator {
         writeln!(header, "MimiCap mimi_cap_register(const char* name);")?;
         writeln!(header)?;
 
+        // Scoped SystemToken API.  The integer token is only an opaque
+        // identity; directory/endpoint/environment authorization is held in
+        // the host-owned registry and checked at each guarded operation.
+        writeln!(header, "// Scoped SystemToken API")?;
+        writeln!(header, "typedef int64_t MimiSystemToken;")?;
+        writeln!(
+            header,
+            "MimiSystemToken mimi_capability_issue_unrestricted(void);"
+        )?;
+        writeln!(
+            header,
+            "MimiSystemToken mimi_capability_issue_path(const char* root);"
+        )?;
+        writeln!(
+            header,
+            "MimiSystemToken mimi_capability_issue_endpoint(const char* host, int64_t port);"
+        )?;
+        writeln!(
+            header,
+            "int32_t mimi_capability_grant_path(MimiSystemToken token, const char* root);"
+        )?;
+        writeln!(header, "int32_t mimi_capability_grant_endpoint(MimiSystemToken token, const char* host, int64_t port);")?;
+        writeln!(
+            header,
+            "int32_t mimi_capability_grant_env(MimiSystemToken token, const char* name);"
+        )?;
+        writeln!(
+            header,
+            "int32_t mimi_capability_revoke(MimiSystemToken token);"
+        )?;
+        writeln!(header, "int32_t mimi_capability_check_path(MimiSystemToken token, const char* path, int32_t write_access);")?;
+        writeln!(header, "int32_t mimi_capability_check_endpoint(MimiSystemToken token, const char* host, int64_t port);")?;
+        writeln!(
+            header,
+            "int32_t mimi_capability_check_url(MimiSystemToken token, const char* url);"
+        )?;
+        writeln!(
+            header,
+            "int32_t mimi_capability_check_env(MimiSystemToken token, const char* name);"
+        )?;
+        writeln!(
+            header,
+            "char* mimi_capability_describe(MimiSystemToken token);"
+        )?;
+        writeln!(header)?;
+
+        // Runtime cost/no_alloc counters.  A region is explicit so host
+        // startup and compiler bookkeeping do not pollute the program report.
+        writeln!(header, "// Runtime cost and no_alloc API")?;
+        writeln!(header, "typedef struct MimiRuntimeCostSnapshot {{")?;
+        writeln!(header, "    uint64_t allocations;")?;
+        writeln!(header, "    uint64_t allocated_bytes;")?;
+        writeln!(header, "    uint64_t releases;")?;
+        writeln!(header, "    uint64_t released_bytes;")?;
+        writeln!(header, "    uint64_t deep_copies;")?;
+        writeln!(header, "    uint64_t cow_copies;")?;
+        writeln!(header, "    uint64_t resizes;")?;
+        writeln!(header, "    uint64_t device_transfers;")?;
+        writeln!(header, "    uint64_t unknown_events;")?;
+        writeln!(header, "    uint64_t no_alloc_violations;")?;
+        writeln!(header, "}} MimiRuntimeCostSnapshot;")?;
+        writeln!(header, "void mimi_cost_begin_region(void);")?;
+        writeln!(
+            header,
+            "MimiRuntimeCostSnapshot mimi_cost_end_region(void);"
+        )?;
+        writeln!(header, "MimiRuntimeCostSnapshot mimi_cost_snapshot(void);")?;
+        writeln!(header, "void mimi_cost_enter_no_alloc(void);")?;
+        writeln!(header, "int32_t mimi_cost_leave_no_alloc(void);")?;
+        writeln!(
+            header,
+            "void mimi_cost_record_event(uint8_t kind, uint64_t units);"
+        )?;
+        writeln!(header)?;
+
         // String API
-        writeln!(header, "/** Get a C string pointer from a Mimi string (lease). Caller must call mimi_string_as_c_str_free() on the result when no longer needed. */")?;
+        writeln!(header, "/**")?;
+        writeln!(
+            header,
+            " * Return a borrowed NUL-terminated pointer to a Mimi string."
+        )?;
+        writeln!(
+            header,
+            " * The pointer is retained in a thread-local registry and remains valid until"
+        )?;
+        writeln!(
+            header,
+            " * mimi_string_as_c_str_free() or mimi_string_as_c_str_free_all() is called"
+        )?;
+        writeln!(
+            header,
+            " * on the creating thread, or that thread exits. Do not use it afterward."
+        )?;
+        writeln!(
+            header,
+            " * Release it with mimi_string_as_c_str_free() on the same thread that"
+        )?;
+        writeln!(
+            header,
+            " * created it; a call from another thread does not release this lease."
+        )?;
+        writeln!(
+            header,
+            " * Returns NULL on error, including strings containing an interior NUL."
+        )?;
+        writeln!(header, " */")?;
         writeln!(
             header,
             "const char* mimi_string_as_c_str(void* mimi_string);"
         )?;
-        writeln!(header, "/** Transfer string ownership to C. Caller must call mimi_string_free_raw() on result. */")?;
-        writeln!(header, "char* mimi_string_into_raw(void* mimi_string);")?;
+        writeln!(header, "/**")?;
         writeln!(
             header,
-            "/** Create a Mimi string from a C string (takes ownership of c_str). */"
+            " * Transfer a Mimi string's bytes to a malloc-owned NUL-terminated C buffer."
         )?;
+        writeln!(
+            header,
+            " * On success, the input Mimi Value remains allocated with an empty string;"
+        )?;
+        writeln!(
+            header,
+            " * the caller must still release that Value with mimi_value_free()."
+        )?;
+        writeln!(
+            header,
+            " * Release the returned buffer exactly once with mimi_string_free_raw(), or"
+        )?;
+        writeln!(
+            header,
+            " * pass it to mimi_string_from_raw(), which consumes it. Returns NULL on"
+        )?;
+        writeln!(
+            header,
+            " * error; on failure, the input Value is unchanged."
+        )?;
+        writeln!(header, " */")?;
+        writeln!(header, "char* mimi_string_into_raw(void* mimi_string);")?;
+        writeln!(header, "/**")?;
+        writeln!(
+            header,
+            " * Create a Mimi string from a malloc-owned NUL-terminated C buffer."
+        )?;
+        writeln!(
+            header,
+            " * The string ends at the first NUL byte. A new Mimi Value is returned for"
+        )?;
+        writeln!(
+            header,
+            " * valid UTF-8; invalid UTF-8 returns NULL. The input buffer is consumed"
+        )?;
+        writeln!(
+            header,
+            " * and freed on both success and invalid UTF-8; do not use or free it after"
+        )?;
+        writeln!(header, " * this call. A NULL input returns NULL.")?;
+        writeln!(header, " */")?;
         writeln!(header, "void* mimi_string_from_raw(char* c_str);")?;
-        writeln!(header, "/** Free a string obtained via mimi_string_into_raw() or C-allocated strings returned by extern functions. */")?;
+        writeln!(header, "/** Free a raw buffer from mimi_string_into_raw() or a compatible C string return. Do not use it after this call. */")?;
         writeln!(header, "void mimi_string_free_raw(char* c_str);")?;
-        writeln!(header, "/** Free a C string pointer obtained from mimi_string_as_c_str() when no longer needed. */")?;
+        writeln!(
+            header,
+            "/** Release a mimi_string_as_c_str() lease on the same thread that created it. */"
+        )?;
         writeln!(header, "void mimi_string_as_c_str_free(const char* c_str);")?;
         writeln!(
             header,
@@ -743,6 +890,14 @@ mod tests {
         assert!(header.contains("mimi_cap_consume"));
         assert!(header.contains("mimi_cap_register"));
 
+        // Scoped SystemToken and cost/no_alloc APIs
+        assert!(header.contains("mimi_capability_issue_path"));
+        assert!(header.contains("mimi_capability_check_endpoint"));
+        assert!(header.contains("mimi_capability_check_url"));
+        assert!(header.contains("mimi_capability_revoke"));
+        assert!(header.contains("mimi_cost_end_region"));
+        assert!(header.contains("MimiRuntimeCostSnapshot"));
+
         // String API
         assert!(header.contains("mimi_string_as_c_str"));
         assert!(header.contains("mimi_string_as_c_str_free"));
@@ -752,6 +907,15 @@ mod tests {
         assert!(header.contains("mimi_string_from_raw"));
         assert!(header.contains("mimi_string_free_raw"));
         assert!(header.contains("mimi_string_free"));
+        assert!(header.contains("input Mimi Value remains allocated with an empty string"));
+        assert!(header.contains("must still release that Value with mimi_value_free()"));
+        assert!(header.contains("The string ends at the first NUL byte"));
+        assert!(header.contains("invalid UTF-8 returns NULL"));
+        assert!(header.contains("input buffer is consumed"));
+        assert!(header.contains("thread-local registry"));
+        assert!(header.contains("on the creating thread"));
+        assert!(header.contains("does not release this lease"));
+        assert!(header.contains("on the same thread that created it"));
 
         // Runtime misc API
         assert!(header.contains("mimi_runtime_set_error_handler"));

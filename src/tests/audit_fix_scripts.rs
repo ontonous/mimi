@@ -557,15 +557,15 @@ fn actor_runner_census_schema_v6_is_required() {
 }
 
 #[test]
-fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
+fn legacy_owner_static_path_roster_is_executable_and_repeatable() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let path = root.join("scripts/audit-mir-legacy-owners-static.sh");
     let run = || {
         std::process::Command::new("bash")
             .arg(&path)
             .current_dir(&root)
             .output()
-            .expect("legacy owner audit must execute")
+            .expect("legacy owner static inventory must execute")
     };
     let first = run();
     let second = run();
@@ -576,239 +576,142 @@ fn legacy_owner_condition_fingerprint_is_executable_and_repeatable() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let fingerprints = |output: &std::process::Output| {
+    let roster = |output: &std::process::Output| {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| {
-                line.contains("owner_deletion_condition_digest=")
-                    || line.starts_with("owner_deletion_condition_set_digest=")
+                line.starts_with("production_path_roster=")
+                    || line.starts_with("reachable_legacy_ast_owner_count=")
+                    || line.starts_with("reachable_checked_proof_compatibility_owner_count=")
+                    || line.starts_with("checked_native_boundary_count=")
+                    || line.starts_with("owner_retirement_status=")
             })
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    let first_fingerprints = fingerprints(&first);
+    let first_roster = roster(&first);
     assert_eq!(
-        first_fingerprints.len(),
-        3,
-        "legacy owner audit must expose two owner digests and one set digest"
+        first_roster.len(),
+        5,
+        "legacy owner static inventory must expose the current four-path roster and retirement status"
     );
     assert_eq!(
-        first_fingerprints,
-        fingerprints(&second),
-        "legacy owner condition fingerprints changed across repeated audits"
+        first_roster,
+        roster(&second),
+        "legacy owner path roster changed across repeated static inventories"
     );
     assert!(
-        String::from_utf8_lossy(&first.stdout).contains("audit_status=ok"),
-        "legacy owner audit omitted its success marker"
+        String::from_utf8_lossy(&first.stdout).contains("static_audit_status=ok"),
+        "legacy owner static inventory omitted its static-only success marker"
+    );
+    assert!(
+        !String::from_utf8_lossy(&first.stdout).contains("route_boundary_audit_status=passed"),
+        "static inventory must never report the full dynamic audit as passed"
     );
 }
 
 #[test]
-fn legacy_owner_reachability_report_stays_conservative() {
+fn legacy_owner_audit_never_reports_skipped_dynamic_probes_as_success() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let script_path = root.join("scripts/audit-mir-legacy-owners.sh");
     let output = std::process::Command::new("bash")
-        .arg(&path)
+        .arg(&script_path)
+        .env("MIMI_LEGACY_OWNER_AUDIT_SKIP_DYNAMIC_PROBES", "1")
         .current_dir(&root)
         .output()
-        .expect("legacy owner audit must execute");
-    assert!(
-        output.status.success(),
-        "legacy owner audit failed:\n{}",
+        .expect("legacy owner audit must execute its skip guard");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "omitting direct owner probes must fail before an audit can report success: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (owner, dependency_class, evidence_marker, guard_name, guard_context) in [
-        (
-            "CodegenLegacyRemainder",
-            "legacy-codegen-remainder",
-            "test_legacy_codegen_function_calls().is_empty()",
-            "try_compile_exact_migrated_mir_island",
-            "src/codegen/compile.rs::pub fn compile_checked(",
-        ),
-        (
-            "FfiVerifierCompatibility",
-            "ffi-declaration-compatibility",
-            "Vec::<crate::core::LegacyBodyConsumer>::new()",
-            "scalar_ffi_admission",
-            "src/verifier/mod.rs::pub fn verify_ffi_checked_with_source_hash(",
-        ),
-    ] {
-        let evidence_prefix = format!("owner={owner} evidence_scope=");
-        let evidence = stdout
-            .lines()
-            .find(|line| line.starts_with(&evidence_prefix))
-            .unwrap_or_else(|| panic!("missing evidence report for {owner}"));
-        assert!(
-            evidence.contains("without") || evidence.contains("rejected"),
-            "owner evidence for {owner} must document a closed or rejected route"
-        );
-        assert!(
-            evidence.contains(&format!("evidence_marker={evidence_marker}")),
-            "owner evidence for {owner} must expose its legacy access marker"
-        );
-        let accessor = format!("owner={owner} production_accessor_call_sites=0");
-        assert!(
-            stdout.lines().any(|line| line == accessor),
-            "owner {owner} must have zero production accessors"
-        );
-        let guard =
-            format!("owner={owner} closed_route_guard={guard_name} context={guard_context}");
-        assert!(
-            stdout.lines().any(|line| line == guard),
-            "owner {owner} closed route guard drifted: expected {guard}"
-        );
-        let status_prefix = format!("owner={owner} production_access_status=sealed");
-        let status = stdout
-            .lines()
-            .find(|line| line.starts_with(&status_prefix))
-            .unwrap_or_else(|| panic!("missing retained status for {owner}"));
-        assert!(
-            status.contains(&format!("dependency_class={dependency_class}")),
-            "owner {owner} dependency class drifted: {status}"
-        );
-        assert!(
-            status.contains("owner_deletion_ready=0"),
-            "owner {owner} must remain fail-closed for deletion: {status}"
-        );
-        if owner == "FfiVerifierCompatibility" {
-            assert!(
-                status.contains("uncovered declarations and call-site contexts remain"),
-                "FFI owner must retain its active declaration/call-site coverage blocker: {status}"
-            );
-        }
-    }
-    let retired_flow_dual = "retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence=flow_scalar_migration_keeps_mir_and_dual_verdicts+flow_transition_invariant_and_field_projection_owner_parity+canonical_mir_transition_preserves_contract_kinds";
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stdout.lines().any(|line| line == retired_flow_dual),
-        "Flow and Dual verifier owners must be physically retired with MIR semantic evidence"
+        stderr.contains("owner_audit_error=dynamic_probe_skip_is_forbidden"),
+        "the skip refusal must be explicit: {stderr}"
     );
-    for retired_owner in ["FlowVerifierCompatibility", "DualVerifierCompatibility"] {
-        assert!(
-            !stdout
-                .lines()
-                .any(|line| line.starts_with(&format!("owner={retired_owner} "))),
-            "retired owner {retired_owner} must not remain in the active census"
-        );
-    }
-    for expected in [
-        "generic_trait_default_route_stdout_marker=\"33\\n22\\n11\\n\"",
-        "closed_scalar_zero_owner_evidence=",
-        "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()",
-        "closed_scalar_cli_evidence=",
-        "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]",
-        "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent",
-        "closed_scalar_cli_nested_helper_marker=relay(i64);separate_main_ffi_call",
-        "test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests",
-        "test_only_ast_verifier_modules=expr,func,helpers,vir;flow-owner+batch+transition-adapters=deleted",
-        "codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route",
-        "closed_codegen_route_tripwire=dynamic-trait test=compile_checked_rejects_dynamic_protocol_method_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
-        "closed_codegen_route_tripwire=flow-transition test=compile_checked_routes_multi_transition_flow_through_canonical_mir markers=test_legacy_body_access().is_empty(),canonical multi-transition Flow must emit main",
-        "closed_codegen_route_tripwire=trait-impl-specialization test=compile_checked_rejects_trait_impl_specialization_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
-        "closed_codegen_route_tripwire=nested-function-body test=compile_checked_routes_captured_nested_helper_without_legacy_owner markers=nested_callable_scopes().len(),canonical MIR default route,test_legacy_body_access().is_empty(),test_legacy_codegen_function_calls().is_empty()",
-        "closed_codegen_route_tripwire=export-wrapper test=compile_checked_routes_scalar_export_wrapper_without_legacy_access markers=test_legacy_body_access().is_empty(),owner_tripwire_export",
-        "closed_codegen_route_tripwire=actor-method test=compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access markers=CanonicalMirRouteProfile::ScalarActor,Vec::<crate::core::LegacyBodyConsumer>::new(),OwnerTripwireWorker__read__method",
-        "closed_codegen_route_tripwire=actor-method-rejected test=compile_checked_rejects_contract_bearing_actor_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
-        "closed_codegen_route_tripwire=map-any-owned test=compile_checked_routes_closed_map_any_owner_v1_without_legacy_access markers=test_legacy_body_access().is_empty(),MapAnyOwnerAdmission::CompleteCoverage",
-        "closed_codegen_route_tripwire=map-any-rejected test=compile_checked_rejects_map_any_borrowed_access_without_legacy_owner markers=MIR_ROUTE_COVERAGE_ERROR_CODE,test_legacy_body_access().is_empty()",
-        "direct_mir_no_legacy_tripwire=compile_checked_routes_exact_s8_flow_through_canonical_mir",
-        "production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0",
-        "test_only_legacy_file_accessor=src/core/resolved/mod.rs::legacy_body_file",
-        "checked_program_legacy_file_residency=field+construction+initializer-cfg-test-only",
-        "production_legacy_body_file_call_sites=0",
-        "production_raw_ast_call_sites=0",
-        "production_compile_func_legacy_call_sites=0",
-        "test_only_codegen_legacy_body_compiler=src/codegen/func.rs::compile_func_legacy+inner+clean",
-        "production_compile_generic_func_call_sites=0",
-        "test_only_codegen_func_generic_adapter_refs=2 excluded_from_production=1",
-        "test_only_codegen_legacy_adapter_refs=5 excluded_from_production=1",
-        "scalar_ffi_direct_expression_legacy_refs=0",
-        "receiptless_bytecode_ffi=raw_compiler_reject+vm_whole_program_preflight+old_loader_removed",
-        "ast_ffi_compatibility=retired+canonical_mir_runtime_only",
-        "checked_directory_viewer=test-only+no-production-consumers",
-        "scalar_route_receipt_binding=CanonicalMirRouteProfile::ScalarFfi->scalar-ffi-v1 consumer=src/main/canonical_dispatch.rs::fn select_scalar_ffi_route(",
-        "consumer_receipt_binding=native-direct-v1 consumer=src/codegen/compile.rs::pub fn compile_checked(",
-        "consumer_receipt_binding=verify-ffi-v1 consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
-        "native_direct_preflight_receipt_binding=native-direct-v1->bytecode+verifier+native consumer=src/codegen/compile.rs::try_compile_exact_migrated_mir_island(",
-        "verifier_route_receipt_handoff=direct-receipt-semantic-run consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "verifier_ffi_route_receipt_handoff=public-api->profile-helper receipt+capability+proof+provenance consumer=src/verifier/mod.rs",
-        "verifier_default_receipt_reuse=single-batch-witness consumer=src/verifier/mir.rs::fn verify_program_inner(",
-        "verifier_semantic_receipt_required=explicit-reference consumer=src/verifier/mir.rs::verify_program_inner+verify_ffi_program_inner(",
-        "verifier_default_entry_receipt_handoff=single-wrapper-witness consumer=src/verifier/mod.rs::verify_mir+verify_ffi_mir_with_source_hash(",
-        "verifier_default_entry_receipt_profile_order=map-empty-root-root-queries-v1->zero-miss-i32->observer-v1->direct-print->computed-key-get->mixed-snapshot-remove->mixed-snapshot->snapshot-replacement->field-move->ordinary-map-owner-v2->default consumer=src/verifier/mod.rs::pub fn verify_mir(",
-        "bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(",
-        "bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(",
-        "values_crosscall_string_caller_route_binding=V1-index0+V2-index1->distinct-ordered-selector+exact-bytecode-token+Checker-MIR-verifier+CLI-profile-dispatch consumer=src/main/canonical_dispatch.rs+src/interp/bytecode/mir.rs+src/verifier/mod.rs+src/main/verify.rs",
-        "observer_v1_exact_route_binding=CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1->ordinary-map-owner-lifecycle-observer-v1->ordered-default-selector+materialization-receipt-equality+checker-MIR-bytecode-native-verifier-preflight+same-bytecode-and-native-receipt-adapters consumer=src/main/canonical_dispatch.rs+src/main/build.rs+src/interp/bytecode/mir.rs+src/codegen/mir/eligibility.rs",
-        "verifier_unbound_helper=test-only consumer=src/verifier/mir.rs::pub(crate) fn verify_program(",
-        "consumer_receipt_provenance_binding=native-direct-v1 graph=canonical provenance=canonical-mir-graph consumer=src/codegen/compile.rs::pub fn compile_checked(",
-        "consumer_receipt_provenance_binding=verify-ffi-v1 graph=canonical provenance=canonical-mir-graph+source-hash consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
-        "consumer_receipt_profile_binding=verify-ffi-v1 profile=CanonicalMirRouteProfile::ScalarFfi consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
-        "source_hash_entry_binding=blake3-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_source(",
-        "source_hash_parameter_binding=declared-and-forwarded consumer=src/verifier/mod.rs::fn verify_ffi_checked_with_source_hash(",
-        "mir_verifier_source_provenance_binding=single-source-hash consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_source_hash(",
-        "mir_result_identity_binding=source-hash+mir-hash+route-receipt consumer=src/verifier/mod.rs::fn validate_mir_result_provenance(",
-        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "mir_route_receipt_validation_binding=validate-against-program consumer=src/verifier/mod.rs::fn verify_ffi_mir_with_route_receipt_profile(",
-        "mir_route_manifest_replay_binding=manifest-round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_manifest(",
-        "mir_route_manifest_replay_binding=manifest-round-trip+direct-adapter consumer=src/verifier/mod.rs::pub fn verify_ffi_mir_with_route_manifest(",
-        "reference_route_manifest_adapter_binding=manifest-round-trip-to-typed-receipt consumer=src/core/mir/reference.rs",
-        "mir_ffi_capability_order_binding=capability-before-execution consumer=src/verifier/mod.rs::fn verify_ffi_mir_results_with_route_receipt(",
-        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::pub fn verify_mir_with_route_receipt(",
-        "mir_route_receipt_order_binding=receipt-before-adapter consumer=src/verifier/mod.rs::fn verify_ffi_mir_with_route_receipt_profile(",
-        "mir_cli_verifier_route_binding=receipt-bearing-adapter consumer=src/main/verify.rs",
-        "mir_cli_error_boundary_binding=shared-format-cli-error consumer=src/main.rs",
-        "mir_cli_disasm_route_binding=shared-format-cli-error consumer=src/main/disasm_cmd.rs",
-        "mir_cli_route_formatter_provenance_binding=registry-code+mir.route-origin consumer=src/main.rs",
-        "owner_count=2",
-        "audit_status=ok",
+    assert!(
+        !stdout.contains("route_boundary_audit_status=passed"),
+        "a skipped dynamic audit must never emit a success marker: {stdout}"
+    );
+
+    let audit_source = std::fs::read_to_string(&script_path).expect("read audit source");
+    for marker in [
+        "DefaultBytecodeAstCompatibility",
+        "NativeCheckedCompatibilityBoundary",
+        "CheckedVerifierActorProofCompatibility",
+        "FfiVerifierOnlyOwnerSlice",
+        "printf 'classified_production_path_count=%s\\n' \"$owner_count\"",
+        "MIMI_LEGACY_OWNER_AUDIT_SKIP_DYNAMIC_PROBES",
+        "dynamic_probe_skip_is_forbidden",
+        "owner_retirement_status=reachable-compatibility-surfaces-remain;route-and-boundary-evidence-only",
     ] {
         assert!(
-            stdout.lines().any(|line| line.starts_with(expected)),
-            "legacy owner audit omitted required marker {expected}"
+            audit_source.contains(marker),
+            "the audit must retain its exact owner classification and non-retirement status marker: {marker}"
+        );
+    }
+    let static_inventory = std::process::Command::new("bash")
+        .arg(root.join("scripts/audit-mir-legacy-owners-static.sh"))
+        .current_dir(&root)
+        .output()
+        .expect("run independent static boundary inventory");
+    assert!(
+        static_inventory.status.success(),
+        "static boundary inventory failed:\n{}",
+        String::from_utf8_lossy(&static_inventory.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&static_inventory.stdout)
+            .lines()
+            .any(|line| line == "classified_production_path_count=4"),
+        "static boundary inventory must emit the formatted current path count"
+    );
+
+    let direct_contracts = std::fs::read_to_string(root.join("tests/legacy_owner_boundary_api.rs"))
+        .expect("read direct owner contracts");
+    for marker in [
+        "default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts",
+        "bytecode_ast_compatibility_direct_api_rejects_dynamic_protocol_receivers",
+        "native_checked_api_rejects_dynamic_protocol_receivers_without_main_artifact",
+        "checked_verifier_actor_proof_compatibility_preserves_contracts_and_rejects_mir_without_artifacts",
+        "checked_verifier_apis_reject_dynamic_protocol_receivers_without_proof_results",
+        "ffi_verifier_only_owner_proves_and_defers_without_execution_or_file_artifacts",
+        "default_and_explicit_routes_reject_dynamic_protocol_receiver_shapes_without_artifacts",
+    ] {
+        assert!(
+            direct_contracts.contains(marker),
+            "the owner census must retain a named direct route contract: {marker}"
         );
     }
 }
 
 #[test]
-fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
+fn legacy_owner_closed_route_guard_drift_fail_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-context");
     let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
     std::fs::create_dir_all(temp_root.join("scripts")).expect("create context audit temp root");
-    std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
-        .expect("link source tree into context audit temp root");
+    mirror_source_tree_except(
+        &root.join("src"),
+        &root.join("src"),
+        &temp_root.join("src"),
+        &["codegen/tests.rs"],
+    )
+    .expect("mirror source tree into context audit temp root");
+    std::fs::copy(
+        root.join("src/codegen/tests.rs"),
+        temp_root.join("src/codegen/tests.rs"),
+    )
+    .expect("copy codegen tests into context audit temp root");
     std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
         .expect("link integration tests into context audit temp root");
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
-    let tampered_script = source_script.replacen(
-        "    if ! rg -U -q '#\\[cfg\\(test\\)\\]\\n    pub\\(crate\\) fn legacy_body_file\\(' \\\n",
-        "    if ! rg -U -q '#\\[cfg\\(test\\)\\]\\n    pub\\(crate\\) fn missing_legacy_body_file\\(' \\\n",
-        1,
-    );
-    assert!(
-        source_script != tampered_script,
-        "context fixture must replace the expected function marker"
-    );
     let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
-    std::fs::write(&script_path, tampered_script).expect("write tampered context audit script");
-    let output = std::process::Command::new("bash")
-        .arg(&script_path)
-        .current_dir(&temp_root)
-        .output()
-        .expect("run tampered context audit");
-    assert!(
-        !output.status.success(),
-        "tampered accessor context must fail closed:\n{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("owner_audit_error=legacy_body_file_accessor_lost_cfg_test"),
-        "test-only accessor drift omitted fail-closed diagnostic:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    std::fs::write(&script_path, source_script.clone()).expect("write owner audit script");
     let tampered_owner_tripwire_script = source_script.replacen(
         "    compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \\\n",
         "    compile_checked_missing_scalar_actor_route_test \\\n",
@@ -822,6 +725,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered owner-class tripwire audit script");
     let owner_tripwire_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered owner-class tripwire audit");
@@ -849,6 +753,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered closed Actor route audit script");
     let closed_actor_route_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered closed Actor route audit");
@@ -865,8 +770,8 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         String::from_utf8_lossy(&closed_actor_route_output.stderr)
     );
     let tampered_map_tripwire_script = source_script.replacen(
-        "    compile_checked_routes_closed_map_any_owner_v1_without_legacy_access \\\n",
-        "    compile_checked_missing_map_any_owner_route_test \\\n",
+        "    compile_checked_fails_closed_on_reachable_map_any_unpack \\\n",
+        "    compile_checked_missing_map_any_native_gate_test \\\n",
         1,
     );
     assert!(
@@ -877,6 +782,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered Map/Any closed-route tripwire audit script");
     let map_tripwire_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered Map/Any closed-route tripwire audit");
@@ -887,34 +793,57 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     );
     assert!(
         String::from_utf8_lossy(&map_tripwire_output.stderr).contains(
-            "owner_audit_error=missing_codegen_closed_route_tripwire class=map-any-owned"
+            "owner_audit_error=missing_codegen_closed_route_tripwire class=map-any-native-hard-gate"
         ),
-        "missing Map/Any closed-route tripwire omitted fail-closed diagnostic:\n{}",
+        "missing Map/Any direct native-codegen gate omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&map_tripwire_output.stderr)
     );
-    let tampered_map_markers_script =
-        source_script.replacen("    'MapAnyOwnerAdmission::CompleteCoverage'\n", "", 1);
-    assert!(
-        source_script != tampered_map_markers_script,
-        "owner tripwire fixture must remove the MapAny admission marker"
+    std::fs::write(&script_path, &source_script)
+        .expect("restore the Map/Any audit before mutating its direct test contract");
+    let codegen_tests_path = temp_root.join("src/codegen/tests.rs");
+    let codegen_tests_source =
+        std::fs::read_to_string(&codegen_tests_path).expect("read mirrored codegen tests");
+    let map_any_test_start = codegen_tests_source
+        .find("fn compile_checked_fails_closed_on_reachable_map_any_unpack() {")
+        .expect("direct Map/Any native hard-gate test exists");
+    let map_any_test_end = codegen_tests_source[map_any_test_start..]
+        .find("\n#[test]")
+        .map(|offset| map_any_test_start + offset)
+        .expect("Map/Any native hard-gate test has a following test boundary");
+    let map_any_test_body = &codegen_tests_source[map_any_test_start..map_any_test_end];
+    let tampered_map_any_test_body = map_any_test_body.replacen(
+        "Some(crate::diagnostic::codes::E0722)",
+        "Some(crate::diagnostic::codes::E0721)",
+        1,
     );
-    std::fs::write(&script_path, tampered_map_markers_script)
-        .expect("write tampered Map/Any admission-marker audit script");
+    assert_ne!(
+        map_any_test_body, tampered_map_any_test_body,
+        "Map/Any source fixture must mutate its asserted native hard-gate diagnostic"
+    );
+    let tampered_codegen_tests = format!(
+        "{}{}{}",
+        &codegen_tests_source[..map_any_test_start],
+        tampered_map_any_test_body,
+        &codegen_tests_source[map_any_test_end..]
+    );
+    std::fs::write(&codegen_tests_path, tampered_codegen_tests)
+        .expect("write codegen fixture with a changed Map/Any hard-gate assertion");
     let map_markers_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
-        .expect("run tampered Map/Any class-marker audit");
+        .expect("run static audit against a changed Map/Any hard-gate assertion");
     assert!(
         !map_markers_output.status.success(),
-        "Map/Any owner class without operation markers must fail closed:\n{}",
+        "Map/Any native-codegen tripwire without its hard-error marker must fail closed:\n{}",
         String::from_utf8_lossy(&map_markers_output.stdout)
     );
     assert!(
         String::from_utf8_lossy(&map_markers_output.stderr).contains(
-            "owner_audit_error=codegen_closed_route_tripwire_missing_marker class=map-any-owned"
+            "owner_audit_error=codegen_closed_route_tripwire_missing_marker class=map-any-native-hard-gate test=compile_checked_fails_closed_on_reachable_map_any_unpack marker=Some(crate::diagnostic::codes::E0722)"
         ),
-        "empty Map/Any canonical marker configuration omitted fail-closed diagnostic:\n{}",
+        "Map/Any direct native hard-gate drift omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&map_markers_output.stderr)
     );
     let tampered_guard_script = source_script.replacen(
@@ -930,6 +859,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered route guard audit script");
     let guard_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered route guard audit");
@@ -954,6 +884,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered scalar receipt audit script");
     let receipt_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered scalar receipt audit");
@@ -978,6 +909,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered consumer receipt audit script");
     let consumer_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered consumer receipt audit");
@@ -1002,6 +934,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered native preflight audit script");
     let native_preflight_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered native preflight audit");
@@ -1029,6 +962,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered provenance audit script");
     let provenance_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered provenance audit");
@@ -1062,6 +996,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered profile audit script");
     let profile_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered profile audit");
@@ -1089,6 +1024,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered source hash audit script");
     let source_hash_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered source hash audit");
@@ -1116,6 +1052,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered source hash parameter audit script");
     let source_hash_parameter_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered source hash parameter audit");
@@ -1143,6 +1080,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered MIR provenance audit script");
     let mir_provenance_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered MIR provenance audit");
@@ -1170,6 +1108,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered MIR identity audit script");
     let identity_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered MIR identity audit");
@@ -1197,6 +1136,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered route validation audit script");
     let route_validation_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered route validation audit");
@@ -1224,6 +1164,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered manifest replay audit script");
     let manifest_replay_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered manifest replay audit");
@@ -1261,6 +1202,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered capability order audit script");
     let capability_order_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered capability order audit");
@@ -1288,6 +1230,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered route order audit script");
     let route_order_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered route order audit");
@@ -1315,6 +1258,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered CLI route audit script");
     let cli_route_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered CLI route audit");
@@ -1342,6 +1286,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered CLI error boundary audit script");
     let cli_boundary_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered CLI error boundary audit");
@@ -1369,6 +1314,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered disasm renderer audit script");
     let disasm_renderer_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered disasm renderer audit");
@@ -1396,6 +1342,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered disasm rejection audit script");
     let disasm_rejection_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered disasm rejection audit");
@@ -1423,6 +1370,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered CLI classifier audit script");
     let cli_classifier_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered CLI classifier audit");
@@ -1450,6 +1398,7 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
         .expect("write tampered CLI origin audit script");
     let cli_origin_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered CLI origin audit");
@@ -1467,13 +1416,13 @@ fn legacy_owner_accessor_and_closed_route_guard_drift_fail_closed() {
     std::fs::remove_dir_all(&temp_root).expect("remove context audit temp root");
     drop(cleanup);
     let restored = std::process::Command::new("bash")
-        .arg(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .arg(root.join("scripts/audit-mir-legacy-owners-static.sh"))
         .current_dir(&root)
         .output()
         .expect("rerun restored context audit");
     assert!(
         restored.status.success(),
-        "restored owner audit failed after context probe:\n{}",
+        "restored owner static inventory failed after context probe:\n{}",
         String::from_utf8_lossy(&restored.stderr)
     );
 }
@@ -1522,24 +1471,24 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
     let mut first_round_results = Vec::new();
     for round in 1..=2 {
         for test_name in [
-            "compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access",
-            "compile_checked_rejects_generic_integer_side_binding_without_legacy_owner",
-            "compile_checked_routes_generic_local_alias_projection_without_legacy_access",
-            "compile_checked_routes_exact_s8_flow_through_canonical_mir",
-            "compile_checked_routes_multi_transition_flow_through_canonical_mir",
-            "compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access",
-            "compile_checked_rejects_contract_bearing_actor_without_legacy_owner",
-            "compile_checked_routes_concrete_protocol_method_without_legacy_access",
-            "compile_checked_rejects_dynamic_protocol_method_without_legacy_owner",
-            "compile_checked_rejects_trait_impl_specialization_without_legacy_owner",
-            "compile_checked_routes_captured_nested_helper_without_legacy_owner",
-            "compile_checked_routes_scalar_export_wrapper_without_legacy_access",
-            "compile_checked_routes_closed_map_any_owner_v1_without_legacy_access",
-            "compile_checked_rejects_map_any_borrowed_access_without_legacy_owner",
-            "typed_ffi_deferred_predicate_preserves_explicit_compatibility_obligation",
-            "nested_requires_in_expression_block_is_rejected_before_verifier_routing",
-            "typed_ffi_deferred_actual_argument_preserves_old_conditional_proof",
-            "typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
+            "codegen::tests::compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access",
+            "codegen::tests::compile_checked_rejects_used_generic_integer_side_binding_without_legacy_owner",
+            "codegen::tests::compile_checked_routes_generic_local_alias_projection_without_legacy_access",
+            "codegen::tests::compile_checked_routes_exact_s8_flow_through_canonical_mir",
+            "codegen::tests::compile_checked_routes_multi_transition_flow_through_canonical_mir",
+            "codegen::tests::compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access",
+            "codegen::tests::compile_checked_rejects_contract_bearing_actor_without_legacy_owner",
+            "codegen::tests::compile_checked_routes_concrete_protocol_method_without_legacy_access",
+            "codegen::tests::compile_checked_rejects_dynamic_protocol_method_without_legacy_owner",
+            "codegen::tests::compile_checked_rejects_trait_impl_specialization_without_legacy_owner",
+            "codegen::tests::compile_checked_routes_captured_nested_helper_without_legacy_owner",
+            "codegen::tests::compile_checked_routes_scalar_export_wrapper_without_legacy_access",
+            "codegen::tests::compile_checked_fails_closed_on_reachable_map_any_unpack",
+            "codegen::tests::compile_checked_rejects_map_any_borrowed_access_without_legacy_owner",
+            "verifier::tests::typed_ffi_deferred_predicate_preserves_explicit_compatibility_obligation",
+            "verifier::tests::nested_requires_in_expression_block_is_rejected_before_verifier_routing",
+            "verifier::tests::typed_ffi_deferred_actual_argument_preserves_old_conditional_proof",
+            "verifier::tests::typed_ffi_symbolic_string_contexts_defer_without_legacy_access",
         ] {
             let output = std::process::Command::new(&cargo)
                 .args([
@@ -1549,6 +1498,7 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
                     "--lib",
                     test_name,
                     "--",
+                    "--exact",
                     "--test-threads=1",
                 ])
                 .env("LLVM_SYS_181_PREFIX", "/tmp/llvm-wrapper")
@@ -1603,20 +1553,39 @@ fn legacy_owner_evidence_tests_execute_as_lib_tests() {
 #[test]
 fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let path = root.join("scripts/audit-mir-legacy-owners-static.sh");
     let output = std::process::Command::new("bash")
         .arg(&path)
         .current_dir(&root)
         .output()
-        .expect("legacy owner audit must execute");
+        .expect("legacy owner static inventory must execute");
     assert!(
         output.status.success(),
         "legacy owner audit failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let audit_source =
-        std::fs::read_to_string(&path).expect("read legacy owner route audit source");
+    let route_audit_source_path = root.join("scripts/audit-mir-legacy-owners.sh");
+    let audit_source = std::fs::read_to_string(&route_audit_source_path)
+        .expect("read legacy owner route audit source");
+    assert!(
+        audit_source.contains(
+            r#"build_route_context="$(sed -n '/let (compile_result, canonical_default, route_receipt, route_consumer) = if mir {/,/^    let native_data_export_table_receipt =/p' "$build_source")"#
+        ),
+        "Observer V1 route audit must limit native receipt counts to the three compile branches, excluding later census labels"
+    );
+    assert!(
+        stdout.contains(
+            "native_build_route_receipt_binding=three-route-selections+exact-receipt+checked-native-adapter consumer=src/main/build.rs"
+        ),
+        "legacy owner audit must prove each native build branch passes its exact selected receipt to the checked adapter"
+    );
+    assert!(
+        stdout.contains(
+            "checked_route_profile_fallback_binding=scalar-export+actor+ffi+nested+generic-i32+i64+native-data-export+static-generic-trait+default consumer=src/main/canonical_dispatch.rs"
+        ),
+        "legacy owner audit must pin the ordered non-Map fallback profiles before the caller's default receipt"
+    );
     assert!(
         stdout.contains(
             "bytecode_route_receipt_binding=compile_mir_program_inner(program, Some(receipt), validated_narrow_route)"
@@ -1637,7 +1606,7 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
-            "bytecode_ordinary_map_owned_any_v2_route_binding=15-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner("
+            "bytecode_ordinary_map_owned_any_v2_route_binding=21-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner("
         ) && audit_source.contains(
             r#"    bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_values_producer_caller_route \
@@ -1648,6 +1617,49 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
         checker-validator"#
         ),
         "legacy owner audit must pin ValuesProducerCaller's typed route token and exact adapter boundary"
+    );
+    assert!(
+        stdout.contains(
+            "bytecode_result_crosscall_route_binding=V3-index0+V4-index1->separate-profile+validated-Checker-MIR-receipt+typed-token+VM-anchor consumer=src/interp/bytecode/mir.rs+src/interp/bytecode/vm.rs"
+        ) && audit_source.contains(
+            "validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route("
+        ) && audit_source.contains(
+            "ValuesResultCrosscallStringCallerIndex1"
+        ) && audit_source.contains(
+            "ValidatedOrdinaryMapOwnedAnyV2Route::${variant}(&receipt)"
+        ),
+        "legacy owner audit must pin the distinct Result Values caller V3/V4 bytecode adapters and route tokens"
+    );
+    assert!(
+        audit_source.contains(
+            r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_record_unit_route \
+        pub\ fn\ compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_route\( \
+        validate_ordinary_map_owned_any_v2_record_unit_route \
+        ORDINARY_MAP_OWNED_ANY_V2_RECORD_UNIT_PROFILE \
+        RecordUnit"#
+        ),
+        "legacy owner audit must pin RecordUnit to its Checker-aware bytecode adapter and exact profile"
+    );
+    let computed_string_key_owner_chain_adapter_binding = r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_computed_string_key_owner_chain_route \
+        pub\ fn\ compile_mir_program_with_dynamic_keys_get_route\( \
+        validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route \
+        ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE \
+        ComputedStringKeyOwnerChain"#;
+    assert!(
+        audit_source.contains(computed_string_key_owner_chain_adapter_binding),
+        "legacy owner audit must pin ComputedStringKeyOwnerChain to its own receipt-backed bytecode adapter and exact profile"
+    );
+    let persistent_root_alias_replacement_adapter_binding = r#"    bytecode_narrow_map_any_route_adapter \
+        compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route \
+        pub\ fn\ compile_mir_program_with_empty_root_root_queries_v1_route\( \
+        validate_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route \
+        ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE \
+        PersistentRootAliasReplacement"#;
+    assert!(
+        audit_source.contains(persistent_root_alias_replacement_adapter_binding),
+        "legacy owner audit must pin PersistentRootAliasReplacement to its own receipt-backed bytecode adapter and exact profile"
     );
     let crosscall_adapter_binding = r#"    bytecode_narrow_map_any_route_adapter \
         compile_mir_program_with_values_crosscall_string_caller_route \
@@ -1715,7 +1727,7 @@ fn legacy_owner_audit_pins_bytecode_route_receipt_provenance() {
     );
     assert!(
         stdout.contains(
-            "bytecode_vm_ffi_preflight_order=canonical-receipts-before-actor-root+host-symbols-before-execution"
+            "bytecode_vm_ffi_preflight_order=canonical-receipts+ffi-descriptors-before-actor-root;worker-and-normal-host-symbol-preflight-before-first-instruction"
         ),
         "legacy owner audit must pin whole-program FFI receipt preflight before Actor setup and host symbol resolution"
     );
@@ -1794,6 +1806,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         std::fs::read_to_string(&dispatcher_path).expect("read copied default dispatcher source");
     let baseline_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run legacy owner audit against the clean source snapshot");
@@ -1804,8 +1817,13 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         String::from_utf8_lossy(&baseline_output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&baseline_output.stdout).contains("audit_status=ok"),
-        "the clean-source audit must report an explicit PASS marker"
+        String::from_utf8_lossy(&baseline_output.stdout).contains("static_audit_status=ok"),
+        "the clean-source static inventory must report its static-only success marker"
+    );
+    assert!(
+        !String::from_utf8_lossy(&baseline_output.stdout)
+            .contains("route_boundary_audit_status=passed"),
+        "a synthetic source snapshot must not claim the dynamic boundary audit passed"
     );
     let wrong_observer_profile = dispatcher_source.replacen(
         "mimi::core::mir::ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE",
@@ -1820,6 +1838,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write dispatcher source with a mismatched Observer V1 profile");
     let dispatcher_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a mismatched Observer V1 main-route profile");
@@ -1850,6 +1869,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write dispatcher source with V1 profile on the index-one route");
     let swapped_values_crosscall_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a V1 profile on the index-one route");
@@ -1915,6 +1935,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
             .expect("write dispatcher source with reordered early V2 routes");
         let early_order_output = std::process::Command::new("bash")
             .arg(&script_path)
+            .arg("--static-only")
             .current_dir(&temp_root)
             .output()
             .expect("run audit against reordered early V2 routes");
@@ -1945,6 +1966,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write dispatcher source with reordered owner fallbacks");
     let fallback_order_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against reordered owner fallbacks");
@@ -1977,6 +1999,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source without the Map Empty Root selector");
     let map_empty_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a missing Map Empty Root selector");
@@ -2007,6 +2030,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source without the ZeroMissI32 selector");
     let zero_miss_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a missing ZeroMissI32 selector");
@@ -2037,6 +2061,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source with a regressed Observer V1 selector");
     let observer_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a regressed Observer V1 selector");
@@ -2067,6 +2092,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source with a regressed direct-print profile");
     let direct_print_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a regressed direct-print profile selector");
@@ -2095,6 +2121,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source with a regressed narrow profile");
     let verifier_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against regressed verifier profile selector");
@@ -2125,6 +2152,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source with a missing ordered narrow branch");
     let order_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a reordered verifier selector");
@@ -2152,6 +2180,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write verifier source with a regressed default route");
     let default_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a regressed verifier default route");
@@ -2184,6 +2213,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write bytecode adapter source with a regressed route token");
     let bytecode_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against regressed bytecode route token");
@@ -2212,6 +2242,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write bytecode adapter source with a raw receipt in the token slot");
     let raw_receipt_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a bytecode adapter receiving a raw receipt token");
@@ -2240,6 +2271,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write IsEmpty adapter source with a CloneIsolation route token");
     let is_empty_token_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against an IsEmpty adapter with a CloneIsolation token");
@@ -2268,6 +2300,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write GetOrDefaultI32 adapter source with a ZeroMissI32 route token");
     let get_or_default_token_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a mismatched GetOrDefaultI32 route token");
@@ -2321,6 +2354,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
             .unwrap_or_else(|_| panic!("write {variant} adapter source with a CloneIsolation token"));
         let token_output = std::process::Command::new("bash")
             .arg(&script_path)
+            .arg("--static-only")
             .current_dir(&temp_root)
             .output()
             .unwrap_or_else(|_| panic!("run audit against a {variant} token mutation"));
@@ -2352,6 +2386,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write CloneIsolation adapter source with the IsEmpty validator");
     let clone_validator_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a CloneIsolation adapter with the IsEmpty validator");
@@ -2382,6 +2417,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write bytecode adapter source with a dropped Observer V1 receipt transfer");
     let observer_handoff_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a dropped Observer V1 receipt transfer");
@@ -2412,6 +2448,7 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
         .expect("write native adapter source with a mismatched route receipt handoff");
     let native_handoff_output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run audit against a mismatched Observer V1 native receipt handoff");
@@ -2430,21 +2467,21 @@ fn legacy_owner_audit_rejects_map_any_route_regressions() {
 }
 
 #[test]
-fn legacy_owner_audit_rejects_production_legacy_file_residency() {
+fn legacy_owner_audit_rejects_checked_program_surface_body_snapshot() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-file-residency");
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-body-retirement");
     let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
     std::fs::create_dir_all(temp_root.join("scripts"))
-        .expect("create legacy-file residency audit temp root");
+        .expect("create legacy-body retirement audit temp root");
     mirror_source_tree_except(
         &root.join("src"),
         &root.join("src"),
         &temp_root.join("src"),
         &["core/resolved/mod.rs"],
     )
-    .expect("mirror source tree for legacy-file cfg mutations");
+    .expect("mirror source tree for legacy-body mutations");
     std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
-        .expect("link integration tests into legacy-file residency temp root");
+        .expect("link integration tests into legacy-body temp root");
     std::fs::copy(
         root.join("scripts/audit-mir-legacy-owners.sh"),
         temp_root.join("scripts/audit-mir-legacy-owners.sh"),
@@ -2458,55 +2495,55 @@ fn legacy_owner_audit_rejects_production_legacy_file_residency() {
         std::fs::read_to_string(&resolved_path).expect("read copied CheckedProgram source");
     let baseline = std::process::Command::new("bash")
         .arg(temp_root.join("scripts/audit-mir-legacy-owners.sh"))
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
-        .expect("run baseline legacy-file residency audit");
+        .expect("run baseline retired-body audit");
     assert!(
         baseline.status.success(),
-        "unmodified CheckedProgram cfg gates must pass the audit:\n{}",
+        "retired CheckedProgram body snapshot must pass the audit:\n{}",
         String::from_utf8_lossy(&baseline.stderr)
     );
 
-    for (label, guarded, unguarded, diagnostic) in [
+    for (label, injected_source) in [
         (
             "CheckedProgram field",
-            "#[cfg(test)]\n    legacy_file: Arc<File>,",
-            "    legacy_file: Arc<File>,",
-            "owner_audit_error=checked_program_legacy_file_field_lost_cfg_test",
+            resolved_source.replacen(
+                "pub struct CheckedProgram {",
+                "pub struct CheckedProgram {\n    legacy_file: Arc<File>,",
+                1,
+            ),
         ),
         (
-            "legacy snapshot construction",
-            "#[cfg(test)]\n        let legacy_file_clone = File {",
-            "        let legacy_file_clone = File {",
-            "owner_audit_error=checked_program_legacy_file_construction_lost_cfg_test",
+            "CheckedProgram accessor",
+            format!("{resolved_source}\n// pub(crate) fn legacy_body_file(&self) -> &File {{}}\n"),
         ),
         (
-            "CheckedProgram initializer",
-            "#[cfg(test)]\n            legacy_file: Arc::new(legacy_file_clone),",
-            "            legacy_file: Arc::new(legacy_file_clone),",
-            "owner_audit_error=checked_program_legacy_file_initializer_lost_cfg_test",
+            "legacy-body trace consumer",
+            format!("{resolved_source}\n// enum LegacyBodyConsumer {{}}\n"),
         ),
     ] {
-        let changed = resolved_source.replacen(guarded, unguarded, 1);
         assert!(
-            resolved_source != changed,
-            "{label} mutation fixture must remove its cfg(test) gate"
+            resolved_source != injected_source,
+            "{label} mutation fixture must inject the retired owner symbol"
         );
-        std::fs::write(&resolved_path, changed)
-            .unwrap_or_else(|_| panic!("write {label} without its cfg(test) gate"));
+        std::fs::write(&resolved_path, injected_source)
+            .unwrap_or_else(|_| panic!("write injected {label}"));
         let output = std::process::Command::new("bash")
             .arg(temp_root.join("scripts/audit-mir-legacy-owners.sh"))
+            .arg("--static-only")
             .current_dir(&temp_root)
             .output()
-            .unwrap_or_else(|_| panic!("run audit against the ungated {label}"));
+            .unwrap_or_else(|_| panic!("run audit against injected {label}"));
         assert!(
             !output.status.success(),
-            "an ungated {label} must fail the legacy owner audit:\n{}",
+            "reintroduced {label} must fail the legacy owner audit:\n{}",
             String::from_utf8_lossy(&output.stdout)
         );
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
-            "ungated {label} omitted its fail-closed diagnostic:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+                .contains("owner_audit_error=checked_program_surface_body_snapshot_present"),
+            "reintroduced {label} omitted the fail-closed diagnostic:\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         std::fs::write(&resolved_path, &resolved_source)
@@ -2540,11 +2577,13 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
     std::fs::write(&script_path, tampered_script).expect("write tampered audit script");
     let output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run tampered legacy owner audit");
     let repeated = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("repeat tampered legacy owner audit");
@@ -2573,7 +2612,7 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
     );
     std::fs::remove_dir_all(&temp_root).expect("remove audit temp root");
     let restored = std::process::Command::new("bash")
-        .arg(root.join("scripts/audit-mir-legacy-owners.sh"))
+        .arg(root.join("scripts/audit-mir-legacy-owners-static.sh"))
         .current_dir(&root)
         .output()
         .expect("rerun restored legacy owner audit");
@@ -2582,9 +2621,17 @@ fn legacy_owner_evidence_marker_drift_fails_closed() {
         "restored owner audit failed after negative probe:\n{}",
         String::from_utf8_lossy(&restored.stderr)
     );
+    let restored_stdout = String::from_utf8_lossy(&restored.stdout);
+    assert!(restored_stdout.contains("static_audit_status=ok"));
     assert!(
-        String::from_utf8_lossy(&restored.stdout).contains("audit_status=ok"),
-        "restored owner audit omitted its success marker"
+        !restored_stdout
+            .lines()
+            .any(|line| line == "audit_status=ok"),
+        "static inventory must never emit the full audit_status=ok line"
+    );
+    assert!(
+        !restored_stdout.contains("route_boundary_audit_status=passed"),
+        "static inventory must never report the full dynamic audit as passed"
     );
     drop(cleanup);
 }
@@ -2615,28 +2662,30 @@ fn legacy_owner_scalar_zero_owner_evidence_missing_or_forged_fails_closed() {
     .expect("write scalar fixture without zero-owner assertion");
     let missing = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run missing scalar assertion audit");
     assert!(
         !missing.status.success(),
-        "missing scalar zero-owner assertion must fail closed:\n{}",
+        "missing scalar canonical-route assertion must fail closed:\n{}",
         String::from_utf8_lossy(&missing.stdout)
     );
     assert!(
         String::from_utf8_lossy(&missing.stderr).contains(
-            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion"
+            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_canonical_route_assertion"
         ),
-        "missing scalar assertion omitted fail-closed diagnostic:\n{}",
+        "missing scalar route assertion omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&missing.stderr)
     );
     std::fs::write(
         &scalar_fixture,
-        "fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {\n}\n#[test]\nfn forged_marker_outside_scalar_test() { assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty()); }\n",
+        "fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers() {\n}\n#[test]\nfn forged_marker_outside_scalar_test() { assert!(crate::core::mir::CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route)); }\n",
     )
     .expect("write scalar fixture with forged outside marker");
     let forged = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run forged scalar assertion audit");
@@ -2647,7 +2696,7 @@ fn legacy_owner_scalar_zero_owner_evidence_missing_or_forged_fails_closed() {
     );
     assert!(
         String::from_utf8_lossy(&forged.stderr).contains(
-            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion"
+            "owner_audit_error=closed_scalar_zero_owner_evidence_missing_canonical_route_assertion"
         ),
         "forged outside marker omitted fail-closed diagnostic:\n{}",
         String::from_utf8_lossy(&forged.stderr)
@@ -2682,6 +2731,7 @@ fn legacy_owner_scalar_cli_matrix_missing_or_forged_fails_closed() {
     .expect("write CLI fixture missing MIR matrix");
     let missing = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run missing CLI matrix audit");
@@ -2703,6 +2753,7 @@ fn legacy_owner_scalar_cli_matrix_missing_or_forged_fails_closed() {
     .expect("write CLI fixture with forged outside MIR matrix");
     let forged = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run forged CLI matrix audit");
@@ -2724,6 +2775,7 @@ fn legacy_owner_scalar_cli_matrix_missing_or_forged_fails_closed() {
     .expect("write CLI fixture with forged outside contract matrix");
     let forged_contract = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run forged contract matrix audit");
@@ -2768,6 +2820,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     .expect("write CLI fixture missing ABI symbol");
     let missing_abi = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run missing ABI audit");
@@ -2790,6 +2843,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     .expect("write CLI fixture with forged ABI symbol outside test");
     let forged_abi = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run forged ABI audit");
@@ -2812,6 +2866,7 @@ fn legacy_owner_scalar_cli_abi_or_route_evidence_missing_or_forged_fails_closed(
     .expect("write CLI fixture missing route assertion");
     let missing_route = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run missing route audit");
@@ -2838,6 +2893,7 @@ fn legacy_owner_scalar_evidence_markers_have_stable_order() {
     let run = || {
         std::process::Command::new("bash")
             .arg(&path)
+            .arg("--static-only")
             .current_dir(&root)
             .output()
             .expect("legacy owner audit must execute")
@@ -2855,7 +2911,7 @@ fn legacy_owner_scalar_evidence_markers_have_stable_order() {
     };
     let expected = vec![
         "closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers".to_owned(),
-        "closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()".to_owned(),
+        "closed_scalar_zero_owner_evidence_marker=CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route)".to_owned(),
         "closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts".to_owned(),
         "closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]".to_owned(),
         "closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent".to_owned(),
@@ -2894,6 +2950,7 @@ fn legacy_owner_scalar_marker_sequence_injection_fails_closed() {
     std::fs::write(&script_path, tampered_script).expect("write injected marker audit script");
     let output = std::process::Command::new("bash")
         .arg(&script_path)
+        .arg("--static-only")
         .current_dir(&temp_root)
         .output()
         .expect("run injected marker audit");
@@ -2931,6 +2988,7 @@ fn legacy_owner_scalar_marker_sequence_missing_duplicate_or_reordered_fails_clos
         std::fs::write(&script_path, tampered_script).expect("write marker drift script");
         let output = std::process::Command::new("bash")
             .arg(&script_path)
+            .arg("--static-only")
             .current_dir(&temp_root)
             .output()
             .expect("run marker drift audit");
@@ -2985,6 +3043,7 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_repeatable() {
     let run = || {
         std::process::Command::new("bash")
             .arg(&script_path)
+            .arg("--static-only")
             .current_dir(&temp_root)
             .output()
             .expect("run snapshot audit")
@@ -3043,6 +3102,7 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_concurrency_stable() 
                 scope.spawn(move || {
                     std::process::Command::new("bash")
                         .arg(&script_path)
+                        .arg("--static-only")
                         .current_dir(&temp_root)
                         .output()
                         .expect("run concurrent marker audit")
@@ -3124,6 +3184,7 @@ fn legacy_owner_scalar_marker_sequence_failure_snapshot_is_multi_batch_stable() 
                         barrier.wait();
                         std::process::Command::new("bash")
                             .arg(&script_path)
+                            .arg("--static-only")
                             .current_dir(&temp_root)
                             .output()
                             .expect("run batch marker audit")
@@ -3205,6 +3266,7 @@ fn legacy_owner_scalar_marker_mixed_success_failure_batches_are_isolated() {
                 barrier.wait();
                 let output = std::process::Command::new("bash")
                     .arg(&script_path)
+                    .arg("--static-only")
                     .current_dir(&temp_root)
                     .output()
                     .expect("run mixed owner audit");
@@ -3330,6 +3392,7 @@ fn legacy_owner_scalar_marker_repeated_roots_keep_paths_isolated() {
                     barrier.wait();
                     let output = std::process::Command::new("bash")
                         .arg(&script_path)
+                        .arg("--static-only")
                         .current_dir(&temp_root)
                         .output()
                         .expect("run isolated marker audit");
@@ -3961,11 +4024,11 @@ fn legacy_owner_scalar_marker_cross_batch_interleaving_keeps_failure_ownership()
 }
 
 #[test]
-fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
+fn legacy_owner_scalar_marker_recovery_preserves_static_summary() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let script = root.join("scripts/audit-mir-legacy-owners.sh");
+    let script = root.join("scripts/audit-mir-legacy-owners-static.sh");
     let run_audit = || {
         std::process::Command::new("bash")
             .arg(&script)
@@ -3977,19 +4040,22 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| {
-                line.contains("owner_deletion_condition_digest=")
-                    || line.starts_with("owner_deletion_condition_set_digest=")
+                line.starts_with("production_path_roster=")
+                    || line.starts_with("reachable_legacy_ast_owner_count=")
+                    || line.starts_with("reachable_checked_proof_compatibility_owner_count=")
+                    || line.starts_with("checked_native_boundary_count=")
+                    || line.starts_with("owner_retirement_status=")
                     || line.starts_with("closed_scalar_")
                     || line.starts_with("scalar_evidence_marker_sequence_status=")
-                    || line.starts_with("production_legacy_body_file_call_sites=")
-                    || line.starts_with("production_direct_legacy_file_accessors=")
+                    || line.starts_with("checked_program_surface_body_snapshot=")
                     || line.starts_with("production_raw_ast_call_sites=")
                     || line.starts_with("production_compile_func_legacy_call_sites=")
                     || line.starts_with("test_only_codegen_legacy_body_compiler=")
                     || line.starts_with("production_compile_generic_func_call_sites=")
                     || line.starts_with("test_only_codegen_func_generic_adapter_refs=")
                     || line.starts_with("test_only_codegen_legacy_adapter_refs=")
-                    || line.starts_with("owner_count=")
+                    || line.starts_with("classified_production_path_count=")
+                    || line.starts_with("static_audit_status=")
                     || line.starts_with("scalar_ffi_direct_expression_legacy_refs=")
             })
             .map(str::to_owned)
@@ -4002,17 +4068,15 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
         String::from_utf8_lossy(&baseline.stderr)
     );
     let baseline_summary = summary(&baseline);
-    assert!(
-        baseline_summary
-            .iter()
-            .any(|line| line.starts_with("owner_deletion_condition_set_digest=")),
-        "baseline owner audit omitted condition set digest"
-    );
+    assert!(baseline_summary
+        .iter()
+        .any(|line| line == "static_audit_status=ok"));
+    assert!(baseline_summary.iter().any(|line| line == "production_path_roster=DefaultBytecodeAstCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice"));
     assert!(
         baseline_summary.iter().any(|line| {
-            line == "production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0"
+            line == "checked_program_surface_body_snapshot=physically-retired;source_registry=retained;has_imports=retained"
         }),
-        "owner audit must keep metadata reads off the retained legacy AST"
+        "owner audit must keep the original surface-body snapshot physically retired"
     );
 
     let prefix = format!("mimi-legacy-owner-marker-summary-{}-", std::process::id());
@@ -4059,7 +4123,7 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
         assert_eq!(
             summary(&after),
             baseline_summary,
-            "owner condition summary drifted after recovery batch {batch}"
+            "owner static summary drifted after recovery batch {batch}"
         );
         assert_no_legacy_owner_temp_roots(&prefix);
     }
@@ -4067,65 +4131,73 @@ fn legacy_owner_scalar_marker_recovery_preserves_condition_summary() {
 }
 
 #[test]
-fn legacy_owner_condition_digest_drift_fails_closed() {
+fn legacy_owner_path_roster_drift_fails_closed() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-digest-audit");
+    let temp_root = unique_legacy_owner_audit_temp_root("mimi-legacy-owner-roster-audit");
     let cleanup = LegacyOwnerAuditTempRootCleanup(temp_root.clone());
-    std::fs::create_dir_all(temp_root.join("scripts")).expect("create digest audit temp root");
+    std::fs::create_dir_all(temp_root.join("scripts")).expect("create roster audit temp root");
     std::os::unix::fs::symlink(root.join("src"), temp_root.join("src"))
-        .expect("link source tree into digest audit temp root");
+        .expect("link source tree into roster audit temp root");
     std::os::unix::fs::symlink(root.join("tests"), temp_root.join("tests"))
-        .expect("link integration tests into digest audit temp root");
+        .expect("link integration tests into roster audit temp root");
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
-    let expected_digest = "fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3";
     let tampered_script = source_script.replacen(
-        expected_digest,
-        "0000000000000000000000000000000000000000000000000000000000000000",
+        "DefaultBytecodeAstCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|",
+        "UnknownBytecodeCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|",
         1,
     );
+    assert_ne!(
+        source_script, tampered_script,
+        "roster mutation must change one owner identity"
+    );
     let script_path = temp_root.join("scripts/audit-mir-legacy-owners.sh");
-    std::fs::write(&script_path, tampered_script).expect("write tampered digest audit script");
-    let output = std::process::Command::new("bash")
-        .arg(&script_path)
-        .current_dir(&temp_root)
-        .output()
-        .expect("run tampered digest audit script");
-    let repeated = std::process::Command::new("bash")
-        .arg(&script_path)
-        .current_dir(&temp_root)
-        .output()
-        .expect("repeat tampered digest audit script");
+    std::fs::write(&script_path, tampered_script).expect("write tampered roster audit script");
+    let run = || {
+        std::process::Command::new("bash")
+            .arg(&script_path)
+            .arg("--static-only")
+            .current_dir(&temp_root)
+            .output()
+            .expect("run tampered roster audit script")
+    };
+    let output = run();
+    let repeated = run();
     assert_eq!(
         output.status.code(),
         repeated.status.code(),
-        "tampered condition digest exit code drifted across repeats"
+        "tampered owner roster exit code drifted across repeats"
     );
     assert_eq!(
         output.stdout, repeated.stdout,
-        "tampered condition digest stdout drifted across repeats"
+        "tampered owner roster stdout drifted across repeats"
     );
     assert_eq!(
         output.stderr, repeated.stderr,
-        "tampered condition digest stderr drifted across repeats"
+        "tampered owner roster stderr drifted across repeats"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "tampered condition digest must fail closed:\n{}",
+        "tampered owner roster must fail closed:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert!(stderr.contains(
+        "owner_audit_error=UnknownBytecodeCompatibility direct_route_probe_missing=tests/legacy_owner_boundary_api.rs::default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts"
+    ), "tampered owner roster omitted the precise missing-probe diagnostic:\n{stderr}");
     assert!(
-        stderr.contains(
-            "owner_audit_error=CodegenLegacyRemainder owner_deletion_condition_digest expected=0000000000000000000000000000000000000000000000000000000000000000"
-        ),
-        "tampered condition digest omitted expected-value diagnostic:\n{stderr}"
+        stderr.contains("owner_audit_error=production_path_roster_mismatch expected=DefaultBytecodeAstCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice actual=UnknownBytecodeCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice"),
+        "tampered owner roster must fail the exact production roster check:\n{stderr}"
     );
     assert!(
-        stderr.contains(&format!("actual={expected_digest}")),
-        "tampered condition digest omitted actual-value diagnostic:\n{stderr}"
+        String::from_utf8_lossy(&output.stdout).contains("production_path_roster=UnknownBytecodeCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice"),
+        "failed inventory must show the observed roster instead of restating the expected roster"
     );
-    std::fs::remove_dir_all(&temp_root).expect("remove digest audit temp root");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("static_audit_status=failed"),
+        "tampered static roster must report only static failure"
+    );
+    std::fs::remove_dir_all(&temp_root).expect("remove roster audit temp root");
     drop(cleanup);
 }
 
@@ -4518,7 +4590,12 @@ fn legacy_owner_audit_concurrent_failure_snapshot_is_path_ordered() {
     let snapshot = legacy_owner_temp_root_residues(&prefix);
     assert_eq!(snapshot, expected, "residue snapshot must be path ordered");
     let mut observed_errors = errors.lock().expect("lock final snapshot errors").clone();
-    observed_errors.sort();
+    observed_errors.sort_by_key(|error| {
+        error
+            .strip_prefix("remove owner audit temp root ")
+            .and_then(|rest| rest.rsplit_once(": "))
+            .map(|(path, _)| std::path::PathBuf::from(path))
+    });
     assert_eq!(observed_errors.len(), expected.len());
     for (error, path) in observed_errors.iter().zip(&expected) {
         assert!(

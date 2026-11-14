@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 
 #[test]
 fn trait_impl_missing_method() {
@@ -105,14 +106,20 @@ func print_value<T>(x: T) -> string {
     "printed"
 }
 
-func main() -> string {
+func generic_print_result() -> string {
     print_value(42)
+}
+
+func main() -> i32 {
+    let _value = generic_print_result()
+    0
 }
 "#;
     // Generic function without trait constraint should work
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("printed".to_string()))
+        bytecode_call_named(src, "generic_print_result", vec![])
+            .expect("generic trait helper should run"),
+        interp::Value::String(SharedString::new("printed".to_string()))
     );
 }
 
@@ -211,8 +218,7 @@ func main() -> i32 {
 
 #[test]
 fn dyn_trait_dispatch_return() {
-    let v = run_source(
-        r#"
+    let src = r#"
 trait Greeter {
     func greet() -> string;
 }
@@ -237,14 +243,22 @@ impl Greeter for French {
     }
 }
 
-func main() -> string {
+func greet_world() -> string {
     let e = English { name: "World" }
     let d: dyn Greeter = e
     d.greet()
 }
-"#,
+func main() -> i32 {
+    let _value = greet_world()
+    0
+}
+"#;
+    let v = bytecode_call_named(src, "greet_world", vec![])
+        .expect("dynamic trait return helper should run");
+    assert_eq!(
+        v,
+        interp::Value::String(SharedString::new("Hello, World".into()))
     );
-    assert_eq!(v, interp::Value::String(crate::interp::SharedString::new("Hello, World".into())));
 }
 
 #[test]

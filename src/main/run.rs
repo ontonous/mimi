@@ -3,6 +3,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
+#[cfg(test)]
+thread_local! {
+    static LEGACY_AST_COMPILER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 use crate::{is_production, is_sketch, resolve_path};
 use mimi::diagnostic::format::{
     colors_enabled, format_diagnostic, format_diagnostic_with_registry, strip_ansi,
@@ -44,6 +49,221 @@ fn compatibility_runtime_error(error: mimi::interp::InterpError) -> RunError {
         eprintln!("bytecode runtime error: {error}");
         RunError::Ordinary("runtime error".into())
     }
+}
+
+const RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE: &str = "run-legacy-remainder-shift-return-v1";
+
+/// The scalar native/verifier intersection intentionally keeps shifts on the
+/// compatibility route.  The bytecode VM already has a typed MIR lowering for
+/// this exact pure shape, so `run` can retire its AST compiler for the narrow
+/// return-only profile below without widening the native or verifier island.
+/// The complete program is first lowered from CheckedProgram; this predicate
+/// only admits two i32 `Const` instructions, one i32 `ShiftLeft`, and a return
+/// of that result. Any other MIR operation stays on the named compatibility
+/// route.
+fn is_exact_legacy_shift_return_mir(program: &mimi::core::mir::reference::MirProgram) -> bool {
+    use mimi::core::ir::ResolvedBinaryOp;
+    use mimi::core::mir::types::MirAbiClass;
+    use mimi::core::mir::{MirInstructionKind, MirTerminator};
+    use std::collections::BTreeSet;
+
+    if program.functions().len() != 1
+        || !program.ffi_calls().is_empty()
+        || !program.transitions().is_empty()
+    {
+        return false;
+    }
+    let main = mimi::core::resolved::NodeId("function:main".into());
+    let Some(function) = program.functions().get(&main) else {
+        return false;
+    };
+    let is_i32 = |ty: &mimi::core::ir::ResolvedTypeId| {
+        program.type_catalog().get(ty).is_some_and(|desc| {
+            desc.abi
+                == (MirAbiClass::Integer {
+                    bits: 32,
+                    signed: true,
+                })
+        })
+    };
+    if !function.parameters.is_empty()
+        || !function
+            .parameter_permissions
+            .as_ref()
+            .is_some_and(|permissions| permissions.is_empty())
+        || !is_i32(&function.result)
+        || !function.contracts.is_empty()
+        || function.proof_worklist.is_some()
+        || function.blocks.len() != 1
+        || function.values.is_empty()
+        || function.values.values().any(|value| !is_i32(&value.ty))
+    {
+        return false;
+    }
+    let Some(block) = function.blocks.get(&function.entry) else {
+        return false;
+    };
+    if !block.parameters.is_empty() || block.instructions.len() != 3 {
+        return false;
+    }
+
+    let mut constants = BTreeSet::new();
+    let mut shift_result = None;
+    for instruction in &block.instructions {
+        match &instruction.kind {
+            MirInstructionKind::Const {
+                result,
+                literal: mimi::core::ir::ResolvedLiteral::Int(_),
+            } if constants.insert(result.clone()) => {}
+            MirInstructionKind::Binary {
+                result,
+                op: ResolvedBinaryOp::ShiftLeft,
+                left,
+                right,
+            } if shift_result.is_none() => {
+                shift_result = Some((result.clone(), left.clone(), right.clone()));
+            }
+            _ => return false,
+        }
+    }
+    let Some((result, left, right)) = shift_result else {
+        return false;
+    };
+    if constants.len() != 2 || !constants.contains(&left) || !constants.contains(&right) {
+        return false;
+    }
+    matches!(
+        &block.terminator,
+        MirTerminator::Return { value: Some(returned) } if returned == &result
+    )
+}
+
+fn item_meta(item: &mimi::ast::Item) -> mimi::ast::AstNodeMeta {
+    match item {
+        mimi::ast::Item::Func(item) => item.meta,
+        mimi::ast::Item::Type(item) => item.meta,
+        mimi::ast::Item::Actor(item) => item.meta,
+        mimi::ast::Item::Cap(item) => item.meta,
+        mimi::ast::Item::Trait(item) => item.meta,
+        mimi::ast::Item::Impl(item) => item.meta,
+        mimi::ast::Item::ExternBlock(item) => item.meta,
+        mimi::ast::Item::Const { meta, .. } => *meta,
+        mimi::ast::Item::Flow(item) => item.meta,
+        mimi::ast::Item::Session(item) => item.meta,
+    }
+}
+
+/// This surface preflight lets the caller fail closed if canonical lowering
+/// fails for the one intended source shape. Other legacy programs are not
+/// speculatively lowered and keep their existing compatibility path.
+fn is_exact_legacy_shift_return_source(file: &mimi::ast::File) -> bool {
+    use mimi::ast::{BinOp, Expr, Item, Lit, Stmt, Type};
+
+    if !file.imports.is_empty() {
+        return false;
+    }
+    let mut main = None;
+    for item in &file.items {
+        let meta = item_meta(item);
+        let is_prelude = file
+            .sources
+            .key(meta.span.source_id)
+            .is_some_and(|key| key.as_str() == "stdlib:prelude.mimi");
+        if is_prelude {
+            continue;
+        }
+        match item {
+            Item::Func(function) if function.name == "main" && main.is_none() => {
+                main = Some(function);
+            }
+            _ => return false,
+        }
+    }
+    let Some(main) = main else {
+        return false;
+    };
+    let [statement] = main.body.as_slice() else {
+        return false;
+    };
+    if !main.params.is_empty()
+        || !main.generics.is_empty()
+        || !main.where_clause.is_empty()
+        || !main.effects.is_empty()
+        || main.is_comptime
+        || main.is_async
+        || main.extern_abi.is_some()
+        || main.has_requires
+        || main.has_ensures
+        || !main.ret.as_ref().is_some_and(
+            |ty| matches!(ty.unlocated(), Type::Name(name, args) if name == "i32" && args.is_empty()),
+        )
+    {
+        return false;
+    }
+    let Stmt::Expr(expression) = statement.unlocated() else {
+        return false;
+    };
+    matches!(
+        expression.unlocated(),
+        Expr::Binary(BinOp::Shl, left, right)
+            if matches!(left.unlocated(), Expr::Literal(Lit::Int(_)))
+                && matches!(right.unlocated(), Expr::Literal(Lit::Int(_)))
+    )
+}
+
+/// Attempt the return-only shift migration after default dispatch has chosen
+/// a compatibility disposition.  Canonical lowering, the finite MIR shape
+/// check, the bound route receipt, and AST-free bytecode compilation all have
+/// to succeed before the caller changes routes.  A nonmatching source keeps
+/// its existing explicitly reported compatibility behavior; an error after
+/// exact admission is returned and never retried through the AST compiler.
+fn compile_legacy_shift_return_route(
+    checked: &mimi::core::resolved::CheckedProgram,
+    merged_file: &mimi::ast::File,
+) -> Result<
+    Option<(
+        mimi::core::mir::reference::MirProgram,
+        mimi::core::mir::CanonicalMirRouteReceipt,
+        std::sync::Arc<mimi::interp::bytecode::BytecodeProgram>,
+    )>,
+    String,
+> {
+    if !is_exact_legacy_shift_return_source(merged_file) {
+        return Ok(None);
+    }
+    let canonical = crate::canonical_dispatch::build_canonical_program(checked, merged_file)
+        .map_err(|error| {
+            format!("exact shift-return candidate failed canonical MIR lowering: {error}")
+        })?;
+    if !is_exact_legacy_shift_return_mir(&canonical) {
+        return Err(
+            "exact shift-return source candidate did not lower to its required canonical MIR shape"
+                .into(),
+        );
+    }
+    let receipt = canonical.route_receipt(RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE);
+    let bytecode =
+        mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+            .map_err(|errors| {
+                format!(
+            "checked MIR bytecode route `{RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE}` failed: {}",
+            errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+            })?;
+    if bytecode.ast.is_some() {
+        return Err(format!(
+            "checked MIR bytecode route `{RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE}` unexpectedly retained an AST"
+        ));
+    }
+    Ok(Some((canonical, receipt, bytecode)))
+}
+
+fn is_map_set_result_route_profile(profile: &str) -> bool {
+    profile == mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE
 }
 
 fn handle_watch_result(
@@ -192,11 +412,12 @@ fn run_once(
         }
     };
 
-    // Canonical MIR bytecode path.  Explicit --mir always requests it and
-    // fails closed on an unsupported graph.  The default path enters the same
-    // route only after canonical_dispatch has atomically preflighted every
-    // consumer for the migrated production island; it never falls back after
-    // starting canonical execution.
+    // Canonical MIR bytecode path. Explicit --mir always requests it and fails
+    // closed on an unsupported graph. The default path enters the same route
+    // after whole-program preflight, or for the one exact run-only shift
+    // return receipt below. It never falls back after canonical execution
+    // starts.
+    let mut legacy_bytecode_override = None;
     let canonical = if mir {
         if let Some(reason) =
             crate::canonical_dispatch::scalar_ffi_declaration_boundary_diagnostic(&checked_program)
@@ -211,20 +432,66 @@ fn run_once(
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => Some(*canonical),
             crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
-                crate::canonical_dispatch::report_legacy_route(reason);
-                None
+                let can_try_legacy_shift_return = matches!(
+                    reason,
+                    crate::canonical_dispatch::LegacyRouteReason::OutsideMigratedProfile
+                        | crate::canonical_dispatch::LegacyRouteReason::PlainScalarIslandPreflightCompatibility
+                );
+                if can_try_legacy_shift_return {
+                    match compile_legacy_shift_return_route(&checked_program, &merged_file) {
+                        Ok(Some((canonical, receipt, bytecode))) => {
+                            if std::env::var_os("MIMI_VERBOSE").is_some()
+                                || std::env::var_os("MIMI_ROUTE_CENSUS").is_some()
+                            {
+                                eprintln!(
+                                    "canonical route disposition: canonical ({})",
+                                    receipt.profile
+                                );
+                            }
+                            legacy_bytecode_override = Some((receipt, bytecode));
+                            Some(canonical)
+                        }
+                        Ok(None) => {
+                            crate::canonical_dispatch::report_legacy_route(reason);
+                            None
+                        }
+                        Err(message) => return Err(message.into()),
+                    }
+                } else {
+                    crate::canonical_dispatch::report_legacy_route(reason);
+                    None
+                }
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                 return Err(format!("default Canonical MIR route rejected: {reason}").into());
             }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                return Err(
+                    "verifier-only FFI owner slice cannot be used by the run bytecode route".into(),
+                );
+            }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                return Err(
+                    "VerifierOnly direct tuple Get L2 semantic projection cannot be used by the run bytecode route".into(),
+                );
+            }
         }
     };
     if let Some(canonical) = canonical {
-        let receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
-            &checked_program,
-            "run-canonical-v1",
-        );
-        let receipt = canonical.route_receipt(receipt_profile);
+        let receipt_profile = legacy_bytecode_override
+            .as_ref()
+            .map(|(receipt, _)| receipt.profile.clone())
+            .unwrap_or_else(|| {
+                crate::canonical_dispatch::route_receipt_profile_for_checked(
+                    &checked_program,
+                    "run-canonical-v1",
+                )
+                .to_owned()
+            });
+        let receipt = legacy_bytecode_override
+            .as_ref()
+            .map(|(receipt, _)| receipt.clone())
+            .unwrap_or_else(|| canonical.route_receipt(receipt_profile.clone()));
         if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
             let admission_mode = if mir { "explicit-mir" } else { "default" };
             eprintln!(
@@ -241,7 +508,64 @@ fn run_once(
                 receipt.profile, receipt.mir_digest
             );
         }
-        let bytecode_result = if receipt_profile
+        let has_owned_get_result_branch_v3 = checked_program
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt());
+        let bytecode_result = if let Some((bound_receipt, bytecode)) =
+            legacy_bytecode_override.take()
+        {
+            if bound_receipt != receipt || !is_exact_legacy_shift_return_mir(&canonical) {
+                return Err(format!(
+                    "checked MIR bytecode route `{RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE}` lost its exact route binding"
+                )
+                .into());
+            }
+            Ok(bytecode)
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
+        {
+            // The nested Result Values route has a separate CheckedProgram /
+            // MIR bytecode adapter; its duplicate owned-Get receipt cannot
+            // authorize the legacy ResultBranchV3 adapter.
+            mimi::interp::bytecode::compile_mir_program_with_values_local_index_i32_result_branch_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+            && has_owned_get_result_branch_v3
+        {
+            // New/Set ResultBranchV3 ops require the exact Checker/MIR
+            // binding to mint the bytecode VM anchor; a profile receipt alone
+            // cannot authorize these instructions.
+            mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE
+        {
+            mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_print_result_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+        {
+            mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+                &checked_program,
+                &canonical,
+                &receipt,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+        {
+            mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_set_get_any_i32_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
             == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE
         {
             mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_get_or_default_string_route(
@@ -377,6 +701,16 @@ fn run_once(
                 &canonical,
             )
         } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE
+        {
+            // Result branches have their own Checker/MIR receipt and private
+            // AST-free Bytecode anchor; the legacy MapSetDropControl adapter
+            // cannot authorize this graph.
+            mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
             == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE
         {
             // The no-query control has an independent Checker-sealed bytecode
@@ -469,6 +803,30 @@ fn run_once(
                 &checked_program,
                 &canonical,
             )
+        } else if is_map_set_result_route_profile(&receipt_profile)
+        {
+            // SetResult has an independent lineage receipt and VM anchor for
+            // the two persistent-root Result dispatches.
+            mimi::interp::bytecode::compile_mir_program_with_map_set_result_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE
+        {
+            // The String payload and Map ownership lineage are authorized by
+            // the exact Checker receipt, with a String-specific VM anchor.
+            mimi::interp::bytecode::compile_mir_program_with_map_set_get_string_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE
+        {
+            mimi::interp::bytecode::compile_mir_program_with_map_set_get_i32_route(
+                &checked_program,
+                &canonical,
+            )
         } else {
             mimi::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
         };
@@ -499,6 +857,8 @@ fn run_once(
         // G1: install type information from CheckedProgram for type-directed
         // method resolution and parameter type tracking.
         compiler.install_checked_program(&checked_program);
+        #[cfg(test)]
+        LEGACY_AST_COMPILER_CALLS.with(|calls| calls.set(calls.get() + 1));
         let prog = compiler
             .compile_file(&merged_file)
             .map_err(|e| format!("bytecode compile error: {}", e))?;
@@ -700,5 +1060,123 @@ mod typed_trap_tests {
         })
         .expect("successful execution keeps watch running");
         assert_eq!(reports, ["file missing"]);
+    }
+}
+
+#[cfg(test)]
+mod legacy_shift_return_route_tests {
+    use super::*;
+    use mimi::core::mir::reference::{MirReferenceInterpreter, MirRuntimeValue};
+    use mimi::core::resolved::NodeId;
+    use mimi::interp::bytecode::BytecodeVM;
+
+    fn checked_file(source: &str) -> (mimi::core::resolved::CheckedProgram, mimi::ast::File) {
+        let tokens = mimi::lexer::Lexer::new(source).tokenize().expect("lex");
+        let mut file = mimi::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        mimi::loader::merge_prelude_into(&mut file);
+        let checked = mimi::core::check_program(&file)
+            .unwrap_or_else(|diagnostics| panic!("check failed: {diagnostics:?}"));
+        (checked, file)
+    }
+
+    fn temp_source_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "mimi-legacy-shift-return-{}-{}.mimi",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn exact_default_shift_return_runs_ast_free_with_checker_mir_receipt() {
+        let source = "func main() -> i32 { 3 << 2 }";
+        let (checked, file) = checked_file(source);
+        assert!(is_exact_legacy_shift_return_source(&file));
+        assert!(matches!(
+            crate::canonical_dispatch::select_default_route(&checked, &file),
+            crate::canonical_dispatch::DefaultMirRoute::Legacy(
+                crate::canonical_dispatch::LegacyRouteReason::OutsideMigratedProfile
+                    | crate::canonical_dispatch::LegacyRouteReason::PlainScalarIslandPreflightCompatibility
+            )
+        ));
+
+        let (canonical, receipt, bytecode) = compile_legacy_shift_return_route(&checked, &file)
+            .expect("exact route compilation")
+            .expect("the exact shift-return MIR shape is admitted");
+        assert_eq!(receipt.profile, RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE);
+        assert_eq!(receipt.mir_digest, canonical.canonical_digest());
+        assert_eq!(
+            receipt,
+            canonical.route_receipt(RUN_LEGACY_REMAINDER_SHIFT_RETURN_PROFILE)
+        );
+        assert_eq!(receipt.route_identity_digest().len(), 64);
+        assert!(
+            bytecode.ast.is_none(),
+            "MIR bytecode must not retain the source AST"
+        );
+
+        let reference = MirReferenceInterpreter::new(&canonical)
+            .execute_with_output(&NodeId("function:main".into()), &[])
+            .expect("MIR reference execution");
+        assert_eq!(reference.value, MirRuntimeValue::Int(12));
+        assert_eq!(reference.output, "");
+        assert_eq!(
+            BytecodeVM::new(bytecode).run().expect("MIR bytecode run"),
+            12
+        );
+
+        let path = temp_source_path();
+        fs::write(&path, source).expect("write production source");
+        let before = LEGACY_AST_COMPILER_CALLS.with(std::cell::Cell::get);
+        assert_eq!(before, 0, "legacy AST compiler calls must start empty");
+        let run_result = run_once(&path, false, false, "system", false, &[])
+            .expect("default run should use checked MIR bytecode");
+        let after = LEGACY_AST_COMPILER_CALLS.with(std::cell::Cell::get);
+        let _ = fs::remove_file(path);
+        assert_eq!(run_result, 12);
+        assert_eq!(
+            after, before,
+            "the legacy AST compiler call count must stay empty"
+        );
+    }
+
+    #[test]
+    fn shift_return_profile_is_narrow_and_set_result_profile_is_exact() {
+        let (nonmatching_checked, nonmatching_file) =
+            checked_file("func helper() -> i32 {\n    1\n}\nfunc main() -> i32 {\n    3 << 2\n}");
+        assert!(!is_exact_legacy_shift_return_source(&nonmatching_file));
+        assert!(
+            compile_legacy_shift_return_route(&nonmatching_checked, &nonmatching_file)
+                .expect("nonmatching source preflight")
+                .is_none()
+        );
+
+        let (existing_legacy_checked, existing_legacy_file) = checked_file(
+            "func main() -> i32 {\n    let base = 3\n    let shifted = base << 2\n    println(shifted)\n    0\n}",
+        );
+        assert!(!is_exact_legacy_shift_return_source(&existing_legacy_file));
+        assert!(
+            compile_legacy_shift_return_route(&existing_legacy_checked, &existing_legacy_file)
+                .expect("existing shift compatibility preflight")
+                .is_none()
+        );
+
+        assert!(is_map_set_result_route_profile(
+            mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE
+        ));
+        assert!(!is_map_set_result_route_profile(
+            mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE
+        ));
+        assert!(!is_map_set_result_route_profile(
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE
+        ));
+        assert!(!is_map_set_result_route_profile(
+            "ordinary-map-set-result-v1+other"
+        ));
     }
 }

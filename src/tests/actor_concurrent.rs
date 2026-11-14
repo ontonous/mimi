@@ -308,22 +308,22 @@ func main() -> i32 {
 #[test]
 fn actor_await_method() {
     let src = r#"
-actor Counter {
-    count: i32 = 0;
-
-    func increment() {
-        self.count = self.count + 1;
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get() -> i32 {
-        return self.count;
+    transition get(Ready) -> Ready {
+        return Ready { count: self.count }
     }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
-    c.get()
+    let state = c.get();
+    state.count
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(1));
@@ -377,23 +377,23 @@ func main() -> i32 {
 #[test]
 fn actor_await_multiple_methods() {
     let src = r#"
-actor Counter {
-    count: i32 = 0;
-
-    func increment() {
-        self.count = self.count + 1;
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get() -> i32 {
-        return self.count;
+    transition get(Ready) -> Ready {
+        return Ready { count: self.count }
     }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
     c.increment();
-    c.get()
+    let state = c.get();
+    state.count
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(2));

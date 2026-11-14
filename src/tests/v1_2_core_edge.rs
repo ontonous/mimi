@@ -191,9 +191,13 @@ fn float_tiny_values_equal() {
 #[test]
 fn string_index_out_of_bounds() {
     let src = r#"
-func main() -> string {
+func string_index_value() -> string {
     let s = "abc";
     s[10]
+}
+func main() -> i32 {
+    let _ = string_index_value();
+    0
 }
 "#;
     let result = run_source_bytecode_result(src);
@@ -207,9 +211,13 @@ func main() -> string {
 #[test]
 fn string_index_empty() {
     let src = r#"
-func main() -> string {
+func string_index_value() -> string {
     let s = "";
     s[0]
+}
+func main() -> i32 {
+    let _ = string_index_value();
+    0
 }
 "#;
     let result = run_source_bytecode_result(src);
@@ -222,23 +230,31 @@ func main() -> string {
 #[test]
 fn string_index_negative() {
     let src = r#"
-func main() -> string {
+func string_index_value() -> string {
     let s = "abc";
     s[-1]
 }
+func main() -> i32 {
+    if string_index_value() == "c" { 1 } else { 0 }
+}
 "#;
     let result = run_source_bytecode_result(src);
-    assert!(result.is_ok(), "negative index should wrap: {:?}", result);
-    if let Ok(interp::Value::String(s)) = result {
-        assert_eq!(s.as_str(), "c", "negative index -1 should give last char");
-    }
+    assert_eq!(
+        result,
+        Ok(interp::Value::Int(1)),
+        "negative index -1 should give the last character"
+    );
 }
 
 #[test]
 fn string_substring_invalid_bounds() {
     let src = r#"
-func main() -> string {
+func substring_value() -> string {
     "hello".substring(0, 10)
+}
+func main() -> i32 {
+    let _ = substring_value();
+    0
 }
 "#;
     let result = run_source_bytecode_result(src);
@@ -248,8 +264,12 @@ func main() -> string {
 #[test]
 fn string_char_at_out_of_bounds() {
     let src = r#"
-func main() -> string {
+func char_at_value() -> string {
     "abc".char_at(10)
+}
+func main() -> i32 {
+    let _ = char_at_value();
+    0
 }
 "#;
     let result = run_source_bytecode_result(src);
@@ -649,29 +669,29 @@ fn range_values_not_equal() {
 #[test]
 fn sort_empty_list() {
     let src = r#"
-func main() -> List<i32> {
+func sorted_empty() -> List<i32> {
     sort([])
+}
+func main() -> i32 {
+    if len(sorted_empty()) == 0 { 1 } else { 0 }
 }
 "#;
     let result = run_source_bytecode_result(src);
-    assert_eq!(
-        result.expect("src/tests/v1_2_core_edge.rs:534 unwrap failed"),
-        interp::Value::List(Arc::new(vec![]))
-    );
+    assert_eq!(result, Ok(interp::Value::Int(1)));
 }
 
 #[test]
 fn reverse_empty_list() {
     let src = r#"
-func main() -> List<i32> {
+func reversed_empty() -> List<i32> {
     reverse([])
+}
+func main() -> i32 {
+    if len(reversed_empty()) == 0 { 1 } else { 0 }
 }
 "#;
     let result = run_source_bytecode_result(src);
-    assert_eq!(
-        result.expect("src/tests/v1_2_core_edge.rs:545 unwrap failed"),
-        interp::Value::List(Arc::new(vec![]))
-    );
+    assert_eq!(result, Ok(interp::Value::Int(1)));
 }
 
 // ========================================================================

@@ -28,11 +28,13 @@ use super::types::{MirBuiltinKind, MirTypeCatalog};
 use super::{
     MirAggregateKind, MirBlock, MirBlockId, MirBlockParameter, MirCheckerLoanContract,
     MirCheckerLoanEndSite, MirCheckerLoanLocation, MirCheckerMapRootAction,
-    MirCheckerOrdinaryMapOwnerLifecycleAction, MirEdgeId, MirFunction, MirGenericInstanceContract,
-    MirInstance, MirInstanceId, MirInstruction, MirInstructionId, MirInstructionKind,
-    MirListOperation, MirManagedAnyTrapKind, MirOwnershipEvent, MirOwnershipEventKind,
-    MirOwnershipSummary, MirProjection, MirSetOperation, MirSwitchArm, MirSwitchBinding,
-    MirSwitchCase, MirTerminator, MirValue, MirValueId, MirVariantPredicate,
+    MirCheckerOrdinaryMapOwnerLifecycleAction, MirCheckerOrdinaryMapOwnerLifecycleAttempt,
+    MirCheckerOrdinaryMapOwnerObserverV1, MirCheckerOrdinaryMapOwnerObserverV1Attempt, MirEdgeId,
+    MirFunction, MirGenericInstanceContract, MirInstance, MirInstanceId, MirInstruction,
+    MirInstructionId, MirInstructionKind, MirListOperation, MirManagedAnyTrapKind,
+    MirOwnershipEvent, MirOwnershipEventKind, MirOwnershipSummary, MirProjection, MirSetOperation,
+    MirSwitchArm, MirSwitchBinding, MirSwitchCase, MirTerminator, MirValue, MirValueId,
+    MirVariantPredicate,
 };
 
 struct NestedRecordMatchSetup {
@@ -96,6 +98,11 @@ pub fn lower_body(body: &ResolvedBody) -> Result<MirFunction, Vec<MirLoweringErr
         None,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+        None,
+        None,
+        None,
         None,
     )
 }
@@ -114,6 +121,11 @@ pub fn lower_body_with_type_catalog(
         None,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+        None,
+        None,
+        None,
         None,
     )
 }
@@ -140,7 +152,7 @@ fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
 
 /// Values an instruction defines, mirroring the structural validator's
 /// definition sites so pruned-block definitions are tracked identically.
-fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
+pub(super) fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
     use MirInstructionKind::*;
     match kind {
         Actor { operation } => operation.result().into_iter().collect(),
@@ -154,7 +166,9 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
             vec![result]
         }
         OrdinaryMapOwnedGetI32StringV1New { result }
+        | OrdinaryMapOwnedGetI32StringV1NewResult { result }
         | OrdinaryMapOwnedGetI32StringV1Set { result, .. }
+        | OrdinaryMapOwnedGetI32StringV1SetResult { result, .. }
         | OrdinaryMapOwnedGetI32StringV1Remove { result, .. }
         | OrdinaryMapOwnedGetI32StringV1Size { result, .. }
         | OrdinaryMapOwnedGetI32StringV1Contains { result, .. }
@@ -167,16 +181,30 @@ fn instruction_results(kind: &MirInstructionKind) -> Vec<&MirValueId> {
         | OrdinaryMapOwnerLifecycleSet { result, .. }
         | OrdinaryMapOwnerLifecycleRemove { result, .. }
         | OrdinaryMapOwnerLifecycleSize { result, .. }
-        | OrdinaryMapOwnerLifecycleContains { result, .. } => vec![result],
+        | OrdinaryMapOwnerLifecycleContains { result, .. }
+        | OrdinaryMapOwnerLifecycleObserverToJson { result, .. }
+        | OrdinaryMapOwnerLifecycleObserverPrintln { result, .. } => vec![result],
         OrdinaryMapOwnedAnyV2New { result }
         | OrdinaryMapOwnedAnyV2Set { result, .. }
+        | OrdinaryMapOwnedAnyV2SetResult { result, .. }
+        | OrdinaryMapOwnedAnyV2SetAnyResult { result, .. }
+        | OrdinaryMapOwnedAnyV2SetStringResult { result, .. }
+        | OrdinaryMapOwnedAnyV2GetI32Result { result, .. }
+        | OrdinaryMapOwnedAnyV2GetStringResult { result, .. }
         | OrdinaryMapOwnedAnyV2Remove { result, .. }
         | OrdinaryMapOwnedAnyV2Size { result, .. }
         | OrdinaryMapOwnedAnyV2Contains { result, .. }
         | OrdinaryMapOwnedAnyV2GetAny { result, .. }
+        | OrdinaryMapOwnedAnyV2GetAnyResult { result, .. }
+        | OrdinaryMapOwnedAnyV2GetOrDefaultI32 { result, .. }
+        | OrdinaryMapOwnedAnyV2GetOrDefaultString { result, .. }
         | OrdinaryMapOwnedAnyV2Unpack { result, .. }
+        | OrdinaryMapOwnedAnyV2Println { result, .. }
         | OrdinaryMapOwnedAnyV2ValuesUnpack { result, .. }
         | OrdinaryMapOwnedAnyV2Values { result, .. }
+        | OrdinaryMapOwnedAnyV2Keys { result, .. }
+        | OrdinaryMapOwnedAnyV2KeysUnpack { result, .. }
+        | OrdinaryMapOwnedAnyV2DynamicArg0 { result, .. }
         | OrdinaryMapOwnedAnyV2IsEmpty { result, .. } => vec![result],
         Const { result, .. }
         | Load { result, .. }
@@ -230,15 +258,40 @@ fn lower_body_impl(
         crate::core::ir::ResolvedLocalId,
         super::closure_callable::MirClosureCallableBindingV1,
     >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
     resource_analysis: Option<&ResourceAnalysis>,
+    checked_callables: Option<&BTreeMap<NodeId, crate::core::ResolvedCallable>>,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+    ffi_singleton_for_node: Option<NodeId>,
+    checked_constants: Option<&HashMap<NodeId, crate::core::ResolvedConstant>>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
-    // A captured callable needs an explicit environment parameter, a
-    // checker-owned environment layout, and ownership/lifetime rules for the
-    // captured values. `ResolvedBody::captures` records lexical visibility,
-    // but it does not itself materialize any of those ABI facts in MIR. Do not
-    // let a later Load synthesize an undefined local value and rely on the
-    // structural validator to discover the missing environment by accident.
-    if !body.captures.is_empty() {
+    // Only checked nested-callable capture receipts may add hidden parameters.
+    // The plain single-body lowering APIs have no lexical owner witness and
+    // therefore remain fail-closed for captured bodies.
+    let capture_slots = nested_callable_capture_slots
+        .get(&body.owner)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut expected_captures = capture_slots
+        .iter()
+        .map(|slot| slot.capture.clone())
+        .collect::<Vec<_>>();
+    expected_captures.sort();
+    let mut body_captures = body.captures.clone();
+    body_captures.sort();
+    if body.captures.is_empty() && !capture_slots.is_empty()
+        || !body.captures.is_empty() && expected_captures != body_captures
+    {
+        return Err(vec![MirLoweringError {
+            node_id: body.owner.clone(),
+            message: "nested callable capture environment differs from the checked lexical layout"
+                .into(),
+        }]);
+    }
+    if !body.captures.is_empty() && capture_slots.is_empty() {
         return Err(vec![MirLoweringError {
             node_id: body.owner.clone(),
             message: format!(
@@ -265,6 +318,11 @@ fn lower_body_impl(
         type_catalog,
         call_parameter_permissions,
         resource_analysis,
+        ffi_singleton_for_node,
+        checked_callables,
+        excluded_sources,
+        checked_constants,
+        default_argument_namespace: None,
         values: BTreeMap::new(),
         locals: HashMap::new(),
         blocks: BTreeMap::new(),
@@ -274,6 +332,7 @@ fn lower_body_impl(
         transition_result,
         approved_nested_callables: nested_callable_declarations.clone(),
         closure_callable_bindings: closure_callable_bindings.clone(),
+        nested_callable_capture_slots: nested_callable_capture_slots.clone(),
         errors: Vec::new(),
         managed_any_origins: BTreeMap::new(),
     };
@@ -287,13 +346,29 @@ fn lower_body_impl(
         },
     );
 
-    let mut parameters = Vec::with_capacity(body.parameters.len());
+    let mut parameters = Vec::with_capacity(body.parameters.len() + capture_slots.len());
     for parameter in &body.parameters {
         let value = lowerer.local_value(parameter)?;
         parameters.push(value);
     }
+    for slot in capture_slots {
+        let value = lowerer.local_value(&slot.capture)?;
+        if value != slot.callee_parameter {
+            lowerer.error(
+                &body.owner,
+                "nested callable capture parameter identity differs from its checked slot",
+            );
+        }
+        parameters.push(value);
+    }
 
     lowerer.lower_root(&body.root);
+    if let Some(unlowered) = lowerer.ffi_singleton_for_node.take() {
+        lowerer.error(
+            &unlowered,
+            "verifier-only singleton `for` receipt did not identify a root statement",
+        );
+    }
     if !lowerer.approved_nested_callables.is_empty() {
         lowerer.error(
             &body.owner,
@@ -353,6 +428,20 @@ fn lower_body_impl(
     // through the mutable local map here would retain the loop-exit value and
     // prune the actual function parameter from the value catalog, leaving the
     // entry edge and function header dangling.
+    let values_caller_receipt = lowerer.ordinary_map_owned_any_v2_values_caller_receipt_for_body();
+    let values_crosscall_string_caller_receipt = lowerer
+        .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body()
+        .cloned();
+    let map_root_caller_receipt =
+        lowerer.ordinary_map_owned_any_v2_map_root_caller_receipt_for_body();
+    let map_root_get_any_caller_receipt =
+        match lowerer.ordinary_map_owned_any_v2_map_root_get_any_caller_selection() {
+            Ok(receipt) => receipt,
+            Err(message) => {
+                lowerer.error(&body.owner, message);
+                None
+            }
+        };
     let blocks = lowerer.finish_blocks(&entry, &parameters);
     if !lowerer.errors.is_empty() {
         return Err(lowerer.errors);
@@ -361,37 +450,57 @@ fn lower_body_impl(
         owner: body.owner.clone(),
         parameters,
         parameter_permissions: None,
-        result: lowerer
-            .transition_result
-            .clone()
-            .map(|ty| {
-                type_catalog.map_or_else(
-                    || ty.clone(),
-                    |catalog| catalog.canonical_managed_any_type(&ty),
-                )
-            })
-            .unwrap_or_else(|| {
-                type_catalog.map_or_else(
-                    || body.root.ty.clone(),
-                    |catalog| catalog.canonical_managed_any_type(&body.root.ty),
-                )
-            }),
+        result: if lowerer
+            .is_exact_ordinary_map_owned_any_v2_values_producer_return(body.root.result.as_deref())
+        {
+            super::types::ordinary_map_owned_any_v2_values_type_id()
+        } else if lowerer.is_exact_ordinary_map_owned_any_v2_map_root_producer_return(
+            body.root.result.as_deref(),
+        ) {
+            super::types::ordinary_map_owned_any_v2_type_id()
+        } else {
+            lowerer
+                .transition_result
+                .clone()
+                .map(|ty| {
+                    type_catalog.map_or_else(
+                        || ty.clone(),
+                        |catalog| catalog.canonical_managed_any_type(&ty),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    type_catalog.map_or_else(
+                        || body.root.ty.clone(),
+                        |catalog| catalog.canonical_managed_any_type(&body.root.ty),
+                    )
+                })
+        },
         entry: entry.clone(),
         values: lowerer.values,
         blocks,
         contracts: Vec::new(),
         proof_worklist: None,
         ownership: resource_analysis
-            .map(|analysis| ownership_summary(analysis, type_catalog))
+            .map(|analysis| {
+                ownership_summary(
+                    analysis,
+                    type_catalog,
+                    &[],
+                    values_caller_receipt.map(Box::new),
+                    values_crosscall_string_caller_receipt.map(Box::new),
+                    ordinary_map_owned_any_v2_values_result_producer_receipt(analysis)
+                        .map(Box::new),
+                    map_root_caller_receipt.map(Box::new),
+                    map_root_get_any_caller_receipt.map(Box::new),
+                )
+            })
             .unwrap_or_default(),
     };
     if let Some(catalog) = type_catalog {
-        let source_cfg = function.ownership.checker_managed_any_cfg_receipt.clone();
-        function.ownership.checker_managed_any = super::managed_any::seal_checked_lowering(
+        function.ownership.checker_managed_any = super::managed_any::seal_initial_checked_lowering(
             &function,
             catalog,
             &lowerer.managed_any_origins,
-            source_cfg.as_ref(),
         );
     }
     if let Some(catalog) = type_catalog {
@@ -425,6 +534,14 @@ fn lower_body_impl(
 pub fn lower_callable(
     callable: &crate::core::ResolvedCallable,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_checked_callables(callable, &BTreeMap::new(), None)
+}
+
+fn lower_callable_with_checked_callables(
+    callable: &crate::core::ResolvedCallable,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    checked_constants: Option<&HashMap<NodeId, crate::core::ResolvedConstant>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body_impl(
         &callable.body,
         None,
@@ -432,7 +549,12 @@ pub fn lower_callable(
         None,
         &BTreeMap::new(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
         Some(&callable.resources),
+        Some(checked_callables),
+        None,
+        None,
+        checked_constants,
     )?;
     function.parameter_permissions = Some(
         callable
@@ -444,7 +566,36 @@ pub fn lower_callable(
     );
     function.contracts = super::contracts::lower_contracts(callable, &function)?;
     function.proof_worklist = super::contracts::lower_proof_worklist(callable, &function)?;
-    function.ownership = ownership_summary(&callable.resources, None);
+    let values_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_caller_receipt
+        .take();
+    let values_crosscall_string_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt
+        .take();
+    let values_result_producer_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+        .take();
+    let map_root_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_map_root_caller_receipt
+        .take();
+    let map_root_get_any_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt
+        .take();
+    function.ownership = ownership_summary(
+        &callable.resources,
+        None,
+        &callable.signature.generic_parameters,
+        values_caller_receipt,
+        values_crosscall_string_caller_receipt,
+        values_result_producer_receipt,
+        map_root_caller_receipt,
+        map_root_get_any_caller_receipt,
+    );
     function.validate().map_err(|errors| {
         errors
             .into_iter()
@@ -483,6 +634,30 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions(
     )
 }
 
+/// Lower one checker-owned callable with its canonical TypeDesc catalog and
+/// the complete Checker-owned constant directory. Synthetic/source-derived
+/// callables such as closures use this when their body still contains
+/// `ResolvedExprKind::Constant` nodes.
+pub(crate) fn lower_callable_with_type_catalog_and_permissions_and_constants(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    checked_constants: &HashMap<NodeId, crate::core::ResolvedConstant>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_constants(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        None,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+        checked_constants,
+    )
+}
+
 pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition(
     callable: &crate::core::ResolvedCallable,
     type_catalog: &MirTypeCatalog,
@@ -512,6 +687,9 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_an
         transition_result,
         nested_callable_declarations,
         &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
     )
 }
 
@@ -525,6 +703,182 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_an
         crate::core::ir::ResolvedLocalId,
         super::closure_callable::MirClosureCallableBindingV1,
     >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        transition_result,
+        nested_callable_declarations,
+        closure_callable_bindings,
+        nested_callable_capture_slots,
+        checked_callables,
+        excluded_sources,
+        None,
+    )
+}
+
+/// Lower one source-scoped callable with the checker-owned constant directory.
+/// Source filtering must not discard constants: a retained body can reference
+/// a constant whose declaration remains in the complete CheckedProgram.
+pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_constants(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+    closure_callable_bindings: &BTreeMap<
+        crate::core::ir::ResolvedLocalId,
+        super::closure_callable::MirClosureCallableBindingV1,
+    >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+    checked_constants: &HashMap<NodeId, crate::core::ResolvedConstant>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        transition_result,
+        nested_callable_declarations,
+        closure_callable_bindings,
+        nested_callable_capture_slots,
+        checked_callables,
+        excluded_sources,
+        None,
+        None,
+        Some(checked_constants),
+    )
+}
+
+/// Lower one isolated caller for the verifier's CheckedProgram-owned FFI
+/// compatibility adapter.  This is the only entry point that may lower the
+/// exact singleton literal-`for` shape; normal program, backend and CLI
+/// callers continue to use the fail-closed Phase 0 surface.
+#[cfg(test)]
+pub(crate) fn lower_ffi_verifier_caller(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_ffi_verifier_caller_with_helper(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        &BTreeMap::new(),
+        None,
+        None,
+    )
+}
+
+pub(crate) fn lower_ffi_verifier_caller_with_helper(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    ffi_helper: Option<(&crate::core::ResolvedCallable, &NodeId)>,
+    checked_constants: Option<&HashMap<NodeId, crate::core::ResolvedConstant>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    if !callable.owner.0.starts_with("function:")
+        || callable.owner.0["function:".len()..].contains("::")
+        || !callable.signature.generic_parameters.is_empty()
+    {
+        return Err(vec![MirLoweringError {
+            node_id: callable.owner.clone(),
+            message:
+                "verifier-only FFI caller lowering requires a concrete top-level free function"
+                    .into(),
+        }]);
+    }
+    let mut root_for_nodes = callable
+        .body
+        .root
+        .statements
+        .iter()
+        .filter(|statement| matches!(&statement.kind, ResolvedStmtKind::For { .. }))
+        .map(|statement| statement.node_id.clone());
+    let ffi_singleton_for_node = root_for_nodes
+        .next()
+        .filter(|_| root_for_nodes.next().is_none());
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        None,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        checked_callables,
+        None,
+        ffi_singleton_for_node,
+        ffi_helper,
+        checked_constants,
+    )
+}
+
+fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+    closure_callable_bindings: &BTreeMap<
+        crate::core::ir::ResolvedLocalId,
+        super::closure_callable::MirClosureCallableBindingV1,
+    >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+    ffi_singleton_for_node: Option<NodeId>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+        callable,
+        type_catalog,
+        call_parameter_permissions,
+        transition_result,
+        nested_callable_declarations,
+        closure_callable_bindings,
+        nested_callable_capture_slots,
+        checked_callables,
+        excluded_sources,
+        ffi_singleton_for_node,
+        None,
+        None,
+    )
+}
+
+fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: Option<&BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
+    transition_result: Option<crate::core::ResolvedTypeId>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+    closure_callable_bindings: &BTreeMap<
+        crate::core::ir::ResolvedLocalId,
+        super::closure_callable::MirClosureCallableBindingV1,
+    >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
+    checked_callables: &BTreeMap<NodeId, crate::core::ResolvedCallable>,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+    ffi_singleton_for_node: Option<NodeId>,
+    ffi_helper: Option<(&crate::core::ResolvedCallable, &NodeId)>,
+    checked_constants: Option<&HashMap<NodeId, crate::core::ResolvedConstant>>,
 ) -> Result<MirFunction, Vec<MirLoweringError>> {
     let mut function = lower_body_impl(
         &callable.body,
@@ -533,7 +887,12 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_an
         transition_result,
         nested_callable_declarations,
         closure_callable_bindings,
+        nested_callable_capture_slots,
         Some(&callable.resources),
+        Some(checked_callables),
+        excluded_sources,
+        ffi_singleton_for_node,
+        checked_constants,
     )?;
     function.parameter_permissions = Some(
         callable
@@ -541,15 +900,54 @@ pub(crate) fn lower_callable_with_type_catalog_and_permissions_for_transition_an
             .parameters
             .iter()
             .map(|parameter| parameter.permission)
+            .chain(
+                (0..nested_callable_capture_slots
+                    .get(&callable.owner)
+                    .map_or(0, Vec::len))
+                    .map(|_| None),
+            )
             .collect(),
     );
-    function.contracts = super::contracts::lower_contracts(callable, &function)?;
+    function.contracts = if let Some((helper, call_node)) = ffi_helper {
+        super::contracts::lower_contracts_with_ffi_helper(callable, &function, helper, call_node)?
+    } else {
+        super::contracts::lower_contracts(callable, &function)?
+    };
     function.proof_worklist = super::contracts::lower_proof_worklist(callable, &function)?;
     let mut managed_any_seal = function.ownership.checker_managed_any.take();
     if let Some(seal) = &mut managed_any_seal {
         seal.parameter_permissions = function.parameter_permissions.clone();
     }
-    function.ownership = ownership_summary(&callable.resources, Some(type_catalog));
+    let values_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_caller_receipt
+        .take();
+    let values_crosscall_string_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt
+        .take();
+    let values_result_producer_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+        .take();
+    let map_root_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_map_root_caller_receipt
+        .take();
+    let map_root_get_any_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt
+        .take();
+    function.ownership = ownership_summary(
+        &callable.resources,
+        Some(type_catalog),
+        &callable.signature.generic_parameters,
+        values_caller_receipt,
+        values_crosscall_string_caller_receipt,
+        values_result_producer_receipt,
+        map_root_caller_receipt,
+        map_root_get_any_caller_receipt,
+    );
     function.ownership.checker_managed_any = managed_any_seal;
     type_catalog
         .validate_managed_any_function(&function)
@@ -606,6 +1004,9 @@ pub fn lower_program(
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
     for (owner, callable) in program.callables() {
+        if is_comptime_callable(program, owner) {
+            continue;
+        }
         // A generic callable declaration is a checker-owned template, not an
         // executable MIR function. Until concrete MIR instantiation exists,
         // putting its unresolved GenericParameter values into the executable
@@ -615,7 +1016,11 @@ pub fn lower_program(
         if !is_concrete_callable(callable) {
             continue;
         }
-        match lower_callable(callable) {
+        match lower_callable_with_checked_callables(
+            callable,
+            program.callables(),
+            Some(program.constants()),
+        ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
             }
@@ -654,6 +1059,7 @@ pub(crate) fn lower_program_with_type_catalog_and_nested(
         type_catalog,
         nested_callable_declarations,
         &BTreeMap::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -667,6 +1073,10 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
             crate::core::ir::ResolvedLocalId,
             super::closure_callable::MirClosureCallableBindingV1,
         >,
+    >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
     >,
 ) -> Result<BTreeMap<NodeId, MirFunction>, Vec<MirLoweringError>> {
     reject_exported_abi_bodies(program, None)?;
@@ -684,6 +1094,9 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
     let mut errors = Vec::new();
     let empty_nested = BTreeMap::new();
     for (owner, callable) in program.callables() {
+        if is_comptime_callable(program, owner) {
+            continue;
+        }
         // Do not lower a polymorphic template as if it were a concrete
         // function. A concrete instance table is a separate MIR contract;
         // until it exists, the only sound behavior is to omit the template
@@ -691,13 +1104,39 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
         if !is_concrete_callable(callable) {
             continue;
         }
+        // The Result-branch Values producer is an executable Checker-CFG
+        // island of its own. Generic lowering cannot safely reinterpret its
+        // source List<DynamicAny> result as the V2 Values owner, so project
+        // the exact branch receipt before the ordinary body lowerer runs.
+        if let Some(analysis) = program.resource_analyses().get(owner) {
+            if let Some(receipt) =
+                ordinary_map_owned_any_v2_values_result_producer_receipt(analysis)
+                    .filter(|receipt| receipt.owner == *owner)
+            {
+                match ordinary_map_owned_any_v2_values_result_producer_function(
+                    callable,
+                    analysis,
+                    type_catalog,
+                    &receipt,
+                ) {
+                    Ok(function) => {
+                        lowered.insert(owner.clone(), function);
+                    }
+                    Err(message) => errors.push(MirLoweringError {
+                        node_id: owner.clone(),
+                        message,
+                    }),
+                }
+                continue;
+            }
+        }
         // Recoverable transitions lower their returns through the canonical
         // Result envelope. Multi-target transitions (no `fails`) return a
         // checker-owned FlowStateSet union, whose canonical identity lives in
         // the transition's interned signature — the checked callable's own
         // signature result is a unit placeholder for those transitions.
         let transition_result = transition_lowering_result(program, owner, callable);
-        match lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures(
+        match lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
             callable,
             type_catalog,
             Some(&call_parameter_permissions),
@@ -706,6 +1145,12 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
                 .get(owner)
                 .unwrap_or(&empty_nested),
             closure_callable_bindings.get(owner).unwrap_or(&BTreeMap::new()),
+            nested_callable_capture_slots,
+            program.callables(),
+            None,
+            None,
+            None,
+            Some(program.constants()),
         ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -831,6 +1276,16 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
                         node_id: NodeId(instruction.id.as_str().to_owned()),
                         message: format!(
                             "generic callee '{}' belongs to an excluded source and has no canonical MIR instance",
+                            template.0
+                        ),
+                    });
+                    continue;
+                }
+                if is_comptime_callable(program, template) {
+                    errors.push(MirLoweringError {
+                        node_id: NodeId(instruction.id.as_str().to_owned()),
+                        message: format!(
+                            "generic comptime callable '{}' cannot be materialized as executable MIR",
                             template.0
                         ),
                     });
@@ -1098,12 +1553,11 @@ pub fn materialize_concrete_generic_instances_excluding_sources(
             .iter()
             .map(|(_, origin, instruction)| (instruction.id.clone(), origin.clone()))
             .collect::<BTreeMap<_, _>>();
-        let source_cfg = function.ownership.checker_managed_any_cfg_receipt.clone();
-        let mut refreshed = super::managed_any::seal_checked_lowering(
+        let mut refreshed = super::managed_any::refresh_checked_lowering(
             function,
             type_catalog,
             &origins,
-            source_cfg.as_ref(),
+            &previous,
         )
         .ok_or_else(|| {
             vec![MirLoweringError {
@@ -2233,198 +2687,207 @@ fn managed_any_trap_cleanup_source_kind(
     None
 }
 
-fn managed_any_trap_cleanup_setup_instructions(
-    callable: &crate::core::ResolvedCallable,
-    trap: MirManagedAnyTrapKind,
-) -> Option<[MirInstructionId; 4]> {
-    let statement = callable.body.root.statements.first()?;
-    let ResolvedStmtKind::Bind {
-        initializer: Some(initializer),
-        ..
-    } = &statement.kind
-    else {
-        return None;
-    };
-    let result = callable.body.root.result.as_deref()?;
-    let ResolvedExprKind::Binary { left, right, .. } = &result.kind else {
-        return None;
-    };
-    let id =
-        |role: &str, node: &NodeId| MirInstructionId::new(format!("inst:{role}:{}", node.0)).ok();
-    let (third_role, third_node, fourth_role, fourth_node) = match trap {
-        MirManagedAnyTrapKind::DivisionByZeroI32 => {
-            ("const", &left.node_id, "clone", &right.node_id)
-        }
-        MirManagedAnyTrapKind::SignedOverflowI32 => {
-            ("clone", &left.node_id, "const", &right.node_id)
-        }
-    };
-    Some([
-        id("const", &initializer.node_id)?,
-        id("bind", &statement.node_id)?,
-        id(third_role, third_node)?,
-        id(fourth_role, fourth_node)?,
-    ])
-}
-
-fn validate_managed_any_trap_cleanup_template(
-    function: &MirFunction,
-    trap: MirManagedAnyTrapKind,
-    trap_origin: &NodeId,
-    expected_setup_instructions: &[MirInstructionId; 4],
-) -> Result<(MirInstructionId, MirValueId), String> {
-    let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
-    if function.blocks.len() != 1 || function.result != i32_type {
-        return Err("ManagedAny trap-cleanup MIR must be one block with i32 result".into());
-    }
-    let [parameter] = function.parameters.as_slice() else {
-        return Err("ManagedAny trap-cleanup MIR requires one generic parameter".into());
-    };
-    let block = function
-        .blocks
-        .get(&function.entry)
-        .ok_or("ManagedAny trap-cleanup MIR entry block is absent")?;
-    if !block.parameters.is_empty() || block.instructions.len() != 5 {
-        return Err(
-            "ManagedAny trap-cleanup MIR must contain exactly five straight-line setup/trap operations"
-                .into(),
-        );
-    }
-    if function.values.len() != 6
-        || function
-            .values
-            .get(parameter)
-            .is_none_or(|value| value.ty == i32_type)
-    {
-        return Err("ManagedAny trap-cleanup MIR has a noncanonical parameter/value set".into());
-    }
-    let i32_const = |instruction: &MirInstruction| match &instruction.kind {
-        MirInstructionKind::Const {
-            result,
-            literal: ResolvedLiteral::Int(value),
-        } if function
-            .values
-            .get(result)
-            .is_some_and(|value| value.ty == i32_type) =>
-        {
-            Some((result.clone(), *value))
-        }
-        _ => None,
-    };
-    let [first, second, third, fourth, trap_instruction] = block.instructions.as_slice() else {
-        unreachable!("length checked above")
-    };
-    let observed_setup_instructions = [
-        first.id.clone(),
-        second.id.clone(),
-        third.id.clone(),
-        fourth.id.clone(),
-    ];
-    if observed_setup_instructions.as_slice() != expected_setup_instructions.as_slice() {
-        return Err(
-            "ManagedAny trap-cleanup MIR setup ids do not match the exact Checker source nodes"
-                .into(),
-        );
-    }
-    let (initial, initial_value) = i32_const(first)
-        .ok_or("ManagedAny trap-cleanup MIR must begin with one i32 initializer")?;
-    let MirInstructionKind::Move {
-        result: local,
-        source,
-    } = &second.kind
-    else {
-        return Err("ManagedAny trap-cleanup MIR must bind its initializer by Move".into());
-    };
-    if source != &initial
-        || function
-            .values
-            .get(local)
-            .is_none_or(|value| value.ty != i32_type)
-    {
-        return Err(
-            "ManagedAny trap-cleanup MIR binding does not preserve the i32 initializer".into(),
-        );
-    }
-    let (left, right, op, expected_initial) = match trap {
-        MirManagedAnyTrapKind::DivisionByZeroI32 => {
-            let (numerator, one) = i32_const(third)
-                .ok_or("division cleanup MIR must materialize the i32 numerator")?;
-            let MirInstructionKind::Clone {
-                result: divisor,
-                source: divisor_local,
-            } = &fourth.kind
-            else {
-                return Err("division cleanup MIR must read the zero local by Clone".into());
-            };
-            if one != 1
-                || divisor_local != local
-                || function
-                    .values
-                    .get(divisor)
-                    .is_none_or(|value| value.ty != i32_type)
-            {
-                return Err("division cleanup MIR is not the exact i32 1 / 0 body".into());
-            }
-            (numerator, divisor.clone(), ResolvedBinaryOp::Divide, 0)
-        }
-        MirManagedAnyTrapKind::SignedOverflowI32 => {
-            let MirInstructionKind::Clone {
-                result: maximum,
-                source: maximum_local,
-            } = &third.kind
-            else {
-                return Err("overflow cleanup MIR must read the maximum local by Clone".into());
-            };
-            let (one, addend) =
-                i32_const(fourth).ok_or("overflow cleanup MIR must materialize the i32 addend")?;
-            if maximum_local != local
-                || addend != 1
-                || function
-                    .values
-                    .get(maximum)
-                    .is_none_or(|value| value.ty != i32_type)
-            {
-                return Err("overflow cleanup MIR is not the exact i32::MAX + 1 body".into());
-            }
-            (maximum.clone(), one, ResolvedBinaryOp::Add, i32::MAX as i64)
-        }
-    };
-    if initial_value != expected_initial {
-        return Err("ManagedAny trap-cleanup MIR binds the wrong exact i32 constant".into());
-    }
-    let MirInstructionKind::Binary {
-        result,
-        op: observed_op,
-        left: observed_left,
-        right: observed_right,
-    } = &trap_instruction.kind
-    else {
-        return Err("ManagedAny trap-cleanup MIR must end with one Binary operation".into());
-    };
-    let expected_id = MirInstructionId::new(format!("inst:binary:{}", trap_origin.0))
-        .map_err(|error| error.to_string())?;
-    if *observed_op != op
-        || observed_left != &left
-        || observed_right != &right
-        || result.as_str().trim().is_empty()
-        || trap_instruction.id != expected_id
-        || function
-            .values
-            .get(result)
-            .is_none_or(|value| value.ty != i32_type)
-        || !matches!(
-            &block.terminator,
-            MirTerminator::Return { value: Some(returned) } if returned == result
-        )
-    {
-        return Err(
-            "ManagedAny trap-cleanup MIR does not have its exact guaranteed i32 trap".into(),
-        );
-    }
-    Ok((trap_instruction.id.clone(), result.clone()))
-}
-
 fn materialize_generic_instance(
+    callable: &crate::core::ResolvedCallable,
+    template: &NodeId,
+    arguments: &[crate::core::ResolvedTypeId],
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    instruction: Option<&MirInstructionId>,
+) -> Result<(MirInstance, MirFunction), Vec<MirLoweringError>> {
+    if callable.signature.generic_parameters.len() == 1 && arguments.len() == 1 {
+        if let Some(projection) = super::scalar_generic_argument_projection(program, callable) {
+            return materialize_scalar_argument_projection_instance(
+                callable,
+                template,
+                arguments,
+                program,
+                type_catalog,
+                instruction,
+                projection,
+            );
+        }
+    }
+
+    materialize_generic_instance_full(
+        callable,
+        template,
+        arguments,
+        program,
+        type_catalog,
+        instruction,
+    )
+}
+
+/// Materialize the small homogeneous scalar argument-projection profile
+/// separately from the broader generic-instance path. Keeping this bounded
+/// case in its own function avoids reserving the full materializer's large
+/// debug stack frame for the selected-formal projection route.
+fn materialize_scalar_argument_projection_instance(
+    callable: &crate::core::ResolvedCallable,
+    template: &NodeId,
+    arguments: &[crate::core::ResolvedTypeId],
+    program: &CheckedProgram,
+    type_catalog: &MirTypeCatalog,
+    instruction: Option<&MirInstructionId>,
+    (parameter_index, parameter_count): (u32, u32),
+) -> Result<(MirInstance, MirFunction), Vec<MirLoweringError>> {
+    let subject = || {
+        instruction
+            .map(|instruction| NodeId(instruction.as_str().to_owned()))
+            .unwrap_or_else(|| template.clone())
+    };
+    if is_comptime_callable(program, template) {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: format!(
+                "comptime callable '{}' cannot be materialized as an executable MIR instance",
+                template.0
+            ),
+        }]);
+    }
+    if callable.signature.generic_parameters.len() != 1 || arguments.len() != 1 {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message:
+                "canonical generic MIR instances require one type parameter and one scalar argument"
+                    .into(),
+        }]);
+    }
+    let Some(generic_parameter) = callable.signature.generic_parameters.first() else {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic signature parameter is absent".into(),
+        }]);
+    };
+    let generic_id = generic_parameter_type_id(program, generic_parameter).ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic signature parameter has no canonical ResolvedTypeId".into(),
+        }]
+    })?;
+    super::validate_generic_argument_projection_arity(parameter_count).map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message,
+        }]
+    })?;
+    type_catalog
+        .validate_scalar_generic_arguments(arguments)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: format!(
+                    "generic MIR instance argument is outside scalar contract or flat Copy variant contract: {message}"
+                ),
+            }]
+        })?;
+
+    let concrete = arguments.first().cloned().ok_or_else(|| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: "generic instance has no concrete argument".into(),
+        }]
+    })?;
+    let mut function = lower_callable_with_type_catalog_and_permissions_and_constants(
+        callable,
+        type_catalog,
+        None,
+        program.constants(),
+    )
+    .map_err(|mut errors| {
+        for error in &mut errors {
+            error.node_id = subject();
+        }
+        errors
+    })?;
+    super::validate_generic_argument_projection_shape(
+        &function,
+        &generic_id,
+        parameter_index,
+        parameter_count,
+    )
+    .map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message,
+        }]
+    })?;
+
+    let instance_id = MirInstanceId::for_template(template, arguments).map_err(|error| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: error.to_string(),
+        }]
+    })?;
+    let function_owner = NodeId(format!("function:mir:{}", instance_id.as_str()));
+    function.owner = function_owner.clone();
+    function.result = specialize_type_id(&function.result, &generic_id, &concrete, program)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]
+        })?;
+    let mut specialization_errors = Vec::new();
+    for value in function.values.values_mut() {
+        match specialize_type_id(&value.ty, &generic_id, &concrete, program) {
+            Ok(ty) => value.ty = ty,
+            Err(message) => specialization_errors.push(MirLoweringError {
+                node_id: subject(),
+                message,
+            }),
+        }
+    }
+    if !specialization_errors.is_empty() {
+        return Err(specialization_errors);
+    }
+    super::validate_generic_argument_projection_shape(
+        &function,
+        &concrete,
+        parameter_index,
+        parameter_count,
+    )
+    .map_err(|message| {
+        vec![MirLoweringError {
+            node_id: subject(),
+            message: format!("specialized generic argument projection rejected: {message}"),
+        }]
+    })?;
+    let contract = MirGenericInstanceContract::ScalarArgumentProjection {
+        parameter_index,
+        parameter_count,
+    };
+    function.validate().map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| MirLoweringError {
+                node_id: subject(),
+                message: error.to_string(),
+            })
+            .collect::<Vec<_>>()
+    })?;
+    type_catalog
+        .validate_scalar_generic_arguments(arguments)
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message: format!(
+                    "specialized generic TypeDesc is outside scalar contract or flat Copy variant contract: {message}"
+                ),
+            }]
+        })?;
+    let instance = MirInstance {
+        id: instance_id,
+        template: template.clone(),
+        arguments: arguments.to_vec(),
+        function: function_owner,
+        contract,
+    };
+    Ok((instance, function))
+}
+
+fn materialize_generic_instance_full(
     callable: &crate::core::ResolvedCallable,
     template: &NodeId,
     arguments: &[crate::core::ResolvedTypeId],
@@ -2437,6 +2900,15 @@ fn materialize_generic_instance(
             .map(|instruction| NodeId(instruction.as_str().to_owned()))
             .unwrap_or_else(|| template.clone())
     };
+    if is_comptime_callable(program, template) {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: format!(
+                "comptime callable '{}' cannot be materialized as an executable MIR instance",
+                template.0
+            ),
+        }]);
+    }
     if callable.signature.generic_parameters.len() != 1 || arguments.len() != 1 {
         return Err(vec![MirLoweringError {
             node_id: subject(),
@@ -2543,6 +3015,19 @@ fn materialize_generic_instance(
     let is_identity = callable.signature.parameters.len() == 1
         && first_parameter.is_some_and(|parameter| parameter.ty == generic_id)
         && callable.signature.result == generic_id;
+    if callable.signature.parameters.len()
+        > super::SCALAR_ARGUMENT_PROJECTION_MAX_PARAMETERS as usize
+    {
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message: format!(
+                "{}/NITS: generic callable arity exceeds the shared scalar projection bytecode register ABI limit of {}",
+                super::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                super::SCALAR_ARGUMENT_PROJECTION_MAX_PARAMETERS
+            ),
+        }]);
+    }
+    let argument_projection = super::scalar_generic_argument_projection(program, callable);
     // `T -> T` is only the signature envelope.  ManagedAnyIdentity is a
     // narrower executable profile: the Checker body itself must be the
     // direct one-block identity (`value` as its implicit result).  A helper
@@ -2923,6 +3408,8 @@ fn materialize_generic_instance(
                 } else {
                     catalog.validate_generic_identity_arguments(arguments)
                 }
+            } else if argument_projection.is_some() {
+                catalog.validate_scalar_generic_arguments(arguments)
             } else if is_owned_record_update {
                 if arguments.len() != 1 {
                     Err(format!(
@@ -3016,15 +3503,74 @@ fn materialize_generic_instance(
     // Generic List operations need their checker-derived receipt while the
     // polymorphic body is lowered. The receipt is specialized below after
     // every MIR value has received its concrete TypeDesc identity.
-    let mut function =
-        lower_callable_with_type_catalog(callable, type_catalog).map_err(|mut errors| {
-            for error in &mut errors {
-                error.node_id = subject();
-            }
-            errors
-        })?;
+    let mut function = lower_callable_with_type_catalog_and_permissions_and_constants(
+        callable,
+        type_catalog,
+        None,
+        program.constants(),
+    )
+    .map_err(|mut errors| {
+        for error in &mut errors {
+            error.node_id = subject();
+        }
+        errors
+    })?;
     if is_identity && !is_owned_string_identity {
         if let Err(message) = super::validate_generic_identity_shape(&function, &generic_id) {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]);
+        }
+    }
+    // The untouched polymorphic body contains `T`, so it deliberately has no
+    // ManagedAny value seal. Freeze the exact Checker identity template now;
+    // only this proof may authorize the concrete Clone/Drop rewrite below.
+    let managed_any_identity_template = if is_managed_any_identity {
+        Some(
+            super::managed_any::checked_managed_any_identity_template(
+                callable,
+                program,
+                type_catalog,
+                &function,
+                arguments,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message,
+                }]
+            })?,
+        )
+    } else {
+        None
+    };
+    // Capture trap-cleanup authority from the original Checker-owned generic
+    // body, before owner/type specialization mutates its MIR representation.
+    let managed_any_trap_cleanup_template = if let Some(trap) = managed_any_trap_cleanup {
+        Some(
+            super::managed_any::checked_managed_any_generic_trap_cleanup_template(
+                callable,
+                program,
+                type_catalog,
+                &function,
+                arguments,
+                trap,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: subject(),
+                    message,
+                }]
+            })?,
+        )
+    } else {
+        None
+    };
+    if let Some((index, count)) = argument_projection {
+        if let Err(message) =
+            super::validate_generic_argument_projection_shape(&function, &generic_id, index, count)
+        {
             return Err(vec![MirLoweringError {
                 node_id: subject(),
                 message,
@@ -3069,6 +3615,16 @@ fn materialize_generic_instance(
     }
     if !specialization_errors.is_empty() {
         return Err(specialization_errors);
+    }
+    if let Some((index, count)) = argument_projection {
+        if let Err(message) =
+            super::validate_generic_argument_projection_shape(&function, &concrete, index, count)
+        {
+            return Err(vec![MirLoweringError {
+                node_id: subject(),
+                message: format!("specialized generic argument projection rejected: {message}"),
+            }]);
+        }
     }
     // A generic List len/reverse facade receives a caller-side clone so the
     // source local remains available for its own Drop.  The lowered facade
@@ -3214,7 +3770,6 @@ fn materialize_generic_instance(
             }]);
         }
         let return_value = result.clone();
-        let clone_instruction_id = clone_instruction.id.clone();
         let clone_contract = super::MirManagedAnyContract {
             schema_version: super::managed_any::MIR_MANAGED_ANY_SCHEMA_VERSION,
             descriptor_version: super::managed_any::MIR_MANAGED_ANY_DESCRIPTOR_VERSION,
@@ -3256,9 +3811,6 @@ fn materialize_generic_instance(
                 contract: Some(drop_contract),
             },
         });
-        let mut origins = BTreeMap::new();
-        origins.insert(clone_instruction_id.clone(), clone_origin.clone());
-        origins.insert(drop_instruction_id.clone(), drop_origin.clone());
         // The specialized identity is deliberately a closed one-block body.
         // Its template CFG receipt names the generic owner and therefore
         // cannot authorize the post-specialization owner identity.  A
@@ -3266,61 +3818,16 @@ fn materialize_generic_instance(
         // snapshot; retaining the template receipt would make the canonical
         // instance fail the owner/entry correspondence check.
         function.ownership.checker_managed_any_cfg_receipt = None;
-        let source_cfg = function.ownership.checker_managed_any_cfg_receipt.clone();
-        let mut seal = super::managed_any::seal_checked_lowering(
+        let seal = super::managed_any::seal_checked_managed_any_identity_instance(
             &function,
             type_catalog,
-            &origins,
-            source_cfg.as_ref(),
-        )
-        .ok_or_else(|| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny identity specialization produced no owner seal".into(),
-            }]
-        })?;
-        seal.generic_identity = Some(
-            super::managed_any::MirCheckerManagedAnyGenericIdentitySeal {
-                template: template.clone(),
-                instance: instance_id.clone(),
-                type_argument: concrete.clone(),
-                managed_type_argument: managed_type_argument.clone(),
-                parameter: parameter.clone(),
-                return_value: return_value.clone(),
-                clone_instruction: clone_instruction_id,
-                drop_instruction: drop_instruction_id,
-                clone_origin,
-                drop_origin,
-            },
-        );
-        function.ownership.checker_managed_any = Some(seal);
-    }
-    if let Some(trap) = managed_any_trap_cleanup {
-        let trap_origin = callable
-            .body
-            .root
-            .result
-            .as_deref()
-            .map(|expression| expression.node_id.clone())
-            .ok_or_else(|| {
+            managed_any_identity_template.ok_or_else(|| {
                 vec![MirLoweringError {
                     node_id: subject(),
-                    message: "ManagedAny trap-cleanup Checker body has no arithmetic result".into(),
-                }]
-            })?;
-        let setup_instructions = managed_any_trap_cleanup_setup_instructions(callable, trap)
-            .ok_or_else(|| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: "ManagedAny trap-cleanup Checker source nodes cannot be identified"
+                    message: "ManagedAny identity specialization has no Checker template proof"
                         .into(),
                 }]
-            })?;
-        let (trap_instruction_id, trap_result) = validate_managed_any_trap_cleanup_template(
-            &function,
-            trap,
-            &trap_origin,
-            &setup_instructions,
+            })?,
         )
         .map_err(|message| {
             vec![MirLoweringError {
@@ -3328,128 +3835,28 @@ fn materialize_generic_instance(
                 message,
             }]
         })?;
-        let managed_type_argument = type_catalog.canonical_managed_any_type(&concrete);
-        type_catalog
-            .validate_managed_any_glue(&managed_type_argument)
-            .map_err(|message| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: format!("ManagedAny trap-cleanup TypeDesc is invalid: {message}"),
-                }]
-            })?;
-        let [parameter] = function.parameters.as_slice() else {
-            return Err(vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny trap-cleanup specialization must have one parameter".into(),
-            }]);
-        };
-        if function.result != crate::core::ir::primitive_type_id(PrimitiveType::I32)
-            || function
-                .values
-                .get(parameter)
-                .is_none_or(|value| value.ty != managed_type_argument)
-        {
-            return Err(vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny trap-cleanup specialization failed canonical parameter/result ABI substitution".into(),
-            }]);
-        }
-        let drop_origin = callable.body.root.node_id.clone();
-        let drop_instruction_id = MirInstructionId::new(format!(
-            "inst:managed_any_trap_cleanup_drop:{}",
-            instance_id.as_str()
-        ))
-        .map_err(|error| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: error.to_string(),
-            }]
-        })?;
-        let drop_contract = super::MirManagedAnyContract {
-            schema_version: super::managed_any::MIR_MANAGED_ANY_SCHEMA_VERSION,
-            descriptor_version: super::managed_any::MIR_MANAGED_ANY_DESCRIPTOR_VERSION,
-            owner: function.owner.clone(),
-            origin: drop_origin.clone(),
-            source: parameter.clone(),
-            result: None,
-            source_type: managed_type_argument.clone(),
-            target_type: None,
-            checker_conversion: None,
-            checker_source_type: None,
-            expected_kind: None,
-        };
-        let block = function.blocks.get_mut(&function.entry).ok_or_else(|| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny trap-cleanup entry block is absent".into(),
-            }]
-        })?;
-        if block.instructions.len() != 5 {
-            return Err(vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny trap-cleanup setup changed after its Checker receipt".into(),
-            }]);
-        }
-        block.instructions.insert(
-            4,
-            MirInstruction {
-                id: drop_instruction_id.clone(),
-                kind: MirInstructionKind::ManagedAny {
-                    result: None,
-                    source: parameter.clone(),
-                    operation: super::MirManagedAnyOperation::Drop,
-                    contract: Some(drop_contract),
-                },
-            },
-        );
-        let mut origins = BTreeMap::new();
-        origins.insert(drop_instruction_id.clone(), drop_origin.clone());
-        // The specialized trap-cleanup body is a closed one-block ABI. Its
-        // template CFG receipt names the generic source owner and therefore
-        // cannot authorize the post-specialization owner identity. As with
-        // the ManagedAny identity specialization above, validate this exact
-        // shape structurally rather than retaining a stale source snapshot.
-        function.ownership.checker_managed_any_cfg_receipt = None;
-        let source_cfg = function.ownership.checker_managed_any_cfg_receipt.clone();
-        let mut seal = super::managed_any::seal_checked_lowering(
-            &function,
-            type_catalog,
-            &origins,
-            source_cfg.as_ref(),
-        )
-        .ok_or_else(|| {
-            vec![MirLoweringError {
-                node_id: subject(),
-                message: "ManagedAny trap-cleanup specialization produced no owner seal".into(),
-            }]
-        })?;
-        seal.generic_trap_cleanup = Some(
-            super::managed_any::MirCheckerManagedAnyGenericTrapCleanupSeal {
-                template: template.clone(),
-                instance: instance_id.clone(),
-                type_argument: concrete.clone(),
-                managed_type_argument,
-                parameter: parameter.clone(),
-                trap,
-                setup_instructions,
-                drop_instruction: drop_instruction_id,
-                trap_instruction: trap_instruction_id,
-                trap_result,
-                drop_origin,
-                trap_origin,
-            },
-        );
         function.ownership.checker_managed_any = Some(seal);
-        type_catalog
-            .validate_managed_any_function(&function)
-            .map_err(|message| {
-                vec![MirLoweringError {
-                    node_id: subject(),
-                    message: format!(
-                        "ManagedAny trap-cleanup receipt failed validation: {message}"
-                    ),
-                }]
-            })?;
+    }
+    if managed_any_trap_cleanup.is_some() {
+        let template = managed_any_trap_cleanup_template.ok_or_else(|| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message:
+                    "ManagedAny trap-cleanup specialization has no Checker source template seal"
+                        .into(),
+            }]
+        })?;
+        super::managed_any::seal_checked_managed_any_generic_trap_cleanup_instance(
+            &mut function,
+            type_catalog,
+            template,
+        )
+        .map_err(|message| {
+            vec![MirLoweringError {
+                node_id: subject(),
+                message,
+            }]
+        })?;
     }
     if nested_list_construct {
         let parameter = function.parameters.first().cloned().ok_or_else(|| {
@@ -4661,6 +5068,11 @@ fn materialize_generic_instance(
         } else {
             MirGenericInstanceContract::ScalarIdentity
         }
+    } else if let Some((parameter_index, parameter_count)) = argument_projection {
+        MirGenericInstanceContract::ScalarArgumentProjection {
+            parameter_index,
+            parameter_count,
+        }
     } else if has_generic_variant_projection_fallback {
         let contract = detect_scalar_variant_projection_fallback_contract(
             &function,
@@ -4738,8 +5150,12 @@ fn materialize_generic_instance(
             MirGenericInstanceContract::ScalarListFacade { operation }
         }
     } else {
-        let operation = detect_scalar_set_facade_operation(&function, type_catalog, &subject())?;
-        MirGenericInstanceContract::ScalarSetFacade { operation }
+        return Err(vec![MirLoweringError {
+            node_id: subject(),
+            message:
+                "generic MIR instance body does not match an admitted canonical scalar contract"
+                    .into(),
+        }]);
     };
     if is_owned_string_identity {
         if let Err(message) = super::validate_owned_string_identity_shape(&function, &concrete) {
@@ -8104,6 +8520,23 @@ fn is_concrete_callable(callable: &crate::core::ResolvedCallable) -> bool {
     callable.signature.generic_parameters.is_empty()
 }
 
+pub(crate) fn is_comptime_callable(program: &CheckedProgram, owner: &NodeId) -> bool {
+    let mut current = owner.clone();
+    loop {
+        if program
+            .functions()
+            .get(&current)
+            .is_some_and(|function| function.is_comptime)
+        {
+            return true;
+        }
+        let Some((parent, _)) = current.0.rsplit_once("/function:") else {
+            return false;
+        };
+        current = NodeId(parent.to_owned());
+    }
+}
+
 fn has_ordinary_map_owned_get_i32_string_v1_get_attempts(analysis: &ResourceAnalysis) -> bool {
     analysis
         .ordinary_map_owned_get_i32_string_v1_operation_attempts
@@ -8118,22 +8551,707 @@ fn has_ordinary_map_owned_get_i32_string_v1_get_attempts(analysis: &ResourceAnal
         })
 }
 
+fn ordinary_map_owned_any_v2_profile_selected(
+    analysis: Option<&ResourceAnalysis>,
+    type_catalog: Option<&MirTypeCatalog>,
+) -> bool {
+    let Some(analysis) = analysis else {
+        return false;
+    };
+    analysis.has_ordinary_map_owned_any_v2_receipt()
+        && analysis.ordinary_map_owned_any_v2_cfg_receipt.is_some()
+        && type_catalog.is_some_and(|catalog| {
+            catalog
+                .get(&super::types::ordinary_map_owned_any_v2_type_id())
+                .is_some()
+        })
+}
+
+fn ordinary_map_owned_any_v2_values_result_producer_receipt(
+    analysis: &ResourceAnalysis,
+) -> Option<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt> {
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as Profile;
+    let cfg = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref()?;
+    let producer = cfg.values_result_producer_receipt.as_ref()?;
+    let string_caller_matches = cfg
+        .values_crosscall_string_caller_receipt
+        .as_ref()
+        .is_some_and(|caller| {
+            matches!(caller.profile_version, Profile::V3 | Profile::V4)
+                && caller.producer_result_receipt.as_ref() == Some(producer)
+        });
+    let length_caller_matches = cfg
+        .values_result_producer_caller_receipt
+        .as_ref()
+        .is_some_and(|caller| {
+            caller.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerProfileVersion::V1
+                && caller.producer_result == *producer
+                && caller.producer_owner == producer.owner
+                && caller.producer_target == producer.owner
+                && caller.producer_values_operation == producer.values_operation
+                && caller.producer_success_result == producer.success_result
+                && caller.snapshot_type == producer.snapshot_type
+        });
+    (string_caller_matches || length_caller_matches).then(|| producer.clone())
+}
+
+/// Keep the cross-call String extraction edge tied to the exact Checker
+/// producer/caller receipt.  The caller's surface type is still bare
+/// `List`, so this deliberately does not infer Values ownership from that
+/// type; the producer's returned Values receipt supplies the owner identity.
+fn ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+    producer: &crate::core::ResolvedCallable,
+    caller: &crate::core::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt,
+) -> bool {
+    use crate::core::ir::{
+        CheckedConversionKind, ResolvedBinaryOp, ResolvedCallee, ResolvedExprKind as E,
+        ResolvedLiteral, ResolvedPatternKind as P, ResolvedStmtKind as S,
+    };
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as Profile;
+
+    // Result-branch producers have a distinct, full-CFG Checker receipt.
+    // Keep them out of the straight-line return recognizer below: its
+    // ContainerErase tail is intentionally a single-block contract.
+    if matches!(receipt.profile_version, Profile::V3 | Profile::V4) {
+        return ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
+            producer, caller, receipt,
+        );
+    }
+
+    fn binding(
+        statement: &crate::core::ir::ResolvedStmt,
+    ) -> Option<(&ResolvedLocalId, &ResolvedExpr)> {
+        let S::Bind {
+            pattern:
+                crate::core::ir::ResolvedPattern {
+                    kind:
+                        P::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        Some((local, initializer))
+    }
+
+    fn direct_load(expression: &ResolvedExpr, local: &ResolvedLocalId) -> bool {
+        matches!(&expression.kind, E::Load(place) if place.projections.is_empty() && &place.base == local)
+    }
+
+    fn direct_local_load(expression: &ResolvedExpr) -> Option<&ResolvedLocalId> {
+        match &expression.kind {
+            E::Load(place) if place.projections.is_empty() => Some(&place.base),
+            _ => None,
+        }
+    }
+
+    fn exact_drop(statement: &crate::core::ir::ResolvedStmt, local: &ResolvedLocalId) -> bool {
+        matches!(&statement.kind, S::Drop(places)
+            if matches!(places.as_slice(), [place] if place.projections.is_empty() && &place.base == local))
+    }
+
+    fn producer_set_entry(
+        producer: &crate::core::ResolvedCallable,
+        producer_return: &crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnReceipt,
+        action: &crate::core::OrdinaryMapOwnedAnyV2Action,
+        string_type: &crate::core::ir::ResolvedTypeId,
+    ) -> Option<(String, String)> {
+        let (result_local, initializer) =
+            producer.body.root.statements.iter().find_map(|statement| {
+                let (local, initializer) = binding(statement)?;
+                (initializer.node_id == action.point).then_some((local, initializer))
+            })?;
+        let E::Call(call) = &initializer.kind else {
+            return None;
+        };
+        if !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_set") {
+            return None;
+        }
+        let [root_argument, key_argument, payload_argument] = call.arguments.as_slice() else {
+            return None;
+        };
+        let E::Literal(ResolvedLiteral::String(key)) = &key_argument.value.kind else {
+            return None;
+        };
+        let source_local = direct_local_load(&root_argument.value)?;
+        let payload_local = direct_local_load(&payload_argument.value)?;
+        let settlements = producer_return
+            .payload_settlements
+            .iter()
+            .filter(|settlement| {
+                settlement.local == *payload_local
+                    && settlement.set_points.len() == 1
+                    && settlement.set_points[0] == action.point
+            })
+            .collect::<Vec<_>>();
+        let [settlement] = settlements.as_slice() else {
+            return None;
+        };
+        let (binding_local, payload_initializer) =
+            producer.body.root.statements.iter().find_map(|statement| {
+                let (local, initializer) = binding(statement)?;
+                (local == payload_local && statement.node_id == settlement.binding_point)
+                    .then_some((local, initializer))
+            })?;
+        let E::Literal(ResolvedLiteral::String(payload_literal)) = &payload_initializer.kind else {
+            return None;
+        };
+        if result_local != &action.local
+            || action.source_local.as_ref() != Some(source_local)
+            || action.key.as_ref() != Some(&key_argument.value.node_id)
+            || action.key_type.as_ref() != Some(string_type)
+            || action.value.as_ref() != Some(&payload_argument.value.node_id)
+            || action.value_type.as_ref() != Some(string_type)
+            || action.key_provenance
+                != Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::StringLiteral)
+            || !action.payload_clone
+            || action.result_type.is_some()
+            || action.result_local.is_some()
+            || binding_local != payload_local
+            || settlement.payload_type != *string_type
+            || payload_initializer.ty != *string_type
+            || payload_argument.value.ty != *string_type
+        {
+            return None;
+        }
+        Some((key.clone(), payload_literal.clone()))
+    }
+
+    fn profile_shape(
+        receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt,
+    ) -> Option<(usize, i32)> {
+        let (count, index) = match receipt.profile_version {
+            Profile::V1 => (1, 0),
+            Profile::V2 => (2, 1),
+            Profile::V3 => (1, 0),
+            Profile::V4 => (2, 1),
+        };
+        let key_settlement_count = receipt
+            .producer_set_temporary_settlements
+            .iter()
+            .filter(|settlement| {
+                settlement.role
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::Key
+            })
+            .count();
+        let payload_settlement_count = receipt
+            .producer_set_temporary_settlements
+            .iter()
+            .filter(|settlement| {
+                settlement.role
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::PayloadClone
+            })
+            .count();
+        let temporary_profile_shape = match receipt.profile_version {
+            Profile::V1 | Profile::V3 => receipt.producer_set_temporary_settlements.is_empty(),
+            Profile::V2 | Profile::V4 => {
+                receipt.producer_set_temporary_settlements.len() == 4
+                    && key_settlement_count == 2
+                    && payload_settlement_count == 2
+                    && receipt
+                        .producer_set_temporary_settlements
+                        .iter()
+                        .all(|settlement| {
+                            settlement.owner_type == receipt.string_type
+                                && !settlement.set_operation.0.trim().is_empty()
+                                && !settlement.source_node.0.trim().is_empty()
+                        })
+            }
+        };
+        (receipt.values_element_count == count
+            && receipt.index_value == index
+            && receipt.producer_sorted_keys.len() == count
+            && receipt
+                .producer_sorted_keys
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            && temporary_profile_shape
+            && (receipt.profile_version != Profile::V2
+                || receipt.producer_sorted_keys == ["a", "b"]))
+        .then_some((count, index))
+    }
+
+    let producer_owner = &receipt.producer_owner;
+    let Some(producer_cfg) = producer
+        .resources
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    let Some(producer_return) = producer_cfg.values_producer_return_receipt.as_ref() else {
+        return false;
+    };
+    let Some((expected_count, expected_index)) = profile_shape(receipt) else {
+        return false;
+    };
+    let producer_return_expr = producer.body.root.result.as_deref();
+    let producer_action_count = producer_cfg
+        .actions
+        .iter()
+        .filter(|action| {
+            action.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                && action.point == producer_return.values_operation
+                && action.result_local.as_ref() == Some(&producer_return.snapshot_local)
+                && action.result_type.as_ref() == Some(&producer_return.snapshot_type)
+        })
+        .count();
+    let producer_result_count = producer_cfg
+        .result_receipts
+        .iter()
+        .filter(|result| producer_return.matches_returned_result(result))
+        .count();
+    let producer_sets = producer_cfg
+        .actions
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set)
+        .collect::<Vec<_>>();
+    let producer_drops = producer_cfg
+        .actions
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop)
+        .collect::<Vec<_>>();
+    let producer_new_count = producer_cfg
+        .actions
+        .iter()
+        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New)
+        .count();
+    let mut producer_entries = producer_sets
+        .iter()
+        .filter_map(|action| {
+            producer_set_entry(producer, producer_return, action, &receipt.string_type)
+        })
+        .collect::<Vec<_>>();
+    producer_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let producer_set_temporary_settlements_match = match receipt.profile_version {
+        Profile::V1 | Profile::V3 => receipt.producer_set_temporary_settlements.is_empty(),
+        Profile::V2 | Profile::V4 => {
+            let mut expected = Vec::with_capacity(expected_count * 2);
+            let mut set_operations = std::collections::BTreeSet::new();
+            let mut set_actions_are_exact = producer_sets.len() == expected_count;
+            for action in &producer_sets {
+                let (Some(key), Some(value)) = (action.key.as_ref(), action.value.as_ref()) else {
+                    set_actions_are_exact = false;
+                    continue;
+                };
+                if !set_operations.insert(action.point.clone())
+                    || action.key_type.as_ref() != Some(&receipt.string_type)
+                    || action.value_type.as_ref() != Some(&receipt.string_type)
+                    || action.key_provenance
+                        != Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::StringLiteral)
+                    || !action.payload_clone
+                {
+                    set_actions_are_exact = false;
+                    continue;
+                }
+                expected.push(
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporarySettlement {
+                        set_operation: action.point.clone(),
+                        role: crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::Key,
+                        source_node: key.clone(),
+                        owner_type: receipt.string_type.clone(),
+                    },
+                );
+                expected.push(
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporarySettlement {
+                        set_operation: action.point.clone(),
+                        role: crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::PayloadClone,
+                        source_node: value.clone(),
+                        owner_type: receipt.string_type.clone(),
+                    },
+                );
+            }
+            expected.sort();
+            set_actions_are_exact
+                && set_operations.len() == expected_count
+                && expected.len() == expected_count * 2
+                && receipt.producer_set_temporary_settlements == expected
+        }
+    };
+    let producer_entries_match = producer_sets.len() == expected_count
+        && producer_entries.len() == expected_count
+        && producer_drops.len() == expected_count + 1
+        && producer_new_count == 1
+        && producer_cfg.actions.len() == expected_count * 2 + 3
+        && producer_cfg.attempts.len() == expected_count * 2 + 3
+        && producer_return.root_settlements.len() == expected_count + 1
+        && producer_return.payload_settlements.len() == expected_count
+        && producer_set_temporary_settlements_match
+        && producer_entries
+            .iter()
+            .map(|(key, _)| key)
+            .eq(receipt.producer_sorted_keys.iter())
+        && producer_entries
+            .get(expected_index as usize)
+            .is_some_and(|(_, literal)| literal == &receipt.expected_string)
+        && producer_return
+            .payload_settlements
+            .iter()
+            .all(|settlement| {
+                settlement.set_points.len() == 1
+                    && producer_sets
+                        .iter()
+                        .any(|action| action.point == settlement.set_points[0])
+                    && producer.body.root.statements.iter().any(|statement| {
+                        statement.node_id == settlement.drop_point
+                            && exact_drop(statement, &settlement.local)
+                    })
+            });
+    let new_root = producer_cfg
+        .actions
+        .iter()
+        .find(|action| action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New)
+        .map(|action| action.local.clone());
+    let mut expected_root_locals = new_root
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    expected_root_locals.extend(producer_sets.iter().map(|action| action.local.clone()));
+    let root_settlements_match = expected_root_locals.len() == expected_count + 1
+        && producer_return
+            .root_settlements
+            .iter()
+            .map(|settlement| settlement.local.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected_root_locals
+        && producer_return.root_settlements.iter().all(|settlement| {
+            producer_drops
+                .iter()
+                .any(|drop| drop.local == settlement.local && drop.point == settlement.drop_point)
+        });
+    let Some(producer_return_expr) = producer_return_expr else {
+        return false;
+    };
+    let E::Cast {
+        value: producer_source,
+        conversion: producer_conversion,
+    } = &producer_return_expr.kind
+    else {
+        return false;
+    };
+    let E::Load(producer_place) = &producer_source.kind else {
+        return false;
+    };
+    let erase = &producer_return.return_container_erase;
+    if producer_cfg.owner != *producer_owner
+        || producer.owner != *producer_owner
+        || producer.signature.owner != *producer_owner
+        || producer.body.owner != *producer_owner
+        || producer_cfg.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+        || producer_cfg.values_crosscall_string_caller_receipt.as_ref() != Some(receipt)
+        || producer_return.profile_version
+            != crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnProfileVersion::V1
+        || producer_return.owner != *producer_owner
+        || producer_return.settlement
+            != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::Return
+        || producer_return.snapshot_type != erase.source_type
+        || producer_return.surface_return_type != erase.target_type
+        || producer_return.return_value != erase.cast_node
+        || producer_action_count != 1
+        || producer_result_count != 1
+        || !producer_entries_match
+        || !root_settlements_match
+        || !producer_cfg.values_unpack_receipts.is_empty()
+        || producer.body.root.ty != producer_return.surface_return_type
+        || producer.signature.parameters.len() != 0
+        || !producer.signature.generic_parameters.is_empty()
+        || producer.signature.result != producer_return.surface_return_type
+        || !producer.body.parameters.is_empty()
+        || !producer.body.captures.is_empty()
+        || producer_return_expr.node_id != producer_return.return_value
+        || producer_return_expr.node_id != erase.cast_node
+        || producer_source.node_id != erase.source_node
+        || producer_source.ty != producer_return.snapshot_type
+        || producer_source.ty != erase.source_type
+        || producer_return_expr.ty != producer_return.surface_return_type
+        || producer_conversion.kind != CheckedConversionKind::ContainerErase
+        || producer_conversion.kind != erase.conversion_kind
+        || producer_conversion.from != producer_return.snapshot_type
+        || producer_conversion.to != producer_return.surface_return_type
+        || !producer_place.projections.is_empty()
+        || producer_place.base != producer_return.snapshot_local
+        || producer
+            .body
+            .locals
+            .get(&producer_return.snapshot_local)
+            .is_none_or(|local| local.mutable || local.ty != producer_return.snapshot_type)
+        || receipt.producer_values_operation != producer_return.values_operation
+        || receipt.producer_return != producer_return.return_value
+        || receipt.call_target != *producer_owner
+        || receipt.snapshot_type != producer_return.snapshot_type
+        || receipt.call_result_type != producer_return.surface_return_type
+        || receipt.index_type != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+        || receipt.string_type
+            != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
+        || receipt.boolean_type
+            != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool)
+    {
+        return false;
+    }
+
+    let caller_cfg = caller
+        .resources
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref();
+    let [call_statement, unpack_statement, boolean_statement, string_drop, snapshot_drop] =
+        caller.body.root.statements.as_slice()
+    else {
+        return false;
+    };
+    let Some((snapshot_local, call_expression)) = binding(call_statement) else {
+        return false;
+    };
+    let E::Call(call) = &call_expression.kind else {
+        return false;
+    };
+    let Some((unpack_local, unpack_expression)) = binding(unpack_statement) else {
+        return false;
+    };
+    let E::Cast {
+        value: projection,
+        conversion,
+    } = &unpack_expression.kind
+    else {
+        return false;
+    };
+    let E::Project {
+        value: snapshot_load,
+        projection: crate::core::ir::ResolvedValueProjection::Index(index_expression),
+    } = &projection.kind
+    else {
+        return false;
+    };
+    let Some((boolean_local, boolean_expression)) = binding(boolean_statement) else {
+        return false;
+    };
+    let E::Binary { op, left, right } = &boolean_expression.kind else {
+        return false;
+    };
+    let E::Literal(ResolvedLiteral::String(expected)) = &right.kind else {
+        return false;
+    };
+    let caller_return = caller.body.root.result.as_deref();
+    let Some(caller_return) = caller_return else {
+        return false;
+    };
+
+    receipt.caller_owner == caller.owner
+        && caller_cfg.is_none_or(|caller_cfg| {
+            caller_cfg.owner == caller.owner
+                && caller_cfg.profile_version
+                    == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && caller_cfg.actions.is_empty()
+                && caller_cfg.attempts.is_empty()
+                && caller_cfg.values_unpack_receipts.is_empty()
+                && caller_cfg.values_crosscall_string_caller_receipt.is_none()
+        })
+        && caller.body.owner == caller.owner
+        && caller.signature.owner == caller.owner
+        && caller.signature.parameters.is_empty()
+        && caller.signature.generic_parameters.is_empty()
+        && caller.signature.effects == producer.signature.effects
+        && caller.body.parameters.is_empty()
+        && caller.body.captures.is_empty()
+        && caller.body.place_inputs.is_empty()
+        && caller.body.default_values.is_empty()
+        && call_statement.node_id == receipt.snapshot_binding_point
+        && call_expression.node_id == receipt.call_node
+        && *snapshot_local == receipt.snapshot_local
+        && call.callee == ResolvedCallee::Function(producer_owner.clone())
+        && caller.body.resolved_calls.get(&receipt.call_node) == Some(&call.callee)
+        && call.arguments.is_empty()
+        && call.type_arguments.is_empty()
+        && call.permission.is_none()
+        && call.session.is_empty()
+        && call.effects == producer.signature.effects
+        && call.result == receipt.call_result_type
+        && call_expression.ty == receipt.call_result_type
+        && caller
+            .body
+            .locals
+            .get(snapshot_local)
+            .is_some_and(|local| !local.mutable && local.ty == receipt.call_result_type)
+        && unpack_statement.node_id == receipt.unpack_binding_point
+        && unpack_expression.node_id == receipt.unpack_cast
+        && *unpack_local == receipt.unpack_binding
+        && projection.node_id == receipt.index_projection
+        && snapshot_load.node_id == receipt.snapshot_load
+        && direct_load(snapshot_load, snapshot_local)
+        && matches!(&index_expression.kind, E::Literal(ResolvedLiteral::Int(value)) if i32::try_from(*value).ok() == Some(expected_index))
+        && expected_index == receipt.index_value
+        && index_expression.node_id == receipt.index_expression
+        && index_expression.ty == receipt.index_type
+        && projection.ty == conversion.from
+        && conversion.kind == CheckedConversionKind::DynamicAnyUnpack
+        && conversion.to == receipt.string_type
+        && unpack_expression.ty == receipt.string_type
+        && caller
+            .body
+            .locals
+            .get(unpack_local)
+            .is_some_and(|local| !local.mutable && local.ty == receipt.string_type)
+        && boolean_statement.node_id == receipt.boolean_binding_point
+        && boolean_expression.node_id == receipt.comparison
+        && *boolean_local == receipt.boolean_local
+        && *op == ResolvedBinaryOp::Equal
+        && direct_load(left, unpack_local)
+        && left.node_id == receipt.comparison_load
+        && left.ty == receipt.string_type
+        && *expected == receipt.expected_string
+        && right.ty == receipt.string_type
+        && boolean_expression.ty == receipt.boolean_type
+        && caller
+            .body
+            .locals
+            .get(boolean_local)
+            .is_some_and(|local| !local.mutable && local.ty == receipt.boolean_type)
+        && exact_drop(string_drop, unpack_local)
+        && string_drop.node_id == receipt.string_drop_point
+        && receipt.string_drop_place_index == 0
+        && exact_drop(snapshot_drop, snapshot_local)
+        && snapshot_drop.node_id == receipt.snapshot_drop_point
+        && receipt.snapshot_drop_place_index == 0
+        && direct_load(caller_return, boolean_local)
+        && caller_return.node_id == receipt.caller_return
+        && caller_return.ty == receipt.caller_return_type
+        && caller.body.root.ty == receipt.boolean_type
+        && caller.signature.result == receipt.boolean_type
+        && receipt.caller_return_type == receipt.boolean_type
+        && receipt.string_source_uses
+            == std::collections::BTreeSet::from([
+                receipt.comparison_load.clone(),
+                receipt.string_drop_point.clone(),
+            ])
+        && receipt.snapshot_source_uses
+            == std::collections::BTreeSet::from([
+                receipt.snapshot_load.clone(),
+                receipt.snapshot_drop_point.clone(),
+            ])
+        && receipt.snapshot_local != receipt.unpack_binding
+}
+
+/// Bind a V3/V4 cross-call receipt to the independently collected branch
+/// producer receipt. This recognizes only the source contract; executable
+/// branch lowering has its own entry point and must not reuse the
+/// straight-line Values producer lowering.
+fn ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
+    producer: &crate::core::ResolvedCallable,
+    caller: &crate::core::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt,
+) -> bool {
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as CallerProfile,
+        OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion as ProducerProfile,
+    };
+
+    let expected = match receipt.profile_version {
+        CallerProfile::V3 => ProducerProfile::V1,
+        CallerProfile::V4 => ProducerProfile::V2,
+        CallerProfile::V1 | CallerProfile::V2 => return false,
+    };
+    let Some(producer_cfg) = producer
+        .resources
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return false;
+    };
+    let Some(producer_result) = producer_cfg.values_result_producer_receipt.as_ref() else {
+        return false;
+    };
+    let set_count = match receipt.profile_version {
+        CallerProfile::V3 => 1,
+        CallerProfile::V4 => 2,
+        CallerProfile::V1 | CallerProfile::V2 => return false,
+    };
+    let index = if set_count == 1 { 0 } else { 1 };
+    producer_cfg.owner == producer.owner
+        && producer_result.owner == producer.owner
+        && producer_result.profile_version == expected
+        && receipt.producer_result_receipt.as_ref() == Some(producer_result)
+        && receipt.producer_owner == producer.owner
+        && receipt.producer_values_operation == producer_result.values_operation
+        && receipt.producer_return == producer_result.success_result
+        && receipt.call_target == producer.owner
+        && receipt.caller_owner == caller.owner
+        && caller.body.resolved_calls.get(&receipt.call_node)
+            == Some(&ResolvedCallee::Function(producer.owner.clone()))
+        && producer_result.set_branches.len() == set_count
+        && receipt.values_element_count == set_count
+        && receipt.index_value == index
+        && receipt.producer_sorted_keys.len() == set_count
+        && receipt
+            .producer_sorted_keys
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        && (receipt.profile_version != CallerProfile::V4
+            || receipt.producer_sorted_keys == ["a", "b"])
+        && producer_result.surface_return_type == receipt.call_result_type
+        && producer.signature.result == producer_result.surface_return_type
+        && producer.body.root.ty == producer_result.surface_return_type
+}
+
 fn ownership_summary(
     analysis: &ResourceAnalysis,
     type_catalog: Option<&MirTypeCatalog>,
+    checker_callable_generic_parameters: &[NodeId],
+    values_caller_receipt: Option<
+        Box<crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerReceipt>,
+    >,
+    values_crosscall_string_caller_receipt: Option<
+        Box<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt>,
+    >,
+    values_result_producer_receipt: Option<
+        Box<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt>,
+    >,
+    map_root_caller_receipt: Option<
+        Box<crate::core::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt>,
+    >,
+    map_root_get_any_caller_receipt: Option<
+        Box<crate::core::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt>,
+    >,
 ) -> MirOwnershipSummary {
     // The independent V1 scanner also recognizes GetAny/Values and the
     // shared New/Drop lifecycle. Once the exact V2 TypeDesc is selected, its
     // sealed Checker CFG receipt owns these overlapping source actions. Keep
     // the V1 attempt census in ResourceAnalysis for arbitration, but do not
     // project a second V1 receipt into MIR.
-    let ordinary_map_owned_get_v1_shadowed_by_v2 = analysis.has_ordinary_map_owned_any_v2_receipt()
-        && analysis.ordinary_map_owned_any_v2_cfg_receipt.is_some()
-        && type_catalog.is_some_and(|catalog| {
-            catalog
-                .get(&super::types::ordinary_map_owned_any_v2_type_id())
-                .is_some()
-        });
+    let map_root_get_any_producer_selected = analysis
+        .ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+        .is_some_and(|cfg| {
+            cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                && cfg.map_root_producer_return_receipt.as_ref().is_some_and(|producer| {
+                    cfg.map_root_get_any_caller_receipt
+                        .as_ref()
+                        .is_some_and(|caller| {
+                            producer.profile_version
+                                == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerProfileVersion::V1
+                                && caller.profile_version
+                                    == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+                                && caller.producer_owner == producer.owner
+                                && caller.caller_owner != producer.owner
+                                && caller.call_target == producer.owner
+                                && caller.caller_root_type == producer.final_root_type
+                        })
+                })
+        }) && type_catalog.is_some_and(|catalog| {
+        catalog
+            .get(&super::types::ordinary_map_owned_any_v2_type_id())
+            .is_some()
+    });
+    let ordinary_map_owned_any_v2_selected =
+        ordinary_map_owned_any_v2_profile_selected(Some(analysis), type_catalog)
+            || map_root_get_any_caller_receipt.is_some()
+            || map_root_get_any_producer_selected;
+    let ordinary_map_owned_get_v1_shadowed_by_v2 = ordinary_map_owned_any_v2_selected;
     let map_any_owner_v1_receipt_present = analysis.has_map_any_owner_v1_receipt();
     let ordinary_attempts_fully_covered_by_map_any_owner_v1 =
         analysis.ordinary_map_attempts_fully_covered_by_map_any_owner_v1();
@@ -8199,6 +9317,19 @@ fn ownership_summary(
         .collect();
     MirOwnershipSummary {
         checker_managed_any: None,
+        checker_callable_generic_parameters: checker_callable_generic_parameters.to_vec(),
+        checker_ordinary_map_owned_any_v2_set_lineage: None,
+        checker_ordinary_map_owned_any_v2_set_lineage_commitment: None,
+        checker_ordinary_map_owned_any_v2_set_get_i32_lineage: None,
+        checker_ordinary_map_owned_any_v2_set_get_i32_lineage_commitment: None,
+        checker_ordinary_map_owned_any_v2_set_get_any_i32_lineage: None,
+        checker_ordinary_map_owned_any_v2_set_get_any_i32_lineage_commitment: None,
+        checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage: None,
+        checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_commitment: None,
+        checker_ordinary_map_owned_any_v2_set_get_string_lineage: None,
+        checker_ordinary_map_owned_any_v2_set_get_string_lineage_commitment: None,
+        checker_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_receipt: None,
+        checker_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_projection: None,
         events: analysis
             .actions
             .iter()
@@ -8396,6 +9527,104 @@ fn ownership_summary(
                     })
                     .collect()
             },
+        checker_ordinary_map_owner_lifecycle_v1_new_attempts:
+            if ordinary_map_owned_get_i32_string_v1_legacy_blocked
+                || (map_any_owner_v1_receipt_present
+                    && ordinary_attempts_fully_covered_by_map_any_owner_v1)
+            {
+                Vec::new()
+            } else {
+                analysis
+                    .ordinary_map_owner_lifecycle_v1_new_attempts
+                    .iter()
+                    .cloned()
+                    .collect()
+            },
+        checker_ordinary_map_owner_lifecycle_v1_operation_attempts:
+            if ordinary_map_owned_get_i32_string_v1_legacy_blocked
+                || (map_any_owner_v1_receipt_present
+                    && ordinary_attempts_fully_covered_by_map_any_owner_v1)
+            {
+                Vec::new()
+            } else {
+                analysis
+                    .ordinary_map_owner_lifecycle_v1_operation_attempts
+                    .iter()
+                    .map(|attempt| MirCheckerOrdinaryMapOwnerLifecycleAttempt {
+                        kind: attempt.kind,
+                        point: attempt.point.clone(),
+                        arguments: attempt.arguments.clone(),
+                        receiver_local: attempt.receiver_local.clone(),
+                        result_local: attempt.result_local.clone(),
+                    })
+                    .collect()
+            },
+        checker_ordinary_map_owner_observer_v1_attempts:
+            if ordinary_map_owned_get_i32_string_v1_legacy_blocked
+                || (map_any_owner_v1_receipt_present
+                    && ordinary_attempts_fully_covered_by_map_any_owner_v1)
+            {
+                Vec::new()
+            } else {
+                analysis
+                    .ordinary_map_owner_observer_v1_attempts
+                    .iter()
+                    .map(|attempt| MirCheckerOrdinaryMapOwnerObserverV1Attempt {
+                        owner: attempt.owner.clone(),
+                        callsite: attempt.callsite.clone(),
+                        builtin: attempt.builtin.clone(),
+                        arguments: attempt.arguments.clone(),
+                        argument_types: attempt.argument_types.clone(),
+                        argument_locals: attempt.argument_locals.clone(),
+                        result_type: attempt.result_type.clone(),
+                        direct_effects: attempt.direct_effects.clone(),
+                        typed_call_effects: attempt.typed_call_effects.clone(),
+                    })
+                    .collect()
+            },
+        checker_ordinary_map_owner_observer_v1:
+            if ordinary_map_owned_get_i32_string_v1_legacy_blocked
+                || (map_any_owner_v1_receipt_present
+                    && ordinary_attempts_fully_covered_by_map_any_owner_v1)
+            {
+                Vec::new()
+            } else {
+                let mut receipts = analysis
+                    .ordinary_map_owner_observer_v1_receipts
+                    .iter()
+                    .filter_map(|receipt| {
+                        let root = mir_value_for_local(&receipt.root_local);
+                        let result =
+                            MirValueId::new(format!("expr:{}", receipt.callsite.0)).ok()?;
+                        let instruction =
+                            super::ordinary_map_owner_lifecycle_observer_v1_instruction_id(
+                                receipt.builtin.as_str(),
+                                &receipt.callsite,
+                            );
+                        Some(MirCheckerOrdinaryMapOwnerObserverV1 {
+                            profile_version: receipt.profile_version,
+                            owner: receipt.owner.clone(),
+                            builtin: receipt.builtin.clone(),
+                            callsite: receipt.callsite.clone(),
+                            argument: receipt.argument.clone(),
+                            root_local: receipt.root_local.clone(),
+                            root,
+                            root_resource: receipt.root.0 .0.clone(),
+                            root_type: receipt.root_type.clone(),
+                            borrow_type: receipt.borrow_type.clone(),
+                            result,
+                            result_type: receipt.result_type.clone(),
+                            direct_effects: receipt.direct_effects.clone(),
+                            typed_call_effects: receipt.typed_call_effects.clone(),
+                            instruction,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                receipts.sort_by(|left, right| {
+                    (&left.owner, &left.callsite).cmp(&(&right.owner, &right.callsite))
+                });
+                receipts
+            },
         checker_ordinary_map_owned_get_i32_string_v1: if ordinary_map_owned_get_v1_shadowed_by_v2 {
             Vec::new()
         } else {
@@ -8472,67 +9701,115 @@ fn ownership_summary(
                     .ordinary_map_owned_get_i32_string_v1_cfg_receipt
                     .clone()
             },
-        checker_ordinary_map_owned_any_v2: analysis
-            .ordinary_map_owned_any_v2_actions
-            .iter()
-            .filter_map(|action| {
-                let local = mir_value_for_local(&action.local);
-                let role = format!("ordinary_map_owned_any_v2_{}:{local}", action.kind.as_str());
-                let instruction =
-                    MirInstructionId::new(format!("inst:{role}:{}", action.point.0)).ok()?;
-                Some(super::MirCheckerOrdinaryMapOwnedAnyV2Action {
-                    profile_version: action.profile_version,
-                    kind: action.kind,
-                    point: action.point.clone(),
-                    local: local.clone(),
-                    result: match action.kind {
-                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Clone
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Remove => Some(local),
-                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::Size
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::HasKey
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
-                        | crate::core::OrdinaryMapOwnedAnyV2ActionKind::IsEmpty => {
-                            MirValueId::new(format!("expr:{}", action.point.0)).ok()
-                        }
-                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop => None,
-                    },
-                    root: action.root.0 .0.clone(),
-                    key_node: action.key.clone(),
-                    key: action
-                        .key_local
-                        .as_ref()
-                        .map(mir_value_for_local)
-                        .or_else(|| {
-                            action
-                                .key
-                                .as_ref()
-                                .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok())
-                        }),
-                    key_type: action.key_type.clone(),
-                    key_local: action.key_local.clone(),
-                    key_provenance: action.key_provenance,
-                    value: action
-                        .value
-                        .as_ref()
-                        .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
-                    value_type: action.value_type.clone(),
-                    payload_clone: action.payload_clone,
-                    source_local: action.source_local.as_ref().map(mir_value_for_local),
-                    source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
-                    source_node: action.source_node.clone(),
-                    source_type: action.source_type.clone(),
-                    result_source_type: action.result_type.clone(),
-                    result_local: action.result_local.clone(),
-                    instruction,
-                })
-            })
-            .collect(),
-        checker_ordinary_map_owned_any_v2_cfg_receipt: analysis
-            .ordinary_map_owned_any_v2_cfg_receipt
+        checker_ordinary_map_owned_get_any_tuple_result_v1_receipt: analysis
+            .ordinary_map_owned_get_any_tuple_result_v1_receipt
             .clone(),
+        checker_ordinary_map_owned_get_any_tuple_l2_projection: None,
+        checker_ordinary_map_owned_any_v2: if ordinary_map_owned_any_v2_selected {
+            analysis
+                .ordinary_map_owned_any_v2_actions
+                .iter()
+                .filter_map(|action| {
+                    let local = mir_value_for_local(&action.local);
+                    let role =
+                        format!("ordinary_map_owned_any_v2_{}:{local}", action.kind.as_str());
+                    let instruction =
+                        MirInstructionId::new(format!("inst:{role}:{}", action.point.0)).ok()?;
+                    Some(super::MirCheckerOrdinaryMapOwnedAnyV2Action {
+                        profile_version: action.profile_version,
+                        kind: action.kind,
+                        point: action.point.clone(),
+                        local: local.clone(),
+                        result: match action.kind {
+                            crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Clone
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Remove => Some(local),
+                            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Size
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::HasKey
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                            | crate::core::OrdinaryMapOwnedAnyV2ActionKind::IsEmpty => {
+                                MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                            }
+                            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Keys => {
+                                MirValueId::new(format!("expr:{}", action.point.0)).ok()
+                            }
+                            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop => None,
+                        },
+                        root: action.root.0 .0.clone(),
+                        key_node: action.key.clone(),
+                        key: action
+                            .key_local
+                            .as_ref()
+                            .map(mir_value_for_local)
+                            .or_else(|| {
+                                action.key.as_ref().and_then(|node| {
+                                    MirValueId::new(format!("expr:{}", node.0)).ok()
+                                })
+                            }),
+                        key_type: action.key_type.clone(),
+                        key_local: action.key_local.clone(),
+                        key_local_mutable: action.key_local_mutable,
+                        key_provenance: action.key_provenance,
+                        key_static_digest: action.key_static_digest.clone(),
+                        value: action
+                            .value
+                            .as_ref()
+                            .and_then(|node| MirValueId::new(format!("expr:{}", node.0)).ok()),
+                        value_type: action.value_type.clone(),
+                        payload_clone: action.payload_clone,
+                        source_local: action.source_local.as_ref().map(mir_value_for_local),
+                        source: action.source.as_ref().map(|resource| resource.0 .0.clone()),
+                        source_node: action.source_node.clone(),
+                        source_type: action.source_type.clone(),
+                        result_source_type: action.result_type.clone(),
+                        result_local: action.result_local.clone(),
+                        instruction,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        checker_ordinary_map_owned_any_v2_new_result: None,
+        checker_ordinary_map_owned_any_v2_new_result_commitment: None,
+        checker_ordinary_map_owned_any_v2_cfg_receipt: if ordinary_map_owned_any_v2_selected {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .clone()
+                .map(Box::new)
+        } else {
+            None
+        },
+        checker_ordinary_map_owned_any_v2_direct_print_result_receipt:
+            if ordinary_map_owned_any_v2_selected {
+                analysis
+                    .ordinary_map_owned_any_v2_direct_print_result_receipt
+                    .clone()
+                    .map(Box::new)
+            } else {
+                None
+            },
+        checker_ordinary_map_owned_any_v2_values_caller_receipt: values_caller_receipt,
+        checker_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt:
+            values_crosscall_string_caller_receipt,
+        checker_ordinary_map_owned_any_v2_values_result_producer_receipt:
+            values_result_producer_receipt,
+        checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt: analysis
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| {
+                let producer = cfg.values_result_producer_receipt.as_ref()?;
+                let caller = cfg.values_result_producer_caller_receipt.as_ref()?;
+                (cfg.owner == caller.caller_owner
+                    && caller.producer_result == *producer
+                    && caller.producer_target == producer.owner)
+                    .then(|| Box::new(caller.clone()))
+            }),
+        checker_ordinary_map_owned_any_v2_map_root_caller_receipt: map_root_caller_receipt,
+        checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt:
+            map_root_get_any_caller_receipt,
         checker_managed_any_cfg_receipt: analysis.managed_any_cfg_receipt.clone(),
     }
 }
@@ -8890,17 +10167,58 @@ fn collect_loop_proof_state_locals(
     proof_reads_in_block(body, output, true);
 }
 
-struct Lowerer<'a> {
-    body: &'a ResolvedBody,
+/// The verifier-only singleton-`for` island accepts a deliberately inert
+/// scalar element expression.  A tiny expression grammar prevents the
+/// verifier compatibility adapter from accidentally acquiring arbitrary
+/// nested control flow or side effects while preserving the existing
+/// CheckedProgram evaluation order for forms such as `[value + 1]`.
+fn ffi_singleton_element_expr_is_closed(expression: &ResolvedExpr) -> bool {
+    match &expression.kind {
+        ResolvedExprKind::Literal(_) | ResolvedExprKind::Constant(_) => true,
+        ResolvedExprKind::Load(place) => place.projections.is_empty(),
+        ResolvedExprKind::Unary { op, operand } => {
+            matches!(op, ResolvedUnaryOp::Negate | ResolvedUnaryOp::Not)
+                && ffi_singleton_element_expr_is_closed(operand)
+        }
+        ResolvedExprKind::Binary { op, left, right } => {
+            !matches!(
+                op,
+                ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr
+            ) && ffi_singleton_element_expr_is_closed(left)
+                && ffi_singleton_element_expr_is_closed(right)
+        }
+        ResolvedExprKind::Cast { value, conversion } => {
+            matches!(
+                conversion.kind,
+                CheckedConversionKind::Identity | CheckedConversionKind::NumericWiden
+            ) && ffi_singleton_element_expr_is_closed(value)
+        }
+        _ => false,
+    }
+}
+
+struct Lowerer<'a, 'body> {
+    body: &'body ResolvedBody,
     type_catalog: Option<&'a MirTypeCatalog>,
     call_parameter_permissions: Option<&'a BTreeMap<NodeId, Option<crate::core::ir::Permission>>>,
     resource_analysis: Option<&'a ResourceAnalysis>,
+    /// The one root-level `for` node authorized by the isolated FFI-verifier
+    /// caller constructor. Production lowering and default/native route
+    /// construction leave this empty; nested or additional loops remain
+    /// fail-closed.
+    ffi_singleton_for_node: Option<NodeId>,
+    checked_callables: Option<&'a BTreeMap<NodeId, crate::core::ResolvedCallable>>,
+    excluded_sources: Option<&'a HashSet<crate::span::SourceId>>,
+    checked_constants: Option<&'a HashMap<NodeId, crate::core::ResolvedConstant>>,
+    default_argument_namespace: Option<String>,
     transition_result: Option<crate::core::ResolvedTypeId>,
     approved_nested_callables: BTreeMap<NodeId, NodeId>,
     closure_callable_bindings: BTreeMap<
         crate::core::ir::ResolvedLocalId,
         super::closure_callable::MirClosureCallableBindingV1,
     >,
+    nested_callable_capture_slots:
+        BTreeMap<NodeId, Vec<super::nested_callable::MirNestedCallableCaptureSlot>>,
     values: BTreeMap<MirValueId, MirValue>,
     locals: HashMap<ResolvedLocalId, MirValueId>,
     blocks: BTreeMap<MirBlockId, BlockDraft>,
@@ -8911,12 +10229,96 @@ struct Lowerer<'a> {
     managed_any_origins: BTreeMap<MirInstructionId, NodeId>,
 }
 
-impl<'a> Lowerer<'a> {
+impl<'a: 'body, 'body> Lowerer<'a, 'body> {
     fn error(&mut self, node_id: &NodeId, message: impl Into<String>) {
         self.errors.push(MirLoweringError {
             node_id: node_id.clone(),
             message: message.into(),
         });
+    }
+
+    fn checked_scalar_constant_literal(
+        &self,
+        item: &NodeId,
+        ty: &crate::core::ResolvedTypeId,
+    ) -> Result<ResolvedLiteral, String> {
+        let constants = self.checked_constants.ok_or_else(|| {
+            format!(
+                "constant '{}' needs the checker-owned constant catalog for MIR lowering",
+                item.0
+            )
+        })?;
+        let constant = constants.get(item).ok_or_else(|| {
+            format!(
+                "constant '{}' is absent from the checker-owned MIR constant catalog",
+                item.0
+            )
+        })?;
+        if constant.node_id != *item {
+            return Err(format!(
+                "checker-owned constant '{}' is stored under a mismatched identity",
+                item.0
+            ));
+        }
+
+        let value = match (ty, &constant.value) {
+            (ty, crate::core::ResolvedConstValue::Int(value))
+                if ty == &primitive_type_id(PrimitiveType::I32)
+                    && i32::try_from(*value).is_ok() =>
+            {
+                ResolvedLiteral::Int(*value)
+            }
+            (ty, crate::core::ResolvedConstValue::Int(value))
+                if ty == &primitive_type_id(PrimitiveType::I64) =>
+            {
+                ResolvedLiteral::Int(*value)
+            }
+            (ty, crate::core::ResolvedConstValue::Float(value))
+                if ty == &primitive_type_id(PrimitiveType::F32) && value.is_finite() =>
+            {
+                // MIR represents floating scalars with f64 bits, so normalize
+                // a checked f32 constant through binary32 before storing it.
+                // Reference, Bytecode, and native consumers then observe the
+                // same source-typed value (including values such as 0.1).
+                let normalized = *value as f32;
+                if !normalized.is_finite() {
+                    return Err(format!(
+                        "constant '{}' cannot be represented as a finite f32 scalar",
+                        constant.qualified_name
+                    ));
+                }
+                ResolvedLiteral::float(normalized as f64)
+            }
+            (ty, crate::core::ResolvedConstValue::Float(value))
+                if ty == &primitive_type_id(PrimitiveType::F64) =>
+            {
+                ResolvedLiteral::float(*value)
+            }
+            (ty, crate::core::ResolvedConstValue::Bool(value))
+                if ty == &primitive_type_id(PrimitiveType::Bool) =>
+            {
+                ResolvedLiteral::Bool(*value)
+            }
+            _ => {
+                return Err(format!(
+                    "constant '{}' is not a materialized i32, i64, f32, f64, or bool scalar",
+                    constant.qualified_name
+                ));
+            }
+        };
+        Ok(value)
+    }
+
+    fn checked_callable(&self, owner: &NodeId) -> Option<&'a crate::core::ResolvedCallable> {
+        let callable = self.checked_callables?.get(owner)?;
+        self.checked_callable_is_included(callable)
+            .then_some(callable)
+    }
+
+    fn checked_callable_is_included(&self, callable: &crate::core::ResolvedCallable) -> bool {
+        self.excluded_sources.is_none_or(|excluded| {
+            !excluded.contains(&callable.body.root.origin.user_span().source_id)
+        })
     }
 
     fn checker_borrow_metadata(
@@ -9080,7 +10482,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn id(&mut self, prefix: &str, node_id: &NodeId) -> Option<MirValueId> {
-        match super::MirValueId::new(format!("{prefix}:{}", node_id.0)) {
+        let qualified_node = self
+            .default_argument_namespace
+            .as_ref()
+            .map(|namespace| format!("default:{namespace}:{}", node_id.0))
+            .unwrap_or_else(|| node_id.0.clone());
+        match super::MirValueId::new(format!("{prefix}:{qualified_node}")) {
             Ok(id) => Some(id),
             Err(error) => {
                 self.error(node_id, error.to_string());
@@ -9090,7 +10497,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn instruction_id(&mut self, node_id: &NodeId, role: &str) -> Option<MirInstructionId> {
-        match super::MirInstructionId::new(format!("inst:{role}:{}", node_id.0)) {
+        let qualified_node = self
+            .default_argument_namespace
+            .as_ref()
+            .map(|namespace| format!("default:{namespace}:{}", node_id.0))
+            .unwrap_or_else(|| node_id.0.clone());
+        match super::MirInstructionId::new(format!("inst:{role}:{qualified_node}")) {
             Ok(id) => Some(id),
             Err(error) => {
                 self.error(node_id, error.to_string());
@@ -9343,11 +10755,1398 @@ impl<'a> Lowerer<'a> {
         converted
     }
 
+    fn ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_operation(
+        &self,
+        operation: &NodeId,
+    ) -> Result<
+        Option<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchReceipt>,
+        String,
+    > {
+        use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchProfileVersion as BranchProfile;
+        use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+        use crate::core::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+        use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as Profile;
+
+        let Some(analysis) = self.resource_analysis else {
+            return Ok(None);
+        };
+        let Some(owner_cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return Ok(None);
+        };
+        let Some(branch) = owner_cfg
+            .values_local_index_i32_result_branch_receipt
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        if branch.map_new_operation != *operation && branch.map_set_operation != *operation {
+            return Ok(None);
+        }
+        let fail = |message: &str| {
+            format!("ValuesLocalIndexI32 Result branch receipt is invalid: {message}")
+        };
+        let exact_kinds = [
+            (ActionKind::New, 1),
+            (ActionKind::Set, 1),
+            (ActionKind::Values, 1),
+            (ActionKind::Drop, 3),
+        ];
+        let exact_attempt_kinds = [
+            (AttemptKind::New, 1),
+            (AttemptKind::Set, 1),
+            (AttemptKind::Values, 1),
+            (AttemptKind::Drop, 3),
+        ];
+        if owner_cfg.owner != self.body.owner
+            || analysis.owner != self.body.owner
+            || owner_cfg.profile_version != Profile::V2
+            || owner_cfg.actions != analysis.ordinary_map_owned_any_v2_actions
+            || owner_cfg.attempts != analysis.ordinary_map_owned_any_v2_operation_attempts
+            || branch.owner != self.body.owner
+            || branch.profile_version != BranchProfile::V2
+            || branch.cfg.owner != self.body.owner
+            || analysis.managed_any_cfg_receipt.as_ref() != Some(&branch.cfg)
+            || owner_cfg.actions.len() != 6
+            || owner_cfg.attempts.len() != 6
+            || exact_kinds.iter().any(|(kind, count)| {
+                owner_cfg
+                    .actions
+                    .iter()
+                    .filter(|item| item.kind == *kind)
+                    .count()
+                    != *count
+            })
+            || exact_attempt_kinds.iter().any(|(kind, count)| {
+                owner_cfg
+                    .attempts
+                    .iter()
+                    .filter(|item| item.kind == *kind)
+                    .count()
+                    != *count
+            })
+            || owner_cfg.actions.iter().any(|item| {
+                item.profile_version != Profile::V2
+                    || !matches!(
+                        item.kind,
+                        ActionKind::New | ActionKind::Set | ActionKind::Values | ActionKind::Drop
+                    )
+            })
+            || owner_cfg.attempts.iter().any(|item| {
+                !matches!(
+                    item.kind,
+                    AttemptKind::New | AttemptKind::Set | AttemptKind::Values | AttemptKind::Drop
+                )
+            })
+            || !self
+                .body
+                .locals
+                .get(&branch.initial_root)
+                .is_some_and(|local| !local.mutable)
+            || !self
+                .body
+                .locals
+                .get(&branch.populated_root)
+                .is_some_and(|local| !local.mutable)
+        {
+            return Err(fail(
+                "owner, profile, exact action/attempt census, or immutable root locals disagree",
+            ));
+        }
+        Ok(Some(branch.clone()))
+    }
+
+    fn lower_ordinary_map_owned_any_v2_values_local_index_i32_result_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        action: &crate::core::OrdinaryMapOwnedAnyV2Action,
+        branch: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchReceipt,
+    ) -> MirValueId {
+        use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+        use crate::core::OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind;
+
+        let is_new = expression.node_id == branch.map_new_operation;
+        let (kind, root_local) = if is_new {
+            (ActionKind::New, &branch.initial_root)
+        } else {
+            (ActionKind::Set, &branch.populated_root)
+        };
+        let Some(analysis) = self.resource_analysis else {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result lowering has no Checker ResourceAnalysis",
+            );
+            return self.fallback_value(expression);
+        };
+        let Some(owner_cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result lowering has no Checker owner-v2 CFG receipt",
+            );
+            return self.fallback_value(expression);
+        };
+        let exact_actions = owner_cfg
+            .actions
+            .iter()
+            .filter(|candidate| candidate.kind == kind && candidate.point == expression.node_id)
+            .collect::<Vec<_>>();
+        let exact_attempts = owner_cfg
+            .attempts
+            .iter()
+            .filter(|candidate| {
+                candidate.kind
+                    == (if is_new {
+                        AttemptKind::New
+                    } else {
+                        AttemptKind::Set
+                    })
+                    && candidate.point == expression.node_id
+            })
+            .collect::<Vec<_>>();
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result lowering requires the canonical MIR TypeCatalog",
+            );
+            return self.fallback_value(expression);
+        };
+        let result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let new_action = owner_cfg
+            .actions
+            .iter()
+            .filter(|candidate| {
+                candidate.kind == ActionKind::New && candidate.point == branch.map_new_operation
+            })
+            .collect::<Vec<_>>();
+        let Some(source_result_type) = new_action
+            .first()
+            .and_then(|candidate| candidate.source_type.as_ref())
+        else {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result branch omits the exact map_new source Result type",
+            );
+            return self.fallback_value(expression);
+        };
+        let children = catalog.resolved_type_children(source_result_type);
+        let source_root_type = children.and_then(|types| (types.len() == 2).then(|| &types[0]));
+        let source_error_type = children.and_then(|types| (types.len() == 2).then(|| &types[1]));
+        let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        if catalog
+            .validate_ordinary_map_owned_any_v2_root_result(&result_ty, source_result_type)
+            .is_err()
+            || source_result_type != &expression.ty
+            || call.result != expression.ty
+            || !call.type_arguments.is_empty()
+            || call.permission.is_some()
+            || !call.effects.is_empty()
+            || expression.effects != call.effects
+            || !call.session.is_empty()
+            || source_root_type.is_none_or(|ty| {
+                self.body
+                    .locals
+                    .get(&branch.initial_root)
+                    .is_none_or(|local| local.ty != *ty)
+                    || self
+                        .body
+                        .locals
+                        .get(&branch.populated_root)
+                        .is_none_or(|local| local.ty != *ty)
+            })
+            || source_error_type != Some(&i32_type)
+            || action.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || action.kind != kind
+            || action.point != expression.node_id
+            || action.local != *root_local
+            || !matches!(exact_actions.as_slice(), [candidate] if *candidate == action)
+            || exact_attempts.len() != 1
+        {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result call differs from its exact Checker action, source Result, or TypeDesc receipt",
+            );
+            return self.fallback_value(expression);
+        }
+        let expected_root = format!("ordinary-map-owned-any-v2:{}", root_local.0 .0);
+        if action.root.0 .0 != expected_root
+            || action.result_type.is_some()
+            || action.result_local.is_some()
+            || action.key_local.is_some()
+            || action.key_local_mutable.is_some()
+        {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 Result action has conflicting root or result metadata",
+            );
+            return self.fallback_value(expression);
+        }
+
+        if is_new {
+            let attempt = exact_attempts[0];
+            if !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_new")
+                || !call.arguments.is_empty()
+                || action.source_node.as_ref() != Some(&expression.node_id)
+                || action.source_type.as_ref() != Some(&expression.ty)
+                || action.key.is_some()
+                || action.key_type.is_some()
+                || action.key_provenance.is_some()
+                || action.key_static_digest.is_some()
+                || action.value.is_some()
+                || action.value_type.is_some()
+                || action.source_local.is_some()
+                || action.source.is_some()
+                || action.payload_clone
+                || attempt.arguments.len() != 0
+                || attempt.receiver_local.is_some()
+                || attempt.result_local.as_ref() != Some(&branch.initial_root)
+            {
+                self.error(
+                    &expression.node_id,
+                    "ValuesLocalIndexI32 map_new differs from its exact New/Result receipt",
+                );
+                return self.fallback_value(expression);
+            }
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return self.fallback_value(expression);
+            };
+            self.insert_value(result.clone(), result_ty, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_new:local:{}", root_local.0 .0),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: result.clone(),
+                },
+            );
+            return result;
+        }
+
+        let (Some(source_arg), Some(key_arg), Some(payload_arg)) = (
+            call.arguments.first(),
+            call.arguments.get(1),
+            call.arguments.get(2),
+        ) else {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 map_set requires root, key, and i32 payload operands",
+            );
+            return self.fallback_value(expression);
+        };
+        let source_local = match &source_arg.value.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                Some(place.base.clone())
+            }
+            _ => None,
+        };
+        let expected_source = format!("ordinary-map-owned-any-v2:{}", branch.initial_root.0 .0);
+        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+        let expected_key_digest = blake3::hash(branch.key_literal.as_bytes())
+            .to_hex()
+            .to_string();
+        let attempt = exact_attempts[0];
+        let conversions_are_identity =
+            [&source_arg, &key_arg, &payload_arg]
+                .into_iter()
+                .all(|argument| {
+                    argument.conversion.kind == CheckedConversionKind::Identity
+                        && argument.conversion.from == argument.value.ty
+                        && argument.conversion.to == argument.value.ty
+                });
+        if !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_set")
+            || call.arguments.len() != 3
+            || source_local.as_ref() != Some(&branch.initial_root)
+            || &source_arg.value.ty != source_root_type.expect("Result child checked above")
+            || !conversions_are_identity
+            || action.source_local.as_ref() != Some(&branch.initial_root)
+            || action
+                .source
+                .as_ref()
+                .map(|resource| resource.0 .0.as_str())
+                != Some(expected_source.as_str())
+            || action.source_node.as_ref() != Some(&source_arg.value.node_id)
+            || action.source_type.as_ref() != Some(&source_arg.value.ty)
+            || action.key.as_ref() != Some(&key_arg.value.node_id)
+            || action.key_type.as_ref() != Some(&string_type)
+            || key_arg.value.ty != string_type
+            || action.key_static_digest.as_ref() != Some(&expected_key_digest)
+            || action.value.as_ref() != Some(&payload_arg.value.node_id)
+            || action.value_type.as_ref() != Some(&payload_arg.value.ty)
+            || action.key_local.is_some()
+            || action.key_provenance
+                != Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::StringLiteral)
+            || action.value_type.as_ref() != Some(&i32_type)
+            || !action.payload_clone
+            || !matches!(&key_arg.value.kind, ResolvedExprKind::Literal(ResolvedLiteral::String(value)) if value == &branch.key_literal)
+            || !matches!(&payload_arg.value.kind, ResolvedExprKind::Literal(ResolvedLiteral::Int(value)) if *value == branch.payload_literal)
+            || payload_arg.value.ty != branch.payload_type
+            || attempt.arguments
+                != vec![
+                    source_arg.value.node_id.clone(),
+                    key_arg.value.node_id.clone(),
+                    payload_arg.value.node_id.clone(),
+                ]
+            || attempt.receiver_local.as_ref() != Some(&branch.initial_root)
+            || attempt.result_local.as_ref() != Some(&branch.populated_root)
+        {
+            self.error(
+                &expression.node_id,
+                "ValuesLocalIndexI32 map_set differs from its exact source, key, payload, or result-path receipt",
+            );
+            return self.fallback_value(expression);
+        }
+        let Some((key, key_is_temporary)) =
+            self.lower_ordinary_map_owned_any_v2_key(action, &key_arg.value, &expression.node_id)
+        else {
+            return self.fallback_value(expression);
+        };
+        let source = self.v2_root_arg(&source_arg.value, action, &expression.node_id);
+        let payload = self.lower_expr(&payload_arg.value);
+        let Some(result) = self.id("expr", &expression.node_id) else {
+            return self.fallback_value(expression);
+        };
+        self.insert_value(result.clone(), result_ty, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            &format!("ordinary_map_owned_any_v2_set:local:{}", action.local.0 .0),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult {
+                result: result.clone(),
+                source,
+                key: key.clone(),
+                value: payload.clone(),
+            },
+        );
+        self.drop_ordinary_map_string_temporaries(
+            &expression.node_id,
+            action.key_type.as_ref(),
+            &key,
+            key_is_temporary,
+            action.value_type.as_ref(),
+            &payload,
+        );
+        self.drop_ordinary_map_owned_any_v2_set_aggregate_temporary(
+            &expression.node_id,
+            action.value_type.as_ref(),
+            &payload,
+        );
+        result
+    }
+
+    fn ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_operation(
+        &self,
+        operation: &NodeId,
+    ) -> Result<
+        Option<
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+        >,
+        String,
+    >{
+        use crate::core::ownership::{
+            ManagedAnyCfgMatchCase, OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+            OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind,
+            OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchProfileVersion as BranchProfile,
+            OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind as PathKind,
+            OrdinaryMapOwnedAnyV2ProfileVersion,
+        };
+
+        let Some(analysis) = self.resource_analysis else {
+            return Ok(None);
+        };
+        let Some(owner_cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return Ok(None);
+        };
+        let candidates = owner_cfg
+            .result_receipts
+            .iter()
+            .filter_map(|result| {
+                let chain = result.computed_string_key_owner_chain.as_deref()?;
+                let branch = chain.result_branch.as_deref()?;
+                (branch.map_new_operation == *operation || branch.map_set_operation == *operation)
+                    .then_some((result, chain, branch))
+            })
+            .collect::<Vec<_>>();
+        let [(result_receipt, chain, branch)] = candidates.as_slice() else {
+            return if candidates.is_empty() {
+                Ok(None)
+            } else {
+                Err("computed String-key owner-chain Result branch receipt is missing or duplicated".into())
+            };
+        };
+
+        let fail = |message: &str| {
+            format!("computed String-key owner-chain Result branch receipt is invalid: {message}")
+        };
+        let Some(managed_cfg) = analysis.managed_any_cfg_receipt.as_ref() else {
+            return Err(fail("Checker managed-any CFG authority is absent"));
+        };
+        let actions = &owner_cfg.actions;
+        let attempts = &owner_cfg.attempts;
+        let exact_action = |kind, point: &NodeId| {
+            let matching = actions
+                .iter()
+                .filter(|action| action.kind == kind && action.point == *point)
+                .collect::<Vec<_>>();
+            match matching.as_slice() {
+                [action] => Some(*action),
+                _ => None,
+            }
+        };
+        let new_actions = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::New)
+            .collect::<Vec<_>>();
+        let set_actions = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Set)
+            .collect::<Vec<_>>();
+        let remove_actions = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Remove)
+            .collect::<Vec<_>>();
+        let get_actions = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::GetAny)
+            .collect::<Vec<_>>();
+        let size_actions = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Size)
+            .collect::<Vec<_>>();
+        let [new_action] = new_actions.as_slice() else {
+            return Err(fail("map_new action is absent or duplicated"));
+        };
+        let [set_action] = set_actions.as_slice() else {
+            return Err(fail("map_set action is absent or duplicated"));
+        };
+        let [remove_action] = remove_actions.as_slice() else {
+            return Err(fail("map_remove action is absent or duplicated"));
+        };
+        let [get_action] = get_actions.as_slice() else {
+            return Err(fail("map_get_any action is absent or duplicated"));
+        };
+        let [size_action] = size_actions.as_slice() else {
+            return Err(fail("map_size action is absent or duplicated"));
+        };
+        let root_resource =
+            |local: &ResolvedLocalId| format!("ordinary-map-owned-any-v2:{}", local.0 .0);
+        let expected_action_kinds = [
+            (ActionKind::New, 1),
+            (ActionKind::Set, 1),
+            (ActionKind::HasKey, 3),
+            (ActionKind::GetAny, 1),
+            (ActionKind::Remove, 1),
+            (ActionKind::Size, 1),
+            (ActionKind::Drop, 4),
+        ];
+        let expected_attempt_kinds = [
+            (AttemptKind::New, 1),
+            (AttemptKind::Set, 1),
+            (AttemptKind::HasKey, 3),
+            (AttemptKind::GetAny, 1),
+            (AttemptKind::Remove, 1),
+            (AttemptKind::Size, 1),
+            (AttemptKind::Drop, 4),
+        ];
+        let new_attempts = attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == AttemptKind::New && attempt.point == branch.map_new_operation
+            })
+            .collect::<Vec<_>>();
+        let set_attempts = attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == AttemptKind::Set && attempt.point == branch.map_set_operation
+            })
+            .collect::<Vec<_>>();
+        let [new_attempt] = new_attempts.as_slice() else {
+            return Err(fail("map_new construction attempt is absent or duplicated"));
+        };
+        let [set_attempt] = set_attempts.as_slice() else {
+            return Err(fail("map_set attempt is absent or duplicated"));
+        };
+        if owner_cfg.owner != self.body.owner
+            || owner_cfg.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || analysis.owner != self.body.owner
+            || analysis.ordinary_map_owned_any_v2_actions != owner_cfg.actions
+            || branch.profile_version != BranchProfile::V1
+            || branch.owner != self.body.owner
+            || branch.cfg.owner != self.body.owner
+            || branch.cfg != *managed_cfg
+            || chain.owner != self.body.owner
+            || chain.profile_version
+                != crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainProfileVersion::V1
+            || chain.result_branch.as_deref() != Some(*branch)
+            || result_receipt.operation != chain.pair.operation
+            || result_receipt.kind != ActionKind::GetAny
+            || result_receipt.source_local != chain.pair.source_local
+            || result_receipt.result != chain.pair.result
+            || result_receipt.binding != chain.pair.binding
+            || result_receipt.result_type != chain.pair.result_type
+            || result_receipt.binding_point != chain.pair.binding_point
+            || result_receipt.settlement != chain.pair.settlement
+            || result_receipt.settlement_point != chain.pair.settlement_point
+            || {
+                let mut unchained = (**result_receipt).clone();
+                unchained.computed_string_key_owner_chain = None;
+                unchained != chain.pair
+            }
+            || branch.map_new_operation != chain.map_new.point
+            || branch.map_set_operation != chain.map_set.point
+            || branch.initial_root != chain.map_new.local
+            || branch.populated_root != chain.map_set.local
+            || branch.map_new_operation == branch.map_set_operation
+            || branch.initial_root == branch.populated_root
+            || *new_action != &chain.map_new
+            || *set_action != &chain.map_set
+            || *remove_action != &chain.map_remove
+            || *get_action != &chain.get_any
+            || *size_action != &chain.map_size
+            || chain.has_key_actions.len() != 3
+            || actions
+                .iter()
+                .filter(|action| action.kind == ActionKind::HasKey)
+                .any(|action| !chain.has_key_actions.contains(action))
+            || chain.has_key_actions.iter().any(|action| {
+                action.kind != ActionKind::HasKey || !actions.contains(action)
+            })
+            || branch.ordered_action_points
+                != actions
+                    .iter()
+                    .map(|action| action.point.clone())
+                    .collect::<Vec<_>>()
+            || chain.ordered_action_points != branch.ordered_action_points
+            || owner_cfg.actions.len() != 12
+            || attempts.len() != 12
+            || expected_action_kinds.iter().any(|(kind, count)| {
+                actions.iter().filter(|action| action.kind == *kind).count() != *count
+            })
+            || expected_attempt_kinds.iter().any(|(kind, count)| {
+                attempts.iter().filter(|attempt| attempt.kind == *kind).count() != *count
+            })
+            || actions.iter().any(|action| {
+                !attempts.iter().any(|attempt| {
+                    attempt.point == action.point
+                        && matches!(
+                            (action.kind, attempt.kind),
+                            (ActionKind::New, AttemptKind::New)
+                                | (ActionKind::Set, AttemptKind::Set)
+                                | (ActionKind::HasKey, AttemptKind::HasKey)
+                                | (ActionKind::GetAny, AttemptKind::GetAny)
+                                | (ActionKind::Remove, AttemptKind::Remove)
+                                | (ActionKind::Size, AttemptKind::Size)
+                                | (ActionKind::Drop, AttemptKind::Drop)
+                        )
+                })
+            })
+            || Some(*new_action) != exact_action(ActionKind::New, &branch.map_new_operation)
+            || Some(*set_action) != exact_action(ActionKind::Set, &branch.map_set_operation)
+            || new_action.point != branch.map_new_operation
+            || new_action.local != branch.initial_root
+            || new_action.root.0 .0 != root_resource(&branch.initial_root)
+            || new_action.source_local.is_some()
+            || new_action.source.is_some()
+            || new_action.source_node.as_ref() != Some(&branch.map_new_operation)
+            || new_action.source_type.is_none()
+            || new_action.key.is_some()
+            || new_action.key_type.is_some()
+            || new_action.key_local.is_some()
+            || new_action.key_local_mutable.is_some()
+            || new_action.key_provenance.is_some()
+            || new_action.key_static_digest.is_some()
+            || new_action.value.is_some()
+            || new_action.value_type.is_some()
+            || new_action.payload_clone
+            || new_action.result_type.is_some()
+            || new_action.result_local.is_some()
+            || set_action.point != branch.map_set_operation
+            || set_action.local != branch.populated_root
+            || set_action.root.0 .0 != root_resource(&branch.populated_root)
+            || set_action.source_local.as_ref() != Some(&branch.initial_root)
+            || set_action.source.as_ref().map(|resource| resource.0 .0.as_str())
+                != Some(root_resource(&branch.initial_root).as_str())
+            || set_action.source_node.is_none()
+            || set_action.source_type.is_none()
+            || set_action.key.is_none()
+            || set_action.key_type.is_none()
+            || set_action.value.is_none()
+            || set_action.value_type.is_none()
+            || !set_action.payload_clone
+            || set_action.result_type.is_some()
+            || set_action.result_local.is_some()
+            || new_attempt.arguments.len() != 0
+            || new_attempt.receiver_local.is_some()
+            || new_attempt.result_local.is_some()
+            || set_attempt.receiver_local.as_ref() != Some(&branch.initial_root)
+            || set_attempt.result_local.as_ref() != Some(&branch.populated_root)
+            || set_attempt.arguments.len() != 3
+            || set_action.source_node.as_ref() != set_attempt.arguments.first()
+            || set_action.key.as_ref() != set_attempt.arguments.get(1)
+            || set_action.value.as_ref() != set_attempt.arguments.get(2)
+        {
+            return Err(fail(
+                "owner, operation/local/action/attempt identities, or complete closed census differs",
+            ));
+        }
+
+        let Some(catalog) = self.type_catalog else {
+            return Err(fail("canonical MIR TypeCatalog is absent"));
+        };
+        let root_result_type = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let Some(source_result_type) = new_action.source_type.as_ref() else {
+            return Err(fail("exact Checker map_new Result type is absent"));
+        };
+        catalog
+            .validate_ordinary_map_owned_any_v2_root_result(&root_result_type, source_result_type)
+            .map_err(|message| {
+                fail(&format!(
+                    "map_new Checker Result TypeDesc is invalid: {message}"
+                ))
+            })?;
+        let source_result_children = catalog
+            .resolved_type_children(source_result_type)
+            .ok_or_else(|| fail("map_new Checker Result omits its exact child types"))?;
+        let [source_root_type, source_error_type] = source_result_children else {
+            return Err(fail(
+                "map_new Checker Result does not have exactly two payload types",
+            ));
+        };
+        if self
+            .body
+            .locals
+            .get(&branch.initial_root)
+            .is_none_or(|local| local.ty != *source_root_type)
+            || self
+                .body
+                .locals
+                .get(&branch.populated_root)
+                .is_none_or(|local| local.ty != *source_root_type)
+            || set_action.source_type.as_ref() != Some(source_root_type)
+            || source_error_type != &crate::core::ir::primitive_type_id(PrimitiveType::I32)
+        {
+            return Err(fail(
+                "Checker Result payload type differs from the exact initial/populated root locals",
+            ));
+        }
+
+        let source_point_count = |node: &NodeId| {
+            branch
+                .cfg
+                .reachable_blocks
+                .values()
+                .flat_map(|block| block.points.iter())
+                .filter(|point| point.source.node == *node)
+                .count()
+        };
+        let source_block_count = |node: &NodeId| {
+            branch
+                .cfg
+                .reachable_blocks
+                .values()
+                .filter(|block| block.source.node == *node)
+                .count()
+        };
+        let exact_result_match =
+            |operation: &NodeId, match_node: &NodeId, ok_arm: &NodeId, err_arm: &NodeId| {
+                let dispatches = branch
+                    .cfg
+                    .reachable_blocks
+                    .iter()
+                    .filter(|(_, block)| {
+                        matches!(
+                            &block.terminator,
+                            crate::core::cfg::Terminator::Match { scrutinee, .. }
+                                if scrutinee == operation
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let [(dispatch_id, block)] = dispatches.as_slice() else {
+                    return false;
+                };
+                let crate::core::cfg::Terminator::Match { arms, .. } = &block.terminator else {
+                    return false;
+                };
+                let Some(match_arms) = branch.cfg.match_arms.get(*dispatch_id) else {
+                    return false;
+                };
+                let expected_arms = BTreeMap::from([
+                    (ok_arm.clone(), NodeId("builtin:variant:Result::Ok".into())),
+                    (
+                        err_arm.clone(),
+                        NodeId("builtin:variant:Result::Err".into()),
+                    ),
+                ]);
+                if arms.len() != 2 || match_arms.len() != 2 {
+                    return false;
+                }
+                let observed_arms = match_arms
+                    .iter()
+                    .map(|arm| arm.source_arm.clone())
+                    .collect::<BTreeSet<_>>();
+                if observed_arms != BTreeSet::from([ok_arm.clone(), err_arm.clone()]) {
+                    return false;
+                }
+                match_arms.iter().all(|arm| {
+                    if !arms.contains(&arm.edge) || arm.guarded {
+                        return false;
+                    }
+                    let Some(expected_variant) = expected_arms.get(&arm.source_arm) else {
+                        return false;
+                    };
+                    if arm.case != ManagedAnyCfgMatchCase::Variant(expected_variant.clone()) {
+                        return false;
+                    }
+                    branch
+                        .cfg
+                        .reachable_edges
+                        .get(&arm.edge)
+                        .and_then(|edge| branch.cfg.reachable_blocks.get(&edge.to))
+                        .is_some_and(|target| target.source.node == arm.source_arm)
+                }) && source_point_count(operation) == 1
+                    && source_point_count(match_node) == 1
+                    && source_block_count(ok_arm) == 1
+                    && source_block_count(err_arm) == 1
+            };
+        if source_point_count(&branch.map_new_operation) != 1
+            || source_point_count(&branch.map_set_operation) != 1
+            || !exact_result_match(
+                &branch.map_new_operation,
+                &branch.map_new_match,
+                &branch.map_new_ok_arm,
+                &branch.map_new_err_arm,
+            )
+            || !exact_result_match(
+                &branch.map_set_operation,
+                &branch.map_set_match,
+                &branch.map_set_ok_arm,
+                &branch.map_set_err_arm,
+            )
+            || branch.paths.len() != 3
+        {
+            return Err(fail(
+                "source operation/match/arm anchors do not form the exact nested Result branch",
+            ));
+        }
+        let exact_result_payload_binding =
+            |arm: &crate::core::ir::MatchArm,
+             variant: &str,
+             result_type: &crate::core::ResolvedTypeId,
+             payload_type: &crate::core::ResolvedTypeId,
+             expected_local: Option<&ResolvedLocalId>| {
+                let ResolvedPatternKind::Constructor {
+                    variant: found_variant,
+                    fields,
+                } = &arm.pattern.kind
+                else {
+                    return false;
+                };
+                let [(field, payload)] = fields.as_slice() else {
+                    return false;
+                };
+                let ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } = &payload.kind
+                else {
+                    return false;
+                };
+                arm.guard.is_none()
+                    && found_variant.0 == format!("builtin:variant:Result::{variant}")
+                    && field.0 == format!("builtin:variant:Result::{variant}/payload:0")
+                    && arm.pattern.ty == *result_type
+                    && payload.ty == *payload_type
+                    && expected_local.is_none_or(|expected| expected == local)
+                    && self.body.locals.get(local).is_some_and(|definition| {
+                        definition.ty == *payload_type && !definition.mutable
+                    })
+            };
+        let exact_source_matches = (|| {
+            let outer_match = self.body.root.result.as_deref()?;
+            if outer_match.node_id != branch.map_new_match {
+                return None;
+            }
+            let ResolvedExprKind::Match {
+                scrutinee: new_expression,
+                arms: new_arms,
+            } = &outer_match.kind
+            else {
+                return None;
+            };
+            if new_expression.node_id != branch.map_new_operation
+                || new_expression.ty != *source_result_type
+            {
+                return None;
+            }
+            let ResolvedExprKind::Call(new_call) = &new_expression.kind else {
+                return None;
+            };
+            if !matches!(
+                &new_call.callee,
+                ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
+            ) || !new_call.arguments.is_empty()
+                || !new_call.type_arguments.is_empty()
+                || new_call.result != new_expression.ty
+                || new_call.permission.is_some()
+                || !new_call.effects.is_empty()
+                || !new_call.session.is_empty()
+                || new_expression.effects != new_call.effects
+            {
+                return None;
+            }
+            if new_arms.len() != 2
+                || new_arms
+                    .iter()
+                    .map(|arm| arm.node_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    != BTreeSet::from([
+                        branch.map_new_ok_arm.clone(),
+                        branch.map_new_err_arm.clone(),
+                    ])
+            {
+                return None;
+            }
+            let new_ok = new_arms
+                .iter()
+                .find(|arm| arm.node_id == branch.map_new_ok_arm)?;
+            let new_err = new_arms
+                .iter()
+                .find(|arm| arm.node_id == branch.map_new_err_arm)?;
+            if new_ok.node_id == new_err.node_id
+                || !exact_result_payload_binding(
+                    new_ok,
+                    "Ok",
+                    &new_expression.ty,
+                    source_root_type,
+                    Some(&branch.initial_root),
+                )
+                || !exact_result_payload_binding(
+                    new_err,
+                    "Err",
+                    &new_expression.ty,
+                    source_error_type,
+                    None,
+                )
+            {
+                return None;
+            }
+            let ResolvedExprKind::Block(new_ok_block) = &new_ok.body.kind else {
+                return None;
+            };
+            if !new_ok_block.statements.is_empty() {
+                return None;
+            }
+            let set_expression = new_ok_block.result.as_deref()?;
+            if set_expression.node_id != branch.map_set_match {
+                return None;
+            }
+            let ResolvedExprKind::Match {
+                scrutinee: set_call_expression,
+                arms: set_arms,
+            } = &set_expression.kind
+            else {
+                return None;
+            };
+            if set_call_expression.node_id != branch.map_set_operation
+                || set_call_expression.ty != *source_result_type
+            {
+                return None;
+            }
+            let ResolvedExprKind::Call(set_call) = &set_call_expression.kind else {
+                return None;
+            };
+            if !matches!(
+                &set_call.callee,
+                ResolvedCallee::Builtin(name) if name.as_str() == "map_set"
+            ) || set_call.arguments.len() != 3
+                || !set_call.type_arguments.is_empty()
+                || set_call.result != set_call_expression.ty
+                || set_call.permission.is_some()
+                || !set_call.effects.is_empty()
+                || !set_call.session.is_empty()
+                || set_call_expression.effects != set_call.effects
+            {
+                return None;
+            }
+            if set_arms.len() != 2
+                || set_arms
+                    .iter()
+                    .map(|arm| arm.node_id.clone())
+                    .collect::<BTreeSet<_>>()
+                    != BTreeSet::from([
+                        branch.map_set_ok_arm.clone(),
+                        branch.map_set_err_arm.clone(),
+                    ])
+            {
+                return None;
+            }
+            let set_ok = set_arms
+                .iter()
+                .find(|arm| arm.node_id == branch.map_set_ok_arm)?;
+            let set_err = set_arms
+                .iter()
+                .find(|arm| arm.node_id == branch.map_set_err_arm)?;
+            (set_ok.node_id != set_err.node_id
+                && exact_result_payload_binding(
+                    set_ok,
+                    "Ok",
+                    &set_call_expression.ty,
+                    source_root_type,
+                    Some(&branch.populated_root),
+                )
+                && exact_result_payload_binding(
+                    set_err,
+                    "Err",
+                    &set_call_expression.ty,
+                    source_error_type,
+                    None,
+                ))
+            .then_some(())
+        })()
+        .is_some();
+        if !exact_source_matches {
+            return Err(fail(
+                "ResolvedBody operation calls, Result payload bindings, or nested match anchors differ from the Checker receipt",
+            ));
+        }
+        let new_error_paths = branch
+            .paths
+            .iter()
+            .filter(|path| path.kind == PathKind::MapNewErr)
+            .collect::<Vec<_>>();
+        let set_error_paths = branch
+            .paths
+            .iter()
+            .filter(|path| path.kind == PathKind::MapSetErr)
+            .collect::<Vec<_>>();
+        let success_paths = branch
+            .paths
+            .iter()
+            .filter(|path| path.kind == PathKind::Success)
+            .collect::<Vec<_>>();
+        let [new_error_path] = new_error_paths.as_slice() else {
+            return Err(fail("MapNew Err path is absent or duplicated"));
+        };
+        let [set_error_path] = set_error_paths.as_slice() else {
+            return Err(fail("MapSet Err path is absent or duplicated"));
+        };
+        let [success_path] = success_paths.as_slice() else {
+            return Err(fail("Set success path is absent or duplicated"));
+        };
+        let remove_root = &remove_action.local;
+        let expected_drop_roots = BTreeSet::from([
+            branch.initial_root.clone(),
+            branch.populated_root.clone(),
+            remove_root.clone(),
+        ]);
+        let path_drops = branch
+            .paths
+            .iter()
+            .flat_map(|path| path.drops.iter())
+            .collect::<Vec<_>>();
+        let action_drops = actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Drop)
+            .map(|action| (action.local.clone(), action.point.clone()))
+            .collect::<BTreeSet<_>>();
+        let receipt_drops = path_drops
+            .iter()
+            .map(|drop| (drop.local.clone(), drop.settlement_point.clone()))
+            .collect::<BTreeSet<_>>();
+        if new_error_path.arm_path != [branch.map_new_err_arm.clone()]
+            || !new_error_path.drops.is_empty()
+            || set_error_path.arm_path
+                != [
+                    branch.map_new_ok_arm.clone(),
+                    branch.map_set_err_arm.clone(),
+                ]
+            || set_error_path.drops.len() != 1
+            || set_error_path.drops[0].local != branch.initial_root
+            || success_path.arm_path
+                != [branch.map_new_ok_arm.clone(), branch.map_set_ok_arm.clone()]
+            || success_path.drops.len() != 3
+            || success_path
+                .drops
+                .iter()
+                .map(|drop| drop.local.clone())
+                .collect::<BTreeSet<_>>()
+                != expected_drop_roots
+            || path_drops.len() != 4
+            || receipt_drops.len() != 4
+            || receipt_drops != action_drops
+            || path_drops.iter().any(|drop| {
+                drop.settlement_place_index != 0
+                    || self
+                        .body
+                        .locals
+                        .get(&drop.local)
+                        .is_none_or(|local| local.ty != drop.binding_type)
+                    || source_point_count(&drop.settlement_point) != 1
+            })
+        {
+            return Err(fail(
+                "path-local branch Drop/action receipts are incomplete or conflicting",
+            ));
+        }
+        if new_action.local != branch.initial_root
+            || set_action.local != branch.populated_root
+            || !self
+                .body
+                .locals
+                .get(&branch.initial_root)
+                .is_some_and(|local| !local.mutable)
+            || !self
+                .body
+                .locals
+                .get(&branch.populated_root)
+                .is_some_and(|local| !local.mutable)
+        {
+            return Err(fail(
+                "branch root locals are absent, mutable, or differ from the actions",
+            ));
+        }
+        Ok(Some((**branch).clone()))
+    }
+
+    fn ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<
+        crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+    > {
+        let analysis = self.resource_analysis?;
+        let owner_cfg = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref()?;
+        let branches = owner_cfg
+            .result_receipts
+            .iter()
+            .filter_map(|result| {
+                result
+                    .computed_string_key_owner_chain
+                    .as_deref()?
+                    .result_branch
+                    .as_deref()
+            })
+            .filter(|branch| branch.initial_root == *local || branch.populated_root == *local)
+            .cloned()
+            .collect::<Vec<_>>();
+        let [branch] = branches.as_slice() else {
+            return None;
+        };
+        self.ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_operation(
+            &branch.map_new_operation,
+        )
+        .ok()
+        .flatten()
+        .filter(|checked| checked == branch)
+    }
+
+    fn ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Result<
+        Option<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchReceipt>,
+        String,
+    > {
+        let Some(branch) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .and_then(|cfg| cfg.values_local_index_i32_result_branch_receipt.as_ref())
+        else {
+            return Ok(None);
+        };
+        if branch.initial_root != *local && branch.populated_root != *local {
+            return Ok(None);
+        }
+        let validated = self
+            .ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_operation(
+                &branch.map_new_operation,
+            )?
+            .ok_or_else(|| {
+                "ValuesLocalIndexI32 Result root local has no valid enclosing branch receipt"
+                    .to_string()
+            })?;
+        if validated != *branch {
+            return Err(
+                "ValuesLocalIndexI32 Result root local conflicts with its Checker branch receipt"
+                    .into(),
+            );
+        }
+        Ok(Some(validated))
+    }
+
+    fn lower_ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+        action: &crate::core::OrdinaryMapOwnedAnyV2Action,
+        branch: &crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultBranchReceipt,
+    ) -> MirValueId {
+        use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+        let is_new = expression.node_id == branch.map_new_operation;
+        let (expected_kind, expected_root) = if is_new {
+            (ActionKind::New, &branch.initial_root)
+        } else {
+            (ActionKind::Set, &branch.populated_root)
+        };
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                &expression.node_id,
+                "computed String-key owner-chain Result lowering requires the canonical MIR TypeCatalog",
+            );
+            return self.fallback_value(expression);
+        };
+        let result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let source_result_type = expression.ty.clone();
+        if catalog
+            .validate_ordinary_map_owned_any_v2_root_result(&result_ty, &source_result_type)
+            .is_err()
+            || action.kind != expected_kind
+            || action.point != expression.node_id
+            || action.local != *expected_root
+            || call.result != expression.ty
+            || !call.type_arguments.is_empty()
+            || call.permission.is_some()
+            || !call.effects.is_empty()
+            || expression.effects != call.effects
+            || !call.session.is_empty()
+        {
+            self.error(
+                &expression.node_id,
+                "computed String-key owner-chain Result call differs from its exact Checker result/action/type receipt",
+            );
+            return self.fallback_value(expression);
+        }
+
+        if is_new {
+            if !matches!(
+                &call.callee,
+                ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
+            ) || !call.arguments.is_empty()
+                || action.root.0 .0
+                    != format!("ordinary-map-owned-any-v2:{}", branch.initial_root.0 .0)
+                || action.source_node.as_ref() != Some(&expression.node_id)
+                || action.source_type.as_ref() != Some(&expression.ty)
+                || action.source_local.is_some()
+                || action.source.is_some()
+                || action.key.is_some()
+                || action.key_type.is_some()
+                || action.value.is_some()
+                || action.value_type.is_some()
+                || action.payload_clone
+                || action.result_type.is_some()
+                || action.result_local.is_some()
+            {
+                self.error(
+                    &expression.node_id,
+                    "computed String-key owner-chain New differs from its exact call, root, or Result type receipt",
+                );
+                return self.fallback_value(expression);
+            }
+            let Some(owner_cfg) = self
+                .resource_analysis
+                .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            else {
+                self.error(
+                    &expression.node_id,
+                    "computed String-key owner-chain New has no Checker owner-v2 CFG receipt",
+                );
+                return self.fallback_value(expression);
+            };
+            let new_actions = owner_cfg
+                .actions
+                .iter()
+                .filter(|candidate| {
+                    candidate.kind == ActionKind::New && candidate.point == branch.map_new_operation
+                })
+                .collect::<Vec<_>>();
+            if !matches!(new_actions.as_slice(), [new_action] if *new_action == action) {
+                self.error(
+                    &expression.node_id,
+                    "computed String-key owner-chain New is not uniquely bound to its exact Checker action",
+                );
+                return self.fallback_value(expression);
+            }
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return self.fallback_value(expression);
+            };
+            self.insert_value(result.clone(), result_ty, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_new:local:{}", action.local.0 .0),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: result.clone(),
+                },
+            );
+            return result;
+        }
+
+        let (Some(source_arg), Some(key_arg), Some(value_arg)) = (
+            call.arguments.first(),
+            call.arguments.get(1),
+            call.arguments.get(2),
+        ) else {
+            self.error(
+                &expression.node_id,
+                "computed String-key owner-chain SetResult requires root, String key, and payload operands",
+            );
+            return self.fallback_value(expression);
+        };
+        let source_local = match &source_arg.value.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                Some(place.base.clone())
+            }
+            _ => None,
+        };
+        let expected_source_resource =
+            format!("ordinary-map-owned-any-v2:{}", branch.initial_root.0 .0);
+        let expected_target_resource =
+            format!("ordinary-map-owned-any-v2:{}", branch.populated_root.0 .0);
+        let exact_new_result_type = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .and_then(|owner_cfg| {
+                let matching = owner_cfg
+                    .actions
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.kind == ActionKind::New
+                            && candidate.point == branch.map_new_operation
+                    })
+                    .collect::<Vec<_>>();
+                match matching.as_slice() {
+                    [new_action] => new_action.source_type.as_ref(),
+                    _ => None,
+                }
+            });
+        if !matches!(
+            &call.callee,
+            ResolvedCallee::Builtin(name) if name.as_str() == "map_set"
+        ) || call.arguments.len() != 3
+            || source_local.as_ref() != Some(&branch.initial_root)
+            || action.source_node.as_ref() != Some(&source_arg.value.node_id)
+            || action.source_type.as_ref() != Some(&source_arg.value.ty)
+            || self
+                .body
+                .locals
+                .get(&branch.initial_root)
+                .is_none_or(|local| local.ty != source_arg.value.ty)
+            || source_arg.conversion.kind != CheckedConversionKind::Identity
+            || source_arg.conversion.from != source_arg.value.ty
+            || source_arg.conversion.to != source_arg.value.ty
+            || action.root.0 .0 != expected_target_resource
+            || action
+                .source
+                .as_ref()
+                .map(|resource| resource.0 .0.as_str())
+                != Some(expected_source_resource.as_str())
+            || action.source_local.as_ref() != Some(&branch.initial_root)
+            || action.source_node.as_ref() != Some(&source_arg.value.node_id)
+            || action.source_type.as_ref() != Some(&source_arg.value.ty)
+            || action.key.as_ref() != Some(&key_arg.value.node_id)
+            || action.key_type.as_ref() != Some(&key_arg.value.ty)
+            || action.value.as_ref() != Some(&value_arg.value.node_id)
+            || action.value_type.as_ref() != Some(&value_arg.value.ty)
+            || !action.payload_clone
+            || action.result_type.is_some()
+            || action.result_local.is_some()
+            || key_arg.conversion.kind != CheckedConversionKind::Identity
+            || key_arg.conversion.from != key_arg.value.ty
+            || key_arg.conversion.to != key_arg.value.ty
+            || value_arg.conversion.kind != CheckedConversionKind::Identity
+            || value_arg.conversion.from != value_arg.value.ty
+            || value_arg.conversion.to != value_arg.value.ty
+            || exact_new_result_type != Some(&expression.ty)
+        {
+            self.error(
+                &expression.node_id,
+                "computed String-key owner-chain SetResult differs from its exact Checker source/key/value/local/type receipt",
+            );
+            return self.fallback_value(expression);
+        }
+        let Some((key, key_is_temporary)) =
+            self.lower_ordinary_map_owned_any_v2_key(action, &key_arg.value, &expression.node_id)
+        else {
+            return self.fallback_value(expression);
+        };
+        let source = self.v2_root_arg(&source_arg.value, action, &expression.node_id);
+        let value = self.lower_expr(&value_arg.value);
+        let Some(result) = self.id("expr", &expression.node_id) else {
+            return self.fallback_value(expression);
+        };
+        self.insert_value(result.clone(), result_ty, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            &format!("ordinary_map_owned_any_v2_set:local:{}", action.local.0 .0),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetAnyResult {
+                result: result.clone(),
+                source,
+                key: key.clone(),
+                value: value.clone(),
+            },
+        );
+        self.drop_ordinary_map_string_temporaries(
+            &expression.node_id,
+            action.key_type.as_ref(),
+            &key,
+            key_is_temporary,
+            action.value_type.as_ref(),
+            &value,
+        );
+        self.drop_ordinary_map_owned_any_v2_set_aggregate_temporary(
+            &expression.node_id,
+            action.value_type.as_ref(),
+            &value,
+        );
+        result
+    }
+
     fn local_value(
         &mut self,
         local: &ResolvedLocalId,
     ) -> Result<MirValueId, Vec<MirLoweringError>> {
+        let computed_map_root = self
+            .ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_local(
+                local,
+            )
+            .is_some();
+        let owned_get_result_root = self
+            .ordinary_map_owned_get_result_branch_for_root(local)
+            .is_some();
+        let values_result_root = self
+            .ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_local(local)
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: local.0.clone(),
+                    message,
+                }]
+            })?
+            .is_some();
         if let Some(value) = self.locals.get(local) {
+            if computed_map_root
+                && self.values.get(value).map(|value| &value.ty)
+                    != Some(&super::types::ordinary_map_owned_any_v2_type_id())
+            {
+                return Err(vec![MirLoweringError {
+                    node_id: local.0.clone(),
+                    message: "computed String-key Result Ok binding already has a non-canonical MIR root type".into(),
+                }]);
+            }
+            if owned_get_result_root
+                && self.values.get(value).map(|value| &value.ty)
+                    != Some(&super::types::ordinary_map_owned_get_i32_string_v1_type_id())
+            {
+                return Err(vec![MirLoweringError {
+                    node_id: local.0.clone(),
+                    message:
+                        "owned-get Result Ok binding already has a non-canonical MIR root type"
+                            .into(),
+                }]);
+            }
+            if values_result_root
+                && self.values.get(value).map(|value| &value.ty)
+                    != Some(&super::types::ordinary_map_owned_any_v2_type_id())
+            {
+                return Err(vec![MirLoweringError {
+                    node_id: local.0.clone(),
+                    message: "ValuesLocalIndexI32 Result Ok binding already has a non-canonical MIR root type".into(),
+                }]);
+            }
             return Ok(value.clone());
         }
         let Some(definition) = self.body.locals.get(local) else {
@@ -9356,15 +12155,27 @@ impl<'a> Lowerer<'a> {
                 message: "local is absent from ResolvedBody catalog".into(),
             }]);
         };
-        let value = super::MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| {
+        let local_id = self
+            .default_argument_namespace
+            .as_ref()
+            .map(|namespace| format!("default:{namespace}:{}", local.0 .0))
+            .unwrap_or_else(|| local.0 .0.clone());
+        let value = super::MirValueId::new(format!("local:{local_id}")).map_err(|error| {
             vec![MirLoweringError {
                 node_id: local.0.clone(),
                 message: error.to_string(),
             }]
         })?;
-        let ty = self
-            .ordinary_map_owned_any_v2_read_result_type(local, &definition.ty)
-            .unwrap_or_else(|| definition.ty.clone());
+        let ty = if computed_map_root {
+            super::types::ordinary_map_owned_any_v2_type_id()
+        } else if owned_get_result_root {
+            super::types::ordinary_map_owned_get_i32_string_v1_type_id()
+        } else if values_result_root {
+            super::types::ordinary_map_owned_any_v2_type_id()
+        } else {
+            self.ordinary_map_owned_any_v2_read_result_type(local, &definition.ty)
+                .unwrap_or_else(|| definition.ty.clone())
+        };
         self.insert_value(value.clone(), ty, &local.0);
         self.locals.insert(local.clone(), value.clone());
         Ok(value)
@@ -9375,6 +12186,46 @@ impl<'a> Lowerer<'a> {
         local: &ResolvedLocalId,
         checker_type: &crate::core::ResolvedTypeId,
     ) -> Option<crate::core::ResolvedTypeId> {
+        if let Ok(Some(receipt)) =
+            self.ordinary_map_owned_any_v2_map_root_get_any_caller_selection()
+        {
+            if receipt.pair_local == *local
+                && receipt.pair_type == *checker_type
+                && receipt.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+            {
+                return Some(super::types::ordinary_map_owned_any_v2_get_result_type_id());
+            }
+        }
+        if let Some(receipt) = self.ordinary_map_owned_any_v2_values_caller_receipt_for_local(local)
+        {
+            if receipt.result_type == *checker_type {
+                return Some(super::types::ordinary_map_owned_any_v2_values_type_id());
+            }
+        }
+        if self
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_local(local)
+            .is_some_and(|receipt| receipt.call_result_type == *checker_type)
+        {
+            return Some(super::types::ordinary_map_owned_any_v2_values_type_id());
+        }
+        if let Some(receipt) =
+            self.ordinary_map_owned_any_v2_map_root_caller_receipt_for_local(local)
+        {
+            if receipt.result_type == *checker_type && receipt.caller_root_type == *checker_type {
+                return Some(super::types::ordinary_map_owned_any_v2_type_id());
+            }
+        }
+        if let Some(receipt) =
+            self.ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_local(local)
+        {
+            if receipt.caller_root_type == *checker_type {
+                return Some(super::types::ordinary_map_owned_any_v2_type_id());
+            }
+        }
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return None;
+        }
         let action = self
             .resource_analysis?
             .ordinary_map_owned_any_v2_actions
@@ -9398,6 +12249,930 @@ impl<'a> Lowerer<'a> {
             }
             _ => unreachable!("the result lookup filters V2 read actions"),
         })
+    }
+
+    fn ordinary_map_owned_any_v2_values_caller_receipt_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerReceipt> {
+        let callables = self.checked_callables?;
+        let matching = callables
+            .values()
+            .filter_map(|callable| {
+                if !self.checked_callable_is_included(callable) {
+                    return None;
+                }
+                let cfg = callable
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?;
+                let caller = cfg.values_producer_caller_receipt.as_ref()?;
+                if caller.caller_owner != self.body.owner
+                    || caller.owner_local != *local
+                    || caller.result_binding != *local
+                {
+                    return None;
+                }
+                let (expression, call) =
+                    self.ordinary_map_owned_any_v2_values_caller_binding(caller)?;
+                self.ordinary_map_owned_any_v2_values_caller_receipt_for_call(expression, call)
+                    .filter(|validated| *validated == caller)
+            })
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(*receipt),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_values_caller_binding<'call>(
+        &'call self,
+        receipt: &crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerReceipt,
+    ) -> Option<(&'call ResolvedExpr, &'call ResolvedCall)> {
+        let matching = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| statement.node_id == receipt.result_binding_point)
+            .collect::<Vec<_>>();
+        let [statement] = matching.as_slice() else {
+            return None;
+        };
+        let ResolvedStmtKind::Bind {
+            pattern:
+                ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        if local != &receipt.result_binding || initializer.node_id != receipt.call_node {
+            return None;
+        }
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            return None;
+        };
+        Some((initializer, call))
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_caller_binding<'call>(
+        &'call self,
+        receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt,
+    ) -> Option<(&'call ResolvedExpr, &'call ResolvedCall)> {
+        let matching = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| statement.node_id == receipt.result_binding_point)
+            .collect::<Vec<_>>();
+        let [statement] = matching.as_slice() else {
+            return None;
+        };
+        let ResolvedStmtKind::Bind {
+            pattern:
+                ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        if local != &receipt.caller_root_local || initializer.node_id != receipt.call_node {
+            return None;
+        }
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            return None;
+        };
+        Some((initializer, call))
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_get_any_caller_binding<'call>(
+        &'call self,
+        receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt,
+    ) -> Option<(&'call ResolvedExpr, &'call ResolvedCall)> {
+        let matching = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(
+                    &statement.kind,
+                    ResolvedStmtKind::Bind {
+                        initializer: Some(initializer),
+                        ..
+                    } if initializer.node_id == receipt.call_node
+                )
+            })
+            .collect::<Vec<_>>();
+        let [statement] = matching.as_slice() else {
+            return None;
+        };
+        let ResolvedStmtKind::Bind {
+            pattern:
+                ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        if local != &receipt.caller_root_local || initializer.node_id != receipt.call_node {
+            return None;
+        }
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            return None;
+        };
+        Some((initializer, call))
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_get_any_pair_binding<'call>(
+        &'call self,
+        receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt,
+    ) -> Option<(&'call ResolvedExpr, &'call ResolvedCall)> {
+        let matching = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| statement.node_id == receipt.pair_binding_point)
+            .collect::<Vec<_>>();
+        let [statement] = matching.as_slice() else {
+            return None;
+        };
+        let ResolvedStmtKind::Bind {
+            pattern:
+                ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            return None;
+        };
+        if local != &receipt.pair_local || initializer.node_id != receipt.get_any_node {
+            return None;
+        }
+        let ResolvedExprKind::Call(call) = &initializer.kind else {
+            return None;
+        };
+        Some((initializer, call))
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_caller_receipt_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt> {
+        let callables = self.checked_callables?;
+        let matching = callables
+            .values()
+            .filter_map(|callable| {
+                if !self.checked_callable_is_included(callable) {
+                    return None;
+                }
+                let cfg = callable
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?;
+                let caller = cfg.map_root_producer_caller_receipt.as_ref()?;
+                if caller.caller_owner != self.body.owner
+                    || caller.caller_root_local != *local
+                    || caller.result_binding != *local
+                {
+                    return None;
+                }
+                let (expression, call) =
+                    self.ordinary_map_owned_any_v2_map_root_caller_binding(caller)?;
+                self.ordinary_map_owned_any_v2_map_root_caller_receipt_for_call(expression, call)
+                    .filter(|validated| *validated == caller)
+            })
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(*receipt),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt> {
+        let callables = self.checked_callables?;
+        let matching = callables
+            .values()
+            .filter_map(|callable| {
+                if !self.checked_callable_is_included(callable) {
+                    return None;
+                }
+                let cfg = callable
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?;
+                let caller = cfg.map_root_get_any_caller_receipt.as_ref()?;
+                if caller.caller_owner != self.body.owner
+                    || caller.caller_root_local != *local
+                    || caller.call_target != callable.owner
+                {
+                    return None;
+                }
+                let (expression, call) =
+                    self.ordinary_map_owned_any_v2_map_root_get_any_caller_binding(caller)?;
+                self.ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_call(
+                    expression, call,
+                )
+                .filter(|validated| *validated == caller)
+            })
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(*receipt),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_get_any_caller_selection(
+        &self,
+    ) -> Result<
+        Option<crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt>,
+        &'static str,
+    > {
+        let Some(callables) = self.checked_callables else {
+            return Ok(None);
+        };
+        let matching = callables
+            .values()
+            .filter(|callable| self.checked_callable_is_included(callable))
+            .filter_map(|callable| {
+                callable
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?
+                    .map_root_get_any_caller_receipt
+                    .as_ref()
+            })
+            .filter(|receipt| receipt.caller_owner == self.body.owner)
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            return if matching.is_empty() {
+                Ok(None)
+            } else {
+                Err("Map-root GetAny caller has repeated producer receipts")
+            };
+        };
+        let (expression, call) = self
+            .ordinary_map_owned_any_v2_map_root_get_any_caller_binding(receipt)
+            .ok_or("Map-root GetAny caller receipt does not identify one exact root binding")?;
+        let validated = self
+            .ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_call(expression, call)
+            .filter(|validated| *validated == *receipt)
+            .ok_or("Map-root GetAny caller receipt failed exact call/source validation")?;
+        let Some(catalog) = self.type_catalog else {
+            return Ok(None);
+        };
+        if catalog
+            .get(&super::types::ordinary_map_owned_any_v2_type_id())
+            .is_none()
+        {
+            return Err("Map-root GetAny caller has no selected V2 root TypeDesc");
+        }
+        Ok(Some(validated.clone()))
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_caller_receipt_for_body(
+        &self,
+    ) -> Option<crate::core::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt> {
+        let matching = self
+            .body
+            .locals
+            .keys()
+            .filter_map(|local| {
+                self.ordinary_map_owned_any_v2_map_root_caller_receipt_for_local(local)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(receipt.clone()),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_caller_receipt_for_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt> {
+        let ResolvedCallee::Function(target) = &call.callee else {
+            return None;
+        };
+        let producer = self.checked_callable(target)?;
+        let cfg = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let producer_receipt = cfg.map_root_producer_return_receipt.as_ref()?;
+        let caller_receipt = cfg.map_root_producer_caller_receipt.as_ref()?;
+        let caller_return = self.body.root.result.as_deref()?;
+        let producer_return = producer.body.root.result.as_deref()?;
+        let ResolvedExprKind::Load(place) = &producer_return.kind else {
+            return None;
+        };
+        let (bound_expression, bound_call) =
+            self.ordinary_map_owned_any_v2_map_root_caller_binding(caller_receipt)?;
+        (producer.owner == *target
+            && cfg.owner == *target
+            && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            && producer.signature.parameters.is_empty()
+            && producer.signature.generic_parameters.is_empty()
+            && producer.signature.result == producer_receipt.final_root_type
+            && producer.body.root.ty == producer_receipt.final_root_type
+            && producer_receipt.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerProfileVersion::V1
+            && producer_receipt.owner == *target
+            && producer_receipt.return_value == producer_return.node_id
+            && producer_receipt.return_load == producer_return.node_id
+            && place.base == producer_receipt.final_root_local
+            && place.projections.is_empty()
+            && producer_return.ty == producer_receipt.final_root_type
+            && caller_receipt.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootCallerProfileVersion::V1
+            && caller_receipt.producer_owner == *target
+            && caller_receipt.producer_map_set_operation == producer_receipt.map_set_operation
+            && caller_receipt.producer_return_value == producer_receipt.return_value
+            && caller_receipt.producer_final_local == producer_receipt.final_root_local
+            && caller_receipt.producer_final_binding_point
+                == producer_receipt.final_root_binding_point
+            && caller_receipt.logical_root == producer_receipt.final_root
+            && caller_receipt.caller_owner == self.body.owner
+            && caller_receipt.caller_return_type == self.body.root.ty
+            && caller_return.node_id == caller_receipt.caller_return
+            && caller_return.ty == caller_receipt.caller_return_type
+            && caller_receipt.call_target == *target
+            && caller_receipt.call_node == expression.node_id
+            && caller_receipt.result_binding == caller_receipt.caller_root_local
+            && caller_receipt.result_type == expression.ty
+            && caller_receipt.result_type == bound_call.result
+            && caller_receipt.result_type == bound_expression.ty
+            && caller_receipt.caller_root_type == producer_receipt.final_root_type
+            && call.callee == bound_call.callee
+            && call.result == bound_call.result
+            && call.type_arguments == bound_call.type_arguments
+            && call.arguments.is_empty()
+            && bound_call.arguments.is_empty()
+            && call.permission == bound_call.permission
+            && call.effects == bound_call.effects
+            && call.session == bound_call.session
+            && matches!(&call.callee, ResolvedCallee::Function(callee) if callee == target)
+            && call.arguments.is_empty()
+            && call.type_arguments.is_empty()
+            && self.body.resolved_calls.get(&expression.node_id) == Some(&call.callee))
+        .then_some(caller_receipt)
+    }
+
+    fn ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt> {
+        let ResolvedCallee::Function(target) = &call.callee else {
+            return None;
+        };
+        let producer = self.checked_callable(target)?;
+        let cfg = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let producer_receipt = cfg.map_root_producer_return_receipt.as_ref()?;
+        let caller_receipt = cfg.map_root_get_any_caller_receipt.as_ref()?;
+        let producer_return = producer.body.root.result.as_deref()?;
+        let ResolvedExprKind::Load(place) = &producer_return.kind else {
+            return None;
+        };
+        let (bound_expression, bound_call) =
+            self.ordinary_map_owned_any_v2_map_root_get_any_caller_binding(caller_receipt)?;
+        (producer.owner == *target
+            && cfg.owner == *target
+            && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            && producer.signature.parameters.is_empty()
+            && producer.signature.generic_parameters.is_empty()
+            && producer.signature.result == producer_receipt.final_root_type
+            && producer.body.root.ty == producer_receipt.final_root_type
+            && producer_receipt.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerProfileVersion::V1
+            && producer_receipt.owner == *target
+            && producer_receipt.return_value == producer_return.node_id
+            && producer_receipt.return_load == producer_return.node_id
+            && place.base == producer_receipt.final_root_local
+            && place.projections.is_empty()
+            && producer_return.ty == producer_receipt.final_root_type
+            && caller_receipt.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+            && caller_receipt.producer_owner == *target
+            && caller_receipt.producer_map_set_operation == producer_receipt.map_set_operation
+            && caller_receipt.producer_return_value == producer_receipt.return_value
+            && caller_receipt.producer_final_local == producer_receipt.final_root_local
+            && caller_receipt.logical_root == producer_receipt.final_root
+            && caller_receipt.caller_owner == self.body.owner
+            && caller_receipt.call_target == *target
+            && caller_receipt.call_node == expression.node_id
+            && caller_receipt.caller_return_type == self.body.root.ty
+            && caller_receipt.caller_root_type == expression.ty
+            && caller_receipt.caller_root_type == bound_call.result
+            && caller_receipt.caller_root_type == bound_expression.ty
+            && caller_receipt.caller_root_type == producer_receipt.final_root_type
+            && call.callee == bound_call.callee
+            && call.result == bound_call.result
+            && call.type_arguments == bound_call.type_arguments
+            && call.arguments.is_empty()
+            && bound_call.arguments.is_empty()
+            && call.permission == bound_call.permission
+            && call.effects == bound_call.effects
+            && call.session == bound_call.session
+            && self.body.resolved_calls.get(&expression.node_id) == Some(&call.callee))
+        .then_some(caller_receipt)
+    }
+
+    fn ordinary_map_owned_any_v2_values_caller_receipt_for_body(
+        &self,
+    ) -> Option<crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerReceipt> {
+        let matching = self
+            .body
+            .locals
+            .keys()
+            .filter_map(|local| {
+                self.ordinary_map_owned_any_v2_values_caller_receipt_for_local(local)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(receipt.clone()),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_values_caller_receipt_for_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> Option<&crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerReceipt> {
+        let ResolvedCallee::Function(target) = &call.callee else {
+            return None;
+        };
+        let callable = self.checked_callable(target)?;
+        let cfg = callable
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let producer = cfg.values_producer_return_receipt.as_ref()?;
+        let receipt = cfg.values_producer_caller_receipt.as_ref()?;
+        let erase = &producer.return_container_erase;
+        let (bound_expression, bound_call) =
+            self.ordinary_map_owned_any_v2_values_caller_binding(receipt)?;
+        let producer_return = callable.body.root.result.as_deref()?;
+        let ResolvedExprKind::Cast {
+            value: producer_source,
+            conversion: producer_conversion,
+        } = &producer_return.kind
+        else {
+            return None;
+        };
+        let ResolvedExprKind::Load(producer_place) = &producer_source.kind else {
+            return None;
+        };
+        let producer_action_count = cfg
+            .actions
+            .iter()
+            .filter(|action| {
+                action.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                    && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Values
+                    && action.point == producer.values_operation
+                    && action.result_local.as_ref() == Some(&producer.snapshot_local)
+                    && action.result_type.as_ref() == Some(&producer.snapshot_type)
+            })
+            .count();
+        let producer_result_count = cfg
+            .result_receipts
+            .iter()
+            .filter(|result| producer.matches_returned_result(result))
+            .count();
+        (cfg.owner == *target
+            && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            && cfg.values_producer_return_receipt.as_ref() == Some(producer)
+            && cfg.values_producer_caller_receipt.as_ref() == Some(receipt)
+            && producer_action_count == 1
+            && producer_result_count == 1
+            && callable.owner == *target
+            && callable.signature.owner == *target
+            && callable.signature.parameters.is_empty()
+            && callable.signature.generic_parameters.is_empty()
+            && callable.signature.result == producer.surface_return_type
+            && callable.signature.effects.len() == 1
+            && callable.signature.effects[0].as_str() == "shared.modify"
+            && callable.body.owner == *target
+            && callable.body.root.ty == producer.surface_return_type
+            && producer_return.node_id == producer.return_value
+            && producer_return.node_id == erase.cast_node
+            && producer_source.node_id == erase.source_node
+            && producer_source.node_id != producer_return.node_id
+            && producer_source.ty == producer.snapshot_type
+            && producer_source.ty == erase.source_type
+            && producer_return.ty == producer.surface_return_type
+            && producer_return.ty == erase.target_type
+            && producer_conversion.kind == CheckedConversionKind::ContainerErase
+            && producer_conversion.kind == erase.conversion_kind
+            && producer_conversion.from == producer.snapshot_type
+            && producer_conversion.from == erase.source_type
+            && producer_conversion.to == producer.surface_return_type
+            && producer_conversion.to == erase.target_type
+            && matches!(producer_place.projections.as_slice(), [])
+            && producer_place.base == producer.snapshot_local
+            && callable
+                .body
+                .locals
+                .get(&producer.snapshot_local)
+                .is_some_and(|local| local.ty == producer.snapshot_type && !local.mutable)
+            && receipt.profile_version
+                == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerProfileVersion::V1
+            && producer.profile_version
+                == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnProfileVersion::V1
+            && producer.owner == *target
+            && producer.return_value == erase.cast_node
+            && erase.source_node.0.trim() != ""
+            && erase.source_node != erase.cast_node
+            && erase.source_type == producer.snapshot_type
+            && erase.target_type == producer.surface_return_type
+            && erase.conversion_kind == CheckedConversionKind::ContainerErase
+            && receipt.caller_owner == self.body.owner
+            && receipt.call_node == expression.node_id
+            && receipt.call_target == *target
+            && receipt.result_type == expression.ty
+            && receipt.result_type == call.result
+            && receipt.result_type == producer.surface_return_type
+            && receipt.owner_type == producer.snapshot_type
+            && receipt.producer_owner == producer.owner
+            && receipt.producer_values_operation == producer.values_operation
+            && receipt.producer_implicit_return == producer.return_value
+            && receipt.result_binding == receipt.owner_local
+            && self.body.resolved_calls.get(&expression.node_id) == Some(&call.callee)
+            && std::ptr::eq(bound_expression, expression)
+            && bound_call.callee == call.callee
+            && bound_call.result == call.result
+            && bound_expression.ty == expression.ty
+            && self
+                .body
+                .locals
+                .get(&receipt.result_binding)
+                .is_some_and(|local| local.ty == receipt.result_type && !local.mutable)
+            && call.result == receipt.result_type
+            && expression.ty == receipt.result_type
+            && call.effects == callable.signature.effects
+            && expression.effects == callable.signature.effects
+            && call.arguments.is_empty()
+            && call.permission.is_none()
+            && call.type_arguments.is_empty()
+            && call.session.is_empty())
+        .then_some(receipt)
+    }
+
+    fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body(
+        &self,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt>
+    {
+        let callables = self.checked_callables?;
+        let matching = callables
+            .values()
+            .filter_map(|producer| {
+                if !self.checked_callable_is_included(producer) || producer.owner == self.body.owner
+                {
+                    return None;
+                }
+                let cfg = producer
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?;
+                let receipt = cfg.values_crosscall_string_caller_receipt.as_ref()?;
+                if receipt.caller_owner != self.body.owner {
+                    return None;
+                }
+                let caller = self.checked_callable(&receipt.caller_owner)?;
+                ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                    producer, caller, receipt,
+                )
+                .then_some(receipt)
+            })
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(*receipt),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt>
+    {
+        self.ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body()
+            .filter(|receipt| receipt.snapshot_local == *local)
+    }
+
+    fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt>
+    {
+        let ResolvedCallee::Function(target) = &call.callee else {
+            return None;
+        };
+        let producer = self.checked_callable(target)?;
+        let cfg = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let receipt = cfg.values_crosscall_string_caller_receipt.as_ref()?;
+        let caller = self.checked_callable(&receipt.caller_owner)?;
+        (receipt.caller_owner == self.body.owner
+            && receipt.call_target == *target
+            && receipt.call_node == expression.node_id
+            && ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                producer, caller, receipt,
+            ))
+        .then_some(receipt)
+    }
+
+    fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_producer(
+        &self,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt>
+    {
+        let cfg = self
+            .resource_analysis?
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let receipt = cfg.values_crosscall_string_caller_receipt.as_ref()?;
+        let producer = self.checked_callable(&self.body.owner)?;
+        let caller = self.checked_callable(&receipt.caller_owner)?;
+        (receipt.producer_owner == self.body.owner
+            && ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                producer, caller, receipt,
+            ))
+        .then_some(receipt)
+    }
+
+    fn is_exact_ordinary_map_owned_any_v2_values_len_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> bool {
+        let Some(receipt) = self.ordinary_map_owned_any_v2_values_caller_receipt_for_body() else {
+            return false;
+        };
+        let Some(observation) = receipt.len_observation.as_ref() else {
+            return false;
+        };
+        let [receiver] = call.arguments.as_slice() else {
+            return false;
+        };
+        let ResolvedExprKind::Load(place) = &receiver.value.kind else {
+            return false;
+        };
+        let ResolvedCallee::Builtin(builtin) = &call.callee else {
+            return false;
+        };
+        builtin.as_str() == "builtin.method.list.len"
+            && receipt.profile_version
+                == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerProfileVersion::V1
+            && receipt.caller_owner == self.body.owner
+            && receipt.result_binding == receipt.owner_local
+            && receipt.result_type != receipt.owner_type
+            && observation.call_node == expression.node_id
+            && observation.receiver_node == receiver.value.node_id
+            && call.result == observation.result_type
+            && expression.ty == observation.result_type
+            && call.permission == Some(crate::core::ir::Permission::View)
+            && call.effects.is_empty()
+            && expression.effects.is_empty()
+            && call.type_arguments.is_empty()
+            && call.session.is_empty()
+            && place.projections.is_empty()
+            && place.base == receipt.owner_local
+            && receiver.conversion.kind == CheckedConversionKind::Identity
+            && receiver.conversion.from == receipt.result_type
+            && receiver.conversion.to == receipt.result_type
+            && self
+                .body
+                .locals
+                .get(&receipt.owner_local)
+                .is_some_and(|local| local.ty == receipt.result_type)
+            && self
+                .body
+                .locals
+                .get(&observation.result_binding)
+                .is_some_and(|local| local.ty == observation.result_type)
+    }
+
+    fn is_exact_ordinary_map_owned_any_v2_values_producer_return(
+        &self,
+        expression: Option<&ResolvedExpr>,
+    ) -> bool {
+        if self.is_exact_ordinary_map_owned_any_v2_values_result_producer() {
+            return true;
+        }
+        let Some(expression) = expression else {
+            return false;
+        };
+        let Some(cfg) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        else {
+            return false;
+        };
+        let Some(receipt) = cfg.values_producer_return_receipt.as_ref() else {
+            return false;
+        };
+        let caller = cfg.values_producer_caller_receipt.as_ref();
+        let crosscall_caller =
+            self.ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_producer();
+        if caller.is_none() && crosscall_caller.is_none() {
+            return false;
+        }
+        let ResolvedExprKind::Cast { value, conversion } = &expression.kind else {
+            return false;
+        };
+        let ResolvedExprKind::Load(place) = &value.kind else {
+            return false;
+        };
+        let erase = &receipt.return_container_erase;
+        let existing_caller_matches = caller.is_some_and(|caller| {
+            caller.profile_version
+                == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerProfileVersion::V1
+                && caller.producer_owner == receipt.owner
+                && caller.producer_values_operation == receipt.values_operation
+                && caller.producer_implicit_return == receipt.return_value
+                && caller.call_target == receipt.owner
+                && caller.caller_owner != receipt.owner
+                && caller.result_type == receipt.surface_return_type
+                && caller.owner_type == receipt.snapshot_type
+        });
+        let crosscall_caller_matches = crosscall_caller.is_some_and(|caller| {
+            caller.producer_owner == receipt.owner
+                && caller.producer_values_operation == receipt.values_operation
+                && caller.producer_return == receipt.return_value
+                && caller.call_target == receipt.owner
+                && caller.caller_owner != receipt.owner
+                && caller.call_result_type == receipt.surface_return_type
+        });
+        receipt.profile_version
+            == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnProfileVersion::V1
+            && receipt.owner == self.body.owner
+            && receipt.return_value == expression.node_id
+            && receipt.return_value == erase.cast_node
+            && erase.source_node == value.node_id
+            && erase.source_type == value.ty
+            && erase.source_type == receipt.snapshot_type
+            && erase.source_node != erase.cast_node
+            && erase.target_type == expression.ty
+            && erase.target_type == receipt.surface_return_type
+            && erase.conversion_kind == CheckedConversionKind::ContainerErase
+            && conversion.kind == CheckedConversionKind::ContainerErase
+            && conversion.from == receipt.snapshot_type
+            && conversion.to == receipt.surface_return_type
+            && (existing_caller_matches || crosscall_caller_matches)
+            && place.projections.is_empty()
+            && place.base == receipt.snapshot_local
+            && self.body.root.ty == receipt.surface_return_type
+    }
+
+    fn is_exact_ordinary_map_owned_any_v2_values_result_producer(&self) -> bool {
+        let Some(cfg) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        else {
+            return false;
+        };
+        let Some(result) = cfg.values_result_producer_receipt.as_ref() else {
+            return false;
+        };
+        let string_caller_matches = cfg
+            .values_crosscall_string_caller_receipt
+            .as_ref()
+            .and_then(|receipt| {
+                let producer = self.checked_callable(&self.body.owner)?;
+                let caller = self.checked_callable(&receipt.caller_owner)?;
+                Some(
+                    ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
+                        producer, caller, receipt,
+                    ),
+                )
+            })
+            .unwrap_or(false);
+        let len_caller_matches = cfg
+            .values_result_producer_caller_receipt
+            .as_ref()
+            .is_some_and(|receipt| {
+                receipt.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerProfileVersion::V1
+                    && receipt.producer_result == *result
+                    && receipt.producer_result.owner == self.body.owner
+                    && receipt.producer_target == self.body.owner
+                    && receipt.snapshot_type == result.snapshot_type
+                    && receipt.call_result_type == result.surface_return_type
+                    && receipt.len.receiver_local == receipt.snapshot_local
+                    && receipt.producer_values_operation == result.values_operation
+                    && receipt.producer_success_result == result.success_result
+            });
+        (string_caller_matches || len_caller_matches)
+            && result.owner == self.body.owner
+            && result.surface_return_type == self.body.root.ty
+            && self
+                .checked_callable(&self.body.owner)
+                .is_some_and(|producer| result.surface_return_type == producer.signature.result)
+            && result.snapshot_type == super::types::ordinary_map_owned_any_v2_values_type_id()
+    }
+
+    fn is_exact_ordinary_map_owned_any_v2_map_root_producer_return(
+        &self,
+        expression: Option<&ResolvedExpr>,
+    ) -> bool {
+        let Some(expression) = expression else {
+            return false;
+        };
+        let Some(cfg) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        else {
+            return false;
+        };
+        let Some(producer) = cfg.map_root_producer_return_receipt.as_ref() else {
+            return false;
+        };
+        let old_caller = cfg.map_root_producer_caller_receipt.as_ref();
+        let get_any_caller = cfg.map_root_get_any_caller_receipt.as_ref();
+        if old_caller.is_none() && get_any_caller.is_none() {
+            return false;
+        }
+        let ResolvedExprKind::Load(place) = &expression.kind else {
+            return false;
+        };
+        producer.profile_version
+            == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootProducerProfileVersion::V1
+            && producer.owner == self.body.owner
+            && producer.return_value == expression.node_id
+            && producer.return_load == expression.node_id
+            && producer.final_root_local == place.base
+            && place.projections.is_empty()
+            && expression.ty == producer.final_root_type
+            && self.body.root.ty == producer.final_root_type
+            && (old_caller.is_some_and(|caller| {
+                caller.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootCallerProfileVersion::V1
+                    && caller.producer_owner == producer.owner
+                    && caller.producer_map_set_operation == producer.map_set_operation
+                    && caller.producer_return_value == producer.return_value
+                    && caller.producer_final_local == producer.final_root_local
+                    && caller.logical_root == producer.final_root
+                    && caller.call_target == producer.owner
+                    && caller.caller_owner != producer.owner
+                    && caller.result_type == producer.final_root_type
+                    && caller.caller_root_type == producer.final_root_type
+            }) || get_any_caller.is_some_and(|caller| {
+                caller.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+                    && caller.producer_owner == producer.owner
+                    && caller.producer_map_set_operation == producer.map_set_operation
+                    && caller.producer_return_value == producer.return_value
+                    && caller.producer_final_local == producer.final_root_local
+                    && caller.logical_root == producer.final_root
+                    && caller.call_target == producer.owner
+                    && caller.caller_owner != producer.owner
+                    && caller.caller_root_type == producer.final_root_type
+                    && caller.string_type
+                        == crate::core::ir::primitive_type_id(PrimitiveType::String)
+            }))
     }
 
     fn direct_local_value(&mut self, expression: &ResolvedExpr) -> Option<MirValueId> {
@@ -9518,6 +13293,15 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    fn ordinary_map_owner_lifecycle_observer_v1_profile(&self) -> bool {
+        let Some(analysis) = self.resource_analysis else {
+            return false;
+        };
+        self.ordinary_map_owner_lifecycle_v1_profile()
+            && analysis.has_ordinary_map_owner_observer_v1_attempts()
+            && analysis.ordinary_map_owner_observer_v1_receipts_are_complete()
+    }
+
     fn ordinary_map_owned_get_i32_string_v1_profile(&self) -> bool {
         let Some(analysis) = self.resource_analysis else {
             return false;
@@ -9530,6 +13314,16 @@ impl<'a> Lowerer<'a> {
                 .get(&super::types::ordinary_map_owned_get_i32_string_v1_type_id())
                 .is_some()
         })
+    }
+
+    /// Checker retains V2 attempts in its wide resource inventory even when
+    /// profile arbitration selects a compatibility Map route. Consume those
+    /// actions as V2 only when this callable has the exact V2 CFG receipt and
+    /// the selected program TypeCatalog materialized the V2 root identity.
+    /// This mirrors the other profile checks and keeps incomplete candidates
+    /// fail-closed in TypeCatalog construction.
+    fn ordinary_map_owned_any_v2_profile_selected(&self) -> bool {
+        ordinary_map_owned_any_v2_profile_selected(self.resource_analysis, self.type_catalog)
     }
 
     fn ordinary_map_owned_get_i32_string_v1_action(
@@ -9580,6 +13374,55 @@ impl<'a> Lowerer<'a> {
             "ordinary_map_owned_get_i32_string_v1_{}:{value}",
             kind.as_str()
         )
+    }
+
+    fn ordinary_map_owned_get_result_branch_for_operation(
+        &self,
+        point: &NodeId,
+        kind: crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind,
+    ) -> Option<&crate::core::OrdinaryMapOwnedGetI32StringV1ResultBranchReceipt> {
+        let receipt = self
+            .resource_analysis?
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_ref()?;
+        if receipt.profile_version
+            != crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::ResultBranchV3
+        {
+            return None;
+        }
+        let matches = receipt
+            .result_branches
+            .iter()
+            .filter(|branch| branch.operation_point == *point && branch.kind == kind)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [branch] => Some(*branch),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_get_result_branch_for_root(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::OrdinaryMapOwnedGetI32StringV1ResultBranchReceipt> {
+        let receipt = self
+            .resource_analysis?
+            .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_ref()?;
+        if receipt.profile_version
+            != crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::ResultBranchV3
+        {
+            return None;
+        }
+        let matches = receipt
+            .result_branches
+            .iter()
+            .filter(|branch| branch.output_root.as_ref() == Some(local))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [branch] => Some(*branch),
+            _ => None,
+        }
     }
 
     fn ordinary_map_owned_get_i32_string_v1_root_matches(
@@ -9936,6 +13779,90 @@ impl<'a> Lowerer<'a> {
         format!("ordinary_map_owner_lifecycle_v1_{}:{value}", kind.as_str())
     }
 
+    fn lower_ordinary_map_owner_lifecycle_observer_v1_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> Option<MirValueId> {
+        if !self.ordinary_map_owner_lifecycle_observer_v1_profile() {
+            return None;
+        }
+        let crate::core::ir::ResolvedCallee::Builtin(builtin) = &call.callee else {
+            return None;
+        };
+        let receipt = self
+            .resource_analysis?
+            .ordinary_map_owner_observer_v1_receipts
+            .iter()
+            .find(|receipt| receipt.callsite == expression.node_id && receipt.builtin == *builtin)?
+            .clone();
+        let [argument] = call.arguments.as_slice() else {
+            self.error(
+                &expression.node_id,
+                "ordinary Map observer requires the Checker-receipted single argument",
+            );
+            return Some(self.fallback_value(expression));
+        };
+        let source_local = match &argument.value.kind {
+            ResolvedExprKind::Load(place) if place.projections.is_empty() => place.base.clone(),
+            _ => {
+                self.error(
+                    &argument.value.node_id,
+                    "ordinary Map observer root must be a direct local",
+                );
+                return Some(self.fallback_value(expression));
+            }
+        };
+        if source_local != receipt.root_local
+            || argument.value.node_id != receipt.argument
+            || argument.value.ty != receipt.borrow_type
+            || expression.ty != receipt.result_type
+            || call.result != receipt.result_type
+            || !call.type_arguments.is_empty()
+            || call.permission.is_some()
+            || !call.session.is_empty()
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map observer call disagrees with its Checker receipt",
+            );
+            return Some(self.fallback_value(expression));
+        }
+        let root = self
+            .ordinary_map_owner_lifecycle_v1_local_value(&source_local, &argument.value.node_id);
+        if root.as_str() != format!("local:{}", receipt.root_local.0 .0) {
+            self.error(
+                &expression.node_id,
+                "ordinary Map observer root identity disagrees with its Checker receipt",
+            );
+            return Some(self.fallback_value(expression));
+        }
+        let result = self.id("expr", &expression.node_id)?;
+        self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+        let instruction = match builtin.as_str() {
+            "to_json" => MirInstructionKind::OrdinaryMapOwnerLifecycleObserverToJson {
+                result: result.clone(),
+                root,
+                callsite: expression.node_id.clone(),
+            },
+            "println" => MirInstructionKind::OrdinaryMapOwnerLifecycleObserverPrintln {
+                result: result.clone(),
+                root,
+                callsite: expression.node_id.clone(),
+            },
+            _ => return None,
+        };
+        self.emit(
+            &expression.node_id,
+            &format!(
+                "ordinary_map_owner_lifecycle_observer_v1_{}",
+                builtin.as_str()
+            ),
+            instruction,
+        );
+        Some(result)
+    }
+
     /// Lower a Map binding through whichever checker-owned receipt selected
     /// the callable's canonical route. Root and nested blocks share this
     /// dispatch so a fresh local in an If arm cannot fall through to a generic
@@ -9951,13 +13878,10 @@ impl<'a> Lowerer<'a> {
             || self.lower_map_root_binding(target, initializer)
     }
 
-    /// The ordinary Map/Any owner-v2 contract has not yet been admitted as a
-    /// canonical MIR profile.  Keep this hook explicit so the shared binding
-    /// dispatch cannot accidentally reinterpret a v2 candidate as one of the
-    /// older MapRoot/MapAnyOwner representations.  The checker-owned route
-    /// classifier remains the authority for the eventual profile; until it
-    /// exposes a complete receipt this method must fail closed and leave the
-    /// binding to the normal compatibility/error path.
+    /// Keep the selected profile check at the shared binding dispatcher so a
+    /// Checker-wide V2 attempt cannot override the TypeCatalog's compatibility
+    /// Map decision. Incomplete V2 candidates are rejected before lowering;
+    /// only an exact, materialized V2 profile reaches the specialized path.
     fn lower_map_any_owner_v2_binding(
         &mut self,
         target: &ResolvedLocalId,
@@ -9966,7 +13890,7 @@ impl<'a> Lowerer<'a> {
         let Some(analysis) = self.resource_analysis else {
             return false;
         };
-        if !analysis.has_ordinary_map_owned_any_v2_receipt() {
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
             return false;
         }
         let Some(action) = analysis
@@ -10091,6 +14015,11 @@ impl<'a> Lowerer<'a> {
                 value_type.as_ref(),
                 &value,
             );
+            self.drop_ordinary_map_owned_any_v2_set_aggregate_temporary(
+                &initializer.node_id,
+                value_type.as_ref(),
+                &value,
+            );
         }
         true
     }
@@ -10116,6 +14045,11 @@ impl<'a> Lowerer<'a> {
             || (direct_local.is_some()
                 != (action.key_provenance
                     == Some(crate::core::OrdinaryMapOwnedAnyV2KeyProvenance::DirectLocal)))
+            || action.key_local_mutable
+                != direct_local
+                    .as_ref()
+                    .and_then(|local| self.body.locals.get(local))
+                    .map(|binding| binding.mutable)
         {
             self.error(
                 subject,
@@ -10182,14 +14116,139 @@ impl<'a> Lowerer<'a> {
     /// a Checker receipt. Keeping the source statement NodeId here preserves
     /// branch-local action identity in MIR and lets the same implementation
     /// serve root and nested blocks.
-    fn lower_checker_map_drop(&mut self, node: &NodeId, local: &ResolvedLocalId) -> bool {
-        if self.resource_analysis.is_some_and(|a| {
-            a.ordinary_map_owned_any_v2_actions.iter().any(|x| {
-                x.point == *node
-                    && x.local == *local
-                    && x.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+    fn lower_checker_map_drop(
+        &mut self,
+        node: &NodeId,
+        local: &ResolvedLocalId,
+        place_index: usize,
+    ) -> bool {
+        let map_root_get_any_caller =
+            match self.ordinary_map_owned_any_v2_map_root_get_any_caller_selection() {
+                Ok(receipt) => receipt,
+                Err(message) => {
+                    self.error(node, message);
+                    return true;
+                }
+            };
+        if let Some(receipt) = map_root_get_any_caller {
+            if node == &receipt.root_drop_point || local == &receipt.caller_root_local {
+                let matching_actions = self
+                    .resource_analysis
+                    .into_iter()
+                    .flat_map(|analysis| &analysis.ordinary_map_owned_any_v2_actions)
+                    .filter(|action| {
+                        action.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                            && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                            && action.point == receipt.root_drop_point
+                            && action.local == receipt.caller_root_local
+                    })
+                    .count();
+                let matching_statements = self
+                    .body
+                    .root
+                    .statements
+                    .iter()
+                    .filter(|statement| statement.node_id == receipt.root_drop_point)
+                    .collect::<Vec<_>>();
+                let source_drop_matches = matches!(
+                    matching_statements.as_slice(),
+                    [crate::core::ir::ResolvedStmt {
+                        kind: ResolvedStmtKind::Drop(places),
+                        ..
+                    }] if matches!(
+                        places.as_slice(),
+                        [place] if place.base == receipt.caller_root_local && place.projections.is_empty()
+                    )
+                );
+                if node != &receipt.root_drop_point
+                    || local != &receipt.caller_root_local
+                    || place_index != 0
+                    || self
+                        .body
+                        .locals
+                        .get(&receipt.caller_root_local)
+                        .is_none_or(|definition| definition.ty != receipt.caller_root_type)
+                    || matching_actions != 1
+                    || !source_drop_matches
+                {
+                    self.error(
+                        node,
+                        "Map-root GetAny caller root Drop differs from its exact Checker receipt",
+                    );
+                    return true;
+                }
+                let value = match self.local_value(&receipt.caller_root_local) {
+                    Ok(value) => value,
+                    Err(errors) => {
+                        self.errors.extend(errors);
+                        return true;
+                    }
+                };
+                if self.values.get(&value).map(|value| &value.ty)
+                    != Some(&super::types::ordinary_map_owned_any_v2_type_id())
+                {
+                    self.error(
+                        node,
+                        "Map-root GetAny caller root Drop has no selected V2 TypeDesc",
+                    );
+                    return true;
+                }
+                self.emit(
+                    node,
+                    &format!("ordinary_map_owned_any_v2_drop:{value}"),
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: value },
+                );
+                return true;
+            }
+        }
+        if let Some(receipt) =
+            self.ordinary_map_owned_any_v2_map_root_caller_receipt_for_local(local)
+        {
+            let exact_actions = self
+                .resource_analysis
+                .map(|analysis| {
+                    analysis
+                        .ordinary_map_owned_any_v2_actions
+                        .iter()
+                        .filter(|action| {
+                            action.profile_version
+                                == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                                && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                                && action.point == receipt.root_drop_point
+                                && action.local == receipt.caller_root_local
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            if receipt.root_drop_point == *node
+                && receipt.root_drop_place_index == place_index
+                && receipt.caller_root_local == *local
+                && receipt.caller_root_type
+                    == self.body.locals.get(local).map_or_else(
+                        || receipt.caller_root_type.clone(),
+                        |definition| definition.ty.clone(),
+                    )
+                && exact_actions == 1
+            {
+                let value = self.ordinary_map_owned_any_v2_local_value(local, node);
+                self.emit(
+                    node,
+                    &format!("ordinary_map_owned_any_v2_drop:{value}"),
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: value },
+                );
+                return true;
+            }
+        }
+        if self.ordinary_map_owned_any_v2_profile_selected()
+            && self.resource_analysis.is_some_and(|a| {
+                a.ordinary_map_owned_any_v2_actions.iter().any(|x| {
+                    x.point == *node
+                        && x.local == *local
+                        && x.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                })
             })
-        }) {
+        {
             let value = self.ordinary_map_owned_any_v2_local_value(local, node);
             self.emit(
                 node,
@@ -10250,6 +14309,496 @@ impl<'a> Lowerer<'a> {
             }
         }
         false
+    }
+
+    /// A Checker-receipted owned String must be consumed by its source Drop
+    /// instead of the generic String Drop shim, which clones and drops a
+    /// temporary while preserving the original binding. This covers Values
+    /// unpack, moved String fields, detached Map/Any results, and receipted
+    /// Map payload locals.
+    fn checker_receipted_owned_string_drop(
+        &self,
+        point: &NodeId,
+        index: usize,
+        local: &ResolvedLocalId,
+    ) -> bool {
+        let map_root_get_any_caller_string_drop = self
+            .ordinary_map_owned_any_v2_map_root_get_any_caller_selection()
+            .is_ok_and(|receipt| {
+                receipt.is_some_and(|receipt| {
+                    receipt.unpack_local == *local
+                        && receipt.string_type
+                            == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                        && receipt.string_drop_point == *point
+                        && receipt.string_drop_place_index == index
+                        && self
+                            .body
+                            .locals
+                            .get(local)
+                            .is_some_and(|definition| definition.ty == receipt.string_type)
+                })
+            });
+        let values_crosscall_string_drop = self
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body()
+            .is_some_and(|receipt| {
+                receipt.unpack_binding == *local
+                    && receipt.string_type
+                        == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                    && receipt.string_drop_point == *point
+                    && receipt.string_drop_place_index == index
+                    && self
+                        .body
+                        .locals
+                        .get(local)
+                        .is_some_and(|definition| definition.ty == receipt.string_type)
+            });
+        // DynamicKeysGet records the exact source Drops for its computed
+        // String operands and copied Keys element in a dedicated Checker
+        // receipt. Those Drops consume the actual locals; routing them
+        // through the generic String shim would only drop a clone and defer
+        // the owner to function-scope cleanup.
+        let dynamic_keys_get_string_drop = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .is_some_and(|cfg| {
+                let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                let mut exact_matches = 0usize;
+                for receipt in &cfg.dynamic_keys_get_receipts {
+                    if receipt.profile_version
+                        != crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetProfileVersion::V1
+                        || receipt.owner != self.body.owner
+                    {
+                        continue;
+                    }
+                    for (candidate_local, candidate_point, candidate_type) in [
+                        (&receipt.prefix_local, &receipt.prefix_drop_point, &string_type),
+                        (&receipt.suffix_local, &receipt.suffix_drop_point, &string_type),
+                        (&receipt.key_local, &receipt.key_drop_point, &string_type),
+                        (
+                            &receipt.keys_snapshot.copied_key_local,
+                            &receipt.keys_snapshot.copied_key_drop_point,
+                            &receipt.keys_snapshot.copied_key_type,
+                        ),
+                    ] {
+                        if candidate_local != local
+                            || candidate_point != point
+                            || candidate_type != &string_type
+                            || self.body.locals.get(local).is_none_or(|definition| {
+                                definition.mutable || definition.ty != string_type
+                            })
+                        {
+                            continue;
+                        }
+                        let matching_drops = self
+                            .body
+                            .root
+                            .statements
+                            .iter()
+                            .filter(|statement| statement.node_id == *candidate_point)
+                            .collect::<Vec<_>>();
+                        if matches!(matching_drops.as_slice(), [statement]
+                            if matches!(&statement.kind, crate::core::ir::ResolvedStmtKind::Drop(places)
+                                if places.len() == 1
+                                    && index == 0
+                                    && places[0].base == *candidate_local
+                                    && places[0].projections.is_empty()))
+                        {
+                            exact_matches += 1;
+                        }
+                    }
+                }
+                exact_matches == 1
+            });
+        // The caller has no Map/Any operation of its own, so its resource
+        // analysis intentionally carries the cross-call authority separately
+        // from an ordinary-map CFG receipt. Let that exact receipt authorize
+        // consuming the copied String before consulting the local CFG gate.
+        if values_crosscall_string_drop {
+            return true;
+        }
+        let values_crosscall_producer_payload_drop = self
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_producer()
+            .is_some_and(|_| {
+                self.resource_analysis
+                    .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+                    .and_then(|cfg| cfg.values_producer_return_receipt.as_ref())
+                    .is_some_and(|producer| {
+                        producer.owner == self.body.owner
+                            && producer.payload_settlements.iter().any(|payload| {
+                                payload.local == *local
+                                    && payload.payload_type
+                                        == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                                    && payload.drop_point == *point
+                                    && payload.drop_place_index == index
+                            })
+                    })
+            });
+        // The GetOrDefault<String> caller receipt proves that map_set cloned
+        // this exact immutable literal into the Map Any payload. Its source
+        // Drop must consume the original local after both persistent roots
+        // have been settled; generic String Drop lowering would clone and
+        // release a temporary, leaving that owner live.
+        let get_or_default_string_set_payload_drop =
+            self.resource_analysis
+                .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+                .and_then(|cfg| cfg.get_or_default_string_receipt.as_ref())
+                .is_some_and(|receipt| {
+                    use crate::core::ir::{
+                        ResolvedExprKind as E, ResolvedLiteral as L, ResolvedPatternKind as P,
+                        ResolvedStmtKind as S,
+                    };
+
+                    let Some(set_local) = receipt.caller_set_value_local.as_ref() else {
+                        return false;
+                    };
+                    let (Some(binding_point), Some(drop_point), Some(drop_place_index)) = (
+                        receipt.caller_set_value_binding_point.as_ref(),
+                        receipt.caller_set_value_drop_point.as_ref(),
+                        receipt.caller_set_value_drop_place_index,
+                    ) else {
+                        return false;
+                    };
+                    let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                    if set_local != local
+                        || receipt.caller_set_value_type != string_type
+                        || drop_point != point
+                        || drop_place_index != index
+                        || self.body.locals.get(local).is_none_or(|definition| {
+                            definition.mutable || definition.ty != string_type
+                        })
+                    {
+                        return false;
+                    }
+                    let binding_statements = self
+                        .body
+                        .root
+                        .statements
+                        .iter()
+                        .filter(|statement| statement.node_id == *binding_point)
+                        .collect::<Vec<_>>();
+                    let [binding_statement] = binding_statements.as_slice() else {
+                        return false;
+                    };
+                    let binding_exact = matches!(
+                        &binding_statement.kind,
+                        S::Bind {
+                            pattern: crate::core::ir::ResolvedPattern {
+                                kind: P::Binding {
+                                    local: bound,
+                                    by_reference: None,
+                                },
+                                ..
+                            },
+                            initializer: Some(initializer),
+                        } if bound == local
+                            && initializer.ty == string_type
+                            && matches!(&initializer.kind, E::Literal(L::String(value))
+                                if value == &receipt.caller_set_value_string)
+                    );
+                    let drop_statements = self
+                        .body
+                        .root
+                        .statements
+                        .iter()
+                        .filter(|statement| statement.node_id == *drop_point)
+                        .collect::<Vec<_>>();
+                    let [drop_statement] = drop_statements.as_slice() else {
+                        return false;
+                    };
+                    let exact_drop = matches!(
+                        &drop_statement.kind,
+                        S::Drop(places)
+                            if places.len() == 1
+                                && drop_place_index == 0
+                                && places[0].base == *local
+                                && places[0].projections.is_empty()
+                    );
+                    let set_statement = self.body.root.statements.iter().position(|statement| {
+                        matches!(
+                            &statement.kind,
+                            S::Bind {
+                                pattern: crate::core::ir::ResolvedPattern {
+                                    kind: P::Binding { local: bound, by_reference: None },
+                                    ..
+                                },
+                                initializer: Some(initializer),
+                            } if bound == &receipt.caller_set_root_local
+                                && initializer.node_id == receipt.caller_set_point
+                        )
+                    });
+                    let drop_index = self
+                        .body
+                        .root
+                        .statements
+                        .iter()
+                        .position(|statement| statement.node_id == *drop_point);
+                    let initial_root_drop_index =
+                        self.body.root.statements.iter().position(|statement| {
+                            statement.node_id == receipt.caller_initial_root_drop_point
+                        });
+                    let root_drop_index =
+                        self.body.root.statements.iter().position(|statement| {
+                            statement.node_id == receipt.caller_root_drop_point
+                        });
+                    let set_root_drop_index =
+                        self.body.root.statements.iter().position(|statement| {
+                            statement.node_id == receipt.caller_set_root_drop_point
+                        });
+                    binding_exact
+                        && exact_drop
+                        && matches!(
+                            (
+                                set_statement,
+                                drop_index,
+                                initial_root_drop_index,
+                                root_drop_index,
+                                set_root_drop_index,
+                            ),
+                            (Some(set), Some(drop), Some(initial), Some(root), Some(set_root))
+                                if set < drop
+                                    && initial < drop
+                                    && root < drop
+                                    && set_root < drop
+                        )
+                });
+        let get_or_default_string_result_drop = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .and_then(|cfg| cfg.get_or_default_string_receipt.as_ref())
+            .is_some_and(|receipt| {
+                use crate::core::ir::ResolvedStmtKind as S;
+                use crate::core::ownership::OrdinaryMapOwnedAnyV2GetOrDefaultStringResultSettlement as Settlement;
+
+                let Settlement::ExplicitDrop {
+                    point: result_drop_point,
+                    place_index,
+                } = &receipt.caller_result_settlement
+                else {
+                    return false;
+                };
+                let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                if receipt.caller_result_local != *local
+                    || result_drop_point != point
+                    || *place_index != index
+                    || self.body.locals.get(local).is_none_or(|definition| {
+                        definition.mutable || definition.ty != string_type
+                    })
+                {
+                    return false;
+                }
+                let matching = self
+                    .body
+                    .root
+                    .statements
+                    .iter()
+                    .filter(|statement| statement.node_id == *result_drop_point)
+                    .collect::<Vec<_>>();
+                let [statement] = matching.as_slice() else {
+                    return false;
+                };
+                let exact_drop = matches!(
+                    &statement.kind,
+                    S::Drop(places)
+                        if places.len() == 1
+                            && *place_index == 0
+                            && places[0].base == *local
+                            && places[0].projections.is_empty()
+                );
+                let drop_index = self
+                    .body
+                    .root
+                    .statements
+                    .iter()
+                    .position(|statement| statement.node_id == *result_drop_point);
+                let call_binding_index = self
+                    .body
+                    .root
+                    .statements
+                    .iter()
+                    .position(|statement| {
+                        statement.node_id == receipt.caller_call_binding_point
+                    });
+                exact_drop
+                    && matches!((drop_index, call_binding_index), (Some(drop), Some(call)) if drop > call)
+            });
+        self.resource_analysis.is_some_and(|analysis| {
+            analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .is_some_and(|receipt| {
+                    let explicit_string_drop = receipt
+                        .values_unpack_receipts
+                        .iter()
+                        .filter(|unpack| {
+                            unpack.result_owner_settlement
+                                == crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::ExplicitStringDrop
+                                && &unpack.unpack_binding == local
+                                && unpack.result_owner_settlement_point.as_ref() == Some(point)
+                                && unpack.result_owner_settlement_index == Some(index)
+                        })
+                        .count();
+                    let moved_label_text_drop = receipt
+                        .values_unpack_receipts
+                        .iter()
+                        .filter(|unpack| {
+                            unpack.result_owner_settlement
+                                == crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::DirectStringFieldMove
+                        })
+                        .filter_map(|unpack| unpack.result_owner_field_move.as_ref())
+                        .filter(|field_move| {
+                            field_move.field_name == "text"
+                                && &field_move.text_binding == local
+                                && &field_move.text_settlement_point == point
+                                && field_move.text_settlement_index == index
+                        })
+                        .count();
+                    let computed_key_string_drop = receipt
+                        .computed_key_string_get_receipts
+                        .iter()
+                        .filter(|computed_get| {
+                            &computed_get.observed_string.local == local
+                                && computed_get.observed_string.settlement_point == *point
+                                && computed_get.observed_string.settlement_place_index == index
+                        })
+                        .count();
+                    let keys_snapshot_string_drop = receipt
+                        .keys_snapshot_receipts
+                        .iter()
+                        .filter(|keys| {
+                            keys.owner == self.body.owner
+                                && keys.key_local == *local
+                                && keys.key_type
+                                    == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                                && keys.key_drop_point == *point
+                                && keys.key_drop_place_index == index
+                                && self
+                                    .body
+                                    .locals
+                                    .get(local)
+                                    .is_some_and(|definition| definition.ty == keys.key_type)
+                        })
+                        .count();
+                    let map_root_payload_drop = receipt
+                        .map_root_producer_return_receipt
+                        .as_ref()
+                        .filter(|producer| {
+                            producer.owner == self.body.owner
+                                && producer.payload_local == *local
+                                && producer.payload_type
+                                    == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                                && producer.payload_drop_point == *point
+                                && producer.payload_drop_place_index == index
+                        })
+                        .filter(|producer| {
+                            receipt
+                                .map_root_producer_caller_receipt
+                                .as_ref()
+                                .is_some_and(|caller| {
+                                    caller.producer_owner == producer.owner
+                                        && caller.producer_map_set_operation
+                                            == producer.map_set_operation
+                                        && caller.producer_return_value == producer.return_value
+                                        && caller.producer_final_local == producer.final_root_local
+                                        && caller.logical_root == producer.final_root
+                                })
+                        })
+                        .is_some() as usize;
+                    let map_root_get_any_payload_drop = receipt
+                        .map_root_producer_return_receipt
+                        .as_ref()
+                        .filter(|producer| {
+                            producer.owner == self.body.owner
+                                && producer.payload_local == *local
+                                && producer.payload_type
+                                    == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                                && producer.payload_drop_point == *point
+                                && producer.payload_drop_place_index == index
+                        })
+                        .filter(|producer| {
+                            receipt
+                                .map_root_get_any_caller_receipt
+                                .as_ref()
+                                .is_some_and(|caller| {
+                                    caller.producer_owner == producer.owner
+                                        && caller.producer_map_set_operation
+                                            == producer.map_set_operation
+                                        && caller.producer_return_value == producer.return_value
+                                        && caller.producer_final_local == producer.final_root_local
+                                        && caller.logical_root == producer.final_root
+                                })
+                        })
+                        .is_some() as usize;
+                    let computed_string_key_owner_chain_source_drop = receipt
+                        .result_receipts
+                        .iter()
+                        .filter_map(|result| {
+                            result.computed_string_key_owner_chain.as_deref()
+                        })
+                        .filter(|chain| {
+                            chain.owner == self.body.owner
+                                && chain.profile_version.canonical_text()
+                                    == "ordinary-map-owned-any-v2-computed-string-key-owner-chain-v1"
+                        })
+                        .flat_map(|chain| chain.key_source_drops.iter())
+                        .filter(|drop| {
+                            let string_type =
+                                crate::core::ir::primitive_type_id(PrimitiveType::String);
+                            if drop.local != *local
+                                || drop.settlement_point != *point
+                                || drop.settlement_place_index != index
+                                || drop.binding_type != string_type
+                                || self.body.locals.get(local).is_none_or(|definition| {
+                                    definition.mutable || definition.ty != string_type
+                                })
+                            {
+                                return false;
+                            }
+                            let matching = self
+                                .body
+                                .root
+                                .statements
+                                .iter()
+                                .filter(|statement| statement.node_id == *point)
+                                .collect::<Vec<_>>();
+                            matches!(
+                                matching.as_slice(),
+                                [statement]
+                                    if matches!(
+                                        &statement.kind,
+                                        crate::core::ir::ResolvedStmtKind::Drop(places)
+                                            if index == 0
+                                                && places.len() == 1
+                                                && places[0].base == *local
+                                                && places[0].projections.is_empty()
+                                    )
+                            )
+                        })
+                        .count();
+                    let existing = explicit_string_drop
+                        + moved_label_text_drop
+                        + computed_key_string_drop
+                        + keys_snapshot_string_drop
+                        + dynamic_keys_get_string_drop as usize
+                        + map_root_payload_drop
+                        + map_root_get_any_payload_drop
+                        + map_root_get_any_caller_string_drop as usize;
+                    let existing = existing + values_crosscall_string_drop as usize;
+                    let existing = existing + values_crosscall_producer_payload_drop as usize;
+                    let existing = existing + get_or_default_string_set_payload_drop as usize;
+                    let existing = existing + get_or_default_string_result_drop as usize;
+                    let existing = existing + computed_string_key_owner_chain_source_drop;
+                    let scalar_prefix_drop = receipt.flow.as_ref().is_some_and(|flow| {
+                        let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail) = &flow.proof else { return false; };
+                        tail.string_drops.get(local).is_some_and(|drop| {
+                            drop.ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                                && &drop.point == point && drop.place_index == index
+                                && drop.point_rank < tail.first_condition_rank
+                                && drop.loads.iter().all(|(_, rank)| *rank < drop.point_rank)
+                        })
+                    });
+                    existing == 1 || (existing == 0 && scalar_prefix_drop)
+                })
+        })
     }
 
     fn lower_ordinary_map_owner_lifecycle_v1_binding(
@@ -10495,6 +15044,44 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn drop_ordinary_map_owned_any_v2_set_aggregate_temporary(
+        &mut self,
+        node: &NodeId,
+        value_type: Option<&crate::core::ResolvedTypeId>,
+        value: &MirValueId,
+    ) {
+        let Some(value_type) = value_type else {
+            return;
+        };
+        let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        if value_type == &string_type {
+            // String values are already settled by
+            // `drop_ordinary_map_string_temporaries` above.
+            return;
+        }
+        let value_needs_drop = self
+            .type_catalog
+            .and_then(|catalog| catalog.get(value_type))
+            .is_some_and(|descriptor| {
+                descriptor.ownership.needs_drop()
+                    && descriptor.glue.drop == super::types::MirGlueKind::Aggregate
+            });
+        if value_needs_drop {
+            // V2 Set borrows its typed payload while the runtime makes a
+            // private callback-owned copy. The MIR expression still owns this
+            // temporary (including a Checker-lowered Clone of a source local),
+            // so release it after the Set instruction and leave the source
+            // local's independent ownership untouched.
+            self.emit(
+                node,
+                "drop.ordinary-map-owned-any-v2-value",
+                MirInstructionKind::Drop {
+                    value: value.clone(),
+                },
+            );
+        }
+    }
+
     fn selected_map_root_actions(&self) -> Vec<crate::core::MapRootAction> {
         let Some(analysis) = self.resource_analysis else {
             return Vec::new();
@@ -10581,10 +15168,6 @@ impl<'a> Lowerer<'a> {
         } else {
             format!("map_root_{operation}:{value}")
         }
-    }
-
-    fn has_map_root_action(&self, point: &NodeId, kind: crate::core::MapRootActionKind) -> bool {
-        self.map_root_action(point, kind).is_some()
     }
 
     fn map_root_local_value(&mut self, local: &ResolvedLocalId, node: &NodeId) -> MirValueId {
@@ -10895,7 +15478,7 @@ impl<'a> Lowerer<'a> {
     /// branch-specific cleanup receipt yet.
     fn value_consumption_on_paths_to_current(&self, value: &MirValueId) -> (bool, bool) {
         fn visit(
-            lowerer: &Lowerer<'_>,
+            lowerer: &Lowerer<'_, '_>,
             block_id: &MirBlockId,
             value: &MirValueId,
             memo: &mut BTreeMap<MirBlockId, (bool, bool)>,
@@ -11129,16 +15712,25 @@ impl<'a> Lowerer<'a> {
     /// return expression has been evaluated. Explicit source drops already
     /// emitted their receipt IDs and therefore never run a second time.
     fn emit_end_of_body_ordinary_map_drops(&mut self) {
+        // The paired Map-root bridge receipt includes its explicit Drop. The
+        // caller must not acquire a second lifecycle Drop from overlapping
+        // ordinary-Map ledgers at the implicit return boundary.
+        if self
+            .ordinary_map_owned_any_v2_map_root_caller_receipt_for_body()
+            .is_some()
+            || self
+                .ordinary_map_owned_any_v2_map_root_get_any_caller_selection()
+                .is_ok_and(|receipt| receipt.is_some())
+        {
+            return;
+        }
         let emitted = self
             .blocks
             .values()
             .flat_map(|block| block.instructions.iter())
             .map(|instruction| instruction.id.clone())
             .collect::<BTreeSet<_>>();
-        if self
-            .resource_analysis
-            .is_some_and(|a| a.has_ordinary_map_owned_any_v2_receipt())
-        {
+        if self.ordinary_map_owned_any_v2_profile_selected() {
             let actions = self
                 .resource_analysis
                 .map(|a| a.ordinary_map_owned_any_v2_actions.clone())
@@ -11323,6 +15915,20 @@ impl<'a> Lowerer<'a> {
                 ResolvedStmtKind::While { condition, body } => {
                     self.lower_while_stmt(&statement.node_id, condition, body);
                 }
+                ResolvedStmtKind::For {
+                    pattern,
+                    iterable,
+                    body,
+                } if self.ffi_singleton_for_node.as_ref() == Some(&statement.node_id) => {
+                    self.ffi_singleton_for_node = None;
+                    self.lower_ffi_singleton_for_stmt(&statement.node_id, pattern, iterable, body);
+                }
+                ResolvedStmtKind::For { .. } => {
+                    self.error(
+                        &statement.node_id,
+                        "structured control flow is not lowered by MIR Phase 0",
+                    );
+                }
                 ResolvedStmtKind::Loop(body) => {
                     self.lower_loop_stmt(&statement.node_id, body);
                 }
@@ -11334,7 +15940,41 @@ impl<'a> Lowerer<'a> {
                 }
                 ResolvedStmtKind::NestedCallable(target) => {
                     match self.approved_nested_callables.remove(target) {
-                        Some(declaration) if declaration == statement.node_id => {}
+                        Some(declaration) if declaration == statement.node_id => {
+                            let capture_slots = self
+                                .nested_callable_capture_slots
+                                .get(target)
+                                .cloned()
+                                .unwrap_or_default();
+                            for (index, slot) in capture_slots.iter().enumerate() {
+                                let source = match self.locals.get(&slot.capture).cloned() {
+                                    Some(source) => source,
+                                    None => {
+                                        self.error(
+                                            &statement.node_id,
+                                            format!(
+                                                "nested capture '{}' is not available at its declaration",
+                                                slot.capture.0 .0
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                };
+                                self.insert_value(
+                                    slot.snapshot.clone(),
+                                    slot.ty.clone(),
+                                    &statement.node_id,
+                                );
+                                self.emit(
+                                    &statement.node_id,
+                                    &format!("nested_capture.{index}"),
+                                    MirInstructionKind::Copy {
+                                        result: slot.snapshot.clone(),
+                                        source,
+                                    },
+                                );
+                            }
+                        }
                         Some(_) => self.error(
                             &statement.node_id,
                             "nested callable declaration disagrees with its root-scope receipt",
@@ -11354,10 +15994,21 @@ impl<'a> Lowerer<'a> {
                             );
                             continue;
                         }
-                        if self.lower_checker_map_drop(&statement.node_id, &place.base) {
+                        if self.lower_checker_map_drop(&statement.node_id, &place.base, index) {
                             continue;
                         }
+                        let consumes_values_owned_string = self
+                            .checker_receipted_owned_string_drop(
+                                &statement.node_id,
+                                index,
+                                &place.base,
+                            );
                         match self.local_value(&place.base) {
+                            Ok(value) if consumes_values_owned_string => self.emit(
+                                &statement.node_id,
+                                &format!("drop.{index}"),
+                                MirInstructionKind::Drop { value },
+                            ),
                             Ok(value)
                                 if self.values.get(&value).is_some_and(|descriptor| {
                                     descriptor.ty
@@ -11424,6 +16075,229 @@ impl<'a> Lowerer<'a> {
                 ),
             }
         }
+    }
+
+    /// Lower only the verifier-adapter's exact `for item in [expr] { extern(item); }`
+    /// shape. The source List is still evaluated and allocated once, the
+    /// Checker TypeDesc authorizes its scope Drop, and the element comes from
+    /// a receipt-bearing checked index projection. The body deliberately has
+    /// one non-escaping FFI call, so no early edge can bypass the cleanup and
+    /// the binding cannot be mutated or carried out of its iteration scope.
+    fn lower_ffi_singleton_for_stmt(
+        &mut self,
+        node: &NodeId,
+        pattern: &ResolvedPattern,
+        iterable: &ResolvedExpr,
+        body: &ResolvedBlock,
+    ) {
+        let Some(type_catalog) = self.type_catalog else {
+            self.error(
+                node,
+                "verifier-only singleton `for` requires the Checker TypeDesc catalog",
+            );
+            return;
+        };
+        let (local, element) = match (&pattern.kind, &iterable.kind) {
+            (
+                ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                },
+                ResolvedExprKind::List(elements),
+            ) if elements.len() == 1 => (local, &elements[0]),
+            _ => {
+                self.error(
+                    node,
+                    "verifier-only singleton `for` requires one direct immutable binding over a one-element List literal",
+                );
+                return;
+            }
+        };
+        let Some(binding) = self.body.locals.get(local) else {
+            self.error(
+                &pattern.node_id,
+                "singleton `for` binding is absent from the Checker local catalog",
+            );
+            return;
+        };
+        if binding.id != *local
+            || binding.mutable
+            || binding.ty != pattern.ty
+            || element.ty != pattern.ty
+        {
+            self.error(
+                &pattern.node_id,
+                "singleton `for` binding identity or element TypeDesc disagrees with the Checker catalog",
+            );
+            return;
+        }
+        let Some(list_descriptor) = type_catalog.get(&iterable.ty) else {
+            self.error(
+                &iterable.node_id,
+                "singleton `for` List TypeDesc is absent from the Checker catalog",
+            );
+            return;
+        };
+        let Some(element_descriptor) = type_catalog.get(&pattern.ty) else {
+            self.error(
+                &pattern.node_id,
+                "singleton `for` element TypeDesc is absent from the Checker catalog",
+            );
+            return;
+        };
+        if list_descriptor.kind != super::types::MirTypeKind::List
+            || !matches!(
+                &list_descriptor.layout,
+                super::types::MirLayout::List { element: list_element }
+                    if list_element == &pattern.ty
+            )
+            || !element_descriptor.is_canonical_ffi_verifier_scalar_leaf()
+            || !ffi_singleton_element_expr_is_closed(element)
+        {
+            self.error(
+                &iterable.node_id,
+                "singleton `for` is limited to a closed Copy scalar element expression and its exact Checker List TypeDesc",
+            );
+            return;
+        }
+        if let Err(message) = type_catalog
+            .validated_list_construct_contract(&iterable.ty, std::slice::from_ref(&element.ty))
+        {
+            self.error(
+                &iterable.node_id,
+                format!("singleton `for` List construction is not Checker-receipted: {message}"),
+            );
+            return;
+        }
+        // ResourceAnalysis emits explicit actions for linear resources, not
+        // ordinary Copy-element List temporaries. Here cleanup is authorized
+        // by the CheckedProgram-owned List TypeDesc's recursive auto-Drop
+        // contract and the exact temporary `List([expr])` source shape.
+        if let Err(message) = type_catalog.validate_drop(&iterable.ty) {
+            self.error(
+                &iterable.node_id,
+                format!("singleton `for` iterable has no Checker-authorized scope Drop: {message}"),
+            );
+            return;
+        }
+
+        if body.result.is_some() || body.statements.len() != 1 {
+            self.error(
+                &body.node_id,
+                "verifier-only singleton `for` body must contain exactly one statement and no result expression",
+            );
+            return;
+        }
+        let ResolvedStmtKind::Expr(call_expression) = &body.statements[0].kind else {
+            self.error(
+                &body.statements[0].node_id,
+                "verifier-only singleton `for` body must be one direct FFI call expression",
+            );
+            return;
+        };
+        let ResolvedExprKind::Call(call) = &call_expression.kind else {
+            self.error(
+                &call_expression.node_id,
+                "verifier-only singleton `for` body expression is not a resolved call",
+            );
+            return;
+        };
+        let [argument] = call.arguments.as_slice() else {
+            self.error(
+                &call_expression.node_id,
+                "verifier-only singleton `for` FFI call must have exactly one argument",
+            );
+            return;
+        };
+        let direct_binding_argument = matches!(
+            &argument.value.kind,
+            ResolvedExprKind::Load(place)
+                if place.base == *local && place.projections.is_empty()
+        );
+        if !matches!(&call.callee, ResolvedCallee::Extern(_))
+            || !call.type_arguments.is_empty()
+            || !direct_binding_argument
+            || argument.value.ty != pattern.ty
+            || argument.conversion.kind != CheckedConversionKind::Identity
+            || argument.conversion.from != pattern.ty
+            || argument.conversion.to != pattern.ty
+            || call_expression.ty != call.result
+            || !type_catalog.is_canonical_ffi_endpoint(&argument.value.ty, false)
+            || !type_catalog.is_canonical_ffi_endpoint(&call.result, true)
+            || self.body.resolved_calls.get(&call_expression.node_id) != Some(&call.callee)
+        {
+            self.error(
+                &call_expression.node_id,
+                "verifier-only singleton `for` call lacks exact Checker FFI target, callsite, or scalar argument provenance",
+            );
+            return;
+        }
+
+        let outer_locals = self.locals.clone();
+        let list = self.lower_expr(iterable);
+        let Some(index) = self.id("for.index_zero", node) else {
+            self.locals = outer_locals;
+            return;
+        };
+        self.insert_value(
+            index.clone(),
+            crate::core::ir::primitive_type_id(PrimitiveType::I64),
+            node,
+        );
+        self.emit(
+            node,
+            "for.index_zero",
+            MirInstructionKind::Const {
+                result: index.clone(),
+                literal: ResolvedLiteral::Int(0),
+            },
+        );
+        let Some(projected) = self.id("for.element", &pattern.node_id) else {
+            self.locals = outer_locals;
+            return;
+        };
+        self.insert_value(projected.clone(), pattern.ty.clone(), &pattern.node_id);
+        let Some(contract) =
+            self.list_index_projection_contract(&pattern.node_id, &list, &index, &projected)
+        else {
+            self.locals = outer_locals;
+            return;
+        };
+        self.emit_with_origin(
+            &pattern.node_id,
+            node,
+            "for.index_project",
+            MirInstructionKind::Project {
+                result: projected.clone(),
+                base: list.clone(),
+                projection: super::MirProjection::Index(index),
+                list_index_contract: Some(contract),
+            },
+        );
+        let destination = match self.local_value(local) {
+            Ok(value) => value,
+            Err(errors) => {
+                self.errors.extend(errors);
+                self.locals = outer_locals;
+                return;
+            }
+        };
+        self.emit_with_origin(
+            &pattern.node_id,
+            node,
+            "for.bind",
+            MirInstructionKind::Move {
+                result: destination,
+                source: projected,
+            },
+        );
+        self.lower_expr(call_expression);
+        self.emit(
+            node,
+            "for.drop_iterable",
+            MirInstructionKind::Drop { value: list },
+        );
+        self.locals = outer_locals;
     }
 
     /// Lower only the checker-proven direct tuple binding shape for
@@ -11733,16 +16607,217 @@ impl<'a> Lowerer<'a> {
                 Some(result)
             }
             K::New => {
-                self.error(
-                    &expression.node_id,
-                    "typed owned-get Map New must be bound to a fresh local root",
+                let Some(branch) = self
+                    .ordinary_map_owned_get_result_branch_for_operation(&expression.node_id, K::New)
+                    .cloned()
+                else {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map New must be bound to a fresh local root or an exact ResultBranchV3 receipt",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let valid_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
                 );
-                Some(self.fallback_value(expression))
+                let Some(output_root) = branch.output_root.as_ref() else {
+                    self.error(
+                        &expression.node_id,
+                        "owned-get New Result receipt has no Ok root",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                if !valid_call
+                    || !call.arguments.is_empty()
+                    || branch.result_node != expression.node_id
+                    || branch.operation_point != expression.node_id
+                    || branch.scrutinee_node != expression.node_id
+                    || branch.result_binding.is_some()
+                    || branch.result_type != expression.ty
+                    || branch.input_root.is_some()
+                    || action.local != *output_root
+                    || action.key.is_some()
+                    || action.key_type.is_some()
+                    || action.key_local.is_some()
+                    || action.value.is_some()
+                    || action.value_type.is_some()
+                    || action.result_type.is_some()
+                    || action.source_local.is_some()
+                    || action.source.is_some()
+                {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map New Result operands differ from its exact Checker branch receipt",
+                    );
+                    return Some(self.fallback_value(expression));
+                }
+                let Some(catalog) = self.type_catalog else {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map New Result has no canonical TypeDesc catalog",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let result_type =
+                    super::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+                if let Err(message) = catalog
+                    .validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                        &result_type,
+                        &branch.result_type,
+                    )
+                {
+                    self.error(&expression.node_id, message);
+                    return Some(self.fallback_value(expression));
+                }
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return Some(self.fallback_value(expression));
+                };
+                self.insert_value(result.clone(), result_type, &expression.node_id);
+                let output_value = self.ordinary_map_owned_get_i32_string_v1_local_value(
+                    output_root,
+                    &expression.node_id,
+                );
+                let role = self.ordinary_map_owned_get_i32_string_v1_role(K::New, &output_value);
+                self.emit(
+                    &expression.node_id,
+                    &role,
+                    MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult {
+                        result: result.clone(),
+                    },
+                );
+                Some(result)
             }
-            K::Set | K::Remove | K::Clone => {
+            K::Set => {
+                let Some(branch) = self
+                    .ordinary_map_owned_get_result_branch_for_operation(&expression.node_id, K::Set)
+                    .cloned()
+                else {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map Set must be bound to a fresh local root or an exact ResultBranchV3 receipt",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let valid_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(name) if name.as_str() == "map_set"
+                );
+                let (Some(source_arg), Some(key_arg), Some(value_arg)) = (
+                    call.arguments.first(),
+                    call.arguments.get(1),
+                    call.arguments.get(2),
+                ) else {
+                    self.error(
+                        &expression.node_id,
+                        "owned-get Set Result has incomplete operands",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let source_local = match &source_arg.value.kind {
+                    ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                        Some(place.base.clone())
+                    }
+                    _ => None,
+                };
+                let (Some(input_root), Some(output_root)) =
+                    (branch.input_root.as_ref(), branch.output_root.as_ref())
+                else {
+                    self.error(
+                        &expression.node_id,
+                        "owned-get Set Result receipt lacks root lineage",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                if !valid_call
+                    || call.arguments.len() != 3
+                    || source_local.as_ref() != Some(input_root)
+                    || branch.result_node != expression.node_id
+                    || branch.operation_point != expression.node_id
+                    || branch.scrutinee_node != expression.node_id
+                    || branch.result_binding.is_some()
+                    || branch.result_type != expression.ty
+                    || action.local != *output_root
+                    || action.source_local.as_ref() != Some(input_root)
+                    || action.key.as_ref() != Some(&key_arg.value.node_id)
+                    || action.key_type.as_ref() != Some(&key_arg.value.ty)
+                    || action.value.as_ref() != Some(&value_arg.value.node_id)
+                    || action.value_type.as_ref() != Some(&value_arg.value.ty)
+                    || action.result_type.is_some()
+                    || action.key_local.as_ref()
+                        != match &key_arg.value.kind {
+                            ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                                Some(&place.base)
+                            }
+                            _ => None,
+                        }
+                    || action.source.as_ref().is_none_or(|source| {
+                        source.0 .0
+                            != format!("ordinary-map-owned-get-i32-string-v1:{}", input_root.0 .0)
+                    })
+                {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map Set Result operands differ from its exact Checker branch receipt",
+                    );
+                    return Some(self.fallback_value(expression));
+                }
+                let Some(catalog) = self.type_catalog else {
+                    self.error(
+                        &expression.node_id,
+                        "typed owned-get Map Set Result has no canonical TypeDesc catalog",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let result_type =
+                    super::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+                if let Err(message) = catalog
+                    .validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                        &result_type,
+                        &branch.result_type,
+                    )
+                {
+                    self.error(&expression.node_id, message);
+                    return Some(self.fallback_value(expression));
+                }
+                let source = self.ordinary_map_owned_get_i32_string_v1_local_value(
+                    input_root,
+                    &source_arg.value.node_id,
+                );
+                let (key, key_is_temporary) = self.lower_ordinary_map_v1_string_key(&key_arg.value);
+                let value = self.lower_expr(&value_arg.value);
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return Some(self.fallback_value(expression));
+                };
+                self.insert_value(result.clone(), result_type, &expression.node_id);
+                let output_value = self.ordinary_map_owned_get_i32_string_v1_local_value(
+                    output_root,
+                    &expression.node_id,
+                );
+                self.emit(
+                    &expression.node_id,
+                    &self.ordinary_map_owned_get_i32_string_v1_role(K::Set, &output_value),
+                    MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult {
+                        result: result.clone(),
+                        source,
+                        key: key.clone(),
+                        value: value.clone(),
+                    },
+                );
+                self.drop_ordinary_map_string_temporaries(
+                    &expression.node_id,
+                    action.key_type.as_ref(),
+                    &key,
+                    key_is_temporary,
+                    action.value_type.as_ref(),
+                    &value,
+                );
+                Some(result)
+            }
+            K::Remove | K::Clone => {
                 self.error(
                     &expression.node_id,
-                    "typed owned-get Map Set/Remove must be bound to a fresh local root",
+                    "typed owned-get Map Remove/Clone must be bound to a fresh local root",
                 );
                 Some(self.fallback_value(expression))
             }
@@ -11761,15 +16836,220 @@ impl<'a> Lowerer<'a> {
         expression: &ResolvedExpr,
         call: &crate::core::ir::ResolvedCall,
     ) -> Option<MirValueId> {
+        if let Some(result) =
+            self.lower_ordinary_map_owned_any_v2_get_or_default_string_call(expression, call)
+        {
+            return Some(result);
+        }
+        if let Some(result) =
+            self.lower_ordinary_map_owned_any_v2_get_or_default_i32_call(expression, call)
+        {
+            return Some(result);
+        }
+        let map_root_get_any_caller =
+            match self.ordinary_map_owned_any_v2_map_root_get_any_caller_selection() {
+                Ok(receipt) => receipt,
+                Err(message) => {
+                    self.error(&expression.node_id, message);
+                    return Some(self.fallback_value(expression));
+                }
+            };
+        let map_root_get_any_caller_call = map_root_get_any_caller
+            .as_ref()
+            .filter(|receipt| receipt.get_any_node == expression.node_id);
+        if map_root_get_any_caller.is_some()
+            && matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_get")
+            && map_root_get_any_caller_call.is_none()
+        {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller contains a map_get outside its exact Checker receipt",
+            );
+            return Some(self.fallback_value(expression));
+        }
+        if let Some(receipt) = self.ordinary_map_owned_any_v2_map_root_caller_receipt_for_body() {
+            if receipt.map_size_node == expression.node_id {
+                let Some(analysis) = self.resource_analysis else {
+                    self.error(
+                        &expression.node_id,
+                        "Map-root caller Size has no Checker resource analysis",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let exact_actions = analysis
+                    .ordinary_map_owned_any_v2_actions
+                    .iter()
+                    .filter(|action| {
+                        action.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+                            && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Size
+                            && action.point == receipt.map_size_node
+                            && action.local == receipt.caller_root_local
+                            && action.result_type.is_none()
+                            && action.source_node.as_ref() == Some(&receipt.map_size_receiver_node)
+                            && action.source_type.as_ref() == Some(&receipt.caller_root_type)
+                    })
+                    .count();
+                let exact_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(name) if name.as_str() == "map_size"
+                );
+                let root_argument = call.arguments.first();
+                let root_argument_node_matches = root_argument.is_some_and(|argument| {
+                    argument.value.node_id == receipt.map_size_receiver_node
+                });
+                let root_argument_type_matches = root_argument
+                    .is_some_and(|argument| argument.value.ty == receipt.caller_root_type);
+                let root_argument_is_direct_load = root_argument.is_some_and(|argument| {
+                    matches!(
+                        &argument.value.kind,
+                        ResolvedExprKind::Load(place)
+                            if place.projections.is_empty()
+                                && place.base == receipt.caller_root_local
+                    )
+                });
+                let direct_root = root_argument_node_matches
+                    && root_argument_type_matches
+                    && root_argument_is_direct_load;
+                if !exact_call
+                    || call.arguments.len() != 1
+                    || !call.type_arguments.is_empty()
+                    || !direct_root
+                    || expression.ty != receipt.size_type
+                    || exact_actions != 1
+                    || self
+                        .body
+                        .locals
+                        .get(&receipt.size_binding)
+                        .map(|local| &local.ty)
+                        != Some(&receipt.size_type)
+                {
+                    self.error(
+                        &expression.node_id,
+                        &format!(
+                            "Map-root caller Size differs from its exact Checker producer/caller receipt (callee={exact_call}, args={}, type_args={}, receiver_node={root_argument_node_matches}, receiver_type={root_argument_type_matches}, direct_load={root_argument_is_direct_load}, result_type={}, exact_actions={exact_actions}, binding_type={})",
+                            call.arguments.len(),
+                            call.type_arguments.len(),
+                            expression.ty == receipt.size_type,
+                            self.body
+                                .locals
+                                .get(&receipt.size_binding)
+                                .map(|local| local.ty == receipt.size_type)
+                                .unwrap_or(false),
+                        ),
+                    );
+                    return Some(self.fallback_value(expression));
+                }
+                let root = match self.local_value(&receipt.caller_root_local) {
+                    Ok(root) => root,
+                    Err(errors) => {
+                        self.errors.extend(errors);
+                        return Some(self.fallback_value(expression));
+                    }
+                };
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return Some(self.fallback_value(expression));
+                };
+                self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+                self.emit(
+                    &expression.node_id,
+                    &format!("ordinary_map_owned_any_v2_size:{root}"),
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                        result: result.clone(),
+                        root,
+                    },
+                );
+                return Some(result);
+            }
+        }
         let analysis = self.resource_analysis?;
-        if !analysis.has_ordinary_map_owned_any_v2_receipt() {
+        if !self.ordinary_map_owned_any_v2_profile_selected()
+            && map_root_get_any_caller_call.is_none()
+        {
             return None;
         }
-        let action = analysis
+        let matching_actions = analysis
             .ordinary_map_owned_any_v2_actions
             .iter()
-            .find(|a| a.point == expression.node_id)?
-            .clone();
+            .filter(|action| action.point == expression.node_id)
+            .collect::<Vec<_>>();
+        if map_root_get_any_caller_call.is_some() && matching_actions.len() != 1 {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller call has a missing or repeated local V2 action",
+            );
+            return Some(self.fallback_value(expression));
+        }
+        let computed_result_branch = match self
+            .ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_operation(
+                &expression.node_id,
+            ) {
+            Ok(branch) => branch,
+            Err(message) => {
+                self.error(&expression.node_id, message);
+                return Some(self.fallback_value(expression));
+            }
+        };
+        let values_local_index_result_branch = match self
+            .ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_operation(
+                &expression.node_id,
+            ) {
+            Ok(branch) => branch,
+            Err(message) => {
+                self.error(&expression.node_id, message);
+                return Some(self.fallback_value(expression));
+            }
+        };
+        if let Some(branch) = values_local_index_result_branch {
+            let [action] = matching_actions.as_slice() else {
+                self.error(
+                    &expression.node_id,
+                    "ValuesLocalIndexI32 Result operation has a missing or repeated Checker action",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            return Some(
+                self.lower_ordinary_map_owned_any_v2_values_local_index_i32_result_call(
+                    expression, call, action, &branch,
+                ),
+            );
+        }
+        if let Some(branch) = computed_result_branch {
+            let [action] = matching_actions.as_slice() else {
+                self.error(
+                    &expression.node_id,
+                    "computed String-key owner-chain Result operation has a missing or repeated Checker action",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let expected_kind = if expression.node_id == branch.map_new_operation {
+                crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+            } else {
+                crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+            };
+            if action.kind != expected_kind {
+                self.error(
+                    &expression.node_id,
+                    "computed String-key owner-chain Result operation has the wrong Checker action kind",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            return Some(
+                self.lower_ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_call(
+                    expression, call, action, &branch,
+                ),
+            );
+        }
+        let action = matching_actions.first().copied()?.clone();
+        if map_root_get_any_caller_call.is_some()
+            && action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+        {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller call is not bound to one local GetAny action",
+            );
+            return Some(self.fallback_value(expression));
+        }
         use crate::core::OrdinaryMapOwnedAnyV2ActionKind as K;
         if action.kind == K::New {
             let temporary_roots = analysis
@@ -11887,8 +17167,180 @@ impl<'a> Lowerer<'a> {
             );
             return Some(result);
         }
+        if action.kind == K::Keys {
+            let valid_call = matches!(
+                &call.callee,
+                crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "keys"
+            );
+            let Some(root_arg) = call.arguments.first() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Keys requires one direct Map root argument",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let source_local = match &root_arg.value.kind {
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            };
+            let Some(binding_local) = action.result_local.as_ref() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Keys receipt has no direct snapshot binding",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let receipt_matches = analysis
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .is_some_and(|cfg| {
+                    let matching_static = cfg
+                        .keys_snapshot_receipts
+                        .iter()
+                        .filter(|receipt| receipt.keys_operation == expression.node_id)
+                        .collect::<Vec<_>>();
+                    let matching_dynamic = cfg
+                        .dynamic_keys_get_receipts
+                        .iter()
+                        .filter(|receipt| receipt.keys_action.point == expression.node_id)
+                        .collect::<Vec<_>>();
+                    match (matching_static.as_slice(), matching_dynamic.as_slice()) {
+                        ([receipt], []) => {
+                            receipt.owner == self.body.owner
+                                && receipt.source_local == action.local
+                                && receipt.snapshot_local == *binding_local
+                                && receipt.snapshot_type == expression.ty
+                        }
+                        ([], [receipt]) => receipt.profile_version
+                            == crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetProfileVersion::V1
+                            && receipt.owner == self.body.owner
+                            && receipt.keys_action.local == action.local
+                            && receipt.keys_snapshot.snapshot_local == *binding_local
+                            && receipt.keys_snapshot.snapshot_type == expression.ty,
+                        _ => false,
+                    }
+                });
+            let binding_type = self.body.locals.get(binding_local).map(|local| &local.ty);
+            let is_string_list = self
+                .type_catalog
+                .is_some_and(|catalog| catalog.validate_owned_string_list(&expression.ty).is_ok());
+            if !valid_call
+                || call.arguments.len() != 1
+                || !call.type_arguments.is_empty()
+                || action.source_local.as_ref() != Some(&action.local)
+                || action.source.as_ref().map(|resource| &resource.0 .0) != Some(&action.root.0 .0)
+                || source_local.as_ref() != Some(&action.local)
+                || action.source_node.as_ref() != Some(&root_arg.value.node_id)
+                || action.source_type.as_ref() != Some(&root_arg.value.ty)
+                || action.result_type.as_ref() != Some(&expression.ty)
+                || binding_type != Some(&expression.ty)
+                || !is_string_list
+                || !receipt_matches
+                || action.key.is_some()
+                || action.key_type.is_some()
+                || action.value.is_some()
+                || action.value_type.is_some()
+                || action.payload_clone
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any v2 Keys operands/result disagree with its exact Checker snapshot receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let root = self.v2_root_arg(&root_arg.value, &action, &expression.node_id);
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return Some(self.fallback_value(expression));
+            };
+            self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+            let owner_value =
+                self.ordinary_map_owned_any_v2_local_value(&action.local, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_keys:{owner_value}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Keys {
+                    result: result.clone(),
+                    root,
+                },
+            );
+            return Some(result);
+        }
         if action.kind == K::GetAny {
             let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+            let map_root_get_any_receipt_matches = map_root_get_any_caller_call
+                .is_none_or(|receipt| {
+                    let Some((bound_expression, bound_call)) = self
+                        .ordinary_map_owned_any_v2_map_root_get_any_pair_binding(receipt)
+                    else {
+                        return false;
+                    };
+                    let result_receipts = analysis
+                        .ordinary_map_owned_any_v2_cfg_receipt
+                        .as_ref()
+                        .map(|cfg| {
+                            let matching = cfg
+                                .result_receipts
+                                .iter()
+                                .filter(|result| {
+                                    result.operation == receipt.get_any_node
+                                        && result.kind
+                                            == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+                                        && result.source_local == receipt.caller_root_local
+                                        && result.source_node == receipt.get_any_receiver_node
+                                        && result.source_type == receipt.caller_root_type
+                                        && result.key.as_ref() == Some(&receipt.get_any_key_node)
+                                        && result.key_type.as_ref() == Some(&string_type)
+                                        && result.result == receipt.get_any_node
+                                        && result.result_type == receipt.pair_type
+                                        && result.binding == receipt.pair_local
+                                        && result.binding_point == receipt.pair_binding_point
+                                        && result.settlement
+                                            == crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+                                        && result.settlement_point.as_ref()
+                                            == Some(&receipt.pair_drop_point)
+                                })
+                                .count();
+                            (cfg.result_receipts.len(), matching)
+                        })
+                        .unwrap_or_default();
+                    receipt.profile_version
+                        == crate::core::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerProfileVersion::V1
+                        && receipt.get_any_node == expression.node_id
+                        && call.arguments.first().is_some_and(|argument| {
+                            argument.value.node_id == receipt.get_any_receiver_node
+                        })
+                        && call.arguments.get(1).is_some_and(|argument| {
+                            argument.value.node_id == receipt.get_any_key_node
+                        })
+                        && receipt.pair_type == expression.ty
+                        && receipt.pair_type == call.result
+                        && receipt.string_type == string_type
+                        && action.local == receipt.caller_root_local
+                        && action.source_local.as_ref() == Some(&receipt.caller_root_local)
+                        && action.source_node.as_ref() == Some(&receipt.get_any_receiver_node)
+                        && action.source_type.as_ref() == Some(&receipt.caller_root_type)
+                        && action.key.as_ref() == Some(&receipt.get_any_key_node)
+                        && action.result_local.as_ref() == Some(&receipt.pair_local)
+                        && action.result_type.as_ref() == Some(&receipt.pair_type)
+                        && self
+                            .body
+                            .locals
+                            .get(&receipt.caller_root_local)
+                            .is_some_and(|local| {
+                                local.ty == receipt.caller_root_type && !local.mutable
+                            })
+                        && self
+                            .body
+                            .locals
+                            .get(&receipt.pair_local)
+                            .is_some_and(|local| local.ty == receipt.pair_type && !local.mutable)
+                        && std::ptr::eq(bound_expression, expression)
+                        && std::ptr::eq(bound_call, call)
+                        && matches!(&bound_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_get")
+                        && result_receipts == (1, 1)
+                });
             let valid_call = matches!(
                 &call.callee,
                 crate::core::ir::ResolvedCallee::Builtin(name) if name.as_str() == "map_get"
@@ -11976,6 +17428,7 @@ impl<'a> Lowerer<'a> {
                 || action.value.is_some()
                 || action.value_type.is_some()
                 || action.payload_clone
+                || !map_root_get_any_receipt_matches
             {
                 self.error(
                     &expression.node_id,
@@ -12015,7 +17468,7 @@ impl<'a> Lowerer<'a> {
                 },
             );
             if temporary_root.is_some()
-                && !self.lower_checker_map_drop(&expression.node_id, &action.local)
+                && !self.lower_checker_map_drop(&expression.node_id, &action.local, 0)
             {
                 self.error(
                     &expression.node_id,
@@ -12101,6 +17554,349 @@ impl<'a> Lowerer<'a> {
                 &key,
             );
         }
+        Some(result)
+    }
+
+    /// Lower the exact Checker-sealed `std::maps.get_or_default<String>` caller
+    /// edge to one fused operation. The generic helper remains a non-executable
+    /// template: no `Call` is emitted, so generic-instance materialization
+    /// cannot turn its unresolved `DynamicAnyUnpack` into an i64-ABI body.
+    fn lower_ordinary_map_owned_any_v2_get_or_default_string_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> Option<MirValueId> {
+        use crate::core::ir::{
+            CheckedConversionKind as Conversion, ResolvedExprKind as E, ResolvedLiteral as L,
+        };
+        use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as Attempt;
+
+        let analysis = self.resource_analysis?;
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return None;
+        };
+        let attempts = cfg
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == Attempt::GetOrDefaultString && attempt.point == expression.node_id
+            })
+            .collect::<Vec<_>>();
+        if attempts.is_empty() {
+            return None;
+        }
+        let reject = |this: &mut Self, message: &str| {
+            this.error(&expression.node_id, message);
+            Some(this.fallback_value(expression))
+        };
+        let [attempt] = attempts.as_slice() else {
+            return reject(
+                self,
+                "GetOrDefault<String> call has duplicate Checker attempt records",
+            );
+        };
+        let Some(receipt) = cfg
+            .get_or_default_string_receipt
+            .as_ref()
+            .filter(|receipt| {
+                receipt.caller_owner == self.body.owner
+                    && receipt.call_node == expression.node_id
+                    && receipt.call_target
+                        == match &call.callee {
+                            ResolvedCallee::Function(target) => target.clone(),
+                            _ => NodeId(String::new()),
+                        }
+            })
+            .cloned()
+        else {
+            return reject(
+                self,
+                "GetOrDefault<String> attempt has no exact canonical Checker cross-call receipt",
+            );
+        };
+        if !self.ordinary_map_owned_any_v2_profile_selected()
+            || receipt.helper_map_permission != crate::core::Permission::View
+        {
+            return reject(
+                self,
+                "GetOrDefault<String> receipt is not admitted by the selected ordinary Map/Any V2 profile",
+            );
+        }
+        let [root_argument, key_argument, default_argument] = call.arguments.as_slice() else {
+            return reject(
+                self,
+                "GetOrDefault<String> call arguments differ from its exact three-argument receipt",
+            );
+        };
+        let expected_string =
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let expected_key_string =
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let root_local = match &root_argument.value.kind {
+            E::Load(place) if place.projections.is_empty() => Some(&place.base),
+            _ => None,
+        };
+        let key_bytes = match &key_argument.value.kind {
+            E::Literal(L::String(value)) => Some(value.as_str()),
+            _ => None,
+        };
+        let default_value = match &default_argument.value.kind {
+            E::Literal(L::String(value)) => Some(value.as_str()),
+            E::Load(place)
+                if place.projections.is_empty()
+                    && receipt.caller_default_local.as_ref() == Some(&place.base) =>
+            {
+                Some(receipt.caller_default_string.as_str())
+            }
+            _ => None,
+        };
+        if !matches!(
+            &call.callee,
+            ResolvedCallee::Function(target) if target == &receipt.call_target
+        ) || call.type_arguments.as_slice() != [expected_string.clone()]
+            || call.result != expected_string
+            || expression.ty != expected_string
+            || call.permission.is_some()
+            || !call.session.is_empty()
+            || call.arguments.len() != 3
+            || call
+                .arguments
+                .iter()
+                .map(|argument| argument.value.node_id.clone())
+                .collect::<Vec<_>>()
+                != receipt.call_arguments
+            || call
+                .arguments
+                .iter()
+                .map(|argument| argument.parameter.clone())
+                .collect::<Vec<_>>()
+                != receipt.call_parameters
+            || attempt.arguments != receipt.call_arguments
+            || attempt.receiver_local.as_ref() != Some(&receipt.caller_root_local)
+            || attempt.result_local.as_ref() != Some(&receipt.caller_result_local)
+            || root_local != Some(&receipt.caller_root_local)
+            || root_argument.value.ty != receipt.caller_root_type
+            || root_argument.conversion.kind != Conversion::Identity
+            || root_argument.conversion.from != receipt.caller_root_type
+            || root_argument.conversion.to != receipt.caller_root_type
+            || key_argument.value.ty != expected_key_string
+            || key_argument.conversion.kind != Conversion::Identity
+            || key_argument.conversion.from != expected_key_string
+            || key_argument.conversion.to != expected_key_string
+            || key_bytes != Some(receipt.caller_query_key_bytes.as_str())
+            || default_argument.value.ty != expected_string
+            || default_argument.conversion.kind != Conversion::Identity
+            || default_argument.conversion.from != expected_string
+            || default_argument.conversion.to != expected_string
+            || default_value != Some(receipt.caller_default_string.as_str())
+        {
+            return reject(
+                self,
+                "GetOrDefault<String> source call differs from its exact Checker root/key/default/type binding",
+            );
+        }
+
+        let root = self
+            .ordinary_map_owned_any_v2_local_value(&receipt.caller_root_local, &expression.node_id);
+        let (key, key_is_temporary) = self.lower_ordinary_map_v1_string_key(&key_argument.value);
+        if !key_is_temporary {
+            return reject(
+                self,
+                "GetOrDefault<String> static literal key unexpectedly aliases a caller local",
+            );
+        }
+        let default = self.lower_expr(&default_argument.value);
+        let Some(result) = self.id("expr", &expression.node_id) else {
+            return Some(self.fallback_value(expression));
+        };
+        self.insert_value(result.clone(), expected_string, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_get_or_default_string",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultString {
+                result: result.clone(),
+                root,
+                key: key.clone(),
+                default,
+                callsite: expression.node_id.clone(),
+                call_target: receipt.call_target.clone(),
+                type_argument: receipt.call_type_argument.clone(),
+            },
+        );
+        self.drop_ordinary_map_string_temporaries(
+            &expression.node_id,
+            Some(&expected_key_string),
+            &key,
+            key_is_temporary,
+            None,
+            &key,
+        );
+        Some(result)
+    }
+
+    fn lower_ordinary_map_owned_any_v2_get_or_default_i32_call(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &crate::core::ir::ResolvedCall,
+    ) -> Option<MirValueId> {
+        use crate::core::ir::{
+            CheckedConversionKind as Conversion, ResolvedExprKind as E, ResolvedLiteral as L,
+        };
+        use crate::core::ownership::OrdinaryMapOwnedAnyV2AttemptKind as Attempt;
+
+        let analysis = self.resource_analysis?;
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return None;
+        };
+        let attempts = cfg
+            .attempts
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == Attempt::GetOrDefaultI32 && attempt.point == expression.node_id
+            })
+            .collect::<Vec<_>>();
+        if attempts.is_empty() {
+            return None;
+        }
+        let reject = |this: &mut Self, message: &str| {
+            this.error(&expression.node_id, message);
+            Some(this.fallback_value(expression))
+        };
+        let [attempt] = attempts.as_slice() else {
+            return reject(
+                self,
+                "GetOrDefault<i32> call has duplicate Checker attempt records",
+            );
+        };
+        let Some(receipt) = cfg
+            .get_or_default_i32_receipt
+            .as_ref()
+            .filter(|receipt| {
+                receipt.caller_owner == self.body.owner
+                    && receipt.call_node == expression.node_id
+                    && receipt.call_target
+                        == match &call.callee {
+                            ResolvedCallee::Function(target) => target.clone(),
+                            _ => NodeId(String::new()),
+                        }
+            })
+            .cloned()
+        else {
+            return reject(
+                self,
+                "GetOrDefault<i32> attempt has no exact canonical Checker cross-call receipt",
+            );
+        };
+        if !self.ordinary_map_owned_any_v2_profile_selected()
+            || receipt.helper_map_permission != crate::core::Permission::View
+        {
+            return reject(
+                self,
+                "GetOrDefault<i32> receipt is not admitted by the selected ordinary Map/Any V2 profile",
+            );
+        }
+        let [root_argument, key_argument, default_argument] = call.arguments.as_slice() else {
+            return reject(
+                self,
+                "GetOrDefault<i32> call arguments differ from its exact three-argument receipt",
+            );
+        };
+        let expected_i32 = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+        let expected_string =
+            crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        let root_local = match &root_argument.value.kind {
+            E::Load(place) if place.projections.is_empty() => Some(&place.base),
+            _ => None,
+        };
+        let key_bytes = match &key_argument.value.kind {
+            E::Literal(L::String(value)) => Some(value.as_str()),
+            _ => None,
+        };
+        let default_value = match &default_argument.value.kind {
+            E::Literal(L::Int(value)) => Some(*value),
+            _ => None,
+        };
+        if !matches!(
+            &call.callee,
+            ResolvedCallee::Function(target) if target == &receipt.call_target
+        ) || call.type_arguments.as_slice() != [expected_i32.clone()]
+            || call.result != expected_i32
+            || expression.ty != expected_i32
+            || call.permission.is_some()
+            || !call.session.is_empty()
+            || call.arguments.len() != 3
+            || call
+                .arguments
+                .iter()
+                .map(|argument| argument.value.node_id.clone())
+                .collect::<Vec<_>>()
+                != receipt.call_arguments
+            || call
+                .arguments
+                .iter()
+                .map(|argument| argument.parameter.clone())
+                .collect::<Vec<_>>()
+                != receipt.call_parameters
+            || attempt.arguments != receipt.call_arguments
+            || attempt.receiver_local.as_ref() != Some(&receipt.caller_root_local)
+            || attempt.result_local.as_ref() != Some(&receipt.caller_result_local)
+            || root_local != Some(&receipt.caller_root_local)
+            || root_argument.value.ty != receipt.caller_root_type
+            || root_argument.conversion.kind != Conversion::Identity
+            || root_argument.conversion.from != receipt.caller_root_type
+            || root_argument.conversion.to != receipt.caller_root_type
+            || key_argument.value.ty != expected_string
+            || key_argument.conversion.kind != Conversion::Identity
+            || key_argument.conversion.from != expected_string
+            || key_argument.conversion.to != expected_string
+            || key_bytes != Some(receipt.caller_query_key_bytes.as_str())
+            || default_argument.value.ty != expected_i32
+            || default_argument.conversion.kind != Conversion::Identity
+            || default_argument.conversion.from != expected_i32
+            || default_argument.conversion.to != expected_i32
+            || default_value != Some(receipt.caller_default_i32)
+        {
+            return reject(
+                self,
+                "GetOrDefault<i32> source call differs from its exact Checker root/key/default/type binding",
+            );
+        }
+
+        let root = self
+            .ordinary_map_owned_any_v2_local_value(&receipt.caller_root_local, &expression.node_id);
+        let (key, key_is_temporary) = self.lower_ordinary_map_v1_string_key(&key_argument.value);
+        if !key_is_temporary {
+            return reject(
+                self,
+                "GetOrDefault<i32> static literal key unexpectedly aliases a caller local",
+            );
+        }
+        let default = self.lower_expr(&default_argument.value);
+        let Some(result) = self.id("expr", &expression.node_id) else {
+            return Some(self.fallback_value(expression));
+        };
+        self.insert_value(result.clone(), expected_i32, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_get_or_default_i32",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2GetOrDefaultI32 {
+                result: result.clone(),
+                root,
+                key: key.clone(),
+                default,
+                callsite: expression.node_id.clone(),
+                call_target: receipt.call_target.clone(),
+                type_argument: receipt.call_type_argument.clone(),
+            },
+        );
+        self.drop_ordinary_map_string_temporaries(
+            &expression.node_id,
+            Some(&expected_string),
+            &key,
+            key_is_temporary,
+            None,
+            &key,
+        );
         Some(result)
     }
 
@@ -12258,8 +18054,439 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn lower_default_argument(
+        &mut self,
+        call_node: &NodeId,
+        call: &ResolvedCall,
+        parameter_index: usize,
+        argument: &crate::core::ir::ResolvedArgument,
+    ) -> Option<MirValueId> {
+        let ResolvedExprKind::DefaultArgument {
+            callable: target_owner,
+            parameter: marker_parameter,
+        } = &argument.value.kind
+        else {
+            return None;
+        };
+        let ResolvedCallee::Function(callee_owner) = &call.callee else {
+            self.error(
+                call_node,
+                "default argument is attached to a non-function call edge",
+            );
+            return None;
+        };
+        if self.checked_callables.is_none() {
+            self.error(
+                call_node,
+                "default argument lowering requires the complete checked callable directory",
+            );
+            return None;
+        }
+        let Some(caller) = self.checked_callable(&self.body.owner) else {
+            self.error(
+                call_node,
+                "default argument caller is absent from the checked callable directory",
+            );
+            return None;
+        };
+        let Some(target) = self.checked_callable(callee_owner) else {
+            self.error(
+                call_node,
+                "default argument target is absent from the checked callable directory",
+            );
+            return None;
+        };
+        let Some(parameter) = target.signature.parameters.get(parameter_index) else {
+            self.error(
+                call_node,
+                "default argument position is outside the canonical callee signature",
+            );
+            return None;
+        };
+        let marker_origin_matches = matches!(
+            &argument.value.origin,
+            crate::core::Origin::Desugared { parent, rule, .. }
+                if parent == call_node && rule == "resolved_body.default_argument"
+        );
+        if target.owner != *callee_owner
+            || target_owner != callee_owner
+            || marker_parameter != &parameter.id
+            || argument.parameter != parameter.id
+            || !parameter.has_default
+            || !marker_origin_matches
+            || argument.value.ty != parameter.ty
+            || argument.conversion.from != parameter.ty
+            || argument.conversion.to != parameter.ty
+        {
+            self.error(
+                call_node,
+                "default argument marker disagrees with its exact checked callee parameter",
+            );
+            return None;
+        }
+        let Some(default_expression) = target.body.default_values.get(&parameter.id) else {
+            self.error(
+                call_node,
+                "checked default parameter has no declaration-owned typed expression",
+            );
+            return None;
+        };
+        let Some(default_root) = target.typed_default_proof_root(&parameter.id) else {
+            self.error(
+                call_node,
+                "checked default parameter has no canonical proof-root receipt",
+            );
+            return None;
+        };
+        let caller_worklist = caller.proof_point_worklist();
+        let Some(default_use) = caller_worklist.default_uses.iter().find(|usage| {
+            usage.caller_owner == caller.owner
+                && usage.call_node == *call_node
+                && usage.callee_owner == target.owner
+                && usage.parameter == parameter.id
+                && usage.argument_node == argument.value.node_id
+                && usage.parameter_index == parameter_index
+        }) else {
+            self.error(
+                call_node,
+                "omitted default argument has no exact checker-issued call-site use receipt",
+            );
+            return None;
+        };
+        if call.callee != ResolvedCallee::Function(target.owner.clone())
+            || !default_use.validate_against(caller, target)
+            || !default_root.validate_against(target)
+            || !default_root.supports_local_only_profile(target)
+            || !self.default_proof_root_is_copy_scalar(&default_root, target)
+        {
+            self.error(
+                call_node,
+                "default expression is outside the receipt-bound scalar local-only MIR profile",
+            );
+            return None;
+        }
+
+        // Default expressions are evaluated in canonical parameter order by
+        // the call argument loop. The supported profile is independent of
+        // callable parameters/captures, so its locals can be isolated from
+        // the caller and namespaced by this exact call site.
+        let caller_body = self.body;
+        let caller_resources = self.resource_analysis;
+        let caller_locals = std::mem::take(&mut self.locals);
+        let caller_transition_result = self.transition_result.take();
+        let prior_namespace = self.default_argument_namespace.replace(format!(
+            "{}:{}:{}",
+            call_node.0, target.owner.0, parameter.id.0 .0
+        ));
+        self.body = &target.body;
+        self.resource_analysis = Some(&target.resources);
+        self.transition_result = None;
+        let lowered_value = match &default_expression.kind {
+            ResolvedExprKind::Block(block) => self.lower_block_expr(block),
+            ResolvedExprKind::Scope {
+                kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                body,
+            } => self.lower_block_expr(body),
+            ResolvedExprKind::Scope { .. } => {
+                self.error(
+                    &default_expression.node_id,
+                    "non-lexical default argument scope is not lowered by MIR Phase 0",
+                );
+                None
+            }
+            _ => Some(self.lower_expr(default_expression)),
+        };
+        let value = match lowered_value {
+            Some(value) => Some(value),
+            None if default_expression.ty
+                == crate::core::ir::primitive_type_id(PrimitiveType::Unit) =>
+            {
+                let unit_value = self.id("default.unit", &default_expression.node_id);
+                if let Some(unit_value_id) = unit_value.as_ref() {
+                    self.insert_value(
+                        unit_value_id.clone(),
+                        default_expression.ty.clone(),
+                        &default_expression.node_id,
+                    );
+                    self.emit(
+                        &default_expression.node_id,
+                        "default.unit",
+                        MirInstructionKind::Const {
+                            result: unit_value_id.clone(),
+                            literal: crate::core::ir::ResolvedLiteral::Unit,
+                        },
+                    );
+                }
+                unit_value
+            }
+            None => {
+                self.error(
+                    call_node,
+                    "default argument expression did not materialize its checked result",
+                );
+                None
+            }
+        };
+        self.body = caller_body;
+        self.resource_analysis = caller_resources;
+        self.locals = caller_locals;
+        self.transition_result = caller_transition_result;
+        self.default_argument_namespace = prior_namespace;
+
+        let value = value?;
+        if self
+            .values
+            .get(&value)
+            .is_none_or(|materialized| materialized.ty != argument.value.ty)
+        {
+            self.error(
+                call_node,
+                "materialized default argument type disagrees with its checker marker",
+            );
+            return None;
+        }
+        Some(value)
+    }
+
+    fn default_proof_root_is_copy_scalar(
+        &self,
+        root: &crate::core::ir::TypedDefaultProofRoot,
+        callable: &crate::core::ResolvedCallable,
+    ) -> bool {
+        fn expression_scopes_are_lexical(expression: &ResolvedExpr) -> bool {
+            use crate::core::ir::{
+                ResolvedExprKind as ExprKind, ResolvedFStringPart, ResolvedScopeKind,
+                ResolvedValueProjection,
+            };
+
+            fn block_scopes_are_lexical(block: &ResolvedBlock) -> bool {
+                block.statements.iter().all(statement_scopes_are_lexical)
+                    && block
+                        .result
+                        .as_deref()
+                        .is_none_or(expression_scopes_are_lexical)
+            }
+
+            fn statement_scopes_are_lexical(statement: &crate::core::ir::ResolvedStmt) -> bool {
+                use crate::core::ir::{ResolvedScopeKind, ResolvedStmtKind as StmtKind};
+
+                match &statement.kind {
+                    StmtKind::Bind { initializer, .. } => initializer
+                        .as_ref()
+                        .is_none_or(expression_scopes_are_lexical),
+                    StmtKind::Assign { value, .. } => expression_scopes_are_lexical(value),
+                    StmtKind::Return { value, .. } | StmtKind::Break(value) => {
+                        value.as_ref().is_none_or(expression_scopes_are_lexical)
+                    }
+                    StmtKind::Continue | StmtKind::Drop(_) | StmtKind::NestedCallable(_) => true,
+                    StmtKind::Expr(expression) => expression_scopes_are_lexical(expression),
+                    StmtKind::While { condition, body } => {
+                        expression_scopes_are_lexical(condition) && block_scopes_are_lexical(body)
+                    }
+                    StmtKind::WhileLet {
+                        initializer, body, ..
+                    }
+                    | StmtKind::For {
+                        iterable: initializer,
+                        body,
+                        ..
+                    } => {
+                        expression_scopes_are_lexical(initializer) && block_scopes_are_lexical(body)
+                    }
+                    StmtKind::IfLet {
+                        initializer,
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        expression_scopes_are_lexical(initializer)
+                            && block_scopes_are_lexical(then_block)
+                            && else_block.as_ref().is_none_or(block_scopes_are_lexical)
+                    }
+                    StmtKind::Loop(body) => block_scopes_are_lexical(body),
+                    StmtKind::Contract { condition, .. } => {
+                        expression_scopes_are_lexical(condition)
+                    }
+                    StmtKind::Math(expressions) => {
+                        expressions.iter().all(expression_scopes_are_lexical)
+                    }
+                    StmtKind::Scope { kind, body } => {
+                        *kind == ResolvedScopeKind::Lexical && block_scopes_are_lexical(body)
+                    }
+                    StmtKind::Pinned { value, body, .. } => {
+                        expression_scopes_are_lexical(value) && block_scopes_are_lexical(body)
+                    }
+                }
+            }
+
+            match &expression.kind {
+                ExprKind::Literal(_)
+                | ExprKind::Load(_)
+                | ExprKind::Constant(_)
+                | ExprKind::Callable(_)
+                | ExprKind::DefaultArgument { .. }
+                | ExprKind::ComptimeValue(_)
+                | ExprKind::TypeValue(_) => true,
+                ExprKind::FString(parts) => parts.iter().all(|part| match part {
+                    ResolvedFStringPart::Text(_) => true,
+                    ResolvedFStringPart::Interpolation(value) => {
+                        expression_scopes_are_lexical(value)
+                    }
+                }),
+                ExprKind::Project { value, projection } => {
+                    expression_scopes_are_lexical(value)
+                        && match projection {
+                            ResolvedValueProjection::Index(index) => {
+                                expression_scopes_are_lexical(index)
+                            }
+                            ResolvedValueProjection::Field(_)
+                            | ResolvedValueProjection::Tuple(_)
+                            | ResolvedValueProjection::Dereference => true,
+                        }
+                }
+                ExprKind::Binary { left, right, .. } => {
+                    expression_scopes_are_lexical(left) && expression_scopes_are_lexical(right)
+                }
+                ExprKind::Unary { operand, .. }
+                | ExprKind::TypeOf(operand)
+                | ExprKind::Old(operand)
+                | ExprKind::Try { value: operand, .. }
+                | ExprKind::Spawn(operand)
+                | ExprKind::Await(operand) => expression_scopes_are_lexical(operand),
+                ExprKind::Call(call) => call
+                    .arguments
+                    .iter()
+                    .all(|argument| expression_scopes_are_lexical(&argument.value)),
+                ExprKind::Tuple(values) | ExprKind::List(values) | ExprKind::Set(values) => {
+                    values.iter().all(expression_scopes_are_lexical)
+                }
+                ExprKind::Map(entries) => entries.iter().all(|(key, value)| {
+                    expression_scopes_are_lexical(key) && expression_scopes_are_lexical(value)
+                }),
+                ExprKind::Comprehension {
+                    value,
+                    iterable,
+                    guard,
+                    ..
+                } => {
+                    expression_scopes_are_lexical(value)
+                        && expression_scopes_are_lexical(iterable)
+                        && guard.as_deref().is_none_or(expression_scopes_are_lexical)
+                }
+                ExprKind::OptionalChain { receiver, .. } => expression_scopes_are_lexical(receiver),
+                ExprKind::Record { fields, rest, .. } => {
+                    fields
+                        .iter()
+                        .all(|field| expression_scopes_are_lexical(&field.value))
+                        && rest.as_deref().is_none_or(expression_scopes_are_lexical)
+                }
+                ExprKind::Block(block) | ExprKind::Comptime(block) | ExprKind::Quote(block) => {
+                    block_scopes_are_lexical(block)
+                }
+                ExprKind::Scope { kind, body } => {
+                    *kind == ResolvedScopeKind::Lexical && block_scopes_are_lexical(body)
+                }
+                ExprKind::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    expression_scopes_are_lexical(condition)
+                        && block_scopes_are_lexical(then_block)
+                        && block_scopes_are_lexical(else_block)
+                }
+                ExprKind::Match { scrutinee, arms } => {
+                    expression_scopes_are_lexical(scrutinee)
+                        && arms.iter().all(|arm| {
+                            arm.guard.as_ref().is_none_or(expression_scopes_are_lexical)
+                                && expression_scopes_are_lexical(&arm.body)
+                        })
+                }
+                ExprKind::Range { start, end } => {
+                    expression_scopes_are_lexical(start) && expression_scopes_are_lexical(end)
+                }
+                ExprKind::Slice { target, start, end } => {
+                    expression_scopes_are_lexical(target)
+                        && start.as_deref().is_none_or(expression_scopes_are_lexical)
+                        && end.as_deref().is_none_or(expression_scopes_are_lexical)
+                }
+                ExprKind::Cast { value, .. } => expression_scopes_are_lexical(value),
+                ExprKind::Lambda(lambda) => block_scopes_are_lexical(&lambda.body),
+            }
+        }
+
+        fn scalar(ty: &crate::core::ResolvedTypeId, catalog: Option<&MirTypeCatalog>) -> bool {
+            if let Some(catalog) = catalog {
+                return catalog.get(ty).is_some_and(|descriptor| {
+                    descriptor.ownership == super::types::MirOwnership::Copy
+                        && matches!(
+                            descriptor.kind,
+                            super::types::MirTypeKind::Primitive(
+                                PrimitiveType::I32
+                                    | PrimitiveType::I64
+                                    | PrimitiveType::F64
+                                    | PrimitiveType::Bool
+                                    | PrimitiveType::Unit
+                            )
+                        )
+                });
+            }
+            [
+                PrimitiveType::I32,
+                PrimitiveType::I64,
+                PrimitiveType::F64,
+                PrimitiveType::Bool,
+                PrimitiveType::Unit,
+            ]
+            .into_iter()
+            .any(|primitive| crate::core::ir::primitive_type_id(primitive) == *ty)
+        }
+
+        fn operations_are_copy_scalar(
+            operations: &[crate::core::ir::TypedProofOperation],
+            callable: &crate::core::ResolvedCallable,
+            catalog: Option<&MirTypeCatalog>,
+        ) -> bool {
+            use crate::core::ir::TypedProofOperation as Op;
+            operations.iter().all(|operation| match operation {
+                Op::Bind {
+                    local, initializer, ..
+                } => {
+                    scalar(&initializer.ty, catalog)
+                        && callable.body.locals.get(local).is_some_and(|definition| {
+                            scalar(&definition.ty, catalog) && !definition.mutable
+                        })
+                }
+                Op::Math(point) => scalar(&point.condition.ty, catalog),
+                Op::Eval { expression, .. } => scalar(&expression.ty, catalog),
+                Op::Scope(inner) => {
+                    operations_are_copy_scalar(&inner.operations, callable, catalog)
+                }
+                _ => false,
+            })
+        }
+
+        callable
+            .body
+            .default_values
+            .get(&root.parameter)
+            .is_some_and(|expression| {
+                scalar(&expression.ty, self.type_catalog)
+                    && expression_scopes_are_lexical(expression)
+            })
+            && operations_are_copy_scalar(&root.root.operations, callable, self.type_catalog)
+    }
+
     fn lower_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
         if let ResolvedExprKind::Call(call) = &expression.kind {
+            if let Some(result) =
+                self.lower_ordinary_map_owner_lifecycle_observer_v1_call(expression, call)
+            {
+                return result;
+            }
+            if let Some(result) = self.lower_ordinary_map_owned_any_v2_println(expression, call) {
+                return result;
+            }
             if let Some(result) = self.lower_ordinary_map_owned_any_v2_call(expression, call) {
                 return result;
             }
@@ -12393,7 +18620,53 @@ impl<'a> Lowerer<'a> {
         let Some(result) = self.id("expr", &expression.node_id) else {
             return self.fallback_value(expression);
         };
-        self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+        let result_type = if self
+            .is_exact_ordinary_map_owned_any_v2_values_producer_return(Some(expression))
+        {
+            super::types::ordinary_map_owned_any_v2_values_type_id()
+        } else if self.is_exact_ordinary_map_owned_any_v2_map_root_producer_return(Some(expression))
+        {
+            super::types::ordinary_map_owned_any_v2_type_id()
+        } else {
+            match &expression.kind {
+                ResolvedExprKind::Call(call)
+                    if self
+                        .ordinary_map_owned_any_v2_values_caller_receipt_for_call(expression, call)
+                        .is_some() =>
+                {
+                    super::types::ordinary_map_owned_any_v2_values_type_id()
+                }
+                ResolvedExprKind::Call(call)
+                    if self
+                        .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_call(
+                            expression, call,
+                        )
+                        .is_some() =>
+                {
+                    super::types::ordinary_map_owned_any_v2_values_type_id()
+                }
+                ResolvedExprKind::Call(call)
+                    if self
+                        .ordinary_map_owned_any_v2_map_root_caller_receipt_for_call(
+                            expression, call,
+                        )
+                        .is_some() =>
+                {
+                    super::types::ordinary_map_owned_any_v2_type_id()
+                }
+                ResolvedExprKind::Call(call)
+                    if self
+                        .ordinary_map_owned_any_v2_map_root_get_any_caller_receipt_for_call(
+                            expression, call,
+                        )
+                        .is_some() =>
+                {
+                    super::types::ordinary_map_owned_any_v2_type_id()
+                }
+                _ => expression.ty.clone(),
+            }
+        };
+        self.insert_value(result.clone(), result_type, &expression.node_id);
         match &expression.kind {
             ResolvedExprKind::Literal(literal) => {
                 self.emit(
@@ -12435,6 +18708,19 @@ impl<'a> Lowerer<'a> {
                 };
                 self.emit(&expression.node_id, "construct_variant", instruction);
             }
+            ResolvedExprKind::Constant(item) => {
+                match self.checked_scalar_constant_literal(item, &expression.ty) {
+                    Ok(literal) => self.emit(
+                        &expression.node_id,
+                        "const.checked",
+                        MirInstructionKind::Const {
+                            result: result.clone(),
+                            literal,
+                        },
+                    ),
+                    Err(message) => self.error(&expression.node_id, message),
+                }
+            }
             ResolvedExprKind::Load(place) => {
                 if let Ok(local) = self.local_value(&place.base) {
                     if place.projections.is_empty() {
@@ -12469,7 +18755,7 @@ impl<'a> Lowerer<'a> {
                                 source: local,
                             },
                         );
-                    } else if self.value_contains_managed_any(&local)
+                    } else if self.value_contains_dynamic_or_managed_any(&local)
                         && matches!(
                             place.projections.as_slice(),
                             [crate::core::ir::ResolvedProjection::Tuple { .. }]
@@ -12506,12 +18792,27 @@ impl<'a> Lowerer<'a> {
                     } else if let Some(projection) =
                         self.move_projection_for_place(&local, &expression.ty, place)
                     {
+                        let projection_base = if self
+                            .is_computed_string_key_owner_chain_snapshot_text_read(
+                                &expression.node_id,
+                                &local,
+                                &projection,
+                                &expression.ty,
+                            ) {
+                            self.clone_computed_string_key_owner_chain_snapshot_text_source(
+                                &expression.node_id,
+                                &local,
+                            )
+                            .unwrap_or_else(|| local.clone())
+                        } else {
+                            local.clone()
+                        };
                         self.emit(
                             &expression.node_id,
                             "move_project",
                             MirInstructionKind::MoveProject {
                                 result: result.clone(),
-                                base: local,
+                                base: projection_base,
                                 projection,
                             },
                         );
@@ -12622,6 +18923,13 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Binary { op, left, right } => {
+                if matches!(
+                    *op,
+                    ResolvedBinaryOp::LogicalAnd | ResolvedBinaryOp::LogicalOr
+                ) {
+                    self.lower_short_circuit_expr(expression, result.clone(), *op, left, right);
+                    return result;
+                }
                 let owned_string_add = *op == ResolvedBinaryOp::Add
                     && expression.ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
                     && left.ty == expression.ty
@@ -12776,6 +19084,18 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Project { value, projection } => {
+                if let Some(result) = self.lower_ordinary_map_owned_any_v2_dynamic_arg0(expression)
+                {
+                    return result;
+                }
+                if self.lower_ordinary_map_owned_any_v2_keys_unpack(
+                    expression,
+                    value,
+                    projection,
+                    result.clone(),
+                ) {
+                    return result;
+                }
                 if let Some((base, receipt)) =
                     self.read_projection_path_for_expr(value, projection, &expression.ty)
                 {
@@ -12806,7 +19126,7 @@ impl<'a> Lowerer<'a> {
                         super::MirProjection::Dereference
                     }
                 };
-                let base = if let ResolvedExprKind::Load(place) = &value.kind {
+                let mut base = if let ResolvedExprKind::Load(place) = &value.kind {
                     if place.projections.is_empty() {
                         self.local_value(&place.base)
                             .ok()
@@ -12830,6 +19150,21 @@ impl<'a> Lowerer<'a> {
                 } else {
                     self.lower_expr(value)
                 };
+                if self.is_computed_string_key_owner_chain_snapshot_text_read(
+                    &expression.node_id,
+                    &base,
+                    &projection,
+                    &expression.ty,
+                ) {
+                    if let Some(cloned_source) = self
+                        .clone_computed_string_key_owner_chain_snapshot_text_source(
+                            &expression.node_id,
+                            &base,
+                        )
+                    {
+                        base = cloned_source;
+                    }
+                }
                 let list_index_contract = match &projection {
                     super::MirProjection::Index(index) => self.list_index_projection_contract(
                         &expression.node_id,
@@ -13020,6 +19355,19 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .enumerate()
                     .map(|(index, argument)| {
+                        if matches!(
+                            &argument.value.kind,
+                            ResolvedExprKind::DefaultArgument { .. }
+                        ) {
+                            return self
+                                .lower_default_argument(
+                                    &expression.node_id,
+                                    call,
+                                    index,
+                                    argument,
+                                )
+                                .unwrap_or_else(|| self.fallback_value(&argument.value));
+                        }
                         let parameter_permission = self
                             .call_parameter_permissions
                             .and_then(|permissions| permissions.get(&argument.parameter.0));
@@ -13148,6 +19496,11 @@ impl<'a> Lowerer<'a> {
                         }
                     }
                 }
+                if let ResolvedCallee::Function(target) = &call.callee {
+                    if let Some(capture_slots) = self.nested_callable_capture_slots.get(target) {
+                        arguments.extend(capture_slots.iter().map(|slot| slot.snapshot.clone()));
+                    }
+                }
                 if let ResolvedCallee::Transition(transition) = &call.callee {
                     self.emit(
                         &expression.node_id,
@@ -13228,7 +19581,9 @@ impl<'a> Lowerer<'a> {
                             "Set builtin arity does not match its canonical MIR operation",
                         );
                     }
-                } else if is_list_len_builtin(call, self.type_catalog) {
+                } else if is_list_len_builtin(call, self.type_catalog)
+                    || self.is_exact_ordinary_map_owned_any_v2_values_len_call(expression, call)
+                {
                     if let Some(list) = arguments.first() {
                         let list_operation_contract = self.list_operation_contract(
                             &expression.node_id,
@@ -13427,18 +19782,46 @@ impl<'a> Lowerer<'a> {
                     // Checker DynamicAny source identity and preserves owner
                     // liveness across stdout; ordinary builtins stay closed.
                 } else if let Some(contract) = call_builtin_contract(call, self.type_catalog) {
+                    let borrowed_assertion = matches!(
+                        contract.kind,
+                        super::types::MirBuiltinKind::AssertEq
+                            | super::types::MirBuiltinKind::AssertNe
+                    );
                     self.emit(
                         &expression.node_id,
                         "builtin_call",
                         MirInstructionKind::BuiltinCall {
                             result: result.clone(),
                             kind: contract.kind,
-                            arguments,
+                            arguments: arguments.clone(),
                             string_field_contract: borrowed_string_field
                                 .as_ref()
                                 .map(|(_, _, contract)| contract.clone()),
                         },
                     );
+                    // The testing equality helpers borrow owned String
+                    // operands.  `lower_expr` materializes each direct read
+                    // as an owned Clone, so settle those temporary owners
+                    // immediately after the observation.  The source locals
+                    // remain live for their ordinary end-of-body Drop.
+                    if borrowed_assertion {
+                        for (index, argument) in arguments.iter().enumerate() {
+                            let owned_string = self.type_catalog.is_some_and(|catalog| {
+                                self.values.get(argument).is_some_and(|value| {
+                                    catalog.validate_owned_string(&value.ty).is_ok()
+                                })
+                            });
+                            if owned_string {
+                                self.emit(
+                                    &expression.node_id,
+                                    &format!("drop.assert.borrow.{index}"),
+                                    MirInstructionKind::Drop {
+                                        value: argument.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
                 } else if let ResolvedCallee::LocalClosure(local) = &call.callee {
                     if let Some(binding) = self.closure_callable_bindings.get(local).cloned() {
                         if binding.callee.0.trim().is_empty()
@@ -13513,6 +19896,43 @@ impl<'a> Lowerer<'a> {
                 }
             }
             ResolvedExprKind::Cast { value, conversion } => {
+                if self.is_exact_ordinary_map_owned_any_v2_values_producer_return(Some(expression))
+                {
+                    let ResolvedExprKind::Load(place) = &value.kind else {
+                        self.error(
+                            &expression.node_id,
+                            "receipted Values return erasure source is not a direct local Load",
+                        );
+                        return result;
+                    };
+                    let source = match self.local_value(&place.base) {
+                        Ok(source) => source,
+                        Err(errors) => {
+                            self.errors.extend(errors);
+                            return result;
+                        }
+                    };
+                    let values_type = super::types::ordinary_map_owned_any_v2_values_type_id();
+                    if !place.projections.is_empty()
+                        || self.values.get(&source).map(|value| &value.ty) != Some(&values_type)
+                        || conversion.kind != CheckedConversionKind::ContainerErase
+                    {
+                        self.error(
+                            &expression.node_id,
+                            "receipted Values return erasure does not move its exact V2 owner",
+                        );
+                        return result;
+                    }
+                    self.emit(
+                        &expression.node_id,
+                        "move",
+                        MirInstructionKind::Move {
+                            result: result.clone(),
+                            source,
+                        },
+                    );
+                    return result;
+                }
                 if conversion.kind == CheckedConversionKind::DynamicAnyPack {
                     let source = self.lower_expr(value);
                     if self.lower_managed_any_i32_pack(
@@ -13531,6 +19951,14 @@ impl<'a> Lowerer<'a> {
                     return result;
                 }
                 if conversion.kind == CheckedConversionKind::DynamicAnyUnpack {
+                    if self.lower_ordinary_map_owned_any_v2_values_crosscall_string_unpack(
+                        expression,
+                        value,
+                        result.clone(),
+                        conversion,
+                    ) {
+                        return result;
+                    }
                     if self.lower_ordinary_map_owned_any_v2_values_unpack(
                         expression,
                         value,
@@ -13592,6 +20020,19 @@ impl<'a> Lowerer<'a> {
                 self.lower_try_expr(&expression.node_id, result.clone(), inner);
             }
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+                if self.default_argument_namespace.is_some()
+                    && matches!(
+                        &expression.kind,
+                        ResolvedExprKind::Scope { kind, .. }
+                            if *kind != crate::core::ir::ResolvedScopeKind::Lexical
+                    )
+                {
+                    self.error(
+                        &expression.node_id,
+                        "non-lexical default argument scope is not lowered as a plain block",
+                    );
+                    return result;
+                }
                 if let Some(value) = self.lower_block_expr(block) {
                     self.emit(
                         &expression.node_id,
@@ -14173,7 +20614,18 @@ impl<'a> Lowerer<'a> {
                 let Some(result) = self.id("expr", &expression.node_id) else {
                     return self.fallback_value(expression);
                 };
-                self.insert_value(result.clone(), expression.ty.clone(), &expression.node_id);
+                let result_type = if self
+                    .is_exact_ordinary_map_owned_any_v2_values_producer_return(Some(expression))
+                {
+                    super::types::ordinary_map_owned_any_v2_values_type_id()
+                } else if self
+                    .is_exact_ordinary_map_owned_any_v2_map_root_producer_return(Some(expression))
+                {
+                    super::types::ordinary_map_owned_any_v2_type_id()
+                } else {
+                    expression.ty.clone()
+                };
+                self.insert_value(result.clone(), result_type, &expression.node_id);
                 match self.local_value(&place.base) {
                     Ok(source) => self.emit(
                         &expression.node_id,
@@ -14239,8 +20691,16 @@ impl<'a> Lowerer<'a> {
                         consumed.extend(fields.iter().map(|(_, value)| value.clone()));
                     }
                     MirInstructionKind::Call { arguments, .. }
-                    | MirInstructionKind::BuiltinCall { arguments, .. }
                     | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        consumed.extend(arguments.iter().cloned());
+                    }
+                    // `assert_eq`/`assert_ne` only observe String handles;
+                    // their canonical contracts are borrowed, so a cloned
+                    // operand remains a live owner and must be dropped by
+                    // the end-of-body ledger below.
+                    MirInstructionKind::BuiltinCall {
+                        kind, arguments, ..
+                    } if !matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe) => {
                         consumed.extend(arguments.iter().cloned());
                     }
                     MirInstructionKind::SessionCall {
@@ -14371,8 +20831,12 @@ impl<'a> Lowerer<'a> {
                         sources.extend(fields.iter().map(|(_, value)| value.clone()));
                     }
                     MirInstructionKind::Call { arguments, .. }
-                    | MirInstructionKind::BuiltinCall { arguments, .. }
                     | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        sources.extend(arguments.iter().cloned());
+                    }
+                    MirInstructionKind::BuiltinCall {
+                        kind, arguments, ..
+                    } if !matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe) => {
                         sources.extend(arguments.iter().cloned());
                     }
                     MirInstructionKind::SessionCall {
@@ -14707,8 +21171,12 @@ impl<'a> Lowerer<'a> {
                         consumed.extend(fields.iter().map(|(_, value)| value.clone()));
                     }
                     MirInstructionKind::Call { arguments, .. }
-                    | MirInstructionKind::BuiltinCall { arguments, .. }
                     | MirInstructionKind::FlowTransition { arguments, .. } => {
+                        consumed.extend(arguments.iter().cloned());
+                    }
+                    MirInstructionKind::BuiltinCall {
+                        kind, arguments, ..
+                    } if !matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe) => {
                         consumed.extend(arguments.iter().cloned());
                     }
                     MirInstructionKind::SessionCall {
@@ -14792,10 +21260,13 @@ impl<'a> Lowerer<'a> {
     /// wider aggregate/control-flow contract. The TypeDesc is the only source
     /// of the ownership decision.
     fn lower_return_expr(&mut self, expression: &ResolvedExpr) -> MirValueId {
-        if self.type_catalog.is_some_and(|catalog| {
-            catalog.validate_owned_string(&expression.ty).is_ok()
-                || catalog.validate_session_channel(&expression.ty).is_ok()
-        }) {
+        if self.is_exact_ordinary_map_owned_any_v2_map_root_producer_return(Some(expression))
+            || self.is_exact_ordinary_map_owned_any_v2_values_producer_return(Some(expression))
+            || self.type_catalog.is_some_and(|catalog| {
+                catalog.validate_owned_string(&expression.ty).is_ok()
+                    || catalog.validate_session_channel(&expression.ty).is_ok()
+            })
+        {
             self.lower_consuming_expr(expression)
         } else {
             self.lower_expr(expression)
@@ -15414,6 +21885,59 @@ impl<'a> Lowerer<'a> {
         self.switch_to(join_id);
     }
 
+    /// Lower logical operators through a branch so the right operand only
+    /// executes on the source-language path that needs it.  The short path
+    /// contributes the operator's identity value to the same join parameter
+    /// used by the evaluated-right path.
+    fn lower_short_circuit_expr(
+        &mut self,
+        expression: &ResolvedExpr,
+        result: MirValueId,
+        op: ResolvedBinaryOp,
+        left: &ResolvedExpr,
+        right: &ResolvedExpr,
+    ) {
+        let shortcut_value = ResolvedExpr {
+            node_id: NodeId(format!("{}/short-circuit", expression.node_id.0)),
+            origin: expression.origin.clone(),
+            ty: expression.ty.clone(),
+            effects: Vec::new(),
+            backend_requirements: Vec::new(),
+            kind: ResolvedExprKind::Literal(ResolvedLiteral::Bool(
+                op == ResolvedBinaryOp::LogicalOr,
+            )),
+        };
+        let as_block = |value: ResolvedExpr| ResolvedBlock {
+            node_id: value.node_id.clone(),
+            origin: value.origin.clone(),
+            ty: value.ty.clone(),
+            statements: Vec::new(),
+            result: Some(Box::new(value)),
+        };
+        let right_block = as_block(right.clone());
+        let shortcut_block = as_block(shortcut_value);
+
+        if op == ResolvedBinaryOp::LogicalAnd {
+            // `false and rhs` joins with false; `true and rhs` evaluates rhs.
+            self.lower_if_expr(
+                &expression.node_id,
+                result,
+                left,
+                &right_block,
+                &shortcut_block,
+            );
+        } else {
+            // `true or rhs` joins with true; `false or rhs` evaluates rhs.
+            self.lower_if_expr(
+                &expression.node_id,
+                result,
+                left,
+                &shortcut_block,
+                &right_block,
+            );
+        }
+    }
+
     /// Lower a statement-shaped `if` without manufacturing a Unit SSA value.
     ///
     /// Unit is a source-level result, not a native ABI value.  Keeping it out
@@ -15955,7 +22479,7 @@ impl<'a> Lowerer<'a> {
                             );
                             continue;
                         }
-                        if self.lower_checker_map_drop(&statement.node_id, &place.base) {
+                        if self.lower_checker_map_drop(&statement.node_id, &place.base, index) {
                             continue;
                         }
                         let value = match self.local_value(&place.base) {
@@ -16078,6 +22602,14 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    fn value_contains_dynamic_or_managed_any(&self, value: &MirValueId) -> bool {
+        self.type_catalog.is_some_and(|catalog| {
+            self.values
+                .get(value)
+                .is_some_and(|value| catalog.contains_dynamic_or_managed_any(&value.ty))
+        })
+    }
+
     fn managed_any_instruction(
         &self,
         node: &NodeId,
@@ -16178,6 +22710,88 @@ impl<'a> Lowerer<'a> {
         true
     }
 
+    fn lower_ordinary_map_owned_any_v2_println(
+        &mut self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+    ) -> Option<MirValueId> {
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return None;
+        }
+        let cfg = self
+            .resource_analysis?
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let matching = cfg
+            .result_receipts
+            .iter()
+            .filter(|receipt| {
+                receipt
+                    .payload_println
+                    .as_ref()
+                    .is_some_and(|observation| observation.call == expression.node_id)
+            })
+            .collect::<Vec<_>>();
+        let [receipt] = matching.as_slice() else {
+            return None;
+        };
+        let observation = receipt.payload_println.as_ref()?;
+        let [argument] = call.arguments.as_slice() else {
+            return None;
+        };
+        let ResolvedExprKind::Load(place) = &argument.value.kind else {
+            return None;
+        };
+        let unit = crate::core::ir::primitive_type_id(PrimitiveType::Unit);
+        if receipt.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
+            || receipt.settlement
+                != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            || !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "println")
+            || !call.type_arguments.is_empty()
+            || !call.session.is_empty()
+            || !(call.effects.is_empty()
+                || (call.effects.len() == 1 && call.effects[0].as_str() == "shared.modify"))
+            || call.result != unit
+            || expression.ty != unit
+            || observation.result_type != unit
+            || argument.parameter.0 != NodeId("builtin:println/parameter:0".into())
+            || argument.conversion.kind != CheckedConversionKind::Identity
+            || argument.conversion.from != argument.value.ty
+            || argument.conversion.to != argument.value.ty
+            || argument.value.node_id != observation.projection
+            || argument.value.ty != observation.checker_payload_type
+            || place.base != receipt.binding
+            || self
+                .body
+                .locals
+                .get(&place.base)
+                .is_none_or(|local| local.mutable)
+            || !matches!(place.projections.as_slice(), [crate::core::ir::ResolvedProjection::Tuple { index: 1, ty }] if ty == &observation.checker_payload_type)
+        {
+            return None;
+        }
+        let binding = receipt.binding.clone();
+        let projection = observation.projection.clone();
+        let pair = self.local_value(&binding).ok()?;
+        if self.values.get(&pair).map(|value| &value.ty)
+            != Some(&super::types::ordinary_map_owned_any_v2_get_result_type_id())
+        {
+            return None;
+        }
+        let result = self.id("expr", &expression.node_id)?;
+        self.insert_value(result.clone(), unit, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_println",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Println {
+                result: result.clone(),
+                pair,
+                projection,
+            },
+        );
+        Some(result)
+    }
+
     /// Materialize only Checker-resolved `println(Any)` as a borrowed read of
     /// the generation-bearing v1 owner. The source argument is always an
     /// owned temporary or Clone, so it receives an explicit Drop after the
@@ -16276,6 +22890,243 @@ impl<'a> Lowerer<'a> {
         self.lower_expr(value)
     }
 
+    fn lower_ordinary_map_owned_any_v2_map_root_get_any_caller_unpack(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        result: MirValueId,
+        conversion: &crate::core::ir::CheckedConversion,
+        caller: &crate::core::ownership::OrdinaryMapOwnedAnyV2MapRootGetAnyCallerReceipt,
+    ) -> bool {
+        let Some(analysis) = self.resource_analysis else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack has no Checker resource analysis",
+            );
+            return true;
+        };
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack has no local V2 CFG receipt",
+            );
+            return true;
+        };
+        let [unpack] = cfg.unpack_receipts.as_slice() else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller requires one unique local unpack receipt",
+            );
+            return true;
+        };
+        let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+        if cfg.result_receipts.len() != 1
+            || cfg.values_unpack_receipts.len() != 0
+            || unpack.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || unpack.operation != caller.get_any_node
+            || unpack.pair_binding_point != caller.pair_binding_point
+            || unpack.pair_binding != caller.pair_local
+            || unpack.unpack_binding_point != caller.unpack_binding_point
+            || unpack.unpack_binding != caller.unpack_local
+            || unpack.projection != caller.unpack_projection
+            || unpack.cast != caller.unpack_cast
+            || unpack.conversion_kind != CheckedConversionKind::DynamicAnyUnpack
+            || unpack.conversion_to != caller.string_type
+            || unpack.settlement
+                != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+            || unpack.settlement_point != caller.pair_drop_point
+            || caller.string_type != string_type
+        {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller and local unpack receipts disagree or conflict",
+            );
+            return true;
+        }
+
+        let matching_bindings = self
+            .body
+            .root
+            .statements
+            .iter()
+            .filter(|statement| statement.node_id == caller.unpack_binding_point)
+            .collect::<Vec<_>>();
+        let [statement] = matching_bindings.as_slice() else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack receipt does not identify one source binding",
+            );
+            return true;
+        };
+        let ResolvedStmtKind::Bind {
+            pattern:
+                ResolvedPattern {
+                    kind:
+                        ResolvedPatternKind::Binding {
+                            local,
+                            by_reference: None,
+                        },
+                    ..
+                },
+            initializer: Some(initializer),
+        } = &statement.kind
+        else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack is not a direct immutable local binding",
+            );
+            return true;
+        };
+        if local != &caller.unpack_local
+            || !std::ptr::eq(initializer, expression)
+            || expression.node_id != caller.unpack_cast
+            || unpack.cast != expression.node_id
+            || unpack.conversion_kind != conversion.kind
+            || unpack.conversion_from != conversion.from
+            || unpack.conversion_to != conversion.to
+            || conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+            || conversion.to != string_type
+            || expression.ty != string_type
+            || value.node_id != caller.unpack_projection
+            || value.node_id != unpack.projection
+            || value.ty != conversion.from
+            || conversion.from == string_type
+            || self
+                .body
+                .locals
+                .get(&caller.unpack_local)
+                .is_none_or(|local| local.ty != string_type || local.mutable)
+        {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack differs from its exact cast/local/type receipt",
+            );
+            return true;
+        }
+
+        let pair_local = match &value.kind {
+            ResolvedExprKind::Load(place) => match place.projections.as_slice() {
+                [crate::core::ir::ResolvedProjection::Tuple { index: 1, ty }]
+                    if ty == &conversion.from =>
+                {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            },
+            ResolvedExprKind::Project {
+                value: pair_expression,
+                projection: crate::core::ir::ResolvedValueProjection::Tuple(1),
+            } => match &pair_expression.kind {
+                ResolvedExprKind::Load(place)
+                    if place.projections.is_empty()
+                        && pair_expression.node_id == caller.pair_local.0 =>
+                {
+                    Some(place.base.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if pair_local.as_ref() != Some(&caller.pair_local) {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack is not the receipted direct tuple field-1 projection",
+            );
+            return true;
+        }
+
+        let Some((get_any_expression, get_any_call)) =
+            self.ordinary_map_owned_any_v2_map_root_get_any_pair_binding(caller)
+        else {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller pair receipt does not identify one direct binding",
+            );
+            return true;
+        };
+        let root_and_key_match = match get_any_call.arguments.as_slice() {
+            [root_argument, key_argument] => {
+                matches!(
+                    &get_any_call.callee,
+                    ResolvedCallee::Builtin(name) if name.as_str() == "map_get"
+                ) && matches!(
+                    &root_argument.value.kind,
+                    ResolvedExprKind::Load(place)
+                        if place.projections.is_empty()
+                            && place.base == caller.caller_root_local
+                ) && root_argument.value.node_id == caller.get_any_receiver_node
+                    && root_argument.value.ty == caller.caller_root_type
+                    && root_argument.conversion.kind == CheckedConversionKind::Identity
+                    && root_argument.conversion.from == caller.caller_root_type
+                    && root_argument.conversion.to == caller.caller_root_type
+                    && key_argument.value.node_id == caller.get_any_key_node
+                    && key_argument.value.ty == string_type
+                    && key_argument.conversion.kind == CheckedConversionKind::Identity
+                    && key_argument.conversion.from == string_type
+                    && key_argument.conversion.to == string_type
+            }
+            _ => false,
+        };
+        if !root_and_key_match
+            || get_any_expression.node_id != caller.get_any_node
+            || get_any_expression.ty != caller.pair_type
+            || get_any_call.result != caller.pair_type
+            || self
+                .body
+                .locals
+                .get(&caller.caller_root_local)
+                .is_none_or(|local| local.ty != caller.caller_root_type || local.mutable)
+            || self
+                .body
+                .locals
+                .get(&caller.pair_local)
+                .is_none_or(|local| local.ty != caller.pair_type || local.mutable)
+        {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller pair, root, key, or TypeDesc differs from its receipt",
+            );
+            return true;
+        }
+
+        let target_supported = self
+            .type_catalog
+            .is_some_and(|catalog| catalog.validate_owned_string(&string_type).is_ok());
+        if !target_supported {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack target has no selected owned String TypeDesc",
+            );
+            return true;
+        }
+        let pair = match self.local_value(&caller.pair_local) {
+            Ok(pair) => pair,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        if self.values.get(&pair).is_none_or(|value| {
+            value.ty != super::types::ordinary_map_owned_any_v2_get_result_type_id()
+        }) {
+            self.error(
+                &expression.node_id,
+                "Map-root GetAny caller unpack pair lacks its exact GetAny tuple TypeDesc",
+            );
+            return true;
+        }
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_unpack",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                result,
+                pair,
+                projection: caller.unpack_projection.clone(),
+            },
+        );
+        true
+    }
+
     fn lower_ordinary_map_owned_any_v2_unpack(
         &mut self,
         expression: &ResolvedExpr,
@@ -16283,9 +23134,25 @@ impl<'a> Lowerer<'a> {
         result: MirValueId,
         conversion: &crate::core::ir::CheckedConversion,
     ) -> bool {
+        let map_root_get_any_caller =
+            match self.ordinary_map_owned_any_v2_map_root_get_any_caller_selection() {
+                Ok(receipt) => receipt,
+                Err(message) => {
+                    self.error(&expression.node_id, message);
+                    return true;
+                }
+            };
+        if let Some(caller) = map_root_get_any_caller {
+            return self.lower_ordinary_map_owned_any_v2_map_root_get_any_caller_unpack(
+                expression, value, result, conversion, &caller,
+            );
+        }
         let Some(analysis) = self.resource_analysis else {
             return false;
         };
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return false;
+        }
         let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
             return false;
         };
@@ -16355,6 +23222,8 @@ impl<'a> Lowerer<'a> {
         let target_supported = self.type_catalog.is_some_and(|catalog| {
             if conversion.to == primitive_type_id(PrimitiveType::I32) {
                 catalog.validate_copy_scalar(&conversion.to).is_ok()
+            } else if conversion.to == primitive_type_id(PrimitiveType::Bool) {
+                catalog.validate_copy_scalar(&conversion.to).is_ok()
             } else if conversion.to == primitive_type_id(PrimitiveType::String) {
                 catalog.validate_owned_string(&conversion.to).is_ok()
             } else {
@@ -16364,7 +23233,7 @@ impl<'a> Lowerer<'a> {
         if !target_supported {
             self.error(
                 &expression.node_id,
-                "ordinary Map/Any owner-v2 unpack target has no exact selected i32/String/Label TypeDesc",
+                "ordinary Map/Any owner-v2 unpack target has no exact selected Bool/i32/String/Label TypeDesc",
             );
             return true;
         }
@@ -16406,6 +23275,9 @@ impl<'a> Lowerer<'a> {
         let Some(analysis) = self.resource_analysis else {
             return false;
         };
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return false;
+        }
         let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
             return false;
         };
@@ -16547,6 +23419,353 @@ impl<'a> Lowerer<'a> {
             },
         );
         true
+    }
+
+    fn lower_ordinary_map_owned_any_v2_values_crosscall_string_unpack(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        result: MirValueId,
+        conversion: &crate::core::ir::CheckedConversion,
+    ) -> bool {
+        let Some(receipt) = self
+            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body()
+            .cloned()
+        else {
+            return false;
+        };
+        if expression.node_id != receipt.unpack_cast {
+            return false;
+        }
+        let Some(catalog) = self.type_catalog else {
+            self.error(
+                &expression.node_id,
+                "cross-call Values String unpack requires the owner-v2 TypeDesc catalog",
+            );
+            return true;
+        };
+        let (snapshot_local, index_expression) = match &value.kind {
+            ResolvedExprKind::Project {
+                value: snapshot,
+                projection: crate::core::ir::ResolvedValueProjection::Index(index),
+            } => match &snapshot.kind {
+                ResolvedExprKind::Load(place) if place.projections.is_empty() => {
+                    (Some(place.base.clone()), Some(index.as_ref()))
+                }
+                _ => (None, Some(index.as_ref())),
+            },
+            _ => (None, None),
+        };
+        let Some(index_expression) = index_expression else {
+            self.error(
+                &expression.node_id,
+                "cross-call Values String unpack is not a direct indexed snapshot cast",
+            );
+            return true;
+        };
+        let values_type = super::types::ordinary_map_owned_any_v2_values_type_id();
+        let index_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+        let (expected_element_count, expected_index) = match receipt.profile_version {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V1 => (1, 0),
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2 => (2, 1),
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => (1, 0),
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => (2, 1),
+        };
+        let expected_source_type = self
+            .body
+            .locals
+            .get(&receipt.snapshot_local)
+            .map(|local| local.ty.clone());
+        if receipt.caller_owner != self.body.owner
+            || receipt.values_element_count != expected_element_count
+            || receipt.index_value != expected_index
+            || receipt.producer_sorted_keys.len() != expected_element_count
+            || receipt
+                .producer_sorted_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || (matches!(
+                receipt.profile_version,
+                crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2
+                    | crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4
+            )
+                && receipt.producer_sorted_keys != ["a", "b"])
+            || receipt.unpack_cast != expression.node_id
+            || receipt.index_projection != value.node_id
+            || receipt.index_expression != index_expression.node_id
+            || receipt.index_type != index_type
+            || snapshot_local.as_ref() != Some(&receipt.snapshot_local)
+            || value.ty != conversion.from
+            || expected_source_type.as_ref() != Some(&receipt.call_result_type)
+            || receipt.snapshot_type == receipt.call_result_type
+            || !matches!(
+                &index_expression.kind,
+                ResolvedExprKind::Literal(ResolvedLiteral::Int(value))
+                    if i32::try_from(*value).ok() == Some(expected_index)
+            )
+            || index_expression.ty != receipt.index_type
+            || conversion.kind != CheckedConversionKind::DynamicAnyUnpack
+            || conversion.to != receipt.string_type
+            || expression.ty != receipt.string_type
+            || self.body
+                .locals
+                .get(&receipt.unpack_binding)
+                .is_none_or(|local| local.mutable || local.ty != receipt.string_type)
+            || catalog
+                .get(&values_type)
+                .is_none_or(|descriptor| {
+                    descriptor.kind != super::types::MirTypeKind::OrdinaryMapOwnedAnyV2Values
+                        || !matches!(
+                            &descriptor.layout,
+                            super::types::MirLayout::List { element }
+                                if element == &super::types::ordinary_map_owned_any_v2_values_element_type_id()
+                                    && catalog.get(element).is_some_and(|element| {
+                                        element.kind
+                                            == super::types::MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+                                            && element.layout
+                                                == super::types::MirLayout::OrdinaryMapOwnedAnyV2ValuesElement
+                                    })
+                        )
+                })
+            || !matches!(
+                catalog.get(&conversion.from),
+                Some(descriptor) if descriptor.kind == super::types::MirTypeKind::DynamicAny
+            )
+            || catalog.validate_owned_string(&receipt.string_type).is_err()
+            || !catalog.validate_copy_scalar(&receipt.index_type).is_ok()
+        {
+            self.error(
+                &expression.node_id,
+                "cross-call Values String unpack differs from its exact Checker index/conversion/snapshot receipt",
+            );
+            return true;
+        }
+        let values = match self.local_value(&receipt.snapshot_local) {
+            Ok(values) => values,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        if values == result || self.values.get(&values).map(|value| &value.ty) != Some(&values_type)
+        {
+            self.error(
+                &expression.node_id,
+                "cross-call Values snapshot does not have its dedicated, independent owner TypeDesc",
+            );
+            return true;
+        }
+        let index = self.lower_expr(index_expression);
+        if self
+            .values
+            .get(&index)
+            .is_none_or(|value| value.ty != receipt.index_type)
+        {
+            self.error(
+                &expression.node_id,
+                "cross-call Values literal index does not lower to its checked TypeDesc",
+            );
+            return true;
+        }
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_values_unpack",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
+                result,
+                values,
+                index,
+                projection: receipt.index_projection.clone(),
+            },
+        );
+        true
+    }
+
+    fn lower_ordinary_map_owned_any_v2_keys_unpack(
+        &mut self,
+        expression: &ResolvedExpr,
+        value: &ResolvedExpr,
+        projection: &crate::core::ir::ResolvedValueProjection,
+        result: MirValueId,
+    ) -> bool {
+        let Some(analysis) = self.resource_analysis else {
+            return false;
+        };
+        let Some(cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return false;
+        };
+        let matching_static = cfg
+            .keys_snapshot_receipts
+            .iter()
+            .filter(|receipt| receipt.index_projection == expression.node_id)
+            .collect::<Vec<_>>();
+        let matching_dynamic = cfg
+            .dynamic_keys_get_receipts
+            .iter()
+            .filter(|receipt| receipt.keys_snapshot.copied_key_projection == expression.node_id)
+            .collect::<Vec<_>>();
+        let source = match (matching_static.as_slice(), matching_dynamic.as_slice()) {
+            ([receipt], []) => Some((
+                receipt.owner.clone(),
+                receipt.snapshot_local.clone(),
+                receipt.snapshot_type.clone(),
+                receipt.index_projection.clone(),
+                receipt.index_expression.clone(),
+                receipt.index_type.clone(),
+            )),
+            ([], [receipt])
+                if receipt.profile_version
+                    == crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetProfileVersion::V1 =>
+            {
+                Some((
+                    receipt.owner.clone(),
+                    receipt.keys_snapshot.snapshot_local.clone(),
+                    receipt.keys_snapshot.snapshot_type.clone(),
+                    receipt.keys_snapshot.copied_key_projection.clone(),
+                    receipt.keys_snapshot.copied_key_index.clone(),
+                    primitive_type_id(PrimitiveType::I32),
+                ))
+            }
+            ([], []) => None,
+            _ => {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any owner-v2 Keys projection has ambiguous Checker receipts",
+                );
+                return true;
+            }
+        };
+        let Some((
+            receipt_owner,
+            receipt_snapshot_local,
+            snapshot_type,
+            index_projection,
+            index_id,
+            index_type,
+        )) = source
+        else {
+            return false;
+        };
+        let (projected_snapshot_local, index_expr) = match (projection, &value.kind) {
+            (
+                crate::core::ir::ResolvedValueProjection::Index(index),
+                ResolvedExprKind::Load(place),
+            ) if place.projections.is_empty() => (Some(place.base.clone()), Some(index.as_ref())),
+            _ => (None, None),
+        };
+        let Some(index_expr) = index_expr else {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Keys unpack is not a direct indexed snapshot read",
+            );
+            return true;
+        };
+        let literal_zero = matches!(
+            &index_expr.kind,
+            ResolvedExprKind::Literal(ResolvedLiteral::Int(0))
+        );
+        let string_type = primitive_type_id(PrimitiveType::String);
+        let snapshot_type_valid = self
+            .type_catalog
+            .is_some_and(|catalog| catalog.validate_owned_string_list(&snapshot_type).is_ok());
+        if receipt_owner != self.body.owner
+            || index_projection != expression.node_id
+            || index_id != index_expr.node_id
+            || index_type != index_expr.ty
+            || index_type != primitive_type_id(PrimitiveType::I32)
+            || !literal_zero
+            || projected_snapshot_local.as_ref() != Some(&receipt_snapshot_local)
+            || expression.ty != string_type
+            || value.ty != snapshot_type
+            || !snapshot_type_valid
+            || self
+                .type_catalog
+                .is_none_or(|catalog| catalog.validate_owned_string(&expression.ty).is_err())
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Keys unpack differs from its exact Checker index-zero snapshot receipt",
+            );
+            return true;
+        }
+        let keys = match self.local_value(&receipt_snapshot_local) {
+            Ok(keys) => keys,
+            Err(errors) => {
+                self.errors.extend(errors);
+                return true;
+            }
+        };
+        if self.values.get(&keys).map(|descriptor| &descriptor.ty) != Some(&snapshot_type) {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any owner-v2 Keys snapshot lacks its exact List<String> TypeDesc",
+            );
+            return true;
+        }
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_keys_unpack",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2KeysUnpack {
+                result,
+                keys,
+                projection: index_projection,
+            },
+        );
+        true
+    }
+
+    fn lower_ordinary_map_owned_any_v2_dynamic_arg0(
+        &mut self,
+        expression: &ResolvedExpr,
+    ) -> Option<MirValueId> {
+        let analysis = self.resource_analysis?;
+        let cfg = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref()?;
+        let matches = cfg
+            .dynamic_keys_get_receipts
+            .iter()
+            .filter(|receipt| receipt.args_projection == expression.node_id)
+            .collect::<Vec<_>>();
+        let [receipt] = matches.as_slice() else {
+            if !matches.is_empty() {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any dynamic argv[0] projection has ambiguous Checker receipts",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            return None;
+        };
+        let string_type = primitive_type_id(PrimitiveType::String);
+        if receipt.profile_version
+            != crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetProfileVersion::V1
+            || receipt.owner != self.body.owner
+            || receipt.args_projection != expression.node_id
+            || expression.ty != string_type
+            || self
+                .type_catalog
+                .is_none_or(|catalog| catalog.validate_owned_string(&expression.ty).is_err())
+            || self
+                .body
+                .locals
+                .get(&receipt.prefix_local)
+                .is_none_or(|local| local.ty != string_type || local.mutable)
+        {
+            self.error(
+                &expression.node_id,
+                "ordinary Map/Any dynamic argv[0] projection differs from its exact Checker source receipt",
+            );
+            return Some(self.fallback_value(expression));
+        }
+        let result = self.id("expr", &expression.node_id)?;
+        self.insert_value(result.clone(), string_type, &expression.node_id);
+        self.emit(
+            &expression.node_id,
+            "ordinary_map_owned_any_v2_dynamic_arg0",
+            MirInstructionKind::OrdinaryMapOwnedAnyV2DynamicArg0 {
+                result: result.clone(),
+                projection: receipt.args_projection.clone(),
+            },
+        );
+        Some(result)
     }
 
     fn lower_managed_any_unpack(
@@ -16713,6 +23932,7 @@ impl<'a> Lowerer<'a> {
             | MirInstructionKind::MoveProjectDrop { base: source, .. }
             | MirInstructionKind::VariantProjectMove { base: source, .. }
             | MirInstructionKind::Convert { source, .. } => source == candidate,
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } => root == candidate,
             MirInstructionKind::ManagedAny {
                 source,
                 operation: super::MirManagedAnyOperation::Drop,
@@ -16771,10 +23991,7 @@ impl<'a> Lowerer<'a> {
                     if consumes(&instruction.kind, candidate) && state == OwnerState::Live {
                         state = OwnerState::Consumed;
                     }
-                    if instruction_results(&instruction.kind)
-                        .iter()
-                        .any(|result| *result == candidate)
-                    {
+                    if instruction_results(&instruction.kind).contains(&candidate) {
                         state = OwnerState::Live;
                     }
                 }
@@ -17461,6 +24678,75 @@ impl<'a> Lowerer<'a> {
             .then_some(projection)
     }
 
+    /// The computed-string owner-chain source receipt keeps its exact
+    /// unpacked Label alive through one `snapshot.text` observation and then
+    /// requires an explicit whole-record Drop. A direct MoveProject would
+    /// consume that local, so clone the receipted Label into a temporary and
+    /// move the String field out of the temporary instead. This is limited to
+    /// the one Checker-sealed source projection; ordinary field reads retain
+    /// their existing ownership rules.
+    fn is_computed_string_key_owner_chain_snapshot_text_read(
+        &self,
+        node: &NodeId,
+        base: &MirValueId,
+        projection: &super::MirProjection,
+        result_ty: &crate::core::ResolvedTypeId,
+    ) -> bool {
+        let super::MirProjection::Field(field) = projection else {
+            return false;
+        };
+        let Some(cfg) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        else {
+            return false;
+        };
+        let matching = cfg
+            .result_receipts
+            .iter()
+            .filter_map(|result| result.computed_string_key_owner_chain.as_deref())
+            .collect::<Vec<_>>();
+        let [chain] = matching.as_slice() else {
+            return false;
+        };
+        let observation = &chain.pair_snapshot_observation;
+        let Ok(expected_base) =
+            MirValueId::new(format!("local:{}", observation.snapshot_local.0 .0))
+        else {
+            return false;
+        };
+        chain.owner == cfg.owner
+            && chain.profile_version.canonical_text()
+                == "ordinary-map-owned-any-v2-computed-string-key-owner-chain-v1"
+            && node == &observation.snapshot_text_projection
+            && base == &expected_base
+            && field == &observation.snapshot_text_field
+            && result_ty == &observation.snapshot_text_type
+            && self
+                .values
+                .get(base)
+                .is_some_and(|value| value.ty == observation.snapshot_type)
+    }
+
+    fn clone_computed_string_key_owner_chain_snapshot_text_source(
+        &mut self,
+        node: &NodeId,
+        source: &MirValueId,
+    ) -> Option<MirValueId> {
+        let source_ty = self.values.get(source)?.ty.clone();
+        let result = self.id("map_any_owner_chain_snapshot_text_clone", node)?;
+        self.insert_value(result.clone(), source_ty, node);
+        self.emit(
+            node,
+            "map_any_owner_chain_snapshot_text_clone",
+            MirInstructionKind::Clone {
+                result: result.clone(),
+                source: source.clone(),
+            },
+        );
+        Some(result)
+    }
+
     fn copy_projection_for_place(
         &self,
         base: &MirValueId,
@@ -18004,8 +25290,13 @@ fn is_set_builtin(call: &ResolvedCall, type_catalog: Option<&MirTypeCatalog>) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{lower_body, lower_body_with_type_catalog, lower_program};
-    use crate::core::mir::reference::{MirProgram, MirProgramBuildError};
+    use super::{
+        lower_body, lower_body_with_type_catalog, lower_program, lower_program_with_type_catalog,
+        materialize_concrete_generic_instances,
+    };
+    use crate::core::mir::reference::{
+        MirProgram, MirProgramBuildError, MirReferenceInterpreter, MirRuntimeValue,
+    };
     use crate::core::mir::types::MirTypeCatalog;
     use crate::core::mir::{MirInstructionKind, MirTerminator};
     use crate::lexer::Lexer;
@@ -18027,6 +25318,1041 @@ mod tests {
         assert!(mir.canonical_text().contains("binary"));
         let program_mir = lower_program(&program).expect("program MIR lowering");
         assert!(program_mir.contains_key(&callable.owner));
+    }
+
+    #[test]
+    fn checked_scalar_constants_lower_to_mir_const_and_execute_in_reference_bytecode() {
+        let source = r#"
+extern "C" const DATA_I32: i32 = -12345
+extern "C" const DATA_I64: i64 = 1234567890123
+extern "C" const DATA_F32: f32 = 0.1
+const ORDINARY_F64: f64 = 0.1
+extern "C" const DATA_F64: f64 = -2.5
+extern "C" const DATA_BOOL: bool = true
+const ORDINARY_I32: i32 = 73
+comptime func compile_only() -> i32 { 1 }
+func read_i32() -> i32 { DATA_I32 }
+func read_i64() -> i64 { DATA_I64 }
+func read_f32() -> f32 { DATA_F32 }
+func read_ordinary_f64() -> f64 { ORDINARY_F64 }
+func read_f64() -> f64 { DATA_F64 }
+func read_bool() -> bool { DATA_BOOL }
+func read_ordinary() -> i32 { ORDINARY_I32 }
+func main() -> i32 { DATA_I32 }
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check scalar constants");
+        let mir = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let source_scoped_mir = MirProgram::from_checked_program_excluding_sources(
+            &checked,
+            &std::collections::HashSet::new(),
+        )
+        .expect("source-scoped MIR retains the checker-owned constant directory");
+        assert_eq!(
+            source_scoped_mir.canonical_digest(),
+            mir.canonical_digest(),
+            "source filtering must not alter constants used by retained bodies"
+        );
+        assert!(
+            !mir.functions()
+                .contains_key(&crate::core::NodeId("function:compile_only".into())),
+            "comptime callables must not enter the executable MIR graph"
+        );
+        assert!(
+            !source_scoped_mir
+                .functions()
+                .contains_key(&crate::core::NodeId("function:compile_only".into())),
+            "source-filtered MIR must also omit comptime callables"
+        );
+        let bytecode =
+            crate::interp::bytecode::compile_mir_program(&mir).expect("MIR to AST-free bytecode");
+        let normalized_f32 = (0.1f32 as f64).to_bits();
+        let reference = MirReferenceInterpreter::new(&mir)
+            .execute(&crate::core::NodeId("function:read_f32".into()), &[])
+            .expect("reference reads checker-authenticated f32 constant");
+        assert_eq!(reference, MirRuntimeValue::FloatBits(normalized_f32));
+        let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+
+        assert!(matches!(
+            vm.call_named("function:read_i32", Vec::new())
+                .expect("read i32"),
+            crate::interp::Value::Int(-12345)
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_i64", Vec::new())
+                .expect("read i64"),
+            crate::interp::Value::Int(1234567890123)
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_f32", Vec::new()).expect("read f32"),
+            crate::interp::Value::Float(value) if value.to_bits() == normalized_f32
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_ordinary_f64", Vec::new())
+                .expect("read ordinary f64"),
+            crate::interp::Value::Float(value) if value == 0.1
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_f64", Vec::new()).expect("read f64"),
+            crate::interp::Value::Float(value) if value == -2.5
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_bool", Vec::new())
+                .expect("read bool"),
+            crate::interp::Value::Bool(true)
+        ));
+        assert!(matches!(
+            vm.call_named("function:read_ordinary", Vec::new())
+                .expect("read ordinary constant"),
+            crate::interp::Value::Int(73)
+        ));
+        assert!(matches!(
+            vm.call_named("function:main", Vec::new())
+                .expect("read exported const in main"),
+            crate::interp::Value::Int(-12345)
+        ));
+    }
+
+    #[test]
+    fn comptime_generic_templates_cannot_become_executable_instances() {
+        let source = r#"
+comptime func identity<T>(value: T) -> T { value }
+func main() -> i32 { identity(41) }
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check comptime generic");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("Checker TypeDesc");
+        let mut functions = lower_program_with_type_catalog(&checked, &catalog)
+            .expect("ordinary MIR keeps the comptime generic template out of its function map");
+        let template = crate::core::NodeId("function:identity".into());
+        assert!(!functions.contains_key(&template));
+        assert!(functions.values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::Call {
+                            callee: crate::core::ir::ResolvedCallee::Function(callee),
+                            type_arguments,
+                            ..
+                        } if callee == &template && !type_arguments.is_empty()
+                    )
+                })
+            })
+        }));
+
+        let errors = materialize_concrete_generic_instances(&checked, &catalog, &mut functions)
+            .expect_err("generic materialization must not resurrect a comptime template");
+        assert!(errors.iter().any(|error| {
+            error.message.contains("comptime")
+                && error
+                    .message
+                    .contains("cannot be materialized as executable MIR")
+        }));
+        assert!(
+            functions
+                .keys()
+                .all(|owner| !owner.0.starts_with("function:mir:")),
+            "a rejected comptime template must not leave a specialized MIR function"
+        );
+    }
+
+    #[test]
+    fn values_producer_caller_bridge_keeps_owned_type_through_binding_read_and_drop() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let producer = checked
+            .callables()
+            .get(&crate::core::NodeId("function:snapshot_values".into()))
+            .expect("checked Values producer");
+        let receipt = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_producer_caller_receipt.as_ref())
+            .expect("exact producer/caller receipt");
+        let observation = receipt
+            .len_observation
+            .as_ref()
+            .expect("the fixture observes List.len");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+        let functions = lower_program_with_type_catalog(&checked, &catalog)
+            .expect("receipt-bound Values producer/caller MIR");
+        let caller = functions
+            .get(&crate::core::NodeId("function:direct_caller".into()))
+            .expect("caller MIR");
+        let values_type = super::super::types::ordinary_map_owned_any_v2_values_type_id();
+        let call_result =
+            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.call_node.0))
+                .expect("call result identity");
+        let owner =
+            crate::core::mir::MirValueId::new(format!("local:{}", receipt.owner_local.0 .0))
+                .expect("bound owner identity");
+        let list_read =
+            crate::core::mir::MirValueId::new(format!("expr:{}", observation.receiver_node.0))
+                .expect("List read identity");
+        assert_eq!(
+            caller.values.get(&call_result).map(|value| &value.ty),
+            Some(&values_type)
+        );
+        assert_eq!(
+            caller.values.get(&owner).map(|value| &value.ty),
+            Some(&values_type)
+        );
+        assert_eq!(
+            caller.values.get(&list_read).map(|value| &value.ty),
+            Some(&values_type)
+        );
+
+        let instructions = caller
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .collect::<Vec<_>>();
+        assert!(instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            MirInstructionKind::Clone { result, source }
+                if result == &list_read && source == &owner
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            MirInstructionKind::Drop { value } if value == &list_read
+        )));
+        assert!(instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            MirInstructionKind::Drop { value } if value == &owner
+        )));
+    }
+
+    #[test]
+    fn values_producer_caller_bridge_rejects_forged_container_erase_source() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_producer_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let producer_owner = crate::core::NodeId("function:snapshot_values".into());
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let producer = checked
+            .callables()
+            .get(&producer_owner)
+            .expect("checked Values producer");
+        let receipt = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_producer_caller_receipt.as_ref())
+            .expect("exact producer/caller receipt")
+            .clone();
+        let receiver_node = receipt
+            .len_observation
+            .as_ref()
+            .expect("the fixture observes List.len")
+            .receiver_node
+            .clone();
+
+        let mut callables = checked.callables().clone();
+        let forged_producer = callables
+            .get_mut(&producer_owner)
+            .expect("cloned Values producer");
+        let erase = &mut forged_producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("producer CFG receipt")
+            .values_producer_return_receipt
+            .as_mut()
+            .expect("producer return receipt")
+            .return_container_erase;
+        erase.source_node = crate::core::NodeId("forged:values-source".into());
+
+        let caller = callables.get(&caller_owner).expect("cloned caller");
+        let mir = super::lower_callable_with_checked_callables(caller, &callables, None)
+            .expect("compatibility lowering remains structurally valid");
+        let expected_surface_type = receipt.result_type.clone();
+        let values_type = super::super::types::ordinary_map_owned_any_v2_values_type_id();
+        let call_result =
+            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.call_node.0))
+                .expect("call result identity");
+        let owner =
+            crate::core::mir::MirValueId::new(format!("local:{}", receipt.owner_local.0 .0))
+                .expect("bound owner identity");
+        let list_read = crate::core::mir::MirValueId::new(format!("expr:{}", receiver_node.0))
+            .expect("List read identity");
+        for value in [&call_result, &owner, &list_read] {
+            assert_eq!(
+                mir.values.get(value).map(|descriptor| &descriptor.ty),
+                Some(&expected_surface_type),
+                "a mismatched producer source must keep the surface bare List type"
+            );
+            assert_ne!(
+                mir.values.get(value).map(|descriptor| &descriptor.ty),
+                Some(&values_type),
+                "a mismatched receipt must not acquire synthetic Values glue"
+            );
+        }
+    }
+
+    #[test]
+    fn values_crosscall_string_caller_lowers_exact_snapshot_and_string_owners() {
+        use crate::core::mir::{MirInstructionKind as I, MirValueId};
+
+        let source = r#"
+func snapshot_values() -> List {
+    let payload = "owned value"
+    let empty = map_new()
+    let root = map_set(empty, "key", payload)
+    let snapshot = values(root)
+    drop(empty)
+    drop(root)
+    drop(payload)
+    snapshot
+}
+
+func direct_caller() -> bool {
+    let snapshot = snapshot_values()
+    let selected = snapshot[0] as string
+    let matches = selected == "owned value"
+    drop(selected)
+    drop(snapshot)
+    matches
+}
+
+func main() -> i32 { 0 }
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("cross-call Values check");
+        let producer_owner = crate::core::NodeId("function:snapshot_values".into());
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let producer = checked
+            .callables()
+            .get(&producer_owner)
+            .expect("checked producer");
+        let receipt = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_crosscall_string_caller_receipt.as_ref())
+            .expect("exact cross-call String receipt");
+        let producer_return = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_producer_return_receipt.as_ref())
+            .expect("exact producer Values return receipt");
+        assert_eq!(receipt.snapshot_type, producer_return.snapshot_type);
+        assert_eq!(
+            receipt.call_result_type,
+            producer_return.surface_return_type
+        );
+        assert_ne!(receipt.snapshot_type, receipt.call_result_type);
+        let caller = checked
+            .callables()
+            .get(&caller_owner)
+            .expect("checked direct caller");
+        assert!(
+            super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                producer, caller, receipt
+            )
+        );
+
+        let mut crossed_receipt = receipt.clone();
+        std::mem::swap(
+            &mut crossed_receipt.snapshot_type,
+            &mut crossed_receipt.call_result_type,
+        );
+        let mut crossed_producer = producer.clone();
+        crossed_producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("producer V2 CFG receipt")
+            .values_crosscall_string_caller_receipt = Some(crossed_receipt.clone());
+        assert!(
+            !super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                &crossed_producer,
+                caller,
+                &crossed_receipt,
+            )
+        );
+        assert!(producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .unwrap()
+            .values_unpack_receipts
+            .is_empty());
+
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+        let functions =
+            lower_program_with_type_catalog(&checked, &catalog).expect("receipt-bound MIR");
+        let producer_mir = functions.get(&producer_owner).expect("producer MIR");
+        let caller_mir = functions.get(&caller_owner).expect("caller MIR");
+        let values_type = super::super::types::ordinary_map_owned_any_v2_values_type_id();
+        assert_ne!(
+            receipt.snapshot_type, values_type,
+            "Checker's List<DynamicAny> source identity must remain distinct from the executable V2 Values owner"
+        );
+        let call_result =
+            MirValueId::new(format!("expr:{}", receipt.call_node.0)).expect("call result identity");
+        let snapshot = MirValueId::new(format!("local:{}", receipt.snapshot_local.0 .0))
+            .expect("snapshot owner identity");
+        let unpack_result = MirValueId::new(format!("expr:{}", receipt.unpack_cast.0))
+            .expect("unpack result identity");
+        let selected = MirValueId::new(format!("local:{}", receipt.unpack_binding.0 .0))
+            .expect("selected String owner identity");
+        let expected = MirValueId::new(format!("expr:{}", receipt.comparison.0))
+            .expect("comparison result identity");
+
+        assert_eq!(producer_mir.result, values_type);
+        assert_eq!(
+            caller_mir.values.get(&call_result).map(|value| &value.ty),
+            Some(&values_type)
+        );
+        assert_eq!(
+            caller_mir.values.get(&snapshot).map(|value| &value.ty),
+            Some(&values_type)
+        );
+        assert_ne!(snapshot, selected);
+        assert_ne!(snapshot, unpack_result);
+        assert_eq!(
+            caller_mir.values.get(&selected).map(|value| &value.ty),
+            Some(&receipt.string_type)
+        );
+        assert_eq!(
+            caller_mir.values.get(&unpack_result).map(|value| &value.ty),
+            Some(&receipt.string_type)
+        );
+
+        let caller_instructions = caller_mir
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .collect::<Vec<_>>();
+        assert!(caller_instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            I::OrdinaryMapOwnedAnyV2ValuesUnpack { result, values, projection, .. }
+                if result == &unpack_result
+                    && values == &snapshot
+                    && projection == &receipt.index_projection
+        )));
+        assert!(caller_instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            I::Move { result, source }
+                if result == &selected && source == &unpack_result
+        )));
+        assert!(caller_instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            I::Drop { value } if value == &selected
+        )));
+        assert!(caller_instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            I::Drop { value } if value == &snapshot
+        )));
+        assert_eq!(
+            caller_instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction.kind,
+                    I::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                ))
+                .count(),
+            1
+        );
+        assert!(caller_instructions.iter().any(|instruction| matches!(
+            &instruction.kind,
+            I::Binary { result, op: crate::core::ir::ResolvedBinaryOp::Equal, left, .. }
+                if result == &expected && left == &selected
+        )));
+        assert!(producer_mir
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(&instruction.kind, I::OrdinaryMapOwnedAnyV2Values { .. })));
+    }
+
+    #[test]
+    fn values_crosscall_result_branch_source_predicate_is_profile_bound() {
+        use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as Profile;
+
+        for (fixture, expected) in [
+            (
+                "mir_ordinary_map_owned_any_v2_values_crosscall_string_caller.mimi",
+                Profile::V3,
+            ),
+            (
+                "mir_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1.mimi",
+                Profile::V4,
+            ),
+        ] {
+            let source = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(fixture),
+            )
+            .expect("branch Values fixture");
+            let tokens = Lexer::new(&source).tokenize().expect("lex");
+            let file = Parser::new(tokens).parse_file().expect("parse");
+            let checked = crate::core::check_program(&file).expect("branch source checks");
+            let producer = checked
+                .callables()
+                .get(&crate::core::NodeId("function:snapshot_values".into()))
+                .expect("producer callable");
+            let caller = checked
+                .callables()
+                .get(&crate::core::NodeId("function:direct_caller".into()))
+                .expect("caller callable");
+            let receipt = producer
+                .resources
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_ref()
+                .and_then(|cfg| cfg.values_crosscall_string_caller_receipt.as_ref())
+                .expect("branch caller receipt");
+            assert_eq!(receipt.profile_version, expected);
+            assert!(
+                super::ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
+                    producer, caller, receipt
+                )
+            );
+
+            let mut detached = receipt.clone();
+            detached.producer_result_receipt = None;
+            assert!(
+                !super::ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
+                    producer, caller, &detached
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn values_crosscall_index1_source_rejects_unbound_set_temporaries() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("cross-call Index1 check");
+        let producer_owner = crate::core::NodeId("function:snapshot_values".into());
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let producer = checked
+            .callables()
+            .get(&producer_owner)
+            .expect("checked Index1 producer");
+        let caller = checked
+            .callables()
+            .get(&caller_owner)
+            .expect("checked Index1 caller");
+        let receipt = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_crosscall_string_caller_receipt.as_ref())
+            .expect("exact Index1 String receipt");
+        assert_eq!(receipt.producer_set_temporary_settlements.len(), 4);
+        assert!(
+            super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                producer, caller, receipt
+            )
+        );
+
+        let rejects = |candidate: crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt| {
+            let mut candidate_producer = producer.clone();
+            candidate_producer
+                .resources
+                .ordinary_map_owned_any_v2_cfg_receipt
+                .as_mut()
+                .expect("producer V2 CFG receipt")
+                .values_crosscall_string_caller_receipt = Some(candidate.clone());
+            !super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+                &candidate_producer,
+                caller,
+                &candidate,
+            )
+        };
+
+        let mut missing = receipt.clone();
+        missing.producer_set_temporary_settlements.pop();
+        assert!(rejects(missing), "all four source settlements are required");
+
+        let mut wrong_role = receipt.clone();
+        wrong_role.producer_set_temporary_settlements[0].role =
+            crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::PayloadClone;
+        assert!(rejects(wrong_role), "the role must match the Set operand");
+
+        let mut wrong_source = receipt.clone();
+        wrong_source.producer_set_temporary_settlements[0].source_node =
+            crate::core::NodeId("expr:forged_index1_set_temporary".into());
+        assert!(
+            rejects(wrong_source),
+            "the source NodeId must match the exact Set action"
+        );
+    }
+
+    #[test]
+    fn map_root_get_any_caller_lowers_only_its_cross_function_unpack_receipt() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_get_any_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let producer_owner = crate::core::NodeId("function:make_root".into());
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let producer = checked
+            .callables()
+            .get(&producer_owner)
+            .expect("checked Map-root producer");
+        let receipt = producer
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.map_root_get_any_caller_receipt.as_ref())
+            .expect("exact producer-owned caller receipt");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+        let functions = lower_program_with_type_catalog(&checked, &catalog)
+            .expect("Map-root GetAny caller MIR lowering");
+        let caller = functions.get(&caller_owner).expect("caller MIR");
+        let cfg = caller
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .expect("narrow caller selection projects local V2 CFG evidence");
+        assert_eq!(cfg.unpack_receipts.len(), 1);
+        assert_eq!(cfg.unpack_receipts[0].cast, receipt.unpack_cast);
+        assert_eq!(cfg.unpack_receipts[0].projection, receipt.unpack_projection);
+        assert_eq!(cfg.unpack_receipts[0].unpack_binding, receipt.unpack_local);
+        assert!(caller
+            .ownership
+            .checker_ordinary_map_owned_any_v2
+            .iter()
+            .any(|action| action.point == receipt.get_any_node
+                && action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny));
+        let unpack_value = format!("expr:{}", receipt.unpack_cast.0);
+        let unpack_local = format!("local:{}", receipt.unpack_local.0 .0);
+        assert!(caller
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack { result, pair, projection }
+                    if result.as_str() == unpack_value
+                        && pair.as_str() == format!("local:{}", receipt.pair_local.0.0)
+                        && projection == &receipt.unpack_projection
+            )));
+        assert!(
+            caller
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Move { result, source }
+                        if result.as_str() == unpack_local && source.as_str() == unpack_value
+                )),
+            "the Checker-owned unpack expression must bind once into its String owner"
+        );
+        assert!(caller
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .any(|instruction| matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root }
+                    if root.as_str() == format!("local:{}", receipt.caller_root_local.0.0)
+            )));
+        caller.validate().expect("caller MIR validates");
+    }
+
+    #[test]
+    fn map_root_get_any_caller_rejects_missing_or_duplicated_local_unpack_receipts() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_get_any_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+
+        let mut missing_callables = checked.callables().clone();
+        missing_callables
+            .get_mut(&caller_owner)
+            .expect("caller callable")
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("caller CFG receipt")
+            .unpack_receipts
+            .clear();
+        let caller = missing_callables
+            .get(&caller_owner)
+            .expect("mutated caller callable");
+        let missing = super::lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures(
+            caller,
+            &catalog,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &missing_callables,
+            None,
+        )
+        .expect_err("a producer bridge cannot replace the missing caller unpack receipt");
+        assert!(missing.iter().any(|error| {
+            error
+                .message
+                .contains("requires one unique local unpack receipt")
+        }));
+
+        let mut duplicated_callables = checked.callables().clone();
+        let local_receipts = &mut duplicated_callables
+            .get_mut(&caller_owner)
+            .expect("caller callable")
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("caller CFG receipt")
+            .unpack_receipts;
+        let receipt = local_receipts[0].clone();
+        local_receipts.push(receipt);
+        let caller = duplicated_callables
+            .get(&caller_owner)
+            .expect("mutated caller callable");
+        let duplicated = super::lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures(
+            caller,
+            &catalog,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &duplicated_callables,
+            None,
+        )
+        .expect_err("a duplicate local unpack receipt must be rejected");
+        assert!(duplicated.iter().any(|error| {
+            error
+                .message
+                .contains("requires one unique local unpack receipt")
+        }));
+
+        let mut mismatched_callables = checked.callables().clone();
+        let local_receipt = &mut mismatched_callables
+            .get_mut(&caller_owner)
+            .expect("caller callable")
+            .resources
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_mut()
+            .expect("caller CFG receipt")
+            .unpack_receipts[0];
+        local_receipt.cast = crate::core::NodeId("forged:unpack-cast".into());
+        let caller = mismatched_callables
+            .get(&caller_owner)
+            .expect("mutated caller callable");
+        let mismatched = super::lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures(
+            caller,
+            &catalog,
+            None,
+            None,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+            &mismatched_callables,
+            None,
+        )
+        .expect_err("a local unpack receipt with another cast identity must be rejected");
+        assert!(mismatched.iter().any(|error| {
+            error
+                .message
+                .contains("caller and local unpack receipts disagree")
+        }));
+    }
+
+    #[test]
+    fn map_root_get_any_caller_binding_rejects_duplicate_call_initializers() {
+        let source = include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_owned_any_v2_map_root_get_any_caller.mimi"
+        );
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let producer_owner = crate::core::NodeId("function:make_root".into());
+        let caller_owner = crate::core::NodeId("function:direct_caller".into());
+        let callables = checked.callables().clone();
+        let receipt = callables
+            .get(&producer_owner)
+            .and_then(|callable| {
+                callable
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()
+            })
+            .and_then(|cfg| cfg.map_root_get_any_caller_receipt.as_ref())
+            .expect("exact producer-owned caller receipt");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+        let caller = callables.get(&caller_owner).expect("checked caller");
+        let mut body = caller.body.clone();
+        let duplicate_binding = body
+            .root
+            .statements
+            .iter()
+            .find(|statement| {
+                matches!(
+                    &statement.kind,
+                    crate::core::ir::ResolvedStmtKind::Bind {
+                        initializer: Some(initializer),
+                        ..
+                    } if initializer.node_id == receipt.call_node
+                )
+            })
+            .expect("caller root binding")
+            .clone();
+        let mut duplicate_binding = duplicate_binding;
+        duplicate_binding.node_id = crate::core::NodeId("forged:duplicate-binding".into());
+        body.root.statements.push(duplicate_binding);
+
+        let lowerer = super::Lowerer {
+            body: &body,
+            type_catalog: Some(&catalog),
+            call_parameter_permissions: None,
+            resource_analysis: None,
+            ffi_singleton_for_node: None,
+            checked_callables: Some(&callables),
+            excluded_sources: None,
+            checked_constants: None,
+            default_argument_namespace: None,
+            transition_result: None,
+            approved_nested_callables: Default::default(),
+            closure_callable_bindings: Default::default(),
+            nested_callable_capture_slots: Default::default(),
+            values: Default::default(),
+            locals: Default::default(),
+            blocks: Default::default(),
+            current: crate::core::mir::MirBlockId::new("bb.test").expect("test block ID"),
+            fallback_value: crate::core::mir::MirValueId::new("error:fallback")
+                .expect("fallback value ID"),
+            loops: Default::default(),
+            errors: Default::default(),
+            managed_any_origins: Default::default(),
+        };
+        assert!(matches!(
+            lowerer.ordinary_map_owned_any_v2_map_root_get_any_caller_selection(),
+            Err("Map-root GetAny caller receipt does not identify one exact root binding")
+        ));
+    }
+
+    #[test]
+    fn checked_scalar_default_argument_lowers_from_exact_receipts_and_executes() {
+        let source = r#"
+            func with_default(value: i32 = {
+                {
+                    let hidden: i32 = 9
+                }
+                let seed: i32 = 1
+                math: { seed == 1; };
+                seed
+            }) -> i32 {
+                value + 1
+            }
+            func main() -> i32 {
+                let first = with_default()
+                let second = with_default()
+                first + second + with_unit_default()
+            }
+            func with_unit_default(value: unit = {
+                let marker: i32 = 2
+            }) -> i32 { 1 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let default_callable = checked
+            .callables()
+            .get(&crate::core::NodeId("function:with_default".into()))
+            .expect("checked default callable");
+        let default_parameter = &default_callable.signature.parameters[0].id;
+        let crate::core::ir::ResolvedExprKind::Block(default_block) =
+            &default_callable.body.default_values[default_parameter].kind
+        else {
+            panic!("the fixture default must retain its checked block root");
+        };
+        assert!(matches!(
+            &default_block.statements[0].kind,
+            crate::core::ir::ResolvedStmtKind::Scope {
+                kind: crate::core::ir::ResolvedScopeKind::Lexical,
+                ..
+            }
+        ));
+        let program =
+            MirProgram::from_checked_program(&checked).expect("receipt-bound default argument MIR");
+        let result = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("execute two omitted defaults");
+        assert_eq!(result, crate::core::mir::reference::MirRuntimeValue::Int(5));
+
+        let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+            .expect("AST-free bytecode must consume checked default MIR");
+        assert!(bytecode.ast.is_none());
+        let bytecode_result = crate::interp::bytecode::BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("execute two omitted defaults in bytecode");
+        assert!(matches!(bytecode_result, crate::interp::Value::Int(5)));
+
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validation must consume checked default MIR");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability gate must consume checked default MIR");
+        let verifier_results = crate::verifier::verify_mir(
+            &program,
+            blake3::hash(source.as_bytes()).to_hex().to_string(),
+        )
+        .expect("the default Math proof root must verify from the exact MIR");
+        assert!(
+            verifier_results.iter().any(|proof| {
+                proof.status == crate::verifier::VerifStatus::Proven
+                    && proof.artifact.as_ref().is_some_and(|artifact| {
+                        artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                    })
+            }),
+            "expected an exact MIR proof for the checked scalar default: {verifier_results:?}"
+        );
+
+        if crate::tests::can_link() {
+            let context = inkwell::context::Context::create();
+            let mut generator = crate::codegen::CodeGenerator::new(&context, "mir_default_args");
+            generator
+                .compile_mir_native(&program)
+                .expect("native MIR consumer must compile checked defaults");
+            let native = crate::tests::link_and_observe_canonical_mir(&generator)
+                .expect("link native MIR default fixture");
+            assert_eq!(native.exit_code, Some(5));
+            assert_eq!(native.stdout, "");
+            assert_eq!(native.stderr, "");
+        }
+    }
+
+    #[test]
+    fn default_argument_outside_scalar_local_only_profile_stays_fail_closed() {
+        let source = r#"
+            func choose(value: i32 = if true { 1 } else { 2 }) -> i32 { value }
+            func main() -> i32 { choose() }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let errors = lower_program(&checked).expect_err("branch default is not in the MIR slice");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("receipt-bound scalar local-only MIR profile")
+            }),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn block_default_does_not_inherit_multi_target_flow_result_context() {
+        let source = r#"
+            func delta_or_default(delta: i32 = {
+                let seed: i32 = 2
+                seed
+            }) -> i32 { delta }
+
+            flow Gauge {
+                state Cold { v: i32 }
+                state Hot { v: i32 }
+                transition heat(Cold) -> Hot | Cold {
+                    let delta = delta_or_default()
+                    return Hot { v: self.v + delta }
+                }
+            }
+
+            func main() -> i32 {
+                let cold = Cold { v: 40 }
+                let next = Gauge::heat(cold)
+                match next {
+                    Hot { v } => v
+                    Cold { v } => v
+                }
+            }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Flow scalar block default must lower independently of its union return");
+        let result = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("execute canonical multi-target transition with omitted helper argument");
+        assert_eq!(
+            result,
+            crate::core::mir::reference::MirRuntimeValue::Int(42)
+        );
+
+        let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+            .expect("AST-free bytecode must consume Flow/default MIR");
+        let bytecode_result = crate::interp::bytecode::BytecodeVM::new(bytecode)
+            .run_value()
+            .expect("execute Flow/default MIR in bytecode");
+        assert!(matches!(bytecode_result, crate::interp::Value::Int(42)));
+        crate::codegen::mir::validate_mir_native(&program)
+            .expect("native validator must consume Flow/default MIR");
+        crate::verifier::validate_mir_capabilities(&program)
+            .expect("verifier capability gate must consume Flow/default MIR");
+    }
+
+    #[test]
+    fn default_argument_block_with_nonlexical_tail_scope_stays_fail_closed() {
+        let source = r#"
+            func choose(value: f64 = { ieee_float { 1.0 / 0.0 } }) -> f64 { value }
+            func main() -> i32 { choose(); 0 }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let default_callable = checked
+            .callables()
+            .get(&crate::core::NodeId("function:choose".into()))
+            .expect("checked default callable");
+        let default_parameter = &default_callable.signature.parameters[0].id;
+        let crate::core::ir::ResolvedExprKind::Block(default_block) =
+            &default_callable.body.default_values[default_parameter].kind
+        else {
+            panic!("the fixture root must be an ordinary block expression");
+        };
+        let tail = default_block
+            .result
+            .as_deref()
+            .expect("the ordinary block must retain its tail expression");
+        assert!(matches!(
+            &tail.kind,
+            crate::core::ir::ResolvedExprKind::Scope {
+                kind: crate::core::ir::ResolvedScopeKind::IeeeFloat,
+                ..
+            }
+        ));
+
+        let errors = lower_program(&checked).expect_err("non-lexical default scope is unsupported");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("receipt-bound scalar local-only MIR profile")
+            }),
+            "{errors:?}"
+        );
     }
 
     #[test]
@@ -18066,16 +26392,19 @@ mod tests {
 
     #[test]
     fn parameter_read_is_lowered_with_explicit_clone_identity() {
-        let source = "func main(x: i32) -> i32 { x + 1 }";
+        let source = "func parameter_probe(x: i32) -> i32 { x + 1 }\nfunc main() -> i32 { 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let program = crate::core::check_program(&file).expect("check");
+        let owner = crate::core::NodeId("function:parameter_probe".into());
         let callable = program
             .callables()
-            .values()
-            .find(|callable| callable.owner.0.ends_with("main"))
-            .expect("main callable");
+            .get(&owner)
+            .expect("parameter probe callable");
+        assert_eq!(callable.owner, owner);
+        assert_eq!(callable.body.owner, owner);
         let mir = lower_body(&callable.body).expect("MIR lowering");
+        assert_eq!(mir.owner, owner);
         assert!(mir.canonical_text().contains("clone"));
         assert!(mir.canonical_text().contains("local:"));
     }
@@ -18083,19 +26412,31 @@ mod tests {
     #[test]
     fn captured_nested_callable_fails_before_mir_materialization() {
         let source = r#"
-            func main(base: i32) -> i32 {
+            func capture_probe(base: i32) -> i32 {
                 func add(value: i32) -> i32 { base + value }
                 add(1)
             }
+            func main() -> i32 { 0 }
         "#;
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let program = crate::core::check_program(&file).expect("check");
+        let helper_owner = crate::core::NodeId("function:capture_probe".into());
+        let helper = program
+            .callables()
+            .get(&helper_owner)
+            .expect("capture probe callable");
+        assert_eq!(helper.owner, helper_owner);
+        assert_eq!(helper.body.owner, helper_owner);
         let nested = program
             .callables()
             .values()
-            .find(|callable| callable.body.owner.0.contains("function:add"))
+            .find(|callable| {
+                callable.body.owner.0.contains("function:capture_probe")
+                    && callable.body.owner.0.contains("function:add")
+            })
             .expect("nested callable");
+        assert!(nested.body.owner.0.contains(&helper_owner.0));
         assert_eq!(nested.body.captures.len(), 1);
 
         let errors = lower_body(&nested.body).expect_err("captured body has no MIR env ABI");
@@ -18125,17 +26466,51 @@ mod tests {
     }
 
     #[test]
+    fn logical_operators_short_circuit_traps_in_canonical_mir() {
+        let source = r#"
+            func main() -> i32 {
+                let n: i32 = -2147483648
+                let or_skips = true or (n % -1 == 0)
+                let and_skips = false and (n % -1 == 0)
+                let or_evaluates_rhs = false or (40 + 2 == 42)
+                let and_evaluates_rhs = true and (40 + 2 == 42)
+                if or_skips and !and_skips and or_evaluates_rhs and and_evaluates_rhs {
+                    42
+                } else {
+                    0
+                }
+            }
+        "#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program =
+            MirProgram::from_checked_program(&checked).expect("materialize short-circuit MIR");
+
+        let result = crate::core::mir::reference::MirReferenceInterpreter::new(&program)
+            .execute(&crate::core::NodeId("function:main".into()), &[])
+            .expect("skipped MIN % -1 operands must not trap");
+        assert_eq!(
+            result,
+            crate::core::mir::reference::MirRuntimeValue::Int(42)
+        );
+    }
+
+    #[test]
     fn literal_match_lowers_to_switch_with_explicit_cases() {
-        let source = "func main(x: i32) -> i32 { match x { 0 => 1, _ => 2 } }";
+        let source = "func match_probe(x: i32) -> i32 { match x { 0 => 1, _ => 2 } }\nfunc main() -> i32 { 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let program = crate::core::check_program(&file).expect("check");
+        let owner = crate::core::NodeId("function:match_probe".into());
         let callable = program
             .callables()
-            .values()
-            .find(|callable| callable.owner.0.ends_with("main"))
-            .expect("main callable");
+            .get(&owner)
+            .expect("match probe callable");
+        assert_eq!(callable.owner, owner);
+        assert_eq!(callable.body.owner, owner);
         let mir = lower_body(&callable.body).expect("match lowering");
+        assert_eq!(mir.owner, owner);
         assert_eq!(mir.blocks.len(), 4);
         let text = mir.canonical_text();
         assert!(text.contains("switch"));
@@ -18330,15 +26705,15 @@ mod tests {
 
     #[test]
     fn tuple_literal_lowers_to_an_explicit_construct_instruction() {
-        let source = "func main() -> (i32, i32) { (1, 2) }";
+        let source = "func tuple_probe() -> (i32, i32) { (1, 2) }\nfunc main() -> i32 { drop(tuple_probe()); 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let program = crate::core::check_program(&file).expect("check");
         let callable = program
             .callables()
             .values()
-            .find(|callable| callable.owner.0.ends_with("main"))
-            .expect("main callable");
+            .find(|callable| callable.owner.0.ends_with("tuple_probe"))
+            .expect("tuple probe callable");
         let mir = lower_body(&callable.body).expect("tuple lowering");
         assert!(mir.canonical_text().contains("construct"));
     }
@@ -18410,7 +26785,7 @@ mod tests {
 
     #[test]
     fn non_copy_option_match_lowers_to_consuming_switch_move() {
-        let source = "func main() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }";
+        let source = "func option_probe() -> string { let value: Option<string> = Some(\"owned\"); match value { Some(v) => v, None => \"fallback\" } }\nfunc main() -> i32 { drop(option_probe()); 0 }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let program = crate::core::check_program(&file).expect("check");
@@ -18418,8 +26793,8 @@ mod tests {
         let callable = program
             .callables()
             .values()
-            .find(|callable| callable.owner.0.ends_with("main"))
-            .expect("main callable");
+            .find(|callable| callable.owner.0.ends_with("option_probe"))
+            .expect("Option probe callable");
         let mir = lower_body_with_type_catalog(&callable.body, &catalog)
             .expect("consuming Option match lowering");
         let switch = mir
@@ -18449,6 +26824,89 @@ mod tests {
             .flat_map(|block| block.instructions.iter())
             .any(|instruction| matches!(instruction.kind, MirInstructionKind::Move { .. })));
         assert!(mir.validate().is_ok(), "{:?}", mir.validate());
+    }
+
+    #[test]
+    fn ordinary_map_owned_any_v2_set_drops_record_payload_clone_before_source() {
+        let source = r#"
+type IsEmptyPayload { text: string }
+func main() -> i32 {
+    let payload = IsEmptyPayload { text: "persistent owner payload" }
+    let empty = map_new()
+    let empty_result = is_empty(empty)
+    println(empty_result)
+    let populated = map_set(empty, "payload", payload)
+    let populated_result = is_empty(populated)
+    println(populated_result)
+    drop(empty)
+    drop(populated)
+    drop(payload)
+    0
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
+        let owner = crate::core::NodeId("function:main".into());
+        let functions = super::lower_program_with_type_catalog(&checked, &catalog)
+            .expect("ordinary Map/Any V2 lowering");
+        let function = functions.get(&owner).expect("main MIR");
+        function.validate().expect("payload temporary has one Drop");
+        let instructions = function
+            .blocks
+            .get(&function.entry)
+            .expect("main entry block")
+            .instructions
+            .as_slice();
+
+        let (set_index, set_value) = instructions
+            .iter()
+            .enumerate()
+            .find_map(|(index, instruction)| match &instruction.kind {
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Set { value, .. } => {
+                    Some((index, value.clone()))
+                }
+                _ => None,
+            })
+            .expect("persistent V2 Set");
+        let source_value = instructions
+            .iter()
+            .find_map(|instruction| match &instruction.kind {
+                MirInstructionKind::Clone { result, source } if result == &set_value => {
+                    Some(source.clone())
+                }
+                _ => None,
+            })
+            .expect("Set payload is a Checker-lowered Clone of the source record");
+        let set_value_type = &function.values.get(&set_value).expect("Set value").ty;
+        assert!(catalog
+            .get(set_value_type)
+            .is_some_and(|descriptor| descriptor.ownership.needs_drop()));
+
+        let temporary_drop_indices = instructions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instruction)| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value } if value == &set_value
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(temporary_drop_indices.len(), 1);
+        let source_drop_index = instructions
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value } if value == &source_value
+                )
+            })
+            .expect("source record remains independently droppable");
+        assert!(set_index < temporary_drop_indices[0]);
+        assert!(temporary_drop_indices[0] < source_drop_index);
     }
 
     #[test]
@@ -18651,4 +27109,5786 @@ func main() -> i32 {
             "{owner_errors:?}"
         );
     }
+
+    #[test]
+    fn ordinary_map_owned_get_maps_if_condition_short_circuit_and_rejects_forged_anchor() {
+        let source = r#"
+func main() -> i32 {
+    let empty = map_new()
+    let value = map_get_i32(empty, "k")
+    drop(value)
+    drop(empty)
+    if true && false { 1 } else { 0 }
+}
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let owner = crate::core::NodeId("function:main".into());
+        let catalog = MirTypeCatalog::from_checked_program(&checked).expect("Map TypeDesc");
+        let mut functions = super::lower_program_with_type_catalog(&checked, &catalog)
+            .expect("short-circuit Map CFG lowering");
+        let function = functions.get_mut(&owner).expect("main MIR");
+        function
+            .validate()
+            .expect("Checker Condition joins project to canonical MIR if-joins");
+
+        let receipt = function
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_ref()
+            .expect("owned-get source CFG receipt");
+        let (condition_join, _) = receipt
+            .reachable_blocks
+            .iter()
+            .find(|(block_id, block)| {
+                let Some((source_node, role)) = block_id.0 .0.rsplit_once("/cfg:block:") else {
+                    return false;
+                };
+                role == "if-join"
+                    && block.points.iter().any(|(point, kind)| {
+                        point.0 == source_node && *kind == crate::core::cfg::CfgPointKind::Condition
+                    })
+            })
+            .expect("short-circuit join has its own Condition anchor");
+        let condition_join = (*condition_join).clone();
+
+        let mut forged = function.clone();
+        let forged_receipt = forged
+            .ownership
+            .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+            .as_mut()
+            .expect("owned-get source CFG receipt");
+        let (source_node, _) = condition_join
+            .0
+             .0
+            .rsplit_once("/cfg:block:")
+            .expect("join source identity");
+        let source_node = crate::core::NodeId(source_node.to_string());
+        let anchor = forged_receipt
+            .reachable_blocks
+            .get_mut(&condition_join)
+            .expect("condition join block")
+            .points
+            .iter_mut()
+            .find(|(point, kind)| {
+                point == &source_node && *kind == crate::core::cfg::CfgPointKind::Condition
+            })
+            .expect("exact condition join anchor");
+        anchor.0 = crate::core::NodeId("forged:unrelated-condition-anchor".into());
+        let errors = forged
+            .validate()
+            .expect_err("another node's Condition point cannot authorize this block ID");
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("uses a source block identity not mapped by this version")
+            }),
+            "expected exact source-anchor rejection, got {errors:?}"
+        );
+    }
+}
+
+/// Mechanical projection of the separate NewResult source receipt. The
+/// complete graph is checked again at every executable consumer boundary.
+fn ordinary_map_owned_any_v2_values_result_producer_function(
+    callable: &crate::core::ResolvedCallable,
+    analysis: &ResourceAnalysis,
+    type_catalog: &MirTypeCatalog,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::cfg::{BasicBlockId as CfgBlockId, EdgeId as CfgEdgeId, Terminator};
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
+        OrdinaryMapOwnedAnyV2ValuesResultPathKind as PathKind,
+        OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion as Profile,
+    };
+
+    let fail =
+        |message: &str| format!("ordinary Map/Any Values Result producer MIR lowering: {message}");
+    let local_value = |local: &ResolvedLocalId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let node_value = |node: &NodeId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("expr:{}", node.0)).map_err(|error| error.to_string())
+    };
+    let block_value = |block: &CfgBlockId| -> Result<MirBlockId, String> {
+        MirBlockId::new(block.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge_value = |edge: &CfgEdgeId| -> Result<MirEdgeId, String> {
+        MirEdgeId::new(edge.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let instruction = |id: String, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(id).map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let add_value = |values: &mut BTreeMap<MirValueId, MirValue>,
+                     id: MirValueId,
+                     ty: crate::core::ResolvedTypeId|
+     -> Result<(), String> {
+        if let Some(previous) = values.get(&id) {
+            if previous.ty != ty {
+                return Err(fail(
+                    "one MIR value identity is assigned conflicting TypeDescs",
+                ));
+            }
+            return Ok(());
+        }
+        values.insert(id.clone(), MirValue { id, ty });
+        Ok(())
+    };
+
+    let Some(owner_cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+        return Err(fail("Checker owner-v2 CFG receipt is absent"));
+    };
+    let expected_set_count = match receipt.profile_version {
+        Profile::V1 => 1,
+        Profile::V2 => 2,
+    };
+    let cfg = &receipt.cfg;
+    if callable.owner != receipt.owner
+        || receipt.owner != owner_cfg.owner
+        || cfg.owner != receipt.owner
+        || owner_cfg.values_result_producer_receipt.as_ref() != Some(receipt)
+        || analysis.managed_any_cfg_receipt.as_ref() != Some(cfg)
+        || callable.signature.result != receipt.surface_return_type
+        || callable.body.root.ty != receipt.surface_return_type
+        || !callable.signature.parameters.is_empty()
+        || !callable.signature.generic_parameters.is_empty()
+        || !callable.body.parameters.is_empty()
+        || !callable.body.captures.is_empty()
+        || !callable.body.place_inputs.is_empty()
+        || !callable.body.default_values.is_empty()
+        || receipt.set_branches.len() != expected_set_count
+        || receipt.paths.len() != expected_set_count + 2
+        || cfg.entry.0 .0.is_empty()
+        || cfg.reachable_blocks.is_empty()
+        || cfg.reachable_edges.is_empty()
+        || cfg.reachable_blocks.keys().any(|id| id.0 .0.is_empty())
+        || cfg.reachable_edges.iter().any(|(id, edge)| {
+            id != &edge.id
+                || !cfg.reachable_blocks.contains_key(&edge.from)
+                || !cfg.reachable_blocks.contains_key(&edge.to)
+        })
+    {
+        return Err(fail(
+            "Checker source receipt, callable identity, or closed profile differs",
+        ));
+    }
+    let all_outgoing = cfg
+        .reachable_blocks
+        .iter()
+        .flat_map(|(block_id, block)| {
+            block
+                .terminator
+                .outgoing_edges()
+                .into_iter()
+                .map(move |edge| (block_id.clone(), edge.clone()))
+        })
+        .collect::<Vec<_>>();
+    let referenced_edges = all_outgoing
+        .iter()
+        .map(|(_, edge)| edge.clone())
+        .collect::<BTreeSet<_>>();
+    let checker_edge_ids = cfg.reachable_edges.keys().cloned().collect::<BTreeSet<_>>();
+    if all_outgoing.len() != cfg.reachable_edges.len()
+        || referenced_edges.len() != cfg.reachable_edges.len()
+        || referenced_edges != checker_edge_ids
+        || all_outgoing.iter().any(|(block, edge_id)| {
+            cfg.reachable_edges
+                .get(edge_id)
+                .is_none_or(|edge| edge.from != *block)
+        })
+    {
+        return Err(fail("source CFG edge table is incomplete or conflicting"));
+    }
+
+    let map_type = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_type = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let values_type = super::types::ordinary_map_owned_any_v2_values_type_id();
+    let values_element_type = super::types::ordinary_map_owned_any_v2_values_element_type_id();
+    let string_type = primitive_type_id(PrimitiveType::String);
+    let i32_type = primitive_type_id(PrimitiveType::I32);
+    if type_catalog.get(&map_type).is_none()
+        || type_catalog.get(&values_element_type).is_none()
+        || type_catalog
+            .validate_ordinary_map_owned_any_v2_root_result(
+                &root_result_type,
+                owner_cfg
+                    .actions
+                    .iter()
+                    .find(|action| {
+                        action.kind == ActionKind::New && action.point == receipt.map_new_operation
+                    })
+                    .and_then(|action| action.source_type.as_ref())
+                    .ok_or_else(|| fail("map_new source Result TypeDesc is absent"))?,
+            )
+            .is_err()
+    {
+        return Err(fail(
+            "source Map/Result/Values TypeDesc identities are not canonical",
+        ));
+    }
+    let empty_values_contract = type_catalog
+        .validated_values_result_empty_list_construct_contract(&values_type)
+        .map_err(|error| {
+            fail(&format!(
+                "empty Values constructor TypeDesc is invalid: {error}"
+            ))
+        })?;
+
+    let mut source_points = BTreeMap::<NodeId, CfgBlockId>::new();
+    for (block_id, block) in &cfg.reachable_blocks {
+        for point in &block.points {
+            if source_points
+                .insert(point.source.node.clone(), block_id.clone())
+                .is_some()
+            {
+                return Err(fail("source CFG repeats a source point identity"));
+            }
+        }
+    }
+    let point_block = |point: &NodeId| -> Result<CfgBlockId, String> {
+        source_points
+            .get(point)
+            .cloned()
+            .ok_or_else(|| fail(&format!("source CFG omits exact point '{}'", point.0)))
+    };
+    let require_point = |point: &NodeId| -> Result<(), String> {
+        let _ = point_block(point)?;
+        Ok(())
+    };
+
+    let new_action = owner_cfg
+        .actions
+        .iter()
+        .filter(|action| {
+            action.kind == ActionKind::New && action.point == receipt.map_new_operation
+        })
+        .collect::<Vec<_>>();
+    let [new_action] = new_action.as_slice() else {
+        return Err(fail("map_new Checker action is absent or duplicated"));
+    };
+    if new_action.local != receipt.initial_root
+        || new_action.source_type.as_ref() != Some(&root_result_type)
+        || new_action.source.as_ref().is_some()
+        || new_action.source_local.is_some()
+        || callable
+            .body
+            .locals
+            .get(&receipt.initial_root)
+            .is_none_or(|local| local.ty != map_type)
+        || callable
+            .body
+            .locals
+            .get(&receipt.map_new_error_local)
+            .is_none_or(|local| local.ty != i32_type)
+    {
+        return Err(fail(
+            "map_new Checker action does not define the receipted initial root",
+        ));
+    }
+    let new_carrier = node_value(&receipt.map_new_operation)?;
+    let initial_root = local_value(&receipt.initial_root)?;
+    let new_error = local_value(&receipt.map_new_error_local)?;
+    let new_instruction = instruction(
+        format!(
+            "inst:ordinary_map_values_result_producer:new:{}",
+            receipt.map_new_operation.0
+        ),
+        MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+            result: new_carrier.clone(),
+        },
+    )?;
+
+    let mut set_values = Vec::with_capacity(expected_set_count);
+    let mut set_instruction_ids = Vec::with_capacity(expected_set_count);
+    let mut set_key_values = Vec::with_capacity(expected_set_count);
+    let mut set_payload_values = Vec::with_capacity(expected_set_count);
+    let mut set_actions = Vec::with_capacity(expected_set_count);
+    for (index, set) in receipt.set_branches.iter().enumerate() {
+        let matches = owner_cfg
+            .actions
+            .iter()
+            .filter(|action| action.kind == ActionKind::Set && action.point == set.operation)
+            .collect::<Vec<_>>();
+        let [action] = matches.as_slice() else {
+            return Err(fail(
+                "a receipted Set Checker action is absent or duplicated",
+            ));
+        };
+        if action.local != set.output_root
+            || action.source_local.as_ref() != Some(&set.input_root)
+            || action.source_type.as_ref() != Some(&map_type)
+            || action.key.as_ref() != Some(&set.key_node)
+            || action.key_type.as_ref() != Some(&string_type)
+            || action.value.as_ref() != Some(&set.payload_node)
+            || action.value_type.as_ref() != Some(&string_type)
+            || action.source_type.as_ref()
+                != callable
+                    .body
+                    .locals
+                    .get(&set.input_root)
+                    .map(|local| &local.ty)
+            || callable
+                .body
+                .locals
+                .get(&set.output_root)
+                .is_none_or(|local| local.ty != map_type)
+            || callable
+                .body
+                .locals
+                .get(&set.error_local)
+                .is_none_or(|local| local.ty != i32_type)
+            || !action.payload_clone
+            || set.payload_local == set.input_root
+        {
+            return Err(fail(
+                "a Set branch's root, key, payload, or Checker action differs",
+            ));
+        }
+        let payload_has_settlement = receipt
+            .payload_settlements
+            .iter()
+            .any(|settlement| settlement.local == set.payload_local);
+        if !payload_has_settlement
+            || !callable
+                .body
+                .locals
+                .get(&set.payload_local)
+                .is_some_and(|local| local.ty == string_type && !local.mutable)
+        {
+            return Err(fail(
+                "Set payload has no unique immutable String settlement",
+            ));
+        }
+        require_point(&set.key_node)?;
+        require_point(&set.payload_initializer_node)?;
+        require_point(&set.payload_binding_point)?;
+        require_point(&set.operation)?;
+        let key = node_value(&set.key_node)?;
+        let payload = local_value(&set.payload_local)?;
+        let result = node_value(&set.operation)?;
+        let set_instruction = instruction(
+            format!(
+                "inst:ordinary_map_values_result_producer:set_{index}:{}",
+                set.operation.0
+            ),
+            MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                result: result.clone(),
+                source: local_value(&set.input_root)?,
+                key: key.clone(),
+                value: payload.clone(),
+            },
+        )?;
+        let key_drop = instruction(
+            format!("inst:drop.ordinary-map-key:{}", set.operation.0),
+            MirInstructionKind::Drop { value: key.clone() },
+        )?;
+        set_values.push((result, key, payload, set_instruction, key_drop));
+        set_instruction_ids.push(
+            MirInstructionId::new(format!(
+                "inst:ordinary_map_values_result_producer:set_{index}:{}",
+                set.operation.0
+            ))
+            .map_err(|error| error.to_string())?,
+        );
+        set_key_values.push(node_value(&set.key_node)?);
+        set_payload_values.push(local_value(&set.payload_local)?);
+        set_actions.push(*action);
+    }
+    let values_actions = owner_cfg
+        .actions
+        .iter()
+        .filter(|action| {
+            action.kind == ActionKind::Values && action.point == receipt.values_operation
+        })
+        .collect::<Vec<_>>();
+    let [values_action] = values_actions.as_slice() else {
+        return Err(fail("Values Checker action is absent or duplicated"));
+    };
+    let final_root = receipt
+        .set_branches
+        .last()
+        .map(|set| &set.output_root)
+        .ok_or_else(|| fail("Values producer has no Set root"))?;
+    if receipt.values_source_local != *final_root
+        || receipt.values_source_type != map_type
+        || receipt.snapshot_type != values_type
+        || values_action.local != *final_root
+        || values_action.source_local.as_ref() != Some(final_root)
+        || values_action.source_type.as_ref()
+            != callable.body.locals.get(final_root).map(|local| &local.ty)
+        || values_action.source_node.as_ref() != Some(&receipt.values_source_node)
+        || values_action.result_type.as_ref() != Some(&receipt.snapshot_type)
+        || values_action.result_local.as_ref() != Some(&receipt.snapshot_local)
+        || callable
+            .body
+            .locals
+            .get(&receipt.snapshot_local)
+            .is_none_or(|local| local.ty != values_type)
+    {
+        return Err(fail(
+            "Values action does not borrow the final Set root or define the snapshot",
+        ));
+    }
+    let values_result = node_value(&receipt.values_operation)?;
+    let snapshot = local_value(&receipt.snapshot_local)?;
+    let snapshot_bind = instruction(
+        format!("inst:bind:{}", receipt.values_binding_point.0),
+        MirInstructionKind::Move {
+            result: snapshot.clone(),
+            source: values_result.clone(),
+        },
+    )?;
+    let values_instruction = instruction(
+        format!(
+            "inst:ordinary_map_owned_any_v2_values:{}:{}",
+            local_value(final_root)?,
+            receipt.values_operation.0
+        ),
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Values {
+            result: values_result.clone(),
+            root: local_value(final_root)?,
+        },
+    )?;
+    require_point(&receipt.values_operation)?;
+    require_point(&receipt.values_binding_point)?;
+    require_point(&receipt.success_result)?;
+
+    let mut explicit = BTreeMap::<NodeId, Vec<MirInstruction>>::new();
+    let mut add_at = |point: NodeId, inst: MirInstruction| -> Result<(), String> {
+        require_point(&point)?;
+        explicit.entry(point).or_default().push(inst);
+        Ok(())
+    };
+    add_at(receipt.map_new_operation.clone(), new_instruction)?;
+    for (index, set) in receipt.set_branches.iter().enumerate() {
+        let action = set_actions[index];
+        let key = &set_key_values[index];
+        let payload = &set_payload_values[index];
+        let key_literal = set.key_literal.clone();
+        add_at(
+            set.key_node.clone(),
+            instruction(
+                format!("inst:const:{}", set.key_node.0),
+                MirInstructionKind::Const {
+                    result: key.clone(),
+                    literal: ResolvedLiteral::String(key_literal),
+                },
+            )?,
+        )?;
+        add_at(
+            set.payload_initializer_node.clone(),
+            instruction(
+                format!("inst:const:{}", set.payload_initializer_node.0),
+                MirInstructionKind::Const {
+                    result: node_value(&set.payload_initializer_node)?,
+                    literal: ResolvedLiteral::String(set.payload_literal.clone()),
+                },
+            )?,
+        )?;
+        add_at(
+            set.payload_binding_point.clone(),
+            instruction(
+                format!("inst:bind:{}", set.payload_binding_point.0),
+                MirInstructionKind::Move {
+                    result: payload.clone(),
+                    source: node_value(&set.payload_initializer_node)?,
+                },
+            )?,
+        )?;
+        let (_, _, _, set_instruction, key_drop) = set_values[index].clone();
+        if action.value.as_ref() != Some(&set.payload_node) {
+            return Err(fail(
+                "Set payload source action changed after its CFG projection",
+            ));
+        }
+        add_at(set.operation.clone(), set_instruction)?;
+        add_at(set.operation.clone(), key_drop)?;
+    }
+    add_at(receipt.values_operation.clone(), values_instruction)?;
+    add_at(receipt.values_binding_point.clone(), snapshot_bind)?;
+    add_at(
+        receipt.success_result.clone(),
+        instruction(
+            format!("inst:move:{}", receipt.success_result.0),
+            MirInstructionKind::Move {
+                result: node_value(&receipt.success_result)?,
+                source: snapshot.clone(),
+            },
+        )?,
+    )?;
+    for path in &receipt.paths {
+        match path.kind {
+            PathKind::ValuesSnapshot => {
+                if path.result != receipt.success_result {
+                    return Err(fail(
+                        "successful path result differs from the exact Values erasure",
+                    ));
+                }
+            }
+            PathKind::EmptyList => {
+                let contract = type_catalog
+                    .validated_values_result_empty_list_construct_contract(&values_type)
+                    .map_err(|error| {
+                        fail(&format!("empty Values path TypeDesc failed: {error}"))
+                    })?;
+                if contract != empty_values_contract
+                    || path.result == receipt.success_result
+                    || path.arm_path.is_empty()
+                {
+                    return Err(fail(
+                        "empty path does not carry the exact empty Values constructor proof",
+                    ));
+                }
+                add_at(
+                    path.result.clone(),
+                    instruction(
+                        format!(
+                            "inst:ordinary_map_values_result_producer:empty_list:{}",
+                            path.result.0
+                        ),
+                        MirInstructionKind::ConstructList {
+                            result: node_value(&path.result)?,
+                            elements: Vec::new(),
+                            list_construct_contract: Some(contract),
+                        },
+                    )?,
+                )?;
+            }
+        }
+    }
+
+    let root_drop_id = |local: &ResolvedLocalId, point: &NodeId| -> Result<String, String> {
+        Ok(format!(
+            "inst:ordinary_map_owned_any_v2_drop:{}:{}",
+            local_value(local)?,
+            point.0
+        ))
+    };
+    let mut root_drop_ids = Vec::new();
+    for settlement in &receipt.root_settlements {
+        if !callable
+            .body
+            .locals
+            .get(&settlement.local)
+            .is_some_and(|local| local.ty == map_type)
+            || settlement.place_index != 0
+            || !receipt.set_branches.iter().any(|set| {
+                set.input_root == settlement.local || set.output_root == settlement.local
+            })
+        {
+            return Err(fail("root settlement names a non-Map lineage local"));
+        }
+        let id = root_drop_id(&settlement.local, &settlement.point)?;
+        add_at(
+            settlement.point.clone(),
+            instruction(
+                id.clone(),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: local_value(&settlement.local)?,
+                },
+            )?,
+        )?;
+        root_drop_ids.push(MirInstructionId::new(id).map_err(|error| error.to_string())?);
+    }
+    let mut payload_drop_ids = Vec::new();
+    for settlement in &receipt.payload_settlements {
+        if !callable
+            .body
+            .locals
+            .get(&settlement.local)
+            .is_some_and(|local| local.ty == string_type)
+            || settlement.place_index != 0
+            || !receipt
+                .set_branches
+                .iter()
+                .any(|set| set.payload_local == settlement.local)
+        {
+            return Err(fail("payload settlement names a non-String source owner"));
+        }
+        let index = settlement.place_index;
+        let id = format!("inst:drop.{index}:{}", settlement.point.0);
+        add_at(
+            settlement.point.clone(),
+            instruction(
+                id.clone(),
+                MirInstructionKind::Drop {
+                    value: local_value(&settlement.local)?,
+                },
+            )?,
+        )?;
+        payload_drop_ids.push(MirInstructionId::new(id).map_err(|error| error.to_string())?);
+    }
+
+    let new_match = &receipt.map_new_match;
+    let mut match_nodes = vec![new_match.clone()];
+    match_nodes.extend(
+        receipt
+            .set_branches
+            .iter()
+            .map(|set| set.match_node.clone()),
+    );
+    let mut dispatches = BTreeMap::<CfgBlockId, (NodeId, Vec<(NodeId, String, CfgBlockId)>)>::new();
+    let mut match_joins = BTreeMap::<NodeId, CfgBlockId>::new();
+    let mut arm_parent = BTreeMap::<NodeId, NodeId>::new();
+    let mut arm_parameters =
+        BTreeMap::<CfgBlockId, (ResolvedLocalId, crate::core::ResolvedTypeId)>::new();
+    for match_node in &match_nodes {
+        let (operation, arms) = if match_node == new_match {
+            (
+                receipt.map_new_operation.clone(),
+                vec![
+                    (
+                        receipt.map_new_ok_arm.clone(),
+                        "Ok".to_owned(),
+                        receipt.initial_root.clone(),
+                    ),
+                    (
+                        receipt.map_new_err_arm.clone(),
+                        "Err".to_owned(),
+                        receipt.map_new_error_local.clone(),
+                    ),
+                ],
+            )
+        } else {
+            let set = receipt
+                .set_branches
+                .iter()
+                .find(|set| &set.match_node == match_node)
+                .ok_or_else(|| fail("Set match has no unique Checker branch"))?;
+            (
+                set.operation.clone(),
+                vec![
+                    (set.ok_arm.clone(), "Ok".to_owned(), set.output_root.clone()),
+                    (
+                        set.err_arm.clone(),
+                        "Err".to_owned(),
+                        set.error_local.clone(),
+                    ),
+                ],
+            )
+        };
+        if arms.len() != 2 || arms[0].0 == arms[1].0 {
+            return Err(fail("Result match does not have two distinct arms"));
+        }
+        let dispatch_candidates = cfg
+            .reachable_blocks
+            .iter()
+            .filter_map(|(id, block)| match &block.terminator {
+                Terminator::Match {
+                    scrutinee,
+                    arms: edges,
+                } if scrutinee == &operation => Some((id.clone(), edges.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let [(dispatch, edges)] = dispatch_candidates.as_slice() else {
+            return Err(fail("Result operation has no unique source CFG dispatch"));
+        };
+        let mut dispatch_arms = Vec::new();
+        for edge_id in edges {
+            let source_edge = cfg
+                .reachable_edges
+                .get(edge_id)
+                .ok_or_else(|| fail("Result dispatch references an absent Checker edge"))?;
+            if source_edge.from != *dispatch {
+                return Err(fail("Result dispatch edge has another source block"));
+            }
+            let Some((arm_node, variant, local)) = arms
+                .iter()
+                .find(|(arm, _, _)| *arm == source_edge.source.node)
+            else {
+                return Err(fail(
+                    "Result dispatch arm is not one of the Checker-receipted Ok/Err arms",
+                ));
+            };
+            let case = cfg
+                .match_arms
+                .get(dispatch)
+                .and_then(|cases| cases.iter().find(|case| case.edge == *edge_id))
+                .ok_or_else(|| fail("Result dispatch has no exact Checker case identity"))?;
+            if case.source_arm != *arm_node
+                || case.guarded
+                || case.case
+                    != crate::core::ownership::ManagedAnyCfgMatchCase::Variant(NodeId(format!(
+                        "builtin:variant:Result::{variant}"
+                    )))
+            {
+                return Err(fail(
+                    "Result dispatch case or source arm differs from its receipt",
+                ));
+            }
+            if arm_parent
+                .insert(arm_node.clone(), match_node.clone())
+                .is_some()
+            {
+                return Err(fail("one Result arm belongs to multiple source matches"));
+            }
+            let target = source_edge.to.clone();
+            let arm_ty = if variant == "Ok" {
+                map_type.clone()
+            } else {
+                i32_type.clone()
+            };
+            if arm_parameters
+                .insert(target.clone(), (local.clone(), arm_ty))
+                .is_some()
+            {
+                return Err(fail("Result arms unexpectedly share a payload block"));
+            }
+            dispatch_arms.push((arm_node.clone(), variant.clone(), target));
+        }
+        if dispatch_arms.len() != 2
+            || arms
+                .iter()
+                .any(|(arm, _, _)| !dispatch_arms.iter().any(|(found, _, _)| found == arm))
+        {
+            return Err(fail(
+                "Result dispatch does not cover exactly its two Checker arms",
+            ));
+        }
+        dispatches.insert(dispatch.clone(), (operation, dispatch_arms));
+        let expected_join = CfgBlockId(NodeId(format!("{}/cfg:block:match-join", match_node.0)));
+        if !cfg.reachable_blocks.contains_key(&expected_join)
+            || match_joins
+                .insert(match_node.clone(), expected_join)
+                .is_some()
+        {
+            return Err(fail("Result match join is absent or duplicated"));
+        }
+    }
+
+    let mut joins_by_block = BTreeMap::<CfgBlockId, NodeId>::new();
+    for (match_node, join) in &match_joins {
+        if joins_by_block
+            .insert(join.clone(), match_node.clone())
+            .is_some()
+        {
+            return Err(fail("two source matches share a join block"));
+        }
+    }
+    let mut arm_results = BTreeMap::<NodeId, NodeId>::new();
+    for path in &receipt.paths {
+        require_point(&path.result)?;
+        if path.arm_path.is_empty() || path.arm_path.len() > match_nodes.len() {
+            return Err(fail(
+                "path does not identify a supported nested Result arm sequence",
+            ));
+        }
+        for (depth, arm) in path.arm_path.iter().enumerate() {
+            if arm_parent.get(arm) != Some(&match_nodes[depth]) {
+                return Err(fail(
+                    "path arm sequence differs from the receipted New/Set nesting",
+                ));
+            }
+            let arm_result = if depth + 1 < path.arm_path.len() {
+                match_nodes[depth + 1].clone()
+            } else {
+                path.result.clone()
+            };
+            if arm_results
+                .insert(arm.clone(), arm_result.clone())
+                .is_some_and(|previous| previous != arm_result)
+            {
+                return Err(fail(
+                    "one source arm has conflicting branch result identities",
+                ));
+            }
+        }
+    }
+    if arm_results.len() != arm_parent.len() {
+        return Err(fail(
+            "nested Result arm sequence omits a receipted source arm",
+        ));
+    }
+
+    let mut block_parameters = BTreeMap::<CfgBlockId, Vec<MirBlockParameter>>::new();
+    let mut block_parameter_types = BTreeMap::<MirValueId, crate::core::ResolvedTypeId>::new();
+    for (block, (local, ty)) in arm_parameters {
+        let value = local_value(&local)?;
+        if block_parameter_types.insert(value.clone(), ty).is_some() {
+            return Err(fail(
+                "Result arm payload local is bound by multiple CFG blocks",
+            ));
+        }
+        block_parameters
+            .entry(block)
+            .or_default()
+            .push(MirBlockParameter { value });
+    }
+    for (match_node, join) in &match_joins {
+        let value = node_value(match_node)?;
+        if block_parameter_types
+            .insert(value.clone(), values_type.clone())
+            .is_some()
+        {
+            return Err(fail(
+                "Result match join value collides with another block parameter",
+            ));
+        }
+        block_parameters
+            .entry(join.clone())
+            .or_default()
+            .push(MirBlockParameter { value });
+    }
+
+    let mut values = BTreeMap::<MirValueId, MirValue>::new();
+    for (id, ty) in [
+        (new_carrier.clone(), root_result_type.clone()),
+        (initial_root.clone(), map_type.clone()),
+        (new_error.clone(), i32_type.clone()),
+        (values_result.clone(), values_type.clone()),
+        (snapshot.clone(), values_type.clone()),
+        (node_value(&receipt.success_result)?, values_type.clone()),
+    ] {
+        add_value(&mut values, id, ty)?;
+    }
+    for (index, set) in receipt.set_branches.iter().enumerate() {
+        let (set_carrier, key, payload, _, _) = &set_values[index];
+        for (id, ty) in [
+            (set_carrier.clone(), root_result_type.clone()),
+            (local_value(&set.input_root)?, map_type.clone()),
+            (local_value(&set.output_root)?, map_type.clone()),
+            (local_value(&set.error_local)?, i32_type.clone()),
+            (key.clone(), string_type.clone()),
+            (payload.clone(), string_type.clone()),
+            (
+                node_value(&set.payload_initializer_node)?,
+                string_type.clone(),
+            ),
+        ] {
+            add_value(&mut values, id, ty)?;
+        }
+    }
+    for match_node in &match_nodes {
+        add_value(&mut values, node_value(match_node)?, values_type.clone())?;
+    }
+    for path in &receipt.paths {
+        add_value(&mut values, node_value(&path.result)?, values_type.clone())?;
+    }
+    for (parameter, ty) in block_parameter_types {
+        add_value(&mut values, parameter, ty)?;
+    }
+
+    // All source-defined operations are inserted at their exact Checker point;
+    // every other point in this sealed profile is an inert load, block, or
+    // pattern identity and therefore has no executable MIR instruction.
+    let mut blocks = BTreeMap::new();
+    for (source_id, source_block) in &cfg.reachable_blocks {
+        let mut instructions = Vec::new();
+        for point in &source_block.points {
+            if let Some(at_point) = explicit.remove(&point.source.node) {
+                instructions.extend(at_point);
+            }
+        }
+        if let Some(at_block_source) = explicit.remove(&source_block.source.node) {
+            instructions.extend(at_block_source);
+        }
+        let terminator = match &source_block.terminator {
+            Terminator::Match { scrutinee, arms } => {
+                let Some((operation, expected_arms)) = dispatches.get(source_id) else {
+                    return Err(fail("source CFG contains a non-receipted Result match"));
+                };
+                if operation != scrutinee || arms.len() != 2 {
+                    return Err(fail(
+                        "source CFG Result dispatch differs from its operation receipt",
+                    ));
+                }
+                let mut projected_arms = Vec::new();
+                for edge_id in arms {
+                    let source_edge = cfg
+                        .reachable_edges
+                        .get(edge_id)
+                        .ok_or_else(|| fail("Result dispatch edge disappeared"))?;
+                    let arm_index = expected_arms
+                        .iter()
+                        .position(|candidate| candidate.0 == source_edge.source.node)
+                        .ok_or_else(|| {
+                            fail("Result dispatch edge has an unreceipted source arm")
+                        })?;
+                    let (source_arm, variant, target) = &expected_arms[arm_index];
+                    if target != &source_edge.to {
+                        return Err(fail("Result arm target differs from the Checker CFG"));
+                    }
+                    let binding = block_parameters
+                        .get(target)
+                        .and_then(|parameters| parameters.first())
+                        .ok_or_else(|| fail("Result arm target has no payload block parameter"))?;
+                    let variant_id = NodeId(format!("builtin:variant:Result::{variant}"));
+                    let (payload_ty, ownership, glue) = if variant == "Ok" {
+                        (
+                            map_type.clone(),
+                            MirOwnership::Move,
+                            MirGlueKind::OrdinaryMapOwnedAnyV2,
+                        )
+                    } else {
+                        (i32_type.clone(), MirOwnership::Copy, MirGlueKind::Noop)
+                    };
+                    let expected_local = if *variant == "Ok" {
+                        if operation == &receipt.map_new_operation {
+                            &receipt.initial_root
+                        } else {
+                            &receipt
+                                .set_branches
+                                .iter()
+                                .find(|set| set.operation == *operation)
+                                .ok_or_else(|| fail("Set operation lost its source branch"))?
+                                .output_root
+                        }
+                    } else if operation == &receipt.map_new_operation {
+                        &receipt.map_new_error_local
+                    } else {
+                        &receipt
+                            .set_branches
+                            .iter()
+                            .find(|set| set.operation == *operation)
+                            .ok_or_else(|| fail("Set operation lost its source branch"))?
+                            .error_local
+                    };
+                    if *source_arm != source_edge.source.node
+                        || binding.value != local_value(expected_local)?
+                    {
+                        return Err(fail(
+                            "Result payload parameter differs from its Checker pattern local",
+                        ));
+                    }
+                    projected_arms.push(MirSwitchArm {
+                        edge: edge_value(edge_id)?,
+                        target: block_value(&source_edge.to)?,
+                        arguments: Vec::new(),
+                        bindings: vec![super::MirSwitchBinding {
+                            parameter: binding.value.clone(),
+                            projection: MirVariantProjectionContract {
+                                nominal: NominalTypeId::new("builtin:type:Result")
+                                    .map_err(|error| error.to_string())?,
+                                variant: variant_id.clone(),
+                                field: NodeId(format!("{}/payload:0", variant_id.0)),
+                                field_index: 0,
+                                arity: 1,
+                                field_ty: payload_ty,
+                                ownership,
+                                move_out_glue: glue,
+                            },
+                            nested_tuple: None,
+                        }],
+                        case: MirSwitchCase::Variant(variant_id),
+                    });
+                }
+                MirTerminator::SwitchMove {
+                    scrutinee: node_value(scrutinee)?,
+                    arms: projected_arms,
+                }
+            }
+            Terminator::Goto { edge } => {
+                let source_edge = cfg
+                    .reachable_edges
+                    .get(edge)
+                    .ok_or_else(|| fail("source Goto edge is absent"))?;
+                if source_edge.from != *source_id {
+                    return Err(fail("source Goto edge has another source block"));
+                }
+                let arm = &source_edge.source.node;
+                let parent_match = arm_parent.get(arm).ok_or_else(|| {
+                    fail("source Goto edge is not anchored at a receipted Result arm")
+                })?;
+                if match_joins.get(parent_match) != Some(&source_edge.to) {
+                    return Err(fail(
+                        "source Goto target is not the exact parent Result match join",
+                    ));
+                }
+                let result_node = if let Some(join_match) = joins_by_block.get(source_id) {
+                    let arm_result = arm_results
+                        .get(arm)
+                        .ok_or_else(|| fail("nested Result join edge has no source arm result"))?;
+                    if arm_result != join_match {
+                        return Err(fail(
+                            "nested Result join does not yield its exact match expression",
+                        ));
+                    }
+                    join_match
+                } else {
+                    arm_results
+                        .get(arm)
+                        .ok_or_else(|| fail("Result arm has no source-bound expression result"))?
+                };
+                let argument = node_value(result_node)?;
+                let target_parameters = block_parameters
+                    .get(&source_edge.to)
+                    .ok_or_else(|| fail("source Goto target has no exact join parameter"))?;
+                if target_parameters.len() != 1 {
+                    return Err(fail("Result match join must have one value parameter"));
+                }
+                MirTerminator::Goto {
+                    edge: edge_value(edge)?,
+                    target: block_value(&source_edge.to)?,
+                    arguments: vec![argument],
+                }
+            }
+            Terminator::Return { value, implicit } => {
+                if !implicit || value.as_ref() != Some(&receipt.map_new_match) {
+                    return Err(fail(
+                        "source CFG return is not the unique outer Result match",
+                    ));
+                }
+                MirTerminator::Return {
+                    value: Some(node_value(value.as_ref().expect("checked value"))?),
+                }
+            }
+            Terminator::Break { .. }
+            | Terminator::Continue { .. }
+            | Terminator::Branch { .. }
+            | Terminator::Diverge
+            | Terminator::Unreachable => {
+                return Err(fail(
+                    "source CFG contains a control-flow form outside this Result profile",
+                ));
+            }
+        };
+        let id = block_value(source_id)?;
+        let parameters = block_parameters.remove(source_id).unwrap_or_default();
+        blocks.insert(
+            id.clone(),
+            MirBlock {
+                id,
+                parameters,
+                instructions,
+                terminator,
+            },
+        );
+    }
+    if !explicit.is_empty()
+        || !block_parameters.is_empty()
+        || blocks.len() != cfg.reachable_blocks.len()
+    {
+        return Err(fail(
+            "source-bound operation point or CFG block was not projected exactly once",
+        ));
+    }
+    let mut expected_drop_ids = receipt
+        .paths
+        .iter()
+        .flat_map(|path| path.drops.iter())
+        .map(|drop| (drop.local.clone(), drop.point.clone(), drop.place_index))
+        .collect::<Vec<_>>();
+    let mut observed_drop_ids = receipt
+        .root_settlements
+        .iter()
+        .map(|drop| (drop.local.clone(), drop.point.clone(), drop.place_index))
+        .chain(
+            receipt
+                .payload_settlements
+                .iter()
+                .map(|drop| (drop.local.clone(), drop.point.clone(), drop.place_index)),
+        )
+        .collect::<Vec<_>>();
+    expected_drop_ids.sort();
+    observed_drop_ids.sort();
+    let root_drop_id_set = root_drop_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let payload_drop_id_set = payload_drop_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let set_instruction_id_set = set_instruction_ids.iter().cloned().collect::<BTreeSet<_>>();
+    if expected_drop_ids != observed_drop_ids
+        || root_drop_ids.len() != receipt.root_settlements.len()
+        || payload_drop_ids.len() != receipt.payload_settlements.len()
+        || set_instruction_ids.len() != expected_set_count
+        || root_drop_id_set.len() != root_drop_ids.len()
+        || payload_drop_id_set.len() != payload_drop_ids.len()
+        || set_instruction_id_set.len() != set_instruction_ids.len()
+    {
+        return Err(fail(
+            "path-local root/payload Drop obligations do not match their exact source paths",
+        ));
+    }
+
+    let mut ownership = ownership_summary(
+        analysis,
+        Some(type_catalog),
+        &callable.signature.generic_parameters,
+        None,
+        None,
+        Some(Box::new(receipt.clone())),
+        None,
+        None,
+    );
+    let mut function = MirFunction {
+        owner: callable.owner.clone(),
+        parameters: Vec::new(),
+        parameter_permissions: Some(Vec::new()),
+        result: values_type,
+        entry: block_value(&cfg.entry)?,
+        values,
+        blocks,
+        contracts: Vec::new(),
+        proof_worklist: None,
+        ownership: std::mem::take(&mut ownership),
+    };
+    function.contracts = super::contracts::lower_contracts(callable, &function)
+        .map_err(|errors| fail(&format!("source contract lowering failed: {errors:?}")))?;
+    function.proof_worklist =
+        super::contracts::lower_proof_worklist(callable, &function).map_err(|errors| {
+            fail(&format!(
+                "source proof-worklist lowering failed: {errors:?}"
+            ))
+        })?;
+    function.validate().map_err(|errors| {
+        format!("generated Result producer CFG is structurally invalid: {errors:?}")
+    })?;
+    Ok(function)
+}
+
+pub(super) fn ordinary_map_new_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2NewResultReceipt,
+) -> MirFunction {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    let value = |local: &ResolvedLocalId| {
+        MirValueId::new(format!("local:{}", local.0 .0)).expect("non-empty local MIR value id")
+    };
+    let block = |id: &crate::core::cfg::BasicBlockId| {
+        MirBlockId::new(id.0 .0.clone()).expect("non-empty CFG block id")
+    };
+    let edge = |id: &crate::core::cfg::EdgeId| {
+        MirEdgeId::new(id.0 .0.clone()).expect("non-empty CFG edge id")
+    };
+    let result = value(&receipt.result_local);
+    let root = value(&receipt.root_local);
+    let status = value(&receipt.status_local);
+    let size = value(&receipt.size_local);
+    let joined = MirValueId::new(format!("expr:{}", receipt.match_node.0))
+        .expect("non-empty expr MIR value id");
+    let result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let i32_ty = primitive_type_id(PrimitiveType::I32);
+    let values = [
+        (result.clone(), result_ty),
+        (root.clone(), root_ty.clone()),
+        (status.clone(), i32_ty.clone()),
+        (size.clone(), i32_ty.clone()),
+        (joined.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| MirInstruction {
+        id: MirInstructionId::new(format!("inst:ordinary_map_new_result:{name}:{}", point.0))
+            .expect("non-empty MIR instruction id"),
+        kind,
+    };
+    let arm = |name: &str, target, edge, parameter, field_ty, ownership, move_out_glue| {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge,
+            target,
+            arguments: vec![],
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+    let entry = block(&receipt.entry);
+    let ok = block(&receipt.ok_block);
+    let err = block(&receipt.err_block);
+    let join = block(&receipt.join);
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new",
+                &receipt.operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: result.clone(),
+                },
+            )],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: result,
+                arms: vec![
+                    arm(
+                        "Ok",
+                        ok.clone(),
+                        edge(&receipt.ok_edge),
+                        root.clone(),
+                        root_ty,
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    arm(
+                        "Err",
+                        err.clone(),
+                        edge(&receipt.err_edge),
+                        status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: ok,
+            parameters: vec![MirBlockParameter {
+                value: root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "size",
+                    &receipt.size_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                        result: size.clone(),
+                        root: root.clone(),
+                    },
+                ),
+                instruction(
+                    "drop",
+                    &receipt.root_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root },
+                ),
+            ],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.ok_join_edge),
+                target: join.clone(),
+                arguments: vec![size],
+            },
+        },
+        MirBlock {
+            id: err,
+            parameters: vec![MirBlockParameter {
+                value: status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.err_join_edge),
+                target: join.clone(),
+                arguments: vec![status],
+            },
+        },
+        MirBlock {
+            id: join,
+            parameters: vec![MirBlockParameter {
+                value: joined.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(joined),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_new_result: Some(Box::new(receipt.clone())),
+        checker_ordinary_map_owned_any_v2_new_result_commitment: Some(format!("{receipt:?}")),
+        ..MirOwnershipSummary::default()
+    };
+    MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty.clone(),
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    }
+}
+
+/// Mechanical projection of the exact Checker Map-New/Set-Result lineage.
+/// The source receipt, rather than the old bare-root Map action table or the
+/// NewResult-only receipt, authorizes both Results and the old-root cleanup
+/// on Set success and Set capacity failure.
+pub(crate) fn ordinary_map_set_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetLineageReceipt,
+) -> MirFunction {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    let value = |local: &ResolvedLocalId| {
+        MirValueId::new(format!("local:{}", local.0 .0)).expect("non-empty local MIR value id")
+    };
+    let block = |id: &crate::core::cfg::BasicBlockId| {
+        MirBlockId::new(id.0 .0.clone()).expect("non-empty CFG block id")
+    };
+    let edge = |id: &crate::core::cfg::EdgeId| {
+        MirEdgeId::new(id.0 .0.clone()).expect("non-empty CFG edge id")
+    };
+    let new_result = value(&receipt.new_result_local);
+    let old_root = value(&receipt.initial_root_local);
+    let set_result = value(&receipt.set_result_local);
+    let updated_root = value(&receipt.updated_root_local);
+    let inner_status = value(&receipt.inner_status_local);
+    let outer_status = value(&receipt.outer_status_local);
+    let size = value(&receipt.size_local);
+    let key = MirValueId::new("literal:ordinary_map_set_lineage:answer")
+        .expect("non-empty literal MIR value id");
+    let payload = MirValueId::new("literal:ordinary_map_set_lineage:42")
+        .expect("non-empty literal MIR value id");
+    let inner_join_value = MirValueId::new(format!("expr:{}", receipt.inner_match.0))
+        .expect("non-empty expr MIR value id");
+    let return_value = MirValueId::new(format!("expr:{}", receipt.outer_match.0))
+        .expect("non-empty expr MIR value id");
+    let result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let i32_ty = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let values = [
+        (new_result.clone(), result_ty.clone()),
+        (old_root.clone(), root_ty.clone()),
+        (set_result.clone(), result_ty.clone()),
+        (updated_root.clone(), root_ty.clone()),
+        (inner_status.clone(), i32_ty.clone()),
+        (outer_status.clone(), i32_ty.clone()),
+        (size.clone(), i32_ty.clone()),
+        (key.clone(), string_ty),
+        (payload.clone(), i32_ty.clone()),
+        (inner_join_value.clone(), i32_ty.clone()),
+        (return_value.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| MirInstruction {
+        id: MirInstructionId::new(format!("inst:ordinary_map_set_lineage:{name}:{}", point.0))
+            .expect("non-empty MIR instruction id"),
+        kind,
+    };
+    let result_arm =
+        |name: &str, target, arm_edge, parameter, field_ty, ownership, move_out_glue| {
+            let variant = NodeId(format!("builtin:variant:Result::{name}"));
+            MirSwitchArm {
+                edge: arm_edge,
+                target,
+                arguments: vec![],
+                bindings: vec![MirSwitchBinding {
+                    parameter,
+                    projection: MirVariantProjectionContract {
+                        nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                        variant: variant.clone(),
+                        field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                        field_index: 0,
+                        arity: 1,
+                        field_ty,
+                        ownership,
+                        move_out_glue,
+                    },
+                    nested_tuple: None,
+                }],
+                case: MirSwitchCase::Variant(variant),
+            }
+        };
+    let entry = block(&receipt.entry);
+    let outer_ok = block(&receipt.outer_ok_block);
+    let outer_err = block(&receipt.outer_err_block);
+    let inner_ok = block(&receipt.inner_ok_block);
+    let inner_err = block(&receipt.inner_err_block);
+    let inner_join = block(&receipt.inner_join_block);
+    let outer_join = block(&receipt.outer_join_block);
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new_result",
+                &receipt.new_operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: new_result.clone(),
+                },
+            )],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: new_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        outer_ok.clone(),
+                        edge(&receipt.outer_ok_edge),
+                        old_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        outer_err.clone(),
+                        edge(&receipt.outer_err_edge),
+                        outer_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: old_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Const {
+                        result: key.clone(),
+                        literal: ResolvedLiteral::String("answer".into()),
+                    },
+                ),
+                instruction(
+                    "value",
+                    &receipt.set_operation,
+                    MirInstructionKind::Const {
+                        result: payload.clone(),
+                        literal: ResolvedLiteral::Int(42),
+                    },
+                ),
+                instruction(
+                    "set_result",
+                    &receipt.set_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                        result: set_result.clone(),
+                        source: old_root.clone(),
+                        key: key.clone(),
+                        value: payload.clone(),
+                    },
+                ),
+                instruction(
+                    "drop_set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Drop { value: key.clone() },
+                ),
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: set_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        inner_ok.clone(),
+                        edge(&receipt.inner_ok_edge),
+                        updated_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        inner_err.clone(),
+                        edge(&receipt.inner_err_edge),
+                        inner_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: outer_status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.outer_err_join_edge),
+                target: outer_join.clone(),
+                arguments: vec![outer_status.clone()],
+            },
+        },
+        MirBlock {
+            id: inner_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: updated_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "drop_old_root",
+                    &receipt.old_root_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: old_root.clone(),
+                    },
+                ),
+                instruction(
+                    "size",
+                    &receipt.size_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                        result: size.clone(),
+                        root: updated_root.clone(),
+                    },
+                ),
+                instruction(
+                    "drop_updated_root",
+                    &receipt.updated_root_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: updated_root.clone(),
+                    },
+                ),
+            ],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.inner_ok_join_edge),
+                target: inner_join.clone(),
+                arguments: vec![size.clone()],
+            },
+        },
+        MirBlock {
+            id: inner_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: inner_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_error_root",
+                &receipt.inner_error_root_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: old_root.clone(),
+                },
+            )],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.inner_err_join_edge),
+                target: inner_join.clone(),
+                arguments: vec![inner_status.clone()],
+            },
+        },
+        MirBlock {
+            id: inner_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: inner_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.inner_to_outer_join_edge),
+                target: outer_join.clone(),
+                arguments: vec![inner_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: outer_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: return_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(return_value),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_set_lineage: Some(Box::new(receipt.clone())),
+        checker_ordinary_map_owned_any_v2_set_lineage_commitment: Some(format!("{receipt:?}")),
+        ..MirOwnershipSummary::default()
+    };
+    MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty.clone(),
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    }
+}
+
+/// Mechanical projection of the independent New/Set/Get-i32 Result
+/// lineage. Every MIR block and edge keeps its checked CFG identity, while
+/// the source collector remains the sole authority for this operation shape.
+pub(crate) fn ordinary_map_set_get_i32_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::cfg::{BasicBlockId as CfgBlockId, EdgeId as CfgEdgeId, Terminator};
+    use crate::core::ownership::ManagedAnyCfgMatchCase;
+
+    let fail = |message: &str| format!("ordinary Map Set/Get-i32 MIR lowering: {message}");
+    let block = |id: &CfgBlockId| -> Result<MirBlockId, String> {
+        MirBlockId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge = |id: &CfgEdgeId| -> Result<MirEdgeId, String> {
+        MirEdgeId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let value = |local: &ResolvedLocalId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let source_arm = |dispatch: &CfgBlockId,
+                      arm: &NodeId,
+                      variant: &str|
+     -> Result<(MirEdgeId, CfgBlockId), String> {
+        let arms = receipt
+            .cfg
+            .match_arms
+            .get(dispatch)
+            .ok_or_else(|| fail("source match has no Checker arm receipt"))?;
+        let mut matching = arms.iter().filter(|candidate| {
+            candidate.source_arm == *arm
+                && !candidate.guarded
+                && candidate.case
+                    == ManagedAnyCfgMatchCase::Variant(NodeId(format!(
+                        "builtin:variant:Result::{variant}"
+                    )))
+        });
+        let matched = matching
+            .next()
+            .ok_or_else(|| fail("source Result arm is absent from the Checker CFG"))?;
+        if matching.next().is_some() {
+            return Err(fail("source Result arm is duplicated in the Checker CFG"));
+        }
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(&matched.edge)
+            .ok_or_else(|| fail("source Result arm edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *dispatch {
+            return Err(fail("source Result arm edge has another source block"));
+        }
+        Ok((edge(&matched.edge)?, cfg_edge.to.clone()))
+    };
+    let goto_edge = |source: &CfgBlockId| -> Result<(MirEdgeId, CfgBlockId), String> {
+        let cfg_block = receipt
+            .cfg
+            .reachable_blocks
+            .get(source)
+            .ok_or_else(|| fail("source join block is absent from the Checker CFG"))?;
+        let Terminator::Goto { edge: edge_id } = &cfg_block.terminator else {
+            return Err(fail("expected a source join Goto edge"));
+        };
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(edge_id)
+            .ok_or_else(|| fail("source join edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *source {
+            return Err(fail("source join edge has another source block"));
+        }
+        Ok((edge(edge_id)?, cfg_edge.to.clone()))
+    };
+
+    if receipt.cfg.reachable_blocks.len() < 10 || receipt.cfg.reachable_edges.len() < 12 {
+        return Err(fail("Checker source receipt has another CFG size"));
+    }
+    let entry_cfg = receipt.entry.clone();
+    let (outer_ok_edge, outer_ok_cfg) = source_arm(&entry_cfg, &receipt.outer_ok_arm, "Ok")?;
+    let (outer_err_edge, outer_err_cfg) = source_arm(&entry_cfg, &receipt.outer_err_arm, "Err")?;
+    let (set_ok_edge, set_ok_cfg) = source_arm(&outer_ok_cfg, &receipt.set_ok_arm, "Ok")?;
+    let (set_err_edge, set_err_cfg) = source_arm(&outer_ok_cfg, &receipt.set_err_arm, "Err")?;
+    let (get_ok_edge, get_ok_cfg) = source_arm(&set_ok_cfg, &receipt.get_ok_arm, "Ok")?;
+    let (get_err_edge, get_err_cfg) = source_arm(&set_ok_cfg, &receipt.get_err_arm, "Err")?;
+    let (get_ok_join_edge, get_join_cfg) = goto_edge(&get_ok_cfg)?;
+    let (get_err_join_edge, get_err_join_cfg) = goto_edge(&get_err_cfg)?;
+    let (set_err_join_edge, set_join_from_err_cfg) = goto_edge(&set_err_cfg)?;
+    let (get_to_set_join_edge, set_join_from_get_cfg) = goto_edge(&get_join_cfg)?;
+    let (set_to_outer_join_edge, outer_join_from_set_cfg) = goto_edge(&set_join_from_get_cfg)?;
+    let (outer_err_join_edge, outer_join_from_err_cfg) = goto_edge(&outer_err_cfg)?;
+    if get_join_cfg != get_err_join_cfg
+        || set_join_from_err_cfg != set_join_from_get_cfg
+        || outer_join_from_set_cfg != outer_join_from_err_cfg
+    {
+        return Err(fail(
+            "Checker source receipt has a non-canonical join topology",
+        ));
+    }
+
+    let new_result = value(&receipt.new_result_local)?;
+    let old_root = value(&receipt.initial_root_local)?;
+    let outer_status = value(&receipt.outer_status_local)?;
+    let set_result = value(&receipt.set_result_local)?;
+    let updated_root = value(&receipt.updated_root_local)?;
+    let set_status = value(&receipt.set_error_local)?;
+    let get_result = value(&receipt.get_result_local)?;
+    let get_ok_value = value(&receipt.get_ok_local)?;
+    let get_err_value = value(&receipt.get_err_local)?;
+    let return_value = MirValueId::new(format!("expr:{}", receipt.outer_match.0))
+        .map_err(|error| error.to_string())?;
+    let get_join_value = MirValueId::new(format!("expr:{}", receipt.get_match.0))
+        .map_err(|error| error.to_string())?;
+    let set_join_value = MirValueId::new("expr:ordinary-map-set-get-i32:set-join")
+        .map_err(|error| error.to_string())?;
+    let set_key = MirValueId::new("literal:ordinary_map_set_get_i32_lineage:set-answer")
+        .map_err(|error| error.to_string())?;
+    let get_key = MirValueId::new("literal:ordinary_map_set_get_i32_lineage:get-answer")
+        .map_err(|error| error.to_string())?;
+    let set_payload = MirValueId::new("literal:ordinary_map_set_get_i32_lineage:42")
+        .map_err(|error| error.to_string())?;
+
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let i32_ty = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let values = [
+        (new_result.clone(), root_result_ty.clone()),
+        (old_root.clone(), root_ty.clone()),
+        (outer_status.clone(), i32_ty.clone()),
+        (set_result.clone(), root_result_ty.clone()),
+        (updated_root.clone(), root_ty.clone()),
+        (set_status.clone(), i32_ty.clone()),
+        (get_result.clone(), receipt.get_result_type.clone()),
+        (get_ok_value.clone(), i32_ty.clone()),
+        (get_err_value.clone(), i32_ty.clone()),
+        (return_value.clone(), i32_ty.clone()),
+        (get_join_value.clone(), i32_ty.clone()),
+        (set_join_value.clone(), i32_ty.clone()),
+        (set_key.clone(), string_ty.clone()),
+        (get_key.clone(), string_ty),
+        (set_payload.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:ordinary_map_set_get_i32_lineage:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind|
+     -> MirSwitchArm {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: vec![],
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block(&entry_cfg)?;
+    let outer_ok = block(&outer_ok_cfg)?;
+    let outer_err = block(&outer_err_cfg)?;
+    let set_ok = block(&set_ok_cfg)?;
+    let set_err = block(&set_err_cfg)?;
+    let get_ok = block(&get_ok_cfg)?;
+    let get_err = block(&get_err_cfg)?;
+    let get_join = block(&get_join_cfg)?;
+    let set_join = block(&set_join_from_get_cfg)?;
+    let outer_join = block(&outer_join_from_set_cfg)?;
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new_result",
+                &receipt.new_operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: new_result.clone(),
+                },
+            )?],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: new_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        outer_ok.clone(),
+                        outer_ok_edge,
+                        old_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        outer_err.clone(),
+                        outer_err_edge,
+                        outer_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: old_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Const {
+                        result: set_key.clone(),
+                        literal: ResolvedLiteral::String("answer".into()),
+                    },
+                )?,
+                instruction(
+                    "set_payload",
+                    &receipt.set_operation,
+                    MirInstructionKind::Const {
+                        result: set_payload.clone(),
+                        literal: ResolvedLiteral::Int(42),
+                    },
+                )?,
+                instruction(
+                    "set_result",
+                    &receipt.set_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                        result: set_result.clone(),
+                        source: old_root.clone(),
+                        key: set_key.clone(),
+                        value: set_payload.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Drop {
+                        value: set_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: set_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        set_ok.clone(),
+                        set_ok_edge,
+                        updated_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        set_err.clone(),
+                        set_err_edge,
+                        set_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: outer_status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: outer_err_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![outer_status.clone()],
+            },
+        },
+        MirBlock {
+            id: set_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: updated_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "drop_old_root",
+                    &receipt.old_root_set_ok_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: old_root.clone(),
+                    },
+                )?,
+                instruction(
+                    "get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Const {
+                        result: get_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "get_i32_result",
+                    &receipt.get_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetI32Result {
+                        result: get_result.clone(),
+                        root: updated_root.clone(),
+                        key: get_key.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Drop {
+                        value: get_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::Switch {
+                scrutinee: get_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        get_ok.clone(),
+                        get_ok_edge,
+                        get_ok_value.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                    result_arm(
+                        "Err",
+                        get_err.clone(),
+                        get_err_edge,
+                        get_err_value.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: set_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_set_error_root",
+                &receipt.old_root_set_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: old_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: set_err_join_edge,
+                target: set_join.clone(),
+                arguments: vec![set_status.clone()],
+            },
+        },
+        MirBlock {
+            id: get_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_ok_value.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_get_ok_root",
+                &receipt.updated_root_get_ok_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: updated_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: get_ok_join_edge,
+                target: get_join.clone(),
+                arguments: vec![get_ok_value.clone()],
+            },
+        },
+        MirBlock {
+            id: get_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_err_value.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_get_err_root",
+                &receipt.updated_root_get_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: updated_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: get_err_join_edge,
+                target: get_join.clone(),
+                arguments: vec![get_err_value.clone()],
+            },
+        },
+        MirBlock {
+            id: get_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: get_to_set_join_edge,
+                target: set_join.clone(),
+                arguments: vec![get_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: set_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: set_to_outer_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![set_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: outer_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: return_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(return_value),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_set_get_i32_lineage: Some(Box::new(receipt.clone())),
+        checker_ordinary_map_owned_any_v2_set_get_i32_lineage_commitment: Some(format!(
+            "{receipt:?}"
+        )),
+        ..MirOwnershipSummary::default()
+    };
+    Ok(MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty,
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    })
+}
+
+/// Mechanical projection of the exact fallible New/Set/GetAny checked-i32
+/// lineage. The Checker receipt supplies all source CFG identities and the
+/// complete New/Set/GetAny attempt census; the broad owner-v2 action ledger
+/// is not consulted as authority.
+pub(crate) fn ordinary_map_set_get_any_i32_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use super::MirProjection;
+    use crate::core::cfg::{BasicBlockId as CfgBlockId, EdgeId as CfgEdgeId, EdgeKind, Terminator};
+    use crate::core::ownership::ManagedAnyCfgMatchCase;
+
+    let fail = |message: &str| format!("ordinary Map Set/GetAny-i32 MIR lowering: {message}");
+    let block = |id: &CfgBlockId| -> Result<MirBlockId, String> {
+        MirBlockId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge = |id: &CfgEdgeId| -> Result<MirEdgeId, String> {
+        MirEdgeId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let value = |local: &ResolvedLocalId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let source_arm = |dispatch: &CfgBlockId,
+                      arm: &NodeId,
+                      variant: &str|
+     -> Result<(MirEdgeId, CfgBlockId), String> {
+        let arms = receipt
+            .cfg
+            .match_arms
+            .get(dispatch)
+            .ok_or_else(|| fail("source Result match has no Checker arm receipt"))?;
+        let mut matching = arms.iter().filter(|candidate| {
+            candidate.source_arm == *arm
+                && !candidate.guarded
+                && candidate.case
+                    == ManagedAnyCfgMatchCase::Variant(NodeId(format!(
+                        "builtin:variant:Result::{variant}"
+                    )))
+        });
+        let matched = matching
+            .next()
+            .ok_or_else(|| fail("source Result arm is absent from the Checker CFG"))?;
+        if matching.next().is_some() {
+            return Err(fail("source Result arm is duplicated in the Checker CFG"));
+        }
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(&matched.edge)
+            .ok_or_else(|| fail("source Result edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *dispatch || cfg_edge.kind != EdgeKind::MatchArm {
+            return Err(fail("source Result edge has another dispatch source/kind"));
+        }
+        Ok((edge(&matched.edge)?, cfg_edge.to.clone()))
+    };
+    let goto_edge = |source: &CfgBlockId| -> Result<(MirEdgeId, CfgBlockId), String> {
+        let cfg_block = receipt
+            .cfg
+            .reachable_blocks
+            .get(source)
+            .ok_or_else(|| fail("source join block is absent from the Checker CFG"))?;
+        let Terminator::Goto { edge: edge_id } = &cfg_block.terminator else {
+            return Err(fail("expected a source join Goto edge"));
+        };
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(edge_id)
+            .ok_or_else(|| fail("source join edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *source {
+            return Err(fail("source join edge has another source block"));
+        }
+        Ok((edge(edge_id)?, cfg_edge.to.clone()))
+    };
+
+    if receipt.profile_version
+        != crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyI32LineageProfileVersion::V1
+        || receipt.owner != receipt.cfg.owner
+        || !receipt.cfg.reachable_blocks.contains_key(&receipt.entry)
+        || receipt.cfg.reachable_blocks.len() < 10
+        || receipt.cfg.reachable_edges.len() < 12
+        || receipt.operations.len() != 3
+        || receipt.set_key_value != "answer"
+        || !matches!(receipt.get_key_value.as_str(), "answer" | "absent")
+        || receipt.set_i32_value != 42
+        || receipt.get_receiver_local != receipt.updated_root_local
+        || receipt.initial_root_local == receipt.updated_root_local
+        || receipt.old_root_set_ok_drop == receipt.old_root_set_err_drop
+        || receipt.pair_drop == receipt.updated_root_get_drop
+        || receipt.set_i32_value < i32::MIN as i64
+        || receipt.set_i32_value > i32::MAX as i64
+    {
+        return Err(fail(&format!(
+            "Checker receipt identity, version, or exact operation census changed (version={:?}, owner_match={}, entry_present={}, blocks={}, edges={}, operations={}, set_key={:?}, get_key={:?}, set_value={}, root_receiver_match={}, roots_distinct={}, root_drops_distinct={}, pair_root_drops_distinct={})",
+            receipt.profile_version,
+            receipt.owner == receipt.cfg.owner,
+            receipt.cfg.reachable_blocks.contains_key(&receipt.entry),
+            receipt.cfg.reachable_blocks.len(),
+            receipt.cfg.reachable_edges.len(),
+            receipt.operations.len(),
+            receipt.set_key_value,
+            receipt.get_key_value,
+            receipt.set_i32_value,
+            receipt.get_receiver_local == receipt.updated_root_local,
+            receipt.initial_root_local != receipt.updated_root_local,
+            receipt.old_root_set_ok_drop != receipt.old_root_set_err_drop,
+            receipt.pair_drop != receipt.updated_root_get_drop,
+        )));
+    }
+
+    let entry_cfg = receipt.entry.clone();
+    let (outer_ok_edge, outer_ok_cfg) = source_arm(&entry_cfg, &receipt.outer_ok_arm, "Ok")?;
+    let (outer_err_edge, outer_err_cfg) = source_arm(&entry_cfg, &receipt.outer_err_arm, "Err")?;
+    let (set_ok_edge, set_ok_cfg) = source_arm(&outer_ok_cfg, &receipt.set_ok_arm, "Ok")?;
+    let (set_err_edge, set_err_cfg) = source_arm(&outer_ok_cfg, &receipt.set_err_arm, "Err")?;
+
+    let set_ok_source = receipt
+        .cfg
+        .reachable_blocks
+        .get(&set_ok_cfg)
+        .ok_or_else(|| fail("Set Ok source block is absent from the Checker CFG"))?;
+    let Terminator::Branch {
+        condition,
+        then_edge,
+        else_edge,
+    } = &set_ok_source.terminator
+    else {
+        return Err(fail(
+            "Set Ok source block must end in the found Bool branch",
+        ));
+    };
+    if *condition != receipt.found_result {
+        return Err(fail(
+            "found Bool branch condition differs from its Checker identity",
+        ));
+    }
+    let then_cfg_edge = receipt
+        .cfg
+        .reachable_edges
+        .get(then_edge)
+        .filter(|candidate| candidate.from == set_ok_cfg && candidate.kind == EdgeKind::Then)
+        .ok_or_else(|| fail("found true edge is absent from the Checker CFG"))?;
+    let else_cfg_edge = receipt
+        .cfg
+        .reachable_edges
+        .get(else_edge)
+        .filter(|candidate| candidate.from == set_ok_cfg && candidate.kind == EdgeKind::Else)
+        .ok_or_else(|| fail("found false edge is absent from the Checker CFG"))?;
+    let found_true_cfg = then_cfg_edge.to.clone();
+    let found_false_cfg = else_cfg_edge.to.clone();
+    let (found_true_edge, found_join_from_true_cfg) = goto_edge(&found_true_cfg)?;
+    let (found_false_edge, found_join_from_false_cfg) = goto_edge(&found_false_cfg)?;
+    if found_join_from_true_cfg != found_join_from_false_cfg {
+        return Err(fail(
+            "found true/false paths do not join at one Checker block",
+        ));
+    }
+    let found_join_cfg = found_join_from_true_cfg;
+    let (found_to_set_join_edge, set_join_from_ok_cfg) = goto_edge(&found_join_cfg)?;
+    let (set_err_join_edge, set_join_from_err_cfg) = goto_edge(&set_err_cfg)?;
+    if set_join_from_ok_cfg != set_join_from_err_cfg {
+        return Err(fail(
+            "Set Ok and Err paths do not join at one Checker block",
+        ));
+    }
+    let set_join_cfg = set_join_from_ok_cfg;
+    let (set_to_outer_join_edge, outer_join_from_set_cfg) = goto_edge(&set_join_cfg)?;
+    let (outer_err_join_edge, outer_join_from_err_cfg) = goto_edge(&outer_err_cfg)?;
+    if outer_join_from_set_cfg != outer_join_from_err_cfg {
+        return Err(fail(
+            "outer New Ok and Err paths do not join at one Checker block",
+        ));
+    }
+    let outer_join_cfg = outer_join_from_set_cfg;
+
+    let new_result = value(&receipt.new_result_local)?;
+    let old_root = value(&receipt.initial_root_local)?;
+    let outer_status = value(&receipt.outer_status_local)?;
+    let set_result = value(&receipt.set_result_local)?;
+    let updated_root = value(&receipt.updated_root_local)?;
+    let set_status = value(&receipt.set_error_local)?;
+    let pair = value(&receipt.get_result_local)?;
+    let found_expression = MirValueId::new(format!("expr:{}", receipt.pair_found_projection.0))
+        .map_err(|error| error.to_string())?;
+    let found_local = value(&receipt.found_local)?;
+    let unpack_expression = MirValueId::new(format!("expr:{}", receipt.unpack_operation.0))
+        .map_err(|error| error.to_string())?;
+    let unpack_local = value(&receipt.unpack_result_local)?;
+    let return_value = MirValueId::new(format!("expr:{}", receipt.outer_match.0))
+        .map_err(|error| error.to_string())?;
+    let found_result = MirValueId::new(format!("expr:{}", receipt.found_result.0))
+        .map_err(|error| error.to_string())?;
+    let set_match_result = MirValueId::new(format!("expr:{}", receipt.set_match.0))
+        .map_err(|error| error.to_string())?;
+    let set_key = MirValueId::new(format!("literal:{}", receipt.set_key.0))
+        .map_err(|error| error.to_string())?;
+    let get_key = MirValueId::new(format!("literal:{}", receipt.get_key.0))
+        .map_err(|error| error.to_string())?;
+    let set_payload = MirValueId::new(format!("literal:{}", receipt.set_value.0))
+        .map_err(|error| error.to_string())?;
+    let zero = MirValueId::new(format!("literal:{}", receipt.found_false_arm.0))
+        .map_err(|error| error.to_string())?;
+
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let bool_ty = crate::core::ir::primitive_type_id(PrimitiveType::Bool);
+    let i32_ty = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let pair_ty = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let _any_ty = super::types::ordinary_map_owned_any_v2_payload_type_id();
+    let values = [
+        (new_result.clone(), root_result_ty.clone()),
+        (old_root.clone(), root_ty.clone()),
+        (outer_status.clone(), i32_ty.clone()),
+        (set_result.clone(), root_result_ty.clone()),
+        (updated_root.clone(), root_ty.clone()),
+        (set_status.clone(), i32_ty.clone()),
+        (pair.clone(), pair_ty),
+        (found_expression.clone(), bool_ty.clone()),
+        (found_local.clone(), bool_ty.clone()),
+        (unpack_expression.clone(), i32_ty.clone()),
+        (unpack_local.clone(), i32_ty.clone()),
+        (return_value.clone(), i32_ty.clone()),
+        (found_result.clone(), i32_ty.clone()),
+        (set_match_result.clone(), i32_ty.clone()),
+        (set_key.clone(), string_ty.clone()),
+        (get_key.clone(), string_ty),
+        (set_payload.clone(), i32_ty.clone()),
+        (zero.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:ordinary_map_set_get_any_i32_lineage:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind|
+     -> MirSwitchArm {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: vec![],
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block(&entry_cfg)?;
+    let outer_ok = block(&outer_ok_cfg)?;
+    let outer_err = block(&outer_err_cfg)?;
+    let set_ok = block(&set_ok_cfg)?;
+    let set_err = block(&set_err_cfg)?;
+    let found_true = block(&found_true_cfg)?;
+    let found_false = block(&found_false_cfg)?;
+    let found_join = block(&found_join_cfg)?;
+    let set_join = block(&set_join_cfg)?;
+    let outer_join = block(&outer_join_cfg)?;
+
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new_result",
+                &receipt.new_operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: new_result.clone(),
+                },
+            )?],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: new_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        outer_ok.clone(),
+                        outer_ok_edge,
+                        old_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        outer_err.clone(),
+                        outer_err_edge,
+                        outer_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: old_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "set_key",
+                    &receipt.set_key,
+                    MirInstructionKind::Const {
+                        result: set_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.set_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "set_value",
+                    &receipt.set_value,
+                    MirInstructionKind::Const {
+                        result: set_payload.clone(),
+                        literal: ResolvedLiteral::Int(receipt.set_i32_value),
+                    },
+                )?,
+                instruction(
+                    "set_result",
+                    &receipt.set_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                        result: set_result.clone(),
+                        source: old_root.clone(),
+                        key: set_key.clone(),
+                        value: set_payload.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Drop {
+                        value: set_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: set_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        set_ok.clone(),
+                        set_ok_edge,
+                        updated_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        set_err.clone(),
+                        set_err_edge,
+                        set_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: outer_status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: outer_err_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![outer_status.clone()],
+            },
+        },
+        MirBlock {
+            id: set_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: updated_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "drop_old_root",
+                    &receipt.old_root_set_ok_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: old_root.clone(),
+                    },
+                )?,
+                instruction(
+                    "get_key",
+                    &receipt.get_key,
+                    MirInstructionKind::Const {
+                        result: get_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "get_any",
+                    &receipt.get_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                        result: pair.clone(),
+                        root: updated_root.clone(),
+                        key: get_key.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Drop {
+                        value: get_key.clone(),
+                    },
+                )?,
+                instruction(
+                    "project_found",
+                    &receipt.pair_found_projection,
+                    MirInstructionKind::Project {
+                        result: found_expression.clone(),
+                        base: pair.clone(),
+                        projection: MirProjection::Tuple(0),
+                        list_index_contract: None,
+                    },
+                )?,
+                instruction(
+                    "bind_found",
+                    &receipt.found_binding,
+                    MirInstructionKind::Copy {
+                        result: found_local.clone(),
+                        source: found_expression.clone(),
+                    },
+                )?,
+                instruction(
+                    "unpack_i32",
+                    &receipt.unpack_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                        result: unpack_expression.clone(),
+                        pair: pair.clone(),
+                        projection: receipt.pair_payload_projection.clone(),
+                    },
+                )?,
+                instruction(
+                    "bind_unpacked_i32",
+                    &receipt.unpack_argument,
+                    MirInstructionKind::Move {
+                        result: unpack_local.clone(),
+                        source: unpack_expression.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_pair",
+                    &receipt.pair_drop,
+                    MirInstructionKind::Drop {
+                        value: pair.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_updated_root",
+                    &receipt.updated_root_get_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: updated_root.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::Branch {
+                condition: found_local.clone(),
+                then_edge: edge(then_edge)?,
+                then_target: found_true.clone(),
+                then_arguments: vec![],
+                else_edge: edge(else_edge)?,
+                else_target: found_false.clone(),
+                else_arguments: vec![],
+            },
+        },
+        MirBlock {
+            id: set_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_set_error_root",
+                &receipt.old_root_set_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: old_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: set_err_join_edge,
+                target: set_join.clone(),
+                arguments: vec![set_status.clone()],
+            },
+        },
+        MirBlock {
+            id: found_true.clone(),
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: found_true_edge,
+                target: found_join.clone(),
+                arguments: vec![unpack_local.clone()],
+            },
+        },
+        MirBlock {
+            id: found_false.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "canonical_miss_zero",
+                &receipt.found_false_arm,
+                MirInstructionKind::Const {
+                    result: zero.clone(),
+                    literal: ResolvedLiteral::Int(0),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: found_false_edge,
+                target: found_join.clone(),
+                arguments: vec![zero.clone()],
+            },
+        },
+        MirBlock {
+            id: found_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: found_result.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: found_to_set_join_edge,
+                target: set_join.clone(),
+                arguments: vec![found_result.clone()],
+            },
+        },
+        MirBlock {
+            id: set_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_match_result.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: set_to_outer_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![set_match_result.clone()],
+            },
+        },
+        MirBlock {
+            id: outer_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: return_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(return_value.clone()),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_set_get_any_i32_lineage: Some(Box::new(receipt.clone())),
+        checker_ordinary_map_owned_any_v2_set_get_any_i32_lineage_commitment: Some(format!(
+            "{receipt:?}"
+        )),
+        ..MirOwnershipSummary::default()
+    };
+    Ok(MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty,
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    })
+}
+
+/// Build the same canonical fallible New/Set/GetAny graph as L1, then attach
+/// the exact Checker contract set and executable proof worklist for the
+/// isolated L2 verifier projection.
+pub(crate) fn ordinary_map_set_get_any_i32_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map Set/GetAny-i32 receipt owner disagrees with its Checked callable".into(),
+        );
+    }
+    let mut function = ordinary_map_set_get_any_i32_result_function(receipt)?;
+    function.contracts =
+        super::contracts::lower_contracts(callable, &function).map_err(|errors| {
+            format!("ordinary Map Set/GetAny-i32 contract lowering failed: {errors:?}")
+        })?;
+    function.proof_worklist = super::contracts::lower_proof_worklist_with_set_get_any_i32_receipt(
+        callable, &function, receipt,
+    )
+    .map_err(|errors| {
+        format!("ordinary Map Set/GetAny-i32 proof-worklist lowering failed: {errors:?}")
+    })?;
+    if function.contracts.len() != 1
+        || function.contracts[0].kind != super::MirContractKind::Ensures
+        || function.proof_worklist.is_none()
+    {
+        return Err(
+            "ordinary Map Set/GetAny-i32 L2 requires one direct Ensures and its proof worklist"
+                .into(),
+        );
+    }
+    Ok(function)
+}
+
+/// Lower the independent fallible New/Set/GetAny i32 source receipt. The
+/// GetAny Result envelope uses its own MIR operation and TypeDesc, distinct
+/// from the legacy tuple-valued GetAny path.
+pub(crate) fn ordinary_map_set_get_any_result_i32_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::cfg::{BasicBlockId as CfgBlockId, EdgeId as CfgEdgeId, EdgeKind, Terminator};
+    use crate::core::ownership::{
+        ManagedAnyCfgMatchCase, OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind,
+        OrdinaryMapOwnedAnyV2GetApi,
+        OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageProfileVersion as ProfileVersion,
+    };
+
+    let fail = |message: &str| format!("ordinary Map Set/GetAnyResult-i32 MIR lowering: {message}");
+    let block = |id: &CfgBlockId| -> Result<MirBlockId, String> {
+        MirBlockId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge = |id: &CfgEdgeId| -> Result<MirEdgeId, String> {
+        MirEdgeId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let value = |local: &ResolvedLocalId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let source_arm = |dispatch: &CfgBlockId,
+                      arm: &NodeId,
+                      variant: &str|
+     -> Result<(MirEdgeId, CfgBlockId), String> {
+        let arms = receipt
+            .cfg
+            .match_arms
+            .get(dispatch)
+            .ok_or_else(|| fail("source Result match has no Checker arm receipt"))?;
+        if arms.len() != 2 {
+            return Err(fail(
+                "source Result match does not have exactly Ok/Err arms",
+            ));
+        }
+        let mut matching = arms.iter().filter(|candidate| {
+            candidate.source_arm == *arm
+                && !candidate.guarded
+                && candidate.case
+                    == ManagedAnyCfgMatchCase::Variant(NodeId(format!(
+                        "builtin:variant:Result::{variant}"
+                    )))
+        });
+        let matched = matching
+            .next()
+            .ok_or_else(|| fail("source Result arm is absent from the Checker CFG"))?;
+        if matching.next().is_some() {
+            return Err(fail("source Result arm is duplicated in the Checker CFG"));
+        }
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(&matched.edge)
+            .ok_or_else(|| fail("source Result edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *dispatch || cfg_edge.kind != EdgeKind::MatchArm {
+            return Err(fail("source Result edge has another dispatch source/kind"));
+        }
+        Ok((edge(&matched.edge)?, cfg_edge.to.clone()))
+    };
+    let check_match =
+        |dispatch: &CfgBlockId, scrutinee: &NodeId, label: &str| -> Result<(), String> {
+            let source = receipt.cfg.reachable_blocks.get(dispatch).ok_or_else(|| {
+                fail("source Result dispatch block is absent from the Checker CFG")
+            })?;
+            if !matches!(
+                &source.terminator,
+                Terminator::Match { scrutinee: observed, .. } if observed == scrutinee
+            ) {
+                return Err(fail(&format!(
+                    "{label} Result dispatch does not use its receipted source scrutinee"
+                )));
+            }
+            Ok(())
+        };
+    let goto_edge = |source: &CfgBlockId| -> Result<(MirEdgeId, CfgBlockId), String> {
+        let cfg_block = receipt
+            .cfg
+            .reachable_blocks
+            .get(source)
+            .ok_or_else(|| fail("source join block is absent from the Checker CFG"))?;
+        let Terminator::Goto { edge: edge_id } = &cfg_block.terminator else {
+            return Err(fail("expected a source join Goto edge"));
+        };
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(edge_id)
+            .ok_or_else(|| fail("source join edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *source {
+            return Err(fail("source join edge has another source block"));
+        }
+        Ok((edge(edge_id)?, cfg_edge.to.clone()))
+    };
+
+    let expected_attempt_kinds =
+        BTreeSet::from([AttemptKind::New, AttemptKind::Set, AttemptKind::GetAny]);
+    let expected_operations = BTreeSet::from([
+        crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+            kind: AttemptKind::New,
+            point: receipt.new_operation.clone(),
+            arguments: Vec::new(),
+            receiver_local: None,
+            result_local: Some(receipt.new_result_local.clone()),
+        },
+        crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+            kind: AttemptKind::Set,
+            point: receipt.set_operation.clone(),
+            arguments: vec![
+                receipt.set_receiver.clone(),
+                receipt.set_key.clone(),
+                receipt.set_value.clone(),
+            ],
+            receiver_local: Some(receipt.initial_root_local.clone()),
+            result_local: Some(receipt.set_result_local.clone()),
+        },
+        crate::core::ownership::OrdinaryMapOwnedAnyV2Attempt {
+            kind: AttemptKind::GetAny,
+            point: receipt.get_operation.clone(),
+            arguments: vec![receipt.get_receiver.clone(), receipt.get_key.clone()],
+            receiver_local: Some(receipt.updated_root_local.clone()),
+            result_local: Some(receipt.get_result_local.clone()),
+        },
+    ]);
+    let actual_attempt_kinds = receipt
+        .operations
+        .iter()
+        .map(|attempt| attempt.kind)
+        .collect::<BTreeSet<_>>();
+    let mut distinct_locals = BTreeSet::from([
+        receipt.new_result_local.clone(),
+        receipt.initial_root_local.clone(),
+        receipt.new_error_local.clone(),
+        receipt.set_result_local.clone(),
+        receipt.updated_root_local.clone(),
+        receipt.set_error_local.clone(),
+        receipt.get_result_local.clone(),
+        receipt.get_ok_pair_local.clone(),
+        receipt.get_err_local.clone(),
+        receipt.get_found_local.clone(),
+        receipt.get_unpack_result_local.clone(),
+    ]);
+    if receipt.proof_ensures.is_some() != receipt.proof_ensures_expression.is_some() {
+        return Err(fail(
+            "direct Ensures node and expression identities must be present together",
+        ));
+    }
+    if receipt.proof_ensures.is_some() {
+        distinct_locals.insert(ResolvedLocalId(NodeId(format!(
+            "{}/contract-result/local",
+            receipt.owner.0
+        ))));
+    }
+    let proof_ensures_identity_is_paired =
+        receipt.proof_ensures.is_some() == receipt.proof_ensures_expression.is_some();
+    let additional_ensure_edges = receipt.cfg.reachable_edges.len().checked_sub(16);
+    let exact_ensures_cfg_size = additional_ensure_edges.is_some_and(|extra_edges| {
+        extra_edges % 4 == 0
+            && (extra_edges == 0 || receipt.proof_ensures.is_some())
+            && receipt.cfg.reachable_blocks.len() == 13 + 3 * (extra_edges / 4)
+            && receipt.cfg.reachable_edges.len() == 16 + extra_edges
+    });
+    let entry_matches_profile = receipt.cfg.reachable_blocks.contains_key(&receipt.entry)
+        && (receipt.proof_ensures.is_some() || receipt.entry == receipt.cfg.entry);
+    if receipt.profile_version != ProfileVersion::V1
+        || receipt.get_api != OrdinaryMapOwnedAnyV2GetApi::MapGetAnyResult
+        || receipt.owner != receipt.cfg.owner
+        || !entry_matches_profile
+        || !proof_ensures_identity_is_paired
+        || !exact_ensures_cfg_size
+        || receipt.operations.len() != 3
+        || actual_attempt_kinds != expected_attempt_kinds
+        || receipt.operations != expected_operations
+        || distinct_locals.len()
+            != if receipt.proof_ensures.is_some() {
+                12
+            } else {
+                11
+            }
+        || receipt.set_i32_value < i32::MIN as i64
+        || receipt.set_i32_value > i32::MAX as i64
+        || receipt.get_key_type != primitive_type_id(PrimitiveType::String)
+        || receipt.get_receiver_local != receipt.updated_root_local
+        || receipt.initial_root_local == receipt.updated_root_local
+        || receipt.get_unpack_conversion_kind
+            != crate::core::ir::CheckedConversionKind::DynamicAnyUnpack
+        || receipt.get_unpack_target_type != primitive_type_id(PrimitiveType::I32)
+    {
+        return Err(fail(&format!(
+            "Checker receipt identity, type, or exact New/Set/GetAny census changed (version={:?}, api={:?}, owner_match={}, entry_match={}, blocks={}, edges={}, attempts={}, attempt_kinds={:?}, distinct_locals={}, set_key={:?}, get_key={:?}, set_value={}, receiver_match={})",
+            receipt.profile_version,
+            receipt.get_api,
+            receipt.owner == receipt.cfg.owner,
+            entry_matches_profile,
+            receipt.cfg.reachable_blocks.len(),
+            receipt.cfg.reachable_edges.len(),
+            receipt.operations.len(),
+            actual_attempt_kinds,
+            distinct_locals.len(),
+            receipt.set_key_value,
+            receipt.get_key_value,
+            receipt.set_i32_value,
+            receipt.get_receiver_local == receipt.updated_root_local,
+        )));
+    }
+
+    let entry_cfg = receipt.entry.clone();
+    check_match(&entry_cfg, &receipt.new_scrutinee, "New")?;
+    let (new_ok_edge, new_ok_cfg) = source_arm(&entry_cfg, &receipt.new_ok_arm, "Ok")?;
+    let (new_err_edge, new_err_cfg) = source_arm(&entry_cfg, &receipt.new_err_arm, "Err")?;
+    check_match(&new_ok_cfg, &receipt.set_scrutinee, "Set")?;
+    let (set_ok_edge, set_ok_cfg) = source_arm(&new_ok_cfg, &receipt.set_ok_arm, "Ok")?;
+    let (set_err_edge, set_err_cfg) = source_arm(&new_ok_cfg, &receipt.set_err_arm, "Err")?;
+    check_match(&set_ok_cfg, &receipt.get_scrutinee, "GetAny")?;
+    let (get_ok_edge, get_ok_cfg) = source_arm(&set_ok_cfg, &receipt.get_ok_arm, "Ok")?;
+    let (get_err_edge, get_err_cfg) = source_arm(&set_ok_cfg, &receipt.get_err_arm, "Err")?;
+    let get_ok_source = receipt
+        .cfg
+        .reachable_blocks
+        .get(&get_ok_cfg)
+        .ok_or_else(|| fail("GetAnyResult Ok source block is absent from the Checker CFG"))?;
+    let Terminator::Branch {
+        condition,
+        then_edge,
+        else_edge,
+    } = &get_ok_source.terminator
+    else {
+        return Err(fail("GetAnyResult Ok source block must branch on found"));
+    };
+    if condition != &receipt.get_found_condition {
+        return Err(fail(
+            "GetAnyResult found condition differs from Checker identity",
+        ));
+    }
+    let found_true_cfg_edge = receipt
+        .cfg
+        .reachable_edges
+        .get(then_edge)
+        .filter(|candidate| candidate.from == get_ok_cfg && candidate.kind == EdgeKind::Then)
+        .ok_or_else(|| fail("GetAnyResult found true edge is absent from the Checker CFG"))?;
+    let found_false_cfg_edge = receipt
+        .cfg
+        .reachable_edges
+        .get(else_edge)
+        .filter(|candidate| candidate.from == get_ok_cfg && candidate.kind == EdgeKind::Else)
+        .ok_or_else(|| fail("GetAnyResult found false edge is absent from the Checker CFG"))?;
+    let found_true_cfg = found_true_cfg_edge.to.clone();
+    let found_false_cfg = found_false_cfg_edge.to.clone();
+    if receipt
+        .cfg
+        .reachable_blocks
+        .get(&found_true_cfg)
+        .is_none_or(|candidate| candidate.source.node != receipt.get_found_true_arm)
+        || receipt
+            .cfg
+            .reachable_blocks
+            .get(&found_false_cfg)
+            .is_none_or(|candidate| candidate.source.node != receipt.get_found_false_arm)
+    {
+        return Err(fail(
+            "GetAnyResult found branch targets differ from checked arms",
+        ));
+    }
+    let (found_true_edge, found_join_from_true_cfg) = goto_edge(&found_true_cfg)?;
+    let (found_false_edge, found_join_from_false_cfg) = goto_edge(&found_false_cfg)?;
+    if found_join_from_true_cfg != found_join_from_false_cfg {
+        return Err(fail(
+            "GetAnyResult found paths do not join at one Checker block",
+        ));
+    }
+    let found_join_cfg = found_join_from_true_cfg;
+    let (found_to_get_join_edge, get_join_from_found_cfg) = goto_edge(&found_join_cfg)?;
+    let (get_err_join_edge, get_join_from_get_err_cfg) = goto_edge(&get_err_cfg)?;
+    if get_join_from_found_cfg != get_join_from_get_err_cfg {
+        return Err(fail(
+            "GetAnyResult Ok and Err paths do not share their checked join",
+        ));
+    }
+    let get_join_cfg = get_join_from_found_cfg;
+    let (get_to_set_join_edge, set_join_from_get_cfg) = goto_edge(&get_join_cfg)?;
+    let (set_err_join_edge, set_join_from_set_err_cfg) = goto_edge(&set_err_cfg)?;
+    if set_join_from_get_cfg != set_join_from_set_err_cfg {
+        return Err(fail(
+            "GetAnyResult and Set Err paths do not share their checked Set join",
+        ));
+    }
+    let set_join_cfg = set_join_from_get_cfg;
+    let (set_to_outer_join_edge, outer_join_from_set_cfg) = goto_edge(&set_join_cfg)?;
+    let (new_err_join_edge, outer_join_from_new_err_cfg) = goto_edge(&new_err_cfg)?;
+    if outer_join_from_set_cfg != outer_join_from_new_err_cfg {
+        return Err(fail("New Ok and Err paths do not share their checked join"));
+    }
+    let outer_join_cfg = outer_join_from_set_cfg;
+    let expected_blocks = BTreeSet::from([
+        entry_cfg.clone(),
+        new_ok_cfg.clone(),
+        new_err_cfg.clone(),
+        set_ok_cfg.clone(),
+        set_err_cfg.clone(),
+        get_ok_cfg.clone(),
+        get_err_cfg.clone(),
+        found_true_cfg.clone(),
+        found_false_cfg.clone(),
+        found_join_cfg.clone(),
+        get_join_cfg.clone(),
+        set_join_cfg.clone(),
+        outer_join_cfg.clone(),
+    ]);
+    if expected_blocks.len() != 13
+        || !receipt
+            .cfg
+            .reachable_blocks
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .is_superset(&expected_blocks)
+    {
+        return Err(fail(
+            "Checker CFG contains an unbound or duplicate source block",
+        ));
+    }
+
+    let new_result = value(&receipt.new_result_local)?;
+    let old_root = value(&receipt.initial_root_local)?;
+    let new_status = value(&receipt.new_error_local)?;
+    let set_result = value(&receipt.set_result_local)?;
+    let updated_root = value(&receipt.updated_root_local)?;
+    let set_status = value(&receipt.set_error_local)?;
+    let get_result = value(&receipt.get_result_local)?;
+    let pair = value(&receipt.get_ok_pair_local)?;
+    let get_status = value(&receipt.get_err_local)?;
+    let found_expression = MirValueId::new(format!("expr:{}", receipt.get_pair_found_projection.0))
+        .map_err(|error| error.to_string())?;
+    let found_local = value(&receipt.get_found_local)?;
+    let unpack_expression = MirValueId::new(format!("expr:{}", receipt.get_unpack_operation.0))
+        .map_err(|error| error.to_string())?;
+    let unpack_local = value(&receipt.get_unpack_result_local)?;
+    let get_found_result = MirValueId::new(format!("expr:{}", receipt.get_found_result.0))
+        .map_err(|error| error.to_string())?;
+    let get_join_value = MirValueId::new(format!("expr:{}", receipt.get_match.0))
+        .map_err(|error| error.to_string())?;
+    let set_join_value = MirValueId::new(format!("expr:{}", receipt.set_match.0))
+        .map_err(|error| error.to_string())?;
+    let return_value = MirValueId::new(format!("expr:{}", receipt.new_match.0))
+        .map_err(|error| error.to_string())?;
+    let set_key = MirValueId::new(format!("literal:{}", receipt.set_key.0))
+        .map_err(|error| error.to_string())?;
+    let get_key = MirValueId::new(format!("literal:{}", receipt.get_key.0))
+        .map_err(|error| error.to_string())?;
+    let set_payload = MirValueId::new(format!("literal:{}", receipt.set_value.0))
+        .map_err(|error| error.to_string())?;
+    let canonical_miss = MirValueId::new(format!("expr:{}", receipt.get_found_false_arm.0))
+        .map_err(|error| error.to_string())?;
+
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let get_envelope_ty = super::types::ordinary_map_owned_any_v2_get_any_result_envelope_type_id();
+    let pair_ty = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let string_ty = primitive_type_id(PrimitiveType::String);
+    let bool_ty = primitive_type_id(PrimitiveType::Bool);
+    let i32_ty = primitive_type_id(PrimitiveType::I32);
+    let values = [
+        (new_result.clone(), root_result_ty.clone()),
+        (old_root.clone(), root_ty.clone()),
+        (new_status.clone(), i32_ty.clone()),
+        (set_result.clone(), root_result_ty.clone()),
+        (updated_root.clone(), root_ty.clone()),
+        (set_status.clone(), i32_ty.clone()),
+        (get_result.clone(), get_envelope_ty),
+        (pair.clone(), pair_ty.clone()),
+        (get_status.clone(), i32_ty.clone()),
+        (found_expression.clone(), bool_ty.clone()),
+        (found_local.clone(), bool_ty.clone()),
+        (unpack_expression.clone(), i32_ty.clone()),
+        (unpack_local.clone(), i32_ty.clone()),
+        (get_found_result.clone(), i32_ty.clone()),
+        (get_join_value.clone(), i32_ty.clone()),
+        (set_join_value.clone(), i32_ty.clone()),
+        (return_value.clone(), i32_ty.clone()),
+        (set_key.clone(), string_ty.clone()),
+        (get_key.clone(), string_ty),
+        (set_payload.clone(), i32_ty.clone()),
+        (canonical_miss.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:ordinary_map_set_get_any_result_i32_lineage:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind|
+     -> MirSwitchArm {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: vec![],
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block(&entry_cfg)?;
+    let new_ok = block(&new_ok_cfg)?;
+    let new_err = block(&new_err_cfg)?;
+    let set_ok = block(&set_ok_cfg)?;
+    let set_err = block(&set_err_cfg)?;
+    let get_ok = block(&get_ok_cfg)?;
+    let get_err = block(&get_err_cfg)?;
+    let found_true = block(&found_true_cfg)?;
+    let found_false = block(&found_false_cfg)?;
+    let found_join = block(&found_join_cfg)?;
+    let get_join = block(&get_join_cfg)?;
+    let set_join = block(&set_join_cfg)?;
+    let outer_join = block(&outer_join_cfg)?;
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new_result",
+                &receipt.new_operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: new_result.clone(),
+                },
+            )?],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: new_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        new_ok.clone(),
+                        new_ok_edge,
+                        old_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        new_err.clone(),
+                        new_err_edge,
+                        new_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: new_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: old_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "set_key",
+                    &receipt.set_key,
+                    MirInstructionKind::Const {
+                        result: set_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.set_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "set_value",
+                    &receipt.set_value,
+                    MirInstructionKind::Const {
+                        result: set_payload.clone(),
+                        literal: ResolvedLiteral::Int(receipt.set_i32_value),
+                    },
+                )?,
+                instruction(
+                    "set_result",
+                    &receipt.set_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                        result: set_result.clone(),
+                        source: old_root.clone(),
+                        key: set_key.clone(),
+                        value: set_payload.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Drop {
+                        value: set_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: set_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        set_ok.clone(),
+                        set_ok_edge,
+                        updated_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        set_err.clone(),
+                        set_err_edge,
+                        set_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: new_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: new_status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: new_err_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![new_status.clone()],
+            },
+        },
+        MirBlock {
+            id: set_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: updated_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "drop_old_root",
+                    &receipt.old_root_set_ok_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: old_root.clone(),
+                    },
+                )?,
+                instruction(
+                    "get_key",
+                    &receipt.get_key,
+                    MirInstructionKind::Const {
+                        result: get_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "get_any_result",
+                    &receipt.get_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetAnyResult {
+                        result: get_result.clone(),
+                        root: updated_root.clone(),
+                        key: get_key.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Drop {
+                        value: get_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: get_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        get_ok.clone(),
+                        get_ok_edge,
+                        pair.clone(),
+                        pair_ty,
+                        MirOwnership::Move,
+                        MirGlueKind::Aggregate,
+                    ),
+                    result_arm(
+                        "Err",
+                        get_err.clone(),
+                        get_err_edge,
+                        get_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: set_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_set_error_root",
+                &receipt.old_root_set_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: old_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: set_err_join_edge,
+                target: set_join.clone(),
+                arguments: vec![set_status.clone()],
+            },
+        },
+        MirBlock {
+            id: get_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: pair.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "project_found",
+                    &receipt.get_pair_found_projection,
+                    MirInstructionKind::Project {
+                        result: found_expression.clone(),
+                        base: pair.clone(),
+                        projection: MirProjection::Tuple(0),
+                        list_index_contract: None,
+                    },
+                )?,
+                instruction(
+                    "bind_found",
+                    &receipt.get_found_binding,
+                    MirInstructionKind::Copy {
+                        result: found_local.clone(),
+                        source: found_expression.clone(),
+                    },
+                )?,
+                instruction(
+                    "unpack_i32",
+                    &receipt.get_unpack_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                        result: unpack_expression.clone(),
+                        pair: pair.clone(),
+                        projection: receipt.get_pair_payload_projection.clone(),
+                    },
+                )?,
+                instruction(
+                    "bind_unpacked_i32",
+                    &receipt.get_unpack_argument,
+                    MirInstructionKind::Move {
+                        result: unpack_local.clone(),
+                        source: unpack_expression.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_pair",
+                    &receipt.get_ok_pair_payload_settlement,
+                    MirInstructionKind::Drop {
+                        value: pair.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_updated_root",
+                    &receipt.get_ok_updated_root_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: updated_root.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::Branch {
+                condition: found_local.clone(),
+                then_edge: edge(then_edge)?,
+                then_target: found_true.clone(),
+                then_arguments: vec![],
+                else_edge: edge(else_edge)?,
+                else_target: found_false.clone(),
+                else_arguments: vec![],
+            },
+        },
+        MirBlock {
+            id: get_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_get_error_root",
+                &receipt.get_err_updated_root_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: updated_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: get_err_join_edge,
+                target: get_join.clone(),
+                // Preserve the GetAny Err status exactly; the runtime
+                // capacity failure is status 4, and no MIR constant replaces it.
+                arguments: vec![get_status.clone()],
+            },
+        },
+        MirBlock {
+            id: found_true.clone(),
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: found_true_edge,
+                target: found_join.clone(),
+                arguments: vec![unpack_local.clone()],
+            },
+        },
+        MirBlock {
+            id: found_false.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "canonical_miss_zero",
+                &receipt.get_found_false_arm,
+                MirInstructionKind::Const {
+                    result: canonical_miss.clone(),
+                    literal: ResolvedLiteral::Int(0),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: found_false_edge,
+                target: found_join.clone(),
+                arguments: vec![canonical_miss.clone()],
+            },
+        },
+        MirBlock {
+            id: found_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_found_result.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: found_to_get_join_edge,
+                target: get_join.clone(),
+                arguments: vec![get_found_result.clone()],
+            },
+        },
+        MirBlock {
+            id: get_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: get_to_set_join_edge,
+                target: set_join.clone(),
+                arguments: vec![get_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: set_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: set_to_outer_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![set_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: outer_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: return_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(return_value.clone()),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage: Some(Box::new(
+            receipt.clone(),
+        )),
+        checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_commitment: Some(format!(
+            "{receipt:?}"
+        )),
+        ..MirOwnershipSummary::default()
+    };
+    Ok(MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty,
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    })
+}
+
+/// Attach the exact Checker contracts and profile-specific proof worklist to
+/// the execution graph for the isolated L2 verifier projection.
+pub(crate) fn ordinary_map_set_get_any_result_i32_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetAnyResultI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map Set/GetAnyResult-i32 receipt owner disagrees with its Checked callable"
+                .into(),
+        );
+    }
+    let mut function = ordinary_map_set_get_any_result_i32_result_function(receipt)?;
+    function.contracts =
+        super::contracts::lower_contracts(callable, &function).map_err(|errors| {
+            format!("ordinary Map Set/GetAnyResult-i32 contract lowering failed: {errors:?}")
+        })?;
+    function.proof_worklist =
+        super::contracts::lower_proof_worklist_with_set_get_any_result_i32_receipt(
+            callable, &function, receipt,
+        )
+        .map_err(|errors| {
+            format!("ordinary Map Set/GetAnyResult-i32 proof-worklist lowering failed: {errors:?}")
+        })?;
+    if function.contracts.len() != 1
+        || function.contracts[0].kind != super::MirContractKind::Ensures
+        || function.proof_worklist.is_none()
+    {
+        return Err(
+            "ordinary Map Set/GetAnyResult-i32 L2 requires one direct Ensures and its exact proof worklist"
+                .into(),
+        );
+    }
+    Ok(function)
+}
+
+/// Mechanical projection of the independent New/Set/Get-String Result
+/// lineage. Every MIR block and edge keeps its checked CFG identity, while
+/// the source collector remains the sole authority for this operation shape.
+pub(crate) fn ordinary_map_set_get_string_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetStringLineageReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::cfg::{BasicBlockId as CfgBlockId, EdgeId as CfgEdgeId, Terminator};
+    use crate::core::ownership::ManagedAnyCfgMatchCase;
+
+    let fail = |message: &str| format!("ordinary Map Set/Get-String MIR lowering: {message}");
+    let block = |id: &CfgBlockId| -> Result<MirBlockId, String> {
+        MirBlockId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge = |id: &CfgEdgeId| -> Result<MirEdgeId, String> {
+        MirEdgeId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let value = |local: &ResolvedLocalId| -> Result<MirValueId, String> {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let source_arm = |dispatch: &CfgBlockId,
+                      arm: &NodeId,
+                      variant: &str|
+     -> Result<(MirEdgeId, CfgBlockId), String> {
+        let arms = receipt
+            .cfg
+            .match_arms
+            .get(dispatch)
+            .ok_or_else(|| fail("source match has no Checker arm receipt"))?;
+        let mut matching = arms.iter().filter(|candidate| {
+            candidate.source_arm == *arm
+                && !candidate.guarded
+                && candidate.case
+                    == ManagedAnyCfgMatchCase::Variant(NodeId(format!(
+                        "builtin:variant:Result::{variant}"
+                    )))
+        });
+        let matched = matching
+            .next()
+            .ok_or_else(|| fail("source Result arm is absent from the Checker CFG"))?;
+        if matching.next().is_some() {
+            return Err(fail("source Result arm is duplicated in the Checker CFG"));
+        }
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(&matched.edge)
+            .ok_or_else(|| fail("source Result arm edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *dispatch {
+            return Err(fail("source Result arm edge has another source block"));
+        }
+        Ok((edge(&matched.edge)?, cfg_edge.to.clone()))
+    };
+    let goto_edge = |source: &CfgBlockId| -> Result<(MirEdgeId, CfgBlockId), String> {
+        let cfg_block = receipt
+            .cfg
+            .reachable_blocks
+            .get(source)
+            .ok_or_else(|| fail("source join block is absent from the Checker CFG"))?;
+        let Terminator::Goto { edge: edge_id } = &cfg_block.terminator else {
+            return Err(fail("expected a source join Goto edge"));
+        };
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(edge_id)
+            .ok_or_else(|| fail("source join edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *source {
+            return Err(fail("source join edge has another source block"));
+        }
+        Ok((edge(edge_id)?, cfg_edge.to.clone()))
+    };
+
+    if receipt.cfg.reachable_blocks.len() < 13 || receipt.cfg.reachable_edges.len() < 16 {
+        return Err(fail("Checker source receipt has another CFG size"));
+    }
+    let entry_cfg = receipt.entry.clone();
+    let (outer_ok_edge, outer_ok_cfg) = source_arm(&entry_cfg, &receipt.outer_ok_arm, "Ok")?;
+    let (outer_err_edge, outer_err_cfg) = source_arm(&entry_cfg, &receipt.outer_err_arm, "Err")?;
+    let (set_ok_edge, set_ok_cfg) = source_arm(&outer_ok_cfg, &receipt.set_ok_arm, "Ok")?;
+    let (set_err_edge, set_err_cfg) = source_arm(&outer_ok_cfg, &receipt.set_err_arm, "Err")?;
+    let (get_ok_edge, get_ok_cfg) = source_arm(&set_ok_cfg, &receipt.get_ok_arm, "Ok")?;
+    let (get_err_edge, get_err_cfg) = source_arm(&set_ok_cfg, &receipt.get_err_arm, "Err")?;
+    let get_ok_source_block = receipt
+        .cfg
+        .reachable_blocks
+        .get(&get_ok_cfg)
+        .ok_or_else(|| fail("GetString Ok source block is absent from the Checker CFG"))?;
+    let Terminator::Branch {
+        condition,
+        then_edge,
+        else_edge,
+    } = &get_ok_source_block.terminator
+    else {
+        return Err(fail(
+            "GetString Ok source block must branch on its checked Bool local",
+        ));
+    };
+    if condition != &receipt.get_ok_if_condition
+        || then_edge != &receipt.get_ok_if_then_edge
+        || else_edge != &receipt.get_ok_if_else_edge
+    {
+        return Err(fail(
+            "GetString Ok branch identity differs from the Checker receipt",
+        ));
+    }
+    let get_ok_if_then_cfg = receipt
+        .cfg
+        .reachable_edges
+        .get(then_edge)
+        .filter(|edge| edge.from == get_ok_cfg)
+        .map(|edge| edge.to.clone())
+        .ok_or_else(|| fail("GetString Bool true edge is absent from the Checker CFG"))?;
+    let get_ok_if_else_cfg = receipt
+        .cfg
+        .reachable_edges
+        .get(else_edge)
+        .filter(|edge| edge.from == get_ok_cfg)
+        .map(|edge| edge.to.clone())
+        .ok_or_else(|| fail("GetString Bool false edge is absent from the Checker CFG"))?;
+    if get_ok_if_then_cfg != receipt.get_ok_if_then_cfg_block
+        || get_ok_if_else_cfg != receipt.get_ok_if_else_cfg_block
+    {
+        return Err(fail(
+            "GetString Bool branch targets differ from the Checker receipt",
+        ));
+    }
+    let (get_ok_if_then_join_edge, get_ok_if_join_cfg) = goto_edge(&get_ok_if_then_cfg)?;
+    let (get_ok_if_else_join_edge, get_ok_if_else_join_cfg) = goto_edge(&get_ok_if_else_cfg)?;
+    if get_ok_if_join_cfg != get_ok_if_else_join_cfg
+        || get_ok_if_then_join_edge != edge(&receipt.get_ok_if_then_join_edge)?
+        || get_ok_if_else_join_edge != edge(&receipt.get_ok_if_else_join_edge)?
+        || get_ok_if_join_cfg != receipt.get_ok_if_join_cfg_block
+    {
+        return Err(fail(
+            "GetString Bool branch join differs from the Checker receipt",
+        ));
+    }
+    let (get_ok_join_edge, get_join_cfg) = goto_edge(&get_ok_if_join_cfg)?;
+    let (get_err_join_edge, get_err_join_cfg) = goto_edge(&get_err_cfg)?;
+    let (set_err_join_edge, set_join_from_err_cfg) = goto_edge(&set_err_cfg)?;
+    let (get_to_set_join_edge, set_join_from_get_cfg) = goto_edge(&get_join_cfg)?;
+    let (set_to_outer_join_edge, outer_join_from_set_cfg) = goto_edge(&set_join_from_get_cfg)?;
+    let (outer_err_join_edge, outer_join_from_err_cfg) = goto_edge(&outer_err_cfg)?;
+    if get_join_cfg != get_err_join_cfg
+        || set_join_from_err_cfg != set_join_from_get_cfg
+        || outer_join_from_set_cfg != outer_join_from_err_cfg
+    {
+        return Err(fail(
+            "Checker source receipt has a non-canonical join topology",
+        ));
+    }
+
+    let new_result = value(&receipt.new_result_local)?;
+    let old_root = value(&receipt.initial_root_local)?;
+    let outer_status = value(&receipt.outer_status_local)?;
+    let set_result = value(&receipt.set_result_local)?;
+    let updated_root = value(&receipt.updated_root_local)?;
+    let set_status = value(&receipt.set_error_local)?;
+    let get_result = value(&receipt.get_result_local)?;
+    let get_ok_value = value(&receipt.get_ok_local)?;
+    let get_ok_compare = value(&receipt.get_ok_compare_local)?;
+    let get_err_value = value(&receipt.get_err_local)?;
+    let return_value = MirValueId::new(format!("expr:{}", receipt.outer_match.0))
+        .map_err(|error| error.to_string())?;
+    let get_ok_if_result = MirValueId::new(format!("expr:{}", receipt.get_ok_result.0))
+        .map_err(|error| error.to_string())?;
+    let get_join_value = MirValueId::new(format!("expr:{}", receipt.get_match.0))
+        .map_err(|error| error.to_string())?;
+    let set_join_value = MirValueId::new("expr:ordinary-map-set-get-string:set-join")
+        .map_err(|error| error.to_string())?;
+    let set_key = MirValueId::new("literal:ordinary_map_set_get_string_lineage:set-answer")
+        .map_err(|error| error.to_string())?;
+    let get_key = MirValueId::new("literal:ordinary_map_set_get_string_lineage:get-answer")
+        .map_err(|error| error.to_string())?;
+    let set_payload = value(&receipt.set_payload_local)?;
+    let get_ok_compare_literal =
+        MirValueId::new(format!("literal:{}", receipt.get_ok_compare_literal.0))
+            .map_err(|error| error.to_string())?;
+    let get_ok_true_value = MirValueId::new(format!("literal:{}", receipt.get_ok_true_result.0))
+        .map_err(|error| error.to_string())?;
+    let get_ok_false_value = MirValueId::new(format!("literal:{}", receipt.get_ok_false_result.0))
+        .map_err(|error| error.to_string())?;
+
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
+    let bool_ty = crate::core::ir::primitive_type_id(PrimitiveType::Bool);
+    let i32_ty = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    let values = [
+        (new_result.clone(), root_result_ty.clone()),
+        (old_root.clone(), root_ty.clone()),
+        (outer_status.clone(), i32_ty.clone()),
+        (set_result.clone(), root_result_ty.clone()),
+        (updated_root.clone(), root_ty.clone()),
+        (set_status.clone(), i32_ty.clone()),
+        (get_result.clone(), receipt.get_result_type.clone()),
+        (get_ok_value.clone(), string_ty.clone()),
+        (get_ok_compare.clone(), bool_ty.clone()),
+        (get_err_value.clone(), i32_ty.clone()),
+        (return_value.clone(), i32_ty.clone()),
+        (get_join_value.clone(), i32_ty.clone()),
+        (get_ok_if_result.clone(), i32_ty.clone()),
+        (set_join_value.clone(), i32_ty.clone()),
+        (set_key.clone(), string_ty.clone()),
+        (get_key.clone(), string_ty.clone()),
+        (set_payload.clone(), string_ty.clone()),
+        (get_ok_compare_literal.clone(), string_ty.clone()),
+        (get_ok_true_value.clone(), i32_ty.clone()),
+        (get_ok_false_value.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:ordinary_map_set_get_string_lineage:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind|
+     -> MirSwitchArm {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: vec![],
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block(&entry_cfg)?;
+    let outer_ok = block(&outer_ok_cfg)?;
+    let outer_err = block(&outer_err_cfg)?;
+    let set_ok = block(&set_ok_cfg)?;
+    let set_err = block(&set_err_cfg)?;
+    let get_ok = block(&get_ok_cfg)?;
+    let get_err = block(&get_err_cfg)?;
+    let get_ok_if_then = block(&get_ok_if_then_cfg)?;
+    let get_ok_if_else = block(&get_ok_if_else_cfg)?;
+    let get_ok_if_join = block(&get_ok_if_join_cfg)?;
+    let get_join = block(&get_join_cfg)?;
+    let set_join = block(&set_join_from_get_cfg)?;
+    let outer_join = block(&outer_join_from_set_cfg)?;
+    let blocks = [
+        MirBlock {
+            id: entry.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "new_result",
+                &receipt.new_operation,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                    result: new_result.clone(),
+                },
+            )?],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: new_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        outer_ok.clone(),
+                        outer_ok_edge,
+                        old_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        outer_err.clone(),
+                        outer_err_edge,
+                        outer_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: old_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "set_payload",
+                    &receipt.set_payload_literal,
+                    MirInstructionKind::Const {
+                        result: set_payload.clone(),
+                        literal: ResolvedLiteral::String(receipt.set_payload_text.clone()),
+                    },
+                )?,
+                instruction(
+                    "set_key",
+                    &receipt.set_key,
+                    MirInstructionKind::Const {
+                        result: set_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.set_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "set_string_result",
+                    &receipt.set_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2SetStringResult {
+                        result: set_result.clone(),
+                        source: old_root.clone(),
+                        key: set_key.clone(),
+                        value: set_payload.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_set_payload",
+                    &receipt.set_payload_drop,
+                    MirInstructionKind::Drop {
+                        value: set_payload.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_set_key",
+                    &receipt.set_operation,
+                    MirInstructionKind::Drop {
+                        value: set_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: set_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        set_ok.clone(),
+                        set_ok_edge,
+                        updated_root.clone(),
+                        root_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OrdinaryMapOwnedAnyV2,
+                    ),
+                    result_arm(
+                        "Err",
+                        set_err.clone(),
+                        set_err_edge,
+                        set_status.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: outer_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: outer_status.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: outer_err_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![outer_status.clone()],
+            },
+        },
+        MirBlock {
+            id: set_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: updated_root.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "drop_old_root",
+                    &receipt.old_root_set_ok_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: old_root.clone(),
+                    },
+                )?,
+                instruction(
+                    "get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Const {
+                        result: get_key.clone(),
+                        literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+                    },
+                )?,
+                instruction(
+                    "get_string_result",
+                    &receipt.get_operation,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2GetStringResult {
+                        result: get_result.clone(),
+                        root: updated_root.clone(),
+                        key: get_key.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_key",
+                    &receipt.get_operation,
+                    MirInstructionKind::Drop {
+                        value: get_key.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::SwitchMove {
+                scrutinee: get_result.clone(),
+                arms: vec![
+                    result_arm(
+                        "Ok",
+                        get_ok.clone(),
+                        get_ok_edge,
+                        get_ok_value.clone(),
+                        string_ty.clone(),
+                        MirOwnership::Move,
+                        MirGlueKind::OwnedString,
+                    ),
+                    result_arm(
+                        "Err",
+                        get_err.clone(),
+                        get_err_edge,
+                        get_err_value.clone(),
+                        i32_ty.clone(),
+                        MirOwnership::Copy,
+                        MirGlueKind::Noop,
+                    ),
+                ],
+            },
+        },
+        MirBlock {
+            id: set_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_status.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_set_error_root",
+                &receipt.old_root_set_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: old_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: set_err_join_edge,
+                target: set_join.clone(),
+                arguments: vec![set_status.clone()],
+            },
+        },
+        MirBlock {
+            id: get_ok.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_ok_value.clone(),
+            }],
+            instructions: vec![
+                instruction(
+                    "compare_string_literal",
+                    &receipt.get_ok_compare_literal,
+                    MirInstructionKind::Const {
+                        result: get_ok_compare_literal.clone(),
+                        literal: ResolvedLiteral::String(receipt.get_ok_compare_text.clone()),
+                    },
+                )?,
+                instruction(
+                    "compare_get_string_payload",
+                    &receipt.get_ok_compare_expression,
+                    MirInstructionKind::Binary {
+                        result: get_ok_compare.clone(),
+                        op: ResolvedBinaryOp::Equal,
+                        left: get_ok_value.clone(),
+                        right: get_ok_compare_literal.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_ok_compare_literal",
+                    &receipt.get_ok_compare_expression,
+                    MirInstructionKind::Drop {
+                        value: get_ok_compare_literal.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_ok_root",
+                    &receipt.updated_root_get_ok_drop,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                        root: updated_root.clone(),
+                    },
+                )?,
+                instruction(
+                    "drop_get_ok_string",
+                    &receipt.get_ok_drop,
+                    MirInstructionKind::Drop {
+                        value: get_ok_value.clone(),
+                    },
+                )?,
+            ],
+            terminator: MirTerminator::Branch {
+                condition: get_ok_compare.clone(),
+                then_edge: edge(&receipt.get_ok_if_then_edge)?,
+                then_target: get_ok_if_then.clone(),
+                then_arguments: vec![],
+                else_edge: edge(&receipt.get_ok_if_else_edge)?,
+                else_target: get_ok_if_else.clone(),
+                else_arguments: vec![],
+            },
+        },
+        MirBlock {
+            id: get_ok_if_then.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "payload_equal_result",
+                &receipt.get_ok_true_result,
+                MirInstructionKind::Const {
+                    result: get_ok_true_value.clone(),
+                    literal: ResolvedLiteral::Int(42),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.get_ok_if_then_join_edge)?,
+                target: get_ok_if_join.clone(),
+                arguments: vec![get_ok_true_value.clone()],
+            },
+        },
+        MirBlock {
+            id: get_ok_if_else.clone(),
+            parameters: vec![],
+            instructions: vec![instruction(
+                "payload_mismatch_result",
+                &receipt.get_ok_false_result,
+                MirInstructionKind::Const {
+                    result: get_ok_false_value.clone(),
+                    literal: ResolvedLiteral::Int(0),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: edge(&receipt.get_ok_if_else_join_edge)?,
+                target: get_ok_if_join.clone(),
+                arguments: vec![get_ok_false_value.clone()],
+            },
+        },
+        MirBlock {
+            id: get_ok_if_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_ok_if_result.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: get_ok_join_edge,
+                target: get_join.clone(),
+                arguments: vec![get_ok_if_result.clone()],
+            },
+        },
+        MirBlock {
+            id: get_err.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_err_value.clone(),
+            }],
+            instructions: vec![instruction(
+                "drop_get_err_root",
+                &receipt.updated_root_get_err_drop,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                    root: updated_root.clone(),
+                },
+            )?],
+            terminator: MirTerminator::Goto {
+                edge: get_err_join_edge,
+                target: get_join.clone(),
+                arguments: vec![get_err_value.clone()],
+            },
+        },
+        MirBlock {
+            id: get_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: get_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: get_to_set_join_edge,
+                target: set_join.clone(),
+                arguments: vec![get_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: set_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: set_join_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Goto {
+                edge: set_to_outer_join_edge,
+                target: outer_join.clone(),
+                arguments: vec![set_join_value.clone()],
+            },
+        },
+        MirBlock {
+            id: outer_join.clone(),
+            parameters: vec![MirBlockParameter {
+                value: return_value.clone(),
+            }],
+            instructions: vec![],
+            terminator: MirTerminator::Return {
+                value: Some(return_value),
+            },
+        },
+    ]
+    .into_iter()
+    .map(|block| (block.id.clone(), block))
+    .collect();
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_set_get_string_lineage: Some(Box::new(receipt.clone())),
+        checker_ordinary_map_owned_any_v2_set_get_string_lineage_commitment: Some(format!(
+            "{receipt:?}"
+        )),
+        ..MirOwnershipSummary::default()
+    };
+    Ok(MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: vec![],
+        parameter_permissions: Some(vec![]),
+        result: i32_ty,
+        entry,
+        values,
+        blocks,
+        contracts: vec![],
+        proof_worklist: None,
+        ownership,
+    })
+}
+
+/// Build the same closed NewResult graph as L1, then attach only the direct
+/// Checker contracts and executable proof worklist for a verifier-owned L2
+/// projection. Execution routes continue to use the contract-free lowering
+/// above and remain independently gated.
+pub(crate) fn ordinary_map_new_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2NewResultReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map NewResult receipt owner disagrees with its Checked callable".into(),
+        );
+    }
+    let mut function = ordinary_map_new_result_function(receipt);
+    function.contracts = super::contracts::lower_contracts(callable, &function)
+        .map_err(|errors| format!("ordinary Map NewResult contract lowering failed: {errors:?}"))?;
+    function.proof_worklist = super::contracts::lower_proof_worklist_with_new_result_receipt(
+        callable, &function, receipt,
+    )
+    .map_err(|errors| {
+        format!("ordinary Map NewResult proof-worklist lowering failed: {errors:?}")
+    })?;
+    Ok(function)
+}
+
+/// Build the exact executable SetResult graph, then attach Checker-owned
+/// contracts and the result-status-aware proof worklist for the isolated L2
+/// verifier projection. The L1 constructor above remains contract-free.
+pub(crate) fn ordinary_map_set_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetLineageReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map SetResult receipt owner disagrees with its Checked callable".into(),
+        );
+    }
+    let mut function = ordinary_map_set_result_function(receipt);
+    if !callable.has_proof_obligations() {
+        return Ok(function);
+    }
+    function.contracts = super::contracts::lower_contracts(callable, &function)
+        .map_err(|errors| format!("ordinary Map SetResult contract lowering failed: {errors:?}"))?;
+    function.proof_worklist = super::contracts::lower_proof_worklist_with_set_result_receipt(
+        callable, &function, receipt,
+    )
+    .map_err(|errors| {
+        format!("ordinary Map SetResult proof-worklist lowering failed: {errors:?}")
+    })?;
+    if function.proof_worklist.is_none() {
+        return Err(
+            "ordinary Map SetResult L2 obligations produced no Checker proof worklist".into(),
+        );
+    }
+    Ok(function)
+}
+
+pub(crate) fn ordinary_map_set_get_i32_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetI32LineageReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map Set/Get-i32 receipt owner disagrees with its Checked callable".into(),
+        );
+    }
+    let mut function = ordinary_map_set_get_i32_result_function(receipt)?;
+    function.contracts =
+        super::contracts::lower_contracts(callable, &function).map_err(|errors| {
+            format!("ordinary Map Set/Get-i32 contract lowering failed: {errors:?}")
+        })?;
+    function.proof_worklist = super::contracts::lower_proof_worklist_with_set_get_i32_receipt(
+        callable, &function, receipt,
+    )
+    .map_err(|errors| {
+        format!("ordinary Map Set/Get-i32 proof-worklist lowering failed: {errors:?}")
+    })?;
+    Ok(function)
+}
+
+pub(crate) fn ordinary_map_set_get_string_result_function_with_checked_proofs(
+    callable: &crate::core::ir::ResolvedCallable,
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2SetGetStringLineageReceipt,
+) -> Result<MirFunction, String> {
+    if callable.owner != receipt.owner {
+        return Err(
+            "ordinary Map Set/Get-String receipt owner disagrees with its Checked callable".into(),
+        );
+    }
+    if receipt.proof_ensures.is_none() || receipt.proof_ensures_expression.is_none() {
+        return Err(
+            "ordinary Map Set/Get-String L2 requires its exact direct Ensures receipt".into(),
+        );
+    }
+    let mut function = ordinary_map_set_get_string_result_function(receipt)?;
+    function.contracts =
+        super::contracts::lower_contracts(callable, &function).map_err(|errors| {
+            format!("ordinary Map Set/Get-String contract lowering failed: {errors:?}")
+        })?;
+    function.proof_worklist = super::contracts::lower_proof_worklist_with_set_get_string_receipt(
+        callable, &function, receipt,
+    )
+    .map_err(|errors| {
+        format!("ordinary Map Set/Get-String proof-worklist lowering failed: {errors:?}")
+    })?;
+    if function.proof_worklist.is_none() {
+        return Err(
+            "ordinary Map Set/Get-String exact Ensures produced no Checker proof worklist".into(),
+        );
+    }
+    Ok(function)
+}
+
+/// Materialize the first executable direct tuple-Get L1 Core MIR slice. This
+/// graph is intentionally narrower than the Checker source receipt: exactly
+/// one selected i32 Set is supported here. The generated graph owns the
+/// operational root and GetAny payload tuple and carries explicit branch
+/// cleanup events; it is not the L2 proof-only projection.
+pub(crate) fn ordinary_map_direct_tuple_get_unpack_l1_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::ownership::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackPayload as Payload;
+
+    let fail = |message: &str| format!("direct tuple Get L1 MIR lowering: {message}");
+    let Some(set) = receipt.sets.first() else {
+        return Err(fail("exact Checker receipt has no Set step"));
+    };
+    let i32_ty = primitive_type_id(PrimitiveType::I32);
+    if receipt.profile_version
+        != crate::core::ownership::OrdinaryMapOwnedAnyV2DirectTupleGetUnpackProfileVersion::V1
+        || receipt.owner != receipt.cfg.owner
+        || receipt.sets.len() != 1
+        || receipt.selected_winning_set.as_ref() != Some(&set.operation)
+        || receipt.unpack_target_type != i32_ty
+        || set.payload_type != i32_ty
+        || !matches!(&set.payload, Payload::I32(_))
+    {
+        return Err(fail(
+            "first executable slice requires the exact one-step selected i32 Checker receipt",
+        ));
+    }
+
+    let value = |local: &ResolvedLocalId| {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let expression = |node: &NodeId| {
+        MirValueId::new(format!("expr:{}", node.0)).map_err(|error| error.to_string())
+    };
+    let literal = |node: &NodeId| {
+        MirValueId::new(format!("literal:{}", node.0)).map_err(|error| error.to_string())
+    };
+    let block = |name: &str| {
+        MirBlockId::new(format!("bb:direct_tuple_get_unpack_l1:{name}"))
+            .map_err(|error| error.to_string())
+    };
+    let _edge = |name: &str| {
+        MirEdgeId::new(format!("edge:direct_tuple_get_unpack_l1:{name}"))
+            .map_err(|error| error.to_string())
+    };
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:direct_tuple_get_unpack_l1:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+    let new_result = expression(&receipt.new_operation)?;
+    let input_root = value(&receipt.initial_root_local)?;
+    let new_status = value(&receipt.new_error_local)?;
+    let set_result = expression(&set.operation)?;
+    let output_root = value(&set.output_root_local)?;
+    let set_status = value(&set.error_local)?;
+    let set_key = literal(&set.key_node)?;
+    let set_payload = literal(&set.payload_node)?;
+    let get_key = literal(&receipt.get_key_node)?;
+    let pair = value(&receipt.pair_local)?;
+    let unpack_expression = expression(&receipt.unpack_operation)?;
+    let unpacked = value(&receipt.unpack_local)?;
+    let success_zero = MirValueId::new("literal:direct_tuple_get_unpack_l1:success-zero")
+        .map_err(|error| error.to_string())?;
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let string_ty = primitive_type_id(PrimitiveType::String);
+    let pair_ty = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+    let values = [
+        (new_result.clone(), root_result_ty.clone()),
+        (input_root.clone(), root_ty.clone()),
+        (new_status.clone(), i32_ty.clone()),
+        (set_result.clone(), root_result_ty.clone()),
+        (output_root.clone(), root_ty.clone()),
+        (set_status.clone(), i32_ty.clone()),
+        (set_key.clone(), string_ty.clone()),
+        (set_payload.clone(), i32_ty.clone()),
+        (get_key.clone(), string_ty),
+        (pair.clone(), pair_ty),
+        (unpack_expression.clone(), i32_ty.clone()),
+        (unpacked.clone(), i32_ty.clone()),
+        (success_zero.clone(), i32_ty.clone()),
+    ]
+    .into_iter()
+    .map(|(id, ty)| (id.clone(), MirValue { id, ty }))
+    .collect();
+
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind| {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: Vec::new(),
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block("entry")?;
+    let new_ok = block("new_ok")?;
+    let new_err = block("new_err")?;
+    let set_ok = block("set_ok")?;
+    let set_err = block("set_err")?;
+    let source_cfg_edge_for_arm = |arm: &NodeId| -> Result<MirEdgeId, String> {
+        let matches = receipt
+            .cfg
+            .match_arms
+            .values()
+            .flat_map(|arms| arms.iter())
+            .filter(|candidate| candidate.source_arm == *arm && !candidate.guarded)
+            .collect::<Vec<_>>();
+        let [matched] = matches.as_slice() else {
+            return Err(fail("source Result arm has no unique Checker CFG edge"));
+        };
+        let source_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(&matched.edge)
+            .ok_or_else(|| fail("source Result arm edge is absent from the Checker CFG"))?;
+        if source_edge.kind != crate::core::cfg::EdgeKind::MatchArm {
+            return Err(fail("source Result arm edge is not a match edge"));
+        }
+        let _ = source_edge;
+        MirEdgeId::new(matched.edge.0 .0.clone()).map_err(|error| error.to_string())
+    };
+
+    let event = |kind: MirOwnershipEventKind,
+                 local: &ResolvedLocalId,
+                 point: &NodeId|
+     -> Result<MirOwnershipEvent, String> {
+        let source = matches!(
+            kind,
+            MirOwnershipEventKind::Move
+                | MirOwnershipEventKind::Drop
+                | MirOwnershipEventKind::Return
+                | MirOwnershipEventKind::TransferSession
+                | MirOwnershipEventKind::TransferChild
+        )
+        .then(|| {
+            crate::core::Place::root(crate::core::LocalId(local.0.clone()), local.0 .0.clone())
+                .display()
+        });
+        Ok(MirOwnershipEvent {
+            kind,
+            resource: local.0 .0.clone(),
+            value: Some(value(local)?),
+            source,
+            target: None,
+            point: point.clone(),
+            loan: None,
+            checker_block: None,
+            checker_edge: None,
+        })
+    };
+    let events = vec![
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.initial_root_local,
+            &receipt.new_ok_pattern,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &receipt.initial_root_local,
+            &set.operation,
+        )?,
+        event(
+            MirOwnershipEventKind::Introduce,
+            &set.output_root_local,
+            &set.ok_pattern,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.initial_root_local,
+            &set.ok_input_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.initial_root_local,
+            &set.error_input_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &set.output_root_local,
+            &receipt.get_operation,
+        )?,
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.pair_local,
+            &receipt.pair_binding,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &receipt.pair_local,
+            &receipt.pair_payload_projection,
+        )?,
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.unpack_local,
+            &receipt.unpack_operation,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &set.output_root_local,
+            &receipt.root_get_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.pair_local,
+            &receipt.pair_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.unpack_local,
+            &receipt.unpack_drop,
+        )?,
+    ];
+
+    let function = MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: Vec::new(),
+        parameter_permissions: Some(Vec::new()),
+        result: i32_ty.clone(),
+        entry: entry.clone(),
+        values,
+        blocks: BTreeMap::from([
+            (
+                entry.clone(),
+                MirBlock {
+                    id: entry.clone(),
+                    parameters: Vec::new(),
+                    instructions: vec![instruction(
+                        "new",
+                        &receipt.new_operation,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                            result: new_result.clone(),
+                        },
+                    )?],
+                    terminator: MirTerminator::SwitchMove {
+                        scrutinee: new_result,
+                        arms: vec![
+                            result_arm(
+                                "Ok",
+                                new_ok.clone(),
+                                source_cfg_edge_for_arm(&receipt.new_ok_arm)?,
+                                input_root.clone(),
+                                root_ty.clone(),
+                                MirOwnership::Move,
+                                MirGlueKind::OrdinaryMapOwnedAnyV2,
+                            ),
+                            result_arm(
+                                "Err",
+                                new_err.clone(),
+                                source_cfg_edge_for_arm(&receipt.new_error_arm)?,
+                                new_status.clone(),
+                                i32_ty.clone(),
+                                MirOwnership::Copy,
+                                MirGlueKind::Noop,
+                            ),
+                        ],
+                    },
+                },
+            ),
+            (
+                new_ok.clone(),
+                MirBlock {
+                    id: new_ok.clone(),
+                    parameters: vec![MirBlockParameter {
+                        value: input_root.clone(),
+                    }],
+                    instructions: vec![
+                        instruction(
+                            "set_key",
+                            &set.key_node,
+                            MirInstructionKind::Const {
+                                result: set_key.clone(),
+                                literal: ResolvedLiteral::String(set.key_value.clone()),
+                            },
+                        )?,
+                        instruction(
+                            "set_i32",
+                            &set.payload_node,
+                            MirInstructionKind::Const {
+                                result: set_payload.clone(),
+                                literal: ResolvedLiteral::Int(match &set.payload {
+                                    Payload::I32(value) => *value,
+                                    Payload::String(_) => unreachable!("guarded above"),
+                                }),
+                            },
+                        )?,
+                        instruction(
+                            "set_result",
+                            &set.operation,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                                result: set_result.clone(),
+                                source: input_root.clone(),
+                                key: set_key.clone(),
+                                value: set_payload.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "drop_set_key",
+                            &set.key_node,
+                            MirInstructionKind::Drop {
+                                value: set_key.clone(),
+                            },
+                        )?,
+                    ],
+                    terminator: MirTerminator::SwitchMove {
+                        scrutinee: set_result.clone(),
+                        arms: vec![
+                            result_arm(
+                                "Ok",
+                                set_ok.clone(),
+                                source_cfg_edge_for_arm(&set.ok_arm)?,
+                                output_root.clone(),
+                                root_ty.clone(),
+                                MirOwnership::Move,
+                                MirGlueKind::OrdinaryMapOwnedAnyV2,
+                            ),
+                            result_arm(
+                                "Err",
+                                set_err.clone(),
+                                source_cfg_edge_for_arm(&set.error_arm)?,
+                                set_status.clone(),
+                                i32_ty.clone(),
+                                MirOwnership::Copy,
+                                MirGlueKind::Noop,
+                            ),
+                        ],
+                    },
+                },
+            ),
+            (
+                new_err.clone(),
+                MirBlock {
+                    id: new_err.clone(),
+                    parameters: vec![MirBlockParameter {
+                        value: new_status.clone(),
+                    }],
+                    instructions: Vec::new(),
+                    terminator: MirTerminator::Return {
+                        value: Some(new_status),
+                    },
+                },
+            ),
+            (
+                set_ok.clone(),
+                MirBlock {
+                    id: set_ok.clone(),
+                    parameters: vec![MirBlockParameter {
+                        value: output_root.clone(),
+                    }],
+                    instructions: vec![
+                        instruction(
+                            "drop_old_root_ok",
+                            &set.ok_input_drop,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                                root: input_root.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "get_key",
+                            &receipt.get_key_node,
+                            MirInstructionKind::Const {
+                                result: get_key.clone(),
+                                literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+                            },
+                        )?,
+                        instruction(
+                            "get_tuple",
+                            &receipt.get_operation,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+                                result: pair.clone(),
+                                root: output_root.clone(),
+                                key: get_key.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "drop_get_key",
+                            &receipt.get_key_node,
+                            MirInstructionKind::Drop {
+                                value: get_key.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "drop_get_root",
+                            &receipt.root_get_drop,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+                                root: output_root.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "unpack_i32",
+                            &receipt.unpack_operation,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Unpack {
+                                result: unpack_expression.clone(),
+                                pair: pair.clone(),
+                                projection: receipt.pair_payload_projection.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "bind_unpacked_i32",
+                            &receipt.unpack_operation,
+                            MirInstructionKind::Move {
+                                result: unpacked.clone(),
+                                source: unpack_expression.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "drop_pair",
+                            &receipt.pair_drop,
+                            MirInstructionKind::Drop {
+                                value: pair.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "drop_unpacked_i32",
+                            &receipt.unpack_drop,
+                            MirInstructionKind::Drop {
+                                value: unpacked.clone(),
+                            },
+                        )?,
+                        instruction(
+                            "success_zero",
+                            &receipt.unpack_drop,
+                            MirInstructionKind::Const {
+                                result: success_zero.clone(),
+                                literal: ResolvedLiteral::Int(0),
+                            },
+                        )?,
+                    ],
+                    terminator: MirTerminator::Return {
+                        value: Some(success_zero),
+                    },
+                },
+            ),
+            (
+                set_err.clone(),
+                MirBlock {
+                    id: set_err.clone(),
+                    parameters: vec![MirBlockParameter {
+                        value: set_status.clone(),
+                    }],
+                    instructions: vec![instruction(
+                        "drop_old_root_err",
+                        &set.error_input_drop,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: input_root },
+                    )?],
+                    terminator: MirTerminator::Return {
+                        value: Some(set_status),
+                    },
+                },
+            ),
+        ]),
+        contracts: Vec::new(),
+        proof_worklist: None,
+        ownership: MirOwnershipSummary::ordinary_map_direct_tuple_get_unpack_l1(
+            receipt.clone(),
+            events,
+        ),
+    };
+    Ok(function)
+}
+
+/// Mechanically project the exact Checker New/Set Result direct-print
+/// receipt. The source CFG remains authoritative for the two dispatch edges
+/// and their block identities; this function only materializes the closed
+/// five-block execution graph for the admitted shape.
+pub(crate) fn ordinary_map_direct_print_result_function(
+    receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2DirectPrintResultReceipt,
+) -> Result<MirFunction, String> {
+    use super::types::{MirGlueKind, MirOwnership, MirVariantProjectionContract};
+    use crate::core::ownership::{
+        ManagedAnyCfgMatchCase, OrdinaryMapOwnedAnyV2ActionKind, OrdinaryMapOwnedAnyV2AttemptKind,
+        OrdinaryMapOwnedAnyV2DirectPrintResultProfileVersion as ProfileVersion,
+        OrdinaryMapOwnedAnyV2DirectPrintResultShape as Shape,
+        OrdinaryMapOwnedAnyV2DirectPrintSetPayload as Payload, OrdinaryMapOwnedAnyV2ProfileVersion,
+        OrdinaryMapOwnedAnyV2ResultSettlementKind,
+    };
+
+    let fail = |message: &str| format!("ordinary Map direct-print Result MIR lowering: {message}");
+    let i32_ty = primitive_type_id(PrimitiveType::I32);
+    let string_ty = primitive_type_id(PrimitiveType::String);
+    let unit_ty = primitive_type_id(PrimitiveType::Unit);
+    let root_ty = super::types::ordinary_map_owned_any_v2_type_id();
+    let root_result_ty = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let pair_ty = super::types::ordinary_map_owned_any_v2_get_result_type_id();
+
+    let is_size_shape = receipt.shape == Shape::SameRootMapSizeI32;
+    let has_size_receipt = match (
+        &receipt.size_operation,
+        &receipt.size_receiver,
+        &receipt.size_binding,
+        &receipt.size_local,
+    ) {
+        (Some(_), Some(_), Some(_), Some(_)) => true,
+        (None, None, None, None) => false,
+        _ => return Err(fail("size operation receipt is incomplete")),
+    };
+    let payload_type = match &receipt.set_payload {
+        Payload::I32(_) => i32_ty.clone(),
+        Payload::String(_) => string_ty.clone(),
+    };
+    let shape_matches = match (
+        &receipt.shape,
+        &receipt.set_payload,
+        receipt.get_key_value.as_str(),
+    ) {
+        (Shape::HitI32, Payload::I32(42), "answer")
+        | (Shape::SameRootMapSizeI32, Payload::I32(42), "answer")
+        | (Shape::MissI32, Payload::I32(42), "missing") => true,
+        (Shape::HitString, Payload::String(value), "answer") => value == "borrowed String λ",
+        _ => false,
+    };
+    let result_print = receipt
+        .result_receipt
+        .payload_println
+        .as_ref()
+        .is_some_and(|observation| {
+            observation.projection == receipt.payload_projection
+                && observation.call == receipt.print_operation
+                && !observation.checker_payload_type.as_str().trim().is_empty()
+                && observation.result_type == unit_ty
+        });
+    if receipt.profile_version != ProfileVersion::V1
+        || receipt.owner != receipt.cfg.owner
+        || receipt.cfg.entry != receipt.new_dispatch
+        || receipt.new_result_type != receipt.set_result_type
+        || receipt.result_receipt.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
+        || receipt.result_receipt.kind != OrdinaryMapOwnedAnyV2ActionKind::GetAny
+        || receipt.result_receipt.operation != receipt.get_operation
+        || receipt.result_receipt.result != receipt.get_operation
+        || receipt.result_receipt.result_type != receipt.pair_type
+        || receipt.result_receipt.binding != receipt.pair_local
+        || receipt.result_receipt.source_local != receipt.updated_root_local
+        || receipt.result_receipt.source_type != receipt.initial_root_type
+        || receipt.result_receipt.settlement
+            != OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
+        || receipt.result_receipt.settlement_point.as_ref() != Some(&receipt.pair_drop)
+        || !result_print
+        || receipt.set_payload_type != payload_type
+        || receipt.set_key_value != "answer"
+        || !shape_matches
+        || is_size_shape != has_size_receipt
+        || receipt.cfg.reachable_blocks.len() != 7
+        || receipt.cfg.reachable_edges.len() != 8
+        || receipt.cfg.match_arms.len() != 2
+        || receipt.new_ok_target != receipt.set_dispatch
+        || receipt.initial_root_local == receipt.new_error_local
+        || receipt.initial_root_local == receipt.updated_root_local
+        || receipt.initial_root_local == receipt.set_error_local
+        || receipt.updated_root_local == receipt.set_error_local
+        || receipt.pair_local == receipt.updated_root_local
+        || receipt.pair_local == receipt.initial_root_local
+        || receipt.pair_local == receipt.new_error_local
+        || receipt.pair_local == receipt.set_error_local
+    {
+        return Err(fail(&format!(
+            "receipt is outside the exact four-shape New/Set/GetAny direct-print slice (shape={:?}, payload={:?}, key={:?}, shape_matches={}, new_result_matches_set_result={}, result_print={}, size_shape={}, size_receipt={}, cfg_blocks={}, cfg_edges={}, cfg_arms={})",
+            receipt.shape,
+            receipt.set_payload,
+            receipt.get_key_value,
+            shape_matches,
+            receipt.new_result_type == receipt.set_result_type,
+            result_print,
+            is_size_shape,
+            has_size_receipt,
+            receipt.cfg.reachable_blocks.len(),
+            receipt.cfg.reachable_edges.len(),
+            receipt.cfg.match_arms.len(),
+        )));
+    }
+
+    let set_attempts = receipt
+        .operations
+        .iter()
+        .filter(|attempt| {
+            attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Set
+                && attempt.point == receipt.set_operation
+        })
+        .collect::<Vec<_>>();
+    let [set_attempt] = set_attempts.as_slice() else {
+        return Err(fail("receipt has no unique Set operation operand census"));
+    };
+    let [_, set_key_node, set_payload_node] = set_attempt.arguments.as_slice() else {
+        return Err(fail(
+            "Set operand census does not contain receiver, key, and payload",
+        ));
+    };
+    let get_attempts = receipt
+        .operations
+        .iter()
+        .filter(|attempt| {
+            attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::GetAny
+                && attempt.point == receipt.get_operation
+        })
+        .collect::<Vec<_>>();
+    let [get_attempt] = get_attempts.as_slice() else {
+        return Err(fail(
+            "receipt has no unique GetAny operation operand census",
+        ));
+    };
+    let [_, get_key_node] = get_attempt.arguments.as_slice() else {
+        return Err(fail(
+            "GetAny operand census does not contain receiver and key",
+        ));
+    };
+    let new_attempt_count = receipt
+        .operations
+        .iter()
+        .filter(|attempt| {
+            attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::New
+                && attempt.point == receipt.new_operation
+        })
+        .count();
+    if get_key_node != &receipt.get_key
+        || set_attempt.receiver_local.as_ref() != Some(&receipt.initial_root_local)
+        || get_attempt.receiver_local.as_ref() != Some(&receipt.updated_root_local)
+        || get_attempt.result_local.as_ref() != Some(&receipt.pair_local)
+        || new_attempt_count != 1
+        || receipt.operations.len() != if has_size_receipt { 4 } else { 3 }
+    {
+        return Err(fail(
+            "operation census differs from the closed Set/GetAny/optional-Size slice",
+        ));
+    }
+    if let (Some(size_operation), Some(size_receiver)) =
+        (&receipt.size_operation, &receipt.size_receiver)
+    {
+        let size_attempts = receipt
+            .operations
+            .iter()
+            .filter(|attempt| {
+                attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Size
+                    && attempt.point == *size_operation
+            })
+            .collect::<Vec<_>>();
+        let [size_attempt] = size_attempts.as_slice() else {
+            return Err(fail("same-root size receipt has no unique Size operation"));
+        };
+        if size_attempt.arguments.as_slice() != std::slice::from_ref(size_receiver)
+            || size_attempt.receiver_local.as_ref() != Some(&receipt.updated_root_local)
+        {
+            return Err(fail(
+                "Size operand census does not observe the updated root",
+            ));
+        }
+    }
+
+    let value = |local: &ResolvedLocalId| {
+        MirValueId::new(format!("local:{}", local.0 .0)).map_err(|error| error.to_string())
+    };
+    let expression = |node: &NodeId| {
+        MirValueId::new(format!("expr:{}", node.0)).map_err(|error| error.to_string())
+    };
+    let literal = |node: &NodeId| {
+        MirValueId::new(format!("literal:{}", node.0)).map_err(|error| error.to_string())
+    };
+    let block = |id: &crate::core::cfg::BasicBlockId| {
+        MirBlockId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let edge = |id: &crate::core::cfg::EdgeId| {
+        MirEdgeId::new(id.0 .0.clone()).map_err(|error| error.to_string())
+    };
+    let instruction = |name: &str, point: &NodeId, kind| -> Result<MirInstruction, String> {
+        Ok(MirInstruction {
+            id: MirInstructionId::new(format!(
+                "inst:ordinary_map_direct_print_result_l1:{name}:{}",
+                point.0
+            ))
+            .map_err(|error| error.to_string())?,
+            kind,
+        })
+    };
+
+    let source_arm = |dispatch: &crate::core::cfg::BasicBlockId,
+                      operation: &NodeId,
+                      arm: &NodeId,
+                      source_edge: &crate::core::cfg::EdgeId,
+                      target: &crate::core::cfg::BasicBlockId,
+                      variant_name: &str|
+     -> Result<(MirEdgeId, MirBlockId), String> {
+        let source_block = receipt
+            .cfg
+            .reachable_blocks
+            .get(dispatch)
+            .ok_or_else(|| fail("Result dispatch block is absent from the Checker CFG"))?;
+        let crate::core::cfg::Terminator::Match {
+            scrutinee,
+            arms: dispatch_edges,
+        } = &source_block.terminator
+        else {
+            return Err(fail("receipt dispatch is not a Checker Match block"));
+        };
+        if scrutinee != operation
+            || dispatch_edges.len() != 2
+            || !dispatch_edges.contains(source_edge)
+        {
+            return Err(fail(
+                "Result dispatch operation or source edge disagrees with its CFG",
+            ));
+        }
+        let matching_arms = receipt
+            .cfg
+            .match_arms
+            .get(dispatch)
+            .into_iter()
+            .flatten()
+            .filter(|candidate| candidate.source_arm == *arm && !candidate.guarded)
+            .collect::<Vec<_>>();
+        let [matched_arm] = matching_arms.as_slice() else {
+            return Err(fail(
+                "Result source arm has no unique unguarded Checker match case",
+            ));
+        };
+        let expected_variant = NodeId(format!("builtin:variant:Result::{variant_name}"));
+        if matched_arm.edge != *source_edge
+            || matched_arm.case != ManagedAnyCfgMatchCase::Variant(expected_variant)
+        {
+            return Err(fail(
+                "Checker match case does not identify the receipted Result variant",
+            ));
+        }
+        let cfg_edge = receipt
+            .cfg
+            .reachable_edges
+            .get(source_edge)
+            .ok_or_else(|| fail("Result source edge is absent from the Checker CFG"))?;
+        if cfg_edge.from != *dispatch
+            || cfg_edge.to != *target
+            || cfg_edge.kind != crate::core::cfg::EdgeKind::MatchArm
+            || cfg_edge.source.node != *arm
+        {
+            return Err(fail(
+                "Result source edge endpoint or arm differs from the Checker receipt",
+            ));
+        }
+        Ok((edge(source_edge)?, block(target)?))
+    };
+    let source_return = |source: &crate::core::cfg::BasicBlockId,
+                         value: &NodeId|
+     -> Result<(), String> {
+        let block = receipt
+            .cfg
+            .reachable_blocks
+            .get(source)
+            .ok_or_else(|| fail("Result branch target is absent from the Checker CFG"))?;
+        if block
+            .points
+            .iter()
+            .filter(|point| {
+                point.source.node == *value
+                    && point.kind == crate::core::cfg::CfgPointKind::Expression
+            })
+            .count()
+            != 1
+        {
+            return Err(fail(
+                "Result branch target does not contain its unique receipted tail expression",
+            ));
+        }
+
+        // Match-arm values flow through the enclosing match join before the
+        // function's implicit return. Follow the actual Checker fallthrough
+        // edges and require that join to return the outer New match value;
+        // the arm's own expression identity is checked above and by the L1
+        // resolved-body receipt validator.
+        let mut current = source.clone();
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(fail(
+                    "Result branch reaches a cycle before its implicit return",
+                ));
+            }
+            let block = receipt
+                .cfg
+                .reachable_blocks
+                .get(&current)
+                .ok_or_else(|| fail("Result branch fallthrough leaves the Checker CFG"))?;
+            match &block.terminator {
+                crate::core::cfg::Terminator::Return {
+                    value: Some(returned),
+                    implicit: true,
+                } if returned == &receipt.new_match => return Ok(()),
+                crate::core::cfg::Terminator::Goto { edge } => {
+                    let cfg_edge = receipt
+                        .cfg
+                        .reachable_edges
+                        .get(edge)
+                        .ok_or_else(|| fail("Result branch fallthrough edge is absent"))?;
+                    if cfg_edge.from != current
+                        || cfg_edge.kind != crate::core::cfg::EdgeKind::Fallthrough
+                    {
+                        return Err(fail(
+                            "Result branch does not follow a Checker fallthrough edge",
+                        ));
+                    }
+                    current = cfg_edge.to.clone();
+                }
+                terminator => {
+                    return Err(fail(&format!(
+                        "Result branch does not reach the receipted outer match return (target={source:?}, expected={value:?}, terminator={terminator:?})"
+                    )));
+                }
+            }
+        }
+    };
+
+    source_arm(
+        &receipt.new_dispatch,
+        &receipt.new_operation,
+        &receipt.new_ok_arm,
+        &receipt.new_ok_edge,
+        &receipt.new_ok_target,
+        "Ok",
+    )?;
+    source_arm(
+        &receipt.new_dispatch,
+        &receipt.new_operation,
+        &receipt.new_error_arm,
+        &receipt.new_error_edge,
+        &receipt.new_error_target,
+        "Err",
+    )?;
+    source_arm(
+        &receipt.set_dispatch,
+        &receipt.set_operation,
+        &receipt.set_ok_arm,
+        &receipt.set_ok_edge,
+        &receipt.set_ok_target,
+        "Ok",
+    )?;
+    source_arm(
+        &receipt.set_dispatch,
+        &receipt.set_operation,
+        &receipt.set_error_arm,
+        &receipt.set_error_edge,
+        &receipt.set_error_target,
+        "Err",
+    )?;
+    source_return(&receipt.new_error_target, &receipt.new_error_return)?;
+    source_return(&receipt.set_error_target, &receipt.set_error_return)?;
+    source_return(&receipt.set_ok_target, &receipt.success_return)?;
+
+    let new_result = expression(&receipt.new_operation)?;
+    let initial_root = value(&receipt.initial_root_local)?;
+    let new_status = value(&receipt.new_error_local)?;
+    let set_result = expression(&receipt.set_operation)?;
+    let updated_root = value(&receipt.updated_root_local)?;
+    let set_status = value(&receipt.set_error_local)?;
+    let set_key = literal(set_key_node)?;
+    let set_payload = literal(set_payload_node)?;
+    let get_key = literal(get_key_node)?;
+    let pair = value(&receipt.pair_local)?;
+    let print_result = expression(&receipt.print_operation)?;
+    let success_result = expression(&receipt.success_return)?;
+    let set_key_instruction = instruction(
+        "set_key",
+        set_key_node,
+        MirInstructionKind::Const {
+            result: set_key.clone(),
+            literal: ResolvedLiteral::String(receipt.set_key_value.clone()),
+        },
+    )?;
+    let set_payload_literal = match &receipt.set_payload {
+        Payload::I32(value) => ResolvedLiteral::Int(*value),
+        Payload::String(value) => ResolvedLiteral::String(value.clone()),
+    };
+    let set_payload_instruction = instruction(
+        "set_payload",
+        set_payload_node,
+        MirInstructionKind::Const {
+            result: set_payload.clone(),
+            literal: set_payload_literal,
+        },
+    )?;
+
+    let mut values = BTreeMap::from([
+        (
+            new_result.clone(),
+            MirValue {
+                id: new_result.clone(),
+                ty: root_result_ty.clone(),
+            },
+        ),
+        (
+            initial_root.clone(),
+            MirValue {
+                id: initial_root.clone(),
+                ty: root_ty.clone(),
+            },
+        ),
+        (
+            new_status.clone(),
+            MirValue {
+                id: new_status.clone(),
+                ty: i32_ty.clone(),
+            },
+        ),
+        (
+            set_result.clone(),
+            MirValue {
+                id: set_result.clone(),
+                ty: root_result_ty.clone(),
+            },
+        ),
+        (
+            updated_root.clone(),
+            MirValue {
+                id: updated_root.clone(),
+                ty: root_ty.clone(),
+            },
+        ),
+        (
+            set_status.clone(),
+            MirValue {
+                id: set_status.clone(),
+                ty: i32_ty.clone(),
+            },
+        ),
+        (
+            set_key.clone(),
+            MirValue {
+                id: set_key.clone(),
+                ty: string_ty.clone(),
+            },
+        ),
+        (
+            set_payload.clone(),
+            MirValue {
+                id: set_payload.clone(),
+                ty: receipt.set_payload_type.clone(),
+            },
+        ),
+        (
+            get_key.clone(),
+            MirValue {
+                id: get_key.clone(),
+                ty: string_ty.clone(),
+            },
+        ),
+        (
+            pair.clone(),
+            MirValue {
+                id: pair.clone(),
+                ty: pair_ty.clone(),
+            },
+        ),
+        (
+            print_result.clone(),
+            MirValue {
+                id: print_result.clone(),
+                ty: unit_ty.clone(),
+            },
+        ),
+        (
+            success_result.clone(),
+            MirValue {
+                id: success_result.clone(),
+                ty: i32_ty.clone(),
+            },
+        ),
+    ]);
+    let size_result =
+        if let (Some(operation), Some(local)) = (&receipt.size_operation, &receipt.size_local) {
+            let operation_value = expression(operation)?;
+            let local_value = value(local)?;
+            values.insert(
+                operation_value.clone(),
+                MirValue {
+                    id: operation_value.clone(),
+                    ty: i32_ty.clone(),
+                },
+            );
+            values.insert(
+                local_value.clone(),
+                MirValue {
+                    id: local_value.clone(),
+                    ty: i32_ty.clone(),
+                },
+            );
+            Some((operation_value, local_value))
+        } else {
+            None
+        };
+
+    let result_arm = |name: &str,
+                      target: MirBlockId,
+                      arm_edge: MirEdgeId,
+                      parameter: MirValueId,
+                      field_ty: crate::core::ResolvedTypeId,
+                      ownership: MirOwnership,
+                      move_out_glue: MirGlueKind| {
+        let variant = NodeId(format!("builtin:variant:Result::{name}"));
+        MirSwitchArm {
+            edge: arm_edge,
+            target,
+            arguments: Vec::new(),
+            bindings: vec![MirSwitchBinding {
+                parameter,
+                projection: MirVariantProjectionContract {
+                    nominal: NominalTypeId::new("builtin:type:Result").expect("Result nominal"),
+                    variant: variant.clone(),
+                    field: NodeId(format!("builtin:variant:Result::{name}/payload:0")),
+                    field_index: 0,
+                    arity: 1,
+                    field_ty,
+                    ownership,
+                    move_out_glue,
+                },
+                nested_tuple: None,
+            }],
+            case: MirSwitchCase::Variant(variant),
+        }
+    };
+
+    let entry = block(&receipt.new_dispatch)?;
+    let set_dispatch = block(&receipt.set_dispatch)?;
+    let new_error = block(&receipt.new_error_target)?;
+    let set_success = block(&receipt.set_ok_target)?;
+    let set_error = block(&receipt.set_error_target)?;
+    let (new_ok_edge, new_ok_target) = source_arm(
+        &receipt.new_dispatch,
+        &receipt.new_operation,
+        &receipt.new_ok_arm,
+        &receipt.new_ok_edge,
+        &receipt.new_ok_target,
+        "Ok",
+    )?;
+    let (new_error_edge, new_error_target) = source_arm(
+        &receipt.new_dispatch,
+        &receipt.new_operation,
+        &receipt.new_error_arm,
+        &receipt.new_error_edge,
+        &receipt.new_error_target,
+        "Err",
+    )?;
+    let (set_ok_edge, set_ok_target) = source_arm(
+        &receipt.set_dispatch,
+        &receipt.set_operation,
+        &receipt.set_ok_arm,
+        &receipt.set_ok_edge,
+        &receipt.set_ok_target,
+        "Ok",
+    )?;
+    let (set_error_edge, set_error_target) = source_arm(
+        &receipt.set_dispatch,
+        &receipt.set_operation,
+        &receipt.set_error_arm,
+        &receipt.set_error_edge,
+        &receipt.set_error_target,
+        "Err",
+    )?;
+    let set_instruction = match &receipt.set_payload {
+        Payload::I32(_) => MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+            result: set_result.clone(),
+            source: initial_root.clone(),
+            key: set_key.clone(),
+            value: set_payload.clone(),
+        },
+        Payload::String(_) => MirInstructionKind::OrdinaryMapOwnedAnyV2SetStringResult {
+            result: set_result.clone(),
+            source: initial_root.clone(),
+            key: set_key.clone(),
+            value: set_payload.clone(),
+        },
+    };
+    let mut set_instructions = vec![
+        set_key_instruction,
+        set_payload_instruction,
+        instruction("set_result", &receipt.set_operation, set_instruction)?,
+    ];
+    if matches!(&receipt.set_payload, Payload::String(_)) {
+        set_instructions.push(instruction(
+            "drop_set_payload",
+            set_payload_node,
+            MirInstructionKind::Drop {
+                value: set_payload.clone(),
+            },
+        )?);
+    }
+    set_instructions.push(instruction(
+        "drop_set_key",
+        set_key_node,
+        MirInstructionKind::Drop {
+            value: set_key.clone(),
+        },
+    )?);
+
+    let get_key_instruction = instruction(
+        "get_key",
+        get_key_node,
+        MirInstructionKind::Const {
+            result: get_key.clone(),
+            literal: ResolvedLiteral::String(receipt.get_key_value.clone()),
+        },
+    )?;
+    let get_instruction = instruction(
+        "get_any",
+        &receipt.get_operation,
+        MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny {
+            result: pair.clone(),
+            root: updated_root.clone(),
+            key: get_key.clone(),
+        },
+    )?;
+    let get_key_drop = instruction(
+        "drop_get_key",
+        get_key_node,
+        MirInstructionKind::Drop {
+            value: get_key.clone(),
+        },
+    )?;
+    let drop_old_root = instruction(
+        "drop_old_root",
+        &receipt.set_ok_input_drop,
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+            root: initial_root.clone(),
+        },
+    )?;
+    let drop_updated_root = instruction(
+        "drop_updated_root",
+        &receipt.root_get_drop,
+        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop {
+            root: updated_root.clone(),
+        },
+    )?;
+    let print_instruction = MirInstruction {
+        id: MirInstructionId::new(format!(
+            "inst:ordinary_map_owned_any_v2_println:{}",
+            receipt.print_operation.0
+        ))
+        .map_err(|error| error.to_string())?,
+        kind: MirInstructionKind::OrdinaryMapOwnedAnyV2Println {
+            result: print_result,
+            pair: pair.clone(),
+            projection: receipt.payload_projection.clone(),
+        },
+    };
+    let pair_drop = instruction(
+        "drop_pair",
+        &receipt.pair_drop,
+        MirInstructionKind::Drop {
+            value: pair.clone(),
+        },
+    )?;
+    let mut size_instructions = None;
+    if let Some((size_expression, size_local)) = &size_result {
+        let size_operation = receipt
+            .size_operation
+            .as_ref()
+            .expect("size receipt presence checked above");
+        let size_binding = receipt
+            .size_binding
+            .as_ref()
+            .expect("size receipt presence checked above");
+        let size = instruction(
+            "size",
+            size_operation,
+            MirInstructionKind::OrdinaryMapOwnedAnyV2Size {
+                result: size_expression.clone(),
+                root: updated_root.clone(),
+            },
+        )?;
+        let bind_size = instruction(
+            "bind_size",
+            size_binding,
+            MirInstructionKind::Copy {
+                result: size_local.clone(),
+                source: size_expression.clone(),
+            },
+        )?;
+        let return_size = instruction(
+            "return_size",
+            &receipt.success_return,
+            MirInstructionKind::Copy {
+                result: success_result.clone(),
+                source: size_local.clone(),
+            },
+        )?;
+        size_instructions = Some((size, bind_size, return_size));
+    }
+
+    let mut set_success_instructions = vec![get_key_instruction, get_instruction, get_key_drop];
+    if is_size_shape {
+        set_success_instructions.push(print_instruction);
+        let (size, bind_size, return_size) =
+            size_instructions.expect("complete size receipt checked above");
+        set_success_instructions.push(size);
+        set_success_instructions.push(bind_size);
+        set_success_instructions.push(pair_drop);
+        set_success_instructions.push(drop_old_root);
+        set_success_instructions.push(drop_updated_root);
+        set_success_instructions.push(return_size);
+    } else {
+        set_success_instructions.push(drop_old_root);
+        set_success_instructions.push(drop_updated_root);
+        set_success_instructions.push(print_instruction);
+        set_success_instructions.push(pair_drop);
+        set_success_instructions.push(instruction(
+            "success_zero",
+            &receipt.success_return,
+            MirInstructionKind::Const {
+                result: success_result.clone(),
+                literal: ResolvedLiteral::Int(0),
+            },
+        )?);
+    }
+
+    let event = |kind: MirOwnershipEventKind,
+                 local: &ResolvedLocalId,
+                 point: &NodeId|
+     -> Result<MirOwnershipEvent, String> {
+        let source = matches!(
+            kind,
+            MirOwnershipEventKind::Move
+                | MirOwnershipEventKind::Drop
+                | MirOwnershipEventKind::Return
+                | MirOwnershipEventKind::TransferSession
+                | MirOwnershipEventKind::TransferChild
+        )
+        .then(|| {
+            crate::core::Place::root(crate::core::LocalId(local.0.clone()), local.0 .0.clone())
+                .display()
+        });
+        Ok(MirOwnershipEvent {
+            kind,
+            resource: local.0 .0.clone(),
+            value: Some(value(local)?),
+            source,
+            target: None,
+            point: point.clone(),
+            loan: None,
+            checker_block: None,
+            checker_edge: None,
+        })
+    };
+    let mut events = vec![
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.initial_root_local,
+            &receipt.new_ok_pattern,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &receipt.initial_root_local,
+            &receipt.set_operation,
+        )?,
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.updated_root_local,
+            &receipt.set_ok_pattern,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.initial_root_local,
+            &receipt.set_ok_input_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.initial_root_local,
+            &receipt.set_error_input_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &receipt.updated_root_local,
+            &receipt.get_operation,
+        )?,
+        event(
+            MirOwnershipEventKind::Introduce,
+            &receipt.pair_local,
+            &receipt.pair_binding,
+        )?,
+        event(
+            MirOwnershipEventKind::Read,
+            &receipt.pair_local,
+            &receipt.payload_projection,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.updated_root_local,
+            &receipt.root_get_drop,
+        )?,
+        event(
+            MirOwnershipEventKind::Drop,
+            &receipt.pair_local,
+            &receipt.pair_drop,
+        )?,
+    ];
+    if let Some(size_local) = &receipt.size_local {
+        events.push(event(
+            MirOwnershipEventKind::Introduce,
+            size_local,
+            receipt.size_binding.as_ref().expect("size receipt present"),
+        )?);
+    }
+    let ownership = MirOwnershipSummary {
+        checker_ordinary_map_owned_any_v2_direct_print_result_receipt: Some(Box::new(
+            receipt.clone(),
+        )),
+        events,
+        ..MirOwnershipSummary::default()
+    };
+
+    let function = MirFunction {
+        owner: receipt.owner.clone(),
+        parameters: Vec::new(),
+        parameter_permissions: Some(Vec::new()),
+        result: i32_ty.clone(),
+        entry: entry.clone(),
+        values: std::mem::take(&mut values),
+        blocks: BTreeMap::from([
+            (
+                entry.clone(),
+                MirBlock {
+                    id: entry.clone(),
+                    parameters: Vec::new(),
+                    instructions: vec![instruction(
+                        "new",
+                        &receipt.new_operation,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                            result: new_result.clone(),
+                        },
+                    )?],
+                    terminator: MirTerminator::SwitchMove {
+                        scrutinee: new_result,
+                        arms: vec![
+                            result_arm(
+                                "Ok",
+                                new_ok_target.clone(),
+                                new_ok_edge,
+                                initial_root.clone(),
+                                root_ty.clone(),
+                                MirOwnership::Move,
+                                MirGlueKind::OrdinaryMapOwnedAnyV2,
+                            ),
+                            result_arm(
+                                "Err",
+                                new_error_target.clone(),
+                                new_error_edge,
+                                new_status.clone(),
+                                i32_ty.clone(),
+                                MirOwnership::Copy,
+                                MirGlueKind::Noop,
+                            ),
+                        ],
+                    },
+                },
+            ),
+            (
+                set_dispatch.clone(),
+                MirBlock {
+                    id: set_dispatch.clone(),
+                    parameters: vec![MirBlockParameter {
+                        value: initial_root.clone(),
+                    }],
+                    instructions: set_instructions,
+                    terminator: MirTerminator::SwitchMove {
+                        scrutinee: set_result,
+                        arms: vec![
+                            result_arm(
+                                "Ok",
+                                set_ok_target,
+                                set_ok_edge,
+                                updated_root.clone(),
+                                root_ty.clone(),
+                                MirOwnership::Move,
+                                MirGlueKind::OrdinaryMapOwnedAnyV2,
+                            ),
+                            result_arm(
+                                "Err",
+                                set_error_target,
+                                set_error_edge,
+                                set_status.clone(),
+                                i32_ty.clone(),
+                                MirOwnership::Copy,
+                                MirGlueKind::Noop,
+                            ),
+                        ],
+                    },
+                },
+            ),
+            (
+                new_error.clone(),
+                MirBlock {
+                    id: new_error,
+                    parameters: vec![MirBlockParameter {
+                        value: new_status.clone(),
+                    }],
+                    instructions: Vec::new(),
+                    terminator: MirTerminator::Return {
+                        value: Some(new_status),
+                    },
+                },
+            ),
+            (
+                set_success.clone(),
+                MirBlock {
+                    id: set_success,
+                    parameters: vec![MirBlockParameter {
+                        value: updated_root.clone(),
+                    }],
+                    instructions: set_success_instructions,
+                    terminator: MirTerminator::Return {
+                        value: Some(success_result),
+                    },
+                },
+            ),
+            (
+                set_error.clone(),
+                MirBlock {
+                    id: set_error,
+                    parameters: vec![MirBlockParameter {
+                        value: set_status.clone(),
+                    }],
+                    instructions: vec![instruction(
+                        "drop_set_error_root",
+                        &receipt.set_error_input_drop,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root: initial_root },
+                    )?],
+                    terminator: MirTerminator::Return {
+                        value: Some(set_status),
+                    },
+                },
+            ),
+        ]),
+        contracts: Vec::new(),
+        proof_worklist: None,
+        ownership,
+    };
+    Ok(function)
 }

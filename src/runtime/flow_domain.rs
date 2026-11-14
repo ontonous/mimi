@@ -625,10 +625,10 @@ fn ensure_participant(
     }
 }
 
-fn checked_instance<'a>(
-    state: &'a DomainState,
+fn checked_instance(
+    state: &DomainState,
     handle: FlowHandle,
-) -> Result<&'a FlowInstance, FlowDomainError> {
+) -> Result<&FlowInstance, FlowDomainError> {
     if handle.domain != state.domain {
         return Err(FlowDomainError::WrongDomain);
     }
@@ -649,10 +649,10 @@ fn checked_instance<'a>(
     }
 }
 
-fn checked_instance_mut<'a>(
-    state: &'a mut DomainState,
+fn checked_instance_mut(
+    state: &mut DomainState,
     handle: FlowHandle,
-) -> Result<&'a mut FlowInstance, FlowDomainError> {
+) -> Result<&mut FlowInstance, FlowDomainError> {
     if handle.domain != state.domain {
         return Err(FlowDomainError::WrongDomain);
     }

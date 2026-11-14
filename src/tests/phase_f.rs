@@ -49,20 +49,33 @@ func main() -> i32 {
 
 const T04_ACTOR_FLOW: &str = r#"
 flow Order {
+    state Uninitialized {}
     state Pending { item: string }
     state Shipped { item: string }
+    transition initialize(Uninitialized, item: string) -> Pending {
+        { return Pending { item: item } }
+    }
     transition ship(Pending) -> Shipped {
         { return Shipped { item: self.item } }
     }
 }
+
 actor OrderWorker runs Order {
-    func process() -> i32 {
-        return 1
+    func process(order: Pending) -> Shipped {
+        return Order::ship(order)
     }
 }
+
 func main() -> i32 {
-    println("t04_actor_flow ok")
-    0
+    let pending = Order::initialize(Uninitialized {}, "book")
+    let worker = OrderWorker.spawn()
+    let shipped = worker.process(pending)
+    if shipped.item == "book" {
+        println("t04_actor_flow ok")
+        0
+    } else {
+        1
+    }
 }
 "#;
 

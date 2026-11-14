@@ -47,6 +47,35 @@ fn assert_closed(
 }
 
 #[test]
+fn canonical_actor_graph_rejects_compile_time_callables_as_executable_bodies() {
+    let source = r#"
+comptime func compile_only() -> i32 { 7 }
+actor Counter {
+    func read() -> i32 { compile_only() }
+}
+func main() -> i32 {
+    let counter = Counter.spawn()
+    counter.read()
+}
+"#;
+    let tokens = crate::lexer::Lexer::new(source)
+        .tokenize()
+        .expect("lex comptime Actor source");
+    let file = crate::parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse comptime Actor source");
+    let checked = crate::core::check_program(&file).expect("check comptime Actor source");
+    let error = MirProgram::from_checked_program(&checked)
+        .expect_err("Actor graph cannot materialize a comptime body as executable MIR");
+    assert!(
+        error
+            .to_string()
+            .contains("compile-time-only callable 'function:compile_only'"),
+        "unexpected Actor comptime diagnostic: {error}"
+    );
+}
+
+#[test]
 fn canonical_actor_reference_preserves_original_capture_stdout() {
     let program = canonical(CAPTURE);
     let reference = MirReferenceInterpreter::new(&program);
@@ -82,42 +111,85 @@ fn canonical_actor_nested_helpers_use_actor_environment_receipts() {
             program.nested_callable_scopes().is_empty(),
             "Actor helpers must not be claimed by the ordinary nested-callable receipt"
         );
+        program
+            .validate_nested_callable_scope_receipts()
+            .expect("ordinary nested-callable validation excludes Actor-specific helper owners");
     }
 }
 
 #[test]
-fn canonical_actor_reference_repeated_turns_keep_state_and_root_replay_resets_it() {
-    let source = CAPTURE.replace("println(r)", "println(r)\n    println(c.bump(7))");
+fn canonical_actor_reference_repeated_mailbox_calls_and_root_replay_resets_it() {
+    let source = CAPTURE.replace(
+        "    println(r)",
+        "    println(r)\n    let advanced2 = c.bump(7)\n    println(advanced2)",
+    );
     let program = canonical(&source);
     let reference = MirReferenceInterpreter::new(&program);
     for _ in 0..2 {
         let observation = reference
             .execute_with_output(&main_owner(), &[])
             .expect("repeat Actor turns");
-        assert_eq!(observation.output, "15\n32\n");
-        assert_closed(&reference, 1, 2, 0);
+        assert_eq!(observation.output, "15\n17\n");
+        assert_closed(&reference, 1, 3, 0);
     }
+}
+
+#[test]
+fn canonical_actor_bytecode_repeated_mailbox_calls_settle_without_ast() {
+    let source = CAPTURE.replace(
+        "    println(r)",
+        "    println(r)\n    let advanced2 = c.bump(7)\n    println(advanced2)",
+    );
+    let program = canonical(&source);
+    let bytecode = crate::interp::bytecode::compile_mir_program(&program)
+        .expect("AST-free Bytecode compiles checked nested-helper Actor calls");
+    assert!(bytecode.ast.is_none());
+    let mut vm = crate::interp::bytecode::BytecodeVM::new(bytecode);
+    vm.run().expect("two nested-helper Actor mailbox turns");
+    assert_eq!(vm.stdout(), "15\n17\n");
+    let counts = vm
+        .canonical_actor_domain_counts()
+        .expect("Flow Actor domain lifecycle is observed");
+    assert_eq!(counts.accepted_messages, 3);
+    assert_eq!(counts.settled_replies, 3);
+    assert_eq!(counts.joined_workers, 1);
+    assert_eq!(counts.live_roots, 0);
+    assert_eq!(counts.live_workers, 0);
 }
 
 #[test]
 fn canonical_actor_reference_two_instances_keep_nonzero_initial_state_independently() {
     let program = canonical(
         r#"
-actor Counter {
-    base: i32 = 9;
+flow CounterFlow {
+    state Active { base: i32 }
+    transition seed(Active, value: i32) -> Active {
+        return Active { base: value }
+    }
+    transition add(Active, amount: i32) -> Active {
+        return Active { base: self.base + amount }
+    }
+}
+actor Counter runs CounterFlow {
     func bump(delta: i32) -> i32 {
         let scale = 10
         func scaled(d: i32) -> i32 { scale + d }
-        self.base = self.base + scaled(delta)
-        self.base
+        scaled(delta)
     }
 }
 func main() -> i32 {
     let a = Counter.spawn()
     let b = Counter.spawn()
-    println(a.bump(5))
-    println(b.bump(7))
-    println(a.bump(7))
+    let a_initial = a.seed(9)
+    let b_initial = b.seed(9)
+    let a_seed = a_initial.base
+    let b_seed = b_initial.base
+    let first = a.add(a.bump(5) + a_seed - 9)
+    let second = b.add(b.bump(7) + b_seed - 9)
+    let third = a.add(a.bump(7))
+    println(first.base)
+    println(second.base)
+    println(third.base)
     0
 }
 "#,
@@ -127,7 +199,7 @@ func main() -> i32 {
         .execute_with_output(&main_owner(), &[])
         .expect("isolated Actor instances");
     assert_eq!(observation.output, "24\n26\n41\n");
-    assert_closed(&reference, 2, 3, 0);
+    assert_closed(&reference, 2, 8, 0);
 }
 
 #[test]
@@ -135,20 +207,26 @@ fn canonical_actor_reference_two_capture_environment_is_bound_to_lexical_helper(
     let program = canonical(
         r#"
 func scaled(x: i32) -> i32 { x + 100 }
-actor Counter {
-    base: i32 = 0;
+flow CounterFlow {
+    state Active { base: i32 }
+    transition add(Active, amount: i32) -> Active {
+        return Active { base: self.base + amount }
+    }
+}
+actor Counter runs CounterFlow {
     func bump(delta: i32) -> i32 {
         let scale = 10
         let bias = 3
         func scaled(d: i32) -> i32 { scale + bias + d }
-        self.base = self.base + scaled(delta)
-        self.base
+        scaled(delta)
     }
 }
 func main() -> i32 {
     let a = Counter.spawn()
-    println(a.bump(5))
-    println(a.bump(7))
+    let first = a.add(a.bump(5))
+    let second = a.add(a.bump(7))
+    println(first.base)
+    println(second.base)
     println(scaled(1))
     0
 }
@@ -159,7 +237,7 @@ func main() -> i32 {
         .execute_with_output(&main_owner(), &[])
         .expect("two Actor captures");
     assert_eq!(observation.output, "18\n38\n101\n");
-    assert_closed(&reference, 1, 2, 0);
+    assert_closed(&reference, 1, 4, 0);
 }
 
 #[test]
@@ -167,9 +245,7 @@ fn canonical_actor_reference_method_trap_settles_turn_and_closes_root() {
     let program = canonical(
         r#"
 actor Counter {
-    base: i32 = 0;
     func divide(delta: i32) -> i32 {
-        self.base = self.base + delta
         9 / delta
     }
 }
@@ -593,7 +669,6 @@ fn canonical_actor_route_shared_graph_public_consumers_and_no_proof() {
             (0, 0, 0, 0, 0, 0, 0, 0)
         );
         assert_eq!(counts.joined_workers, 1);
-        crate::core::CheckedProgram::reset_test_legacy_body_access();
         for results in [
             crate::verifier::verify_checked(&checked, "actor-route-original".into()).unwrap(),
             crate::verifier::verify_checked_dual(&checked, "actor-route-original".into()).unwrap(),
@@ -612,7 +687,6 @@ fn canonical_actor_route_shared_graph_public_consumers_and_no_proof() {
         let mut configurable = crate::verifier::Verifier::new().expect("configured verifier host");
         configurable.set_source_hash("actor-route-original".into());
         assert!(configurable.verify_checked(&checked).is_empty());
-        assert!(crate::core::CheckedProgram::test_legacy_body_access().is_empty());
         let mut forged_receipt = receipt.clone();
         forged_receipt.mir_digest = "0".repeat(64);
         assert!(crate::verifier::verify_mir_with_route_receipt(
@@ -631,6 +705,7 @@ fn canonical_actor_route_shared_graph_public_consumers_and_no_proof() {
                 Vec::new(),
                 crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool),
             )]),
+            ffi_helper_call: None,
         });
         forged_program.replace_function_for_test_only(function);
         assert!(
@@ -641,42 +716,112 @@ fn canonical_actor_route_shared_graph_public_consumers_and_no_proof() {
 }
 
 #[test]
-fn canonical_actor_route_retains_unused_and_embedded_checked_contract_obligations() {
-    for (suffix, proven) in [
-        ("func guarded(x: i32) -> i32 {\n requires: x > 0\n ensures: result == x\n x\n}", true),
-        ("func guarded(x: i32) -> i32 {\n requires: x > 0\n ensures: result != x\n x\n}", false),
-        ("func identity_i32(x: i32) -> i32 { x }\nfunc guarded(x: i32) -> i32 { identity_i32({\n ensures: false\n x\n}) }", false),
-        ("func guarded(x: i32) -> i32 { x + {\n ensures: false\n 0\n} }", false),
+fn canonical_actor_route_retains_top_level_contracts_and_rejects_embedded_contracts() {
+    for (suffix, expected_proof) in [
+        (
+            "func guarded(x: i32) -> i32 {\n requires: x > 0\n ensures: result == x\n x\n}",
+            Some(true),
+        ),
+        (
+            "func guarded(x: i32) -> i32 {\n requires: x > 0\n ensures: result != x\n x\n}",
+            Some(false),
+        ),
+        (
+            "func identity_i32(x: i32) -> i32 { x }\nfunc guarded(x: i32) -> i32 { identity_i32({\n ensures: false\n x\n}) }",
+            None,
+        ),
+        (
+            "func guarded(x: i32) -> i32 { x + {\n ensures: false\n 0\n} }",
+            None,
+        ),
     ] {
         for original in [CAPTURE, SHADOW] {
             let source = format!("{original}\n{suffix}");
             let tokens = crate::lexer::Lexer::new(&source).tokenize().unwrap();
             let mut file = crate::parser::Parser::new(tokens).parse_file().unwrap();
             crate::loader::merge_prelude_into(&mut file);
-            let checked = crate::core::check_program(&file).expect("accepted dormant user contract");
+            let checked = match crate::core::check_program(&file) {
+                Ok(checked) => {
+                    assert!(
+                        expected_proof.is_some(),
+                        "embedded contract is rejected by the top-level contract rule"
+                    );
+                    checked
+                }
+                Err(diagnostics) => {
+                    assert!(
+                        expected_proof.is_none(),
+                        "valid top-level contract must remain accepted: {diagnostics:?}"
+                    );
+                    assert!(diagnostics.iter().any(|diagnostic| {
+                        diagnostic.code.as_deref() == Some("E0503")
+                            && diagnostic
+                                .message
+                                .contains("top-level callable-body contract")
+                    }));
+                    continue;
+                }
+            };
             let owner = NodeId("function:guarded".into());
-            let callable = checked.callable(&owner).expect("whole checked callable owner");
+            let callable = checked
+                .callable(&owner)
+                .expect("whole checked callable owner");
             assert!(callable.has_proof_obligations());
-            assert!(!callable.contracts.is_empty(), "Call/Binary descendants must remain in the checker contract census");
-            assert!(super::scalar_actor_contract_boundary_reason(&checked).unwrap().contains("guarded"));
+            assert!(
+                !callable.contracts.is_empty(),
+                "Call/Binary descendants must remain in the checker contract census"
+            );
+            assert!(
+                super::scalar_actor_contract_boundary_reason(&checked)
+                    .unwrap()
+                    .contains("guarded")
+            );
             assert!(!super::classify_canonical_mir_route_admission(&checked).scalar_actor);
-            let excluded = checked.source_registry().records().iter()
+            let excluded = checked
+                .source_registry()
+                .records()
+                .iter()
                 .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
-                .map(|record| record.id).collect::<std::collections::HashSet<_>>();
-            assert!(MirProgram::from_checked_program_excluding_sources(&checked, &excluded).unwrap_err()
-                .to_string().contains("cannot discard proof obligations"));
+                .map(|record| record.id)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(
+                MirProgram::from_checked_program_excluding_sources(&checked, &excluded)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot discard proof obligations")
+            );
             let mut configured = crate::verifier::Verifier::new().unwrap();
             configured.set_source_hash("whole-actor-user-contract-census".into());
-            for results in [crate::verifier::verify_checked(&checked, "whole-actor-user-contract-census".into()).unwrap(),
-                crate::verifier::verify_checked_dual(&checked, "whole-actor-user-contract-census".into()).unwrap(),
-                configured.verify_checked(&checked)] {
-                let guarded = results.iter().find(|result| result.func_name == "guarded")
+            for results in [
+                crate::verifier::verify_checked(
+                    &checked,
+                    "whole-actor-user-contract-census".into(),
+                )
+                .unwrap(),
+                crate::verifier::verify_checked_dual(
+                    &checked,
+                    "whole-actor-user-contract-census".into(),
+                )
+                .unwrap(),
+                configured.verify_checked(&checked),
+            ] {
+                let guarded = results
+                    .iter()
+                    .find(|result| result.func_name == "guarded")
                     .expect("default public verifier must retain the dormant owner obligation");
                 assert_ne!(guarded.status, crate::verifier::VerifStatus::NoObligations);
-                if proven {
-                    assert_eq!(guarded.status, crate::verifier::VerifStatus::Proven, "supported original user proof must remain supported: {guarded:?}");
+                if expected_proof == Some(true) {
+                    assert_eq!(
+                        guarded.status,
+                        crate::verifier::VerifStatus::Proven,
+                        "supported original user proof must remain supported: {guarded:?}"
+                    );
                 } else {
-                    assert_ne!(guarded.status, crate::verifier::VerifStatus::Proven, "false embedded/unused claim cannot be proved: {guarded:?}");
+                    assert_ne!(
+                        guarded.status,
+                        crate::verifier::VerifStatus::Proven,
+                        "false embedded/unused claim cannot be proved: {guarded:?}"
+                    );
                 }
             }
         }
@@ -685,29 +830,82 @@ fn canonical_actor_route_retains_unused_and_embedded_checked_contract_obligation
 
 #[test]
 fn canonical_actor_proof_census_retains_dormant_nested_impl_flow_and_declaration_owners() {
-    for (suffix, owner_fragment) in [
-        ("func outer() -> i32 {\nfunc guarded(x: i32) -> i32 {\nensures: false\nx\n}\n0\n}", "guarded"),
-        ("trait ProofTrait { func check(x: i32) -> i32 }\ntype ProofProbe { marker: i32 }\nimpl ProofTrait for ProofProbe { func check(x: i32) -> i32 {\nensures: false\nx\n} }", "check"),
-        ("flow Hidden {\nstate A { n: i32 }\ntransition tick(A) -> A {\nensures: false\nreturn A { n: self.n }\n}\n}", "Hidden"),
-        ("actor Dormant { n: i32 = {\nensures: false\n0\n};\nfunc read() -> i32 { self.n }\n}", "Dormant"),
-        ("const VALUE: i32 = {\nensures: false\n1\n}", "VALUE"),
+    for (suffix, owner_fragment, callable_body_contract) in [
+        (
+            "func outer() -> i32 {\nfunc guarded(x: i32) -> i32 {\nensures: false\nx\n}\n0\n}",
+            "guarded",
+            true,
+        ),
+        (
+            "trait ProofTrait { func check(x: i32) -> i32 }\ntype ProofProbe { marker: i32 }\nimpl ProofTrait for ProofProbe { func check(x: i32) -> i32 {\nensures: false\nx\n} }",
+            "check",
+            true,
+        ),
+        (
+            "flow Hidden {\nstate A { n: i32 }\ntransition tick(A) -> A {\nensures: false\nreturn A { n: self.n }\n}\n}",
+            "Hidden",
+            true,
+        ),
+        (
+            "actor Dormant { n: i32 = 0;\nfunc read() -> i32 {\nensures: false\nself.n\n}\n}",
+            "Dormant",
+            true,
+        ),
+        ("const VALUE: i32 = {\nensures: false\n1\n}", "VALUE", false),
     ] {
         let source = format!("{CAPTURE}\n{suffix}");
         let tokens = crate::lexer::Lexer::new(&source).tokenize().unwrap();
         let mut file = crate::parser::Parser::new(tokens).parse_file().unwrap();
         crate::loader::merge_prelude_into(&mut file);
-        let checked = crate::core::check_program(&file).expect("accepted independent proof owner");
+        let checked = match crate::core::check_program(&file) {
+            Ok(checked) => {
+                assert!(
+                    callable_body_contract,
+                    "constant initializer contracts are not callable-body contracts"
+                );
+                checked
+            }
+            Err(diagnostics) => {
+                assert!(
+                    !callable_body_contract,
+                    "valid callable-body owner must remain accepted: {diagnostics:?}"
+                );
+                assert!(diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code.as_deref() == Some("E0503")
+                        && diagnostic
+                            .message
+                            .contains("top-level callable-body contract")
+                }));
+                continue;
+            }
+        };
         assert!(super::scalar_actor_contract_boundary_reason(&checked).is_some());
         assert!(!super::classify_canonical_mir_route_admission(&checked).scalar_actor);
         let mut configured = crate::verifier::Verifier::new().unwrap();
         configured.set_source_hash("actor-whole-owner-census".into());
-        for results in [crate::verifier::verify_checked(&checked, "actor-whole-owner-census".into()).unwrap(),
-            crate::verifier::verify_checked_dual(&checked, "actor-whole-owner-census".into()).unwrap(),
-            configured.verify_checked(&checked)] {
-            let obligation = results.iter().find(|result| result.func_name.contains(owner_fragment))
-                .unwrap_or_else(|| panic!("typed owner {owner_fragment} must retain a proof obligation: {results:?}"));
-            assert_ne!(obligation.status, crate::verifier::VerifStatus::NoObligations);
-            assert_ne!(obligation.status, crate::verifier::VerifStatus::Proven, "false dormant claim cannot be proved");
+        for results in [
+            crate::verifier::verify_checked(&checked, "actor-whole-owner-census".into()).unwrap(),
+            crate::verifier::verify_checked_dual(&checked, "actor-whole-owner-census".into())
+                .unwrap(),
+            configured.verify_checked(&checked),
+        ] {
+            let obligation = results
+                .iter()
+                .find(|result| result.func_name.contains(owner_fragment))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "typed owner {owner_fragment} must retain a proof obligation: {results:?}"
+                    )
+                });
+            assert_ne!(
+                obligation.status,
+                crate::verifier::VerifStatus::NoObligations
+            );
+            assert_ne!(
+                obligation.status,
+                crate::verifier::VerifStatus::Proven,
+                "false dormant claim cannot be proved"
+            );
         }
     }
 }
@@ -730,13 +928,29 @@ func actor_ffi_positive(value: i64) -> i64 {{
 func actor_ffi_negative() -> i64 {{
     actor_ffi_probe(0 as i64)
 }}
+func actor_ffi_twice(value: i64) -> i64 {{
+    requires: value > 0
+    actor_ffi_probe(value);
+    actor_ffi_probe(value)
+}}
 "#
     );
     let tokens = crate::lexer::Lexer::new(&source).tokenize().unwrap();
     let mut file = crate::parser::Parser::new(tokens).parse_file().unwrap();
     crate::loader::merge_prelude_into(&mut file);
     let checked = crate::core::check_program(&file).expect("mixed Actor/FFI source checks");
+    let twice_sites = checked
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| site.owner == "function:actor_ffi_twice" && site.callee == "actor_ffi_probe")
+        .collect::<Vec<_>>();
+    assert_eq!(twice_sites.len(), 2, "Checker preserves both source calls");
     assert!(super::scalar_actor_contract_boundary_reason(&checked).is_some());
+    let admission = super::classify_canonical_mir_route_admission(&checked);
+    assert!(
+        !super::CanonicalMirRouteProfile::ScalarActor.is_admitted(admission),
+        "verifier-only FFI caller materialization must not admit Actor execution"
+    );
 
     let mut configured = crate::verifier::Verifier::new().expect("configured verifier host");
     configured.set_source_hash("actor-mixed-ffi-contracts".into());
@@ -751,17 +965,64 @@ func actor_ffi_negative() -> i64 {{
         .unwrap(),
     ];
 
-    for results in batches {
+    for (batch_index, results) in batches.into_iter().enumerate() {
         let positive = results
             .iter()
             .find(|result| result.func_name == "actor_ffi_positive calls actor_ffi_probe")
             .unwrap_or_else(|| panic!("missing positive FFI call-site check: {results:?}"));
-        assert_eq!(positive.status, crate::verifier::VerifStatus::Proven);
+        assert_eq!(
+            positive.status,
+            crate::verifier::VerifStatus::Proven,
+            "batch {batch_index}: {results:#?}"
+        );
+        let positive_artifact = positive
+            .artifact
+            .as_ref()
+            .expect("proved FFI Requires retains a canonical MIR proof artifact");
+        assert_eq!(
+            positive_artifact.engine,
+            crate::verifier::ProofArtifact::ENGINE_MIR
+        );
+        let positive_receipt = positive_artifact
+            .mir_route_receipt
+            .as_ref()
+            .expect("proved FFI Requires retains its verifier-only route receipt");
+        assert_eq!(
+            positive_receipt.profile, "verifier-ffi-owner-slice-v1",
+            "ordinary FFI caller proof is materialized independently of Actor execution"
+        );
+        assert_eq!(positive_artifact.source_hash, "actor-mixed-ffi-contracts");
         let negative = results
             .iter()
             .find(|result| result.func_name == "actor_ffi_negative calls actor_ffi_probe")
             .unwrap_or_else(|| panic!("missing negative FFI call-site check: {results:?}"));
         assert_eq!(negative.status, crate::verifier::VerifStatus::Disproven);
+
+        for site in &twice_sites {
+            let exact_instruction = format!("'inst:call:{}'", site.node_id.0);
+            let twice_result = results
+                .iter()
+                .filter(|result| {
+                    result.message.contains(&exact_instruction)
+                        && result.message.contains("extern requires")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                twice_result.len(),
+                1,
+                "exact source call {} has one Requires result: {results:#?}",
+                site.node_id.0
+            );
+            assert_eq!(
+                twice_result[0].func_name,
+                "actor_ffi_twice calls actor_ffi_probe"
+            );
+            assert_eq!(
+                twice_result[0].status,
+                crate::verifier::VerifStatus::Proven,
+                "each call in one owner is proved independently: {twice_result:#?}"
+            );
+        }
 
         let foreign_ensures = results
             .iter()
@@ -769,7 +1030,7 @@ func actor_ffi_negative() -> i64 {{
             .collect::<Vec<_>>();
         assert_eq!(
             foreign_ensures.len(),
-            2,
+            4,
             "one foreign Ensures observation per actual call"
         );
         assert!(foreign_ensures.iter().all(|result| {
@@ -789,6 +1050,106 @@ func actor_ffi_negative() -> i64 {{
             "an uncalled foreign contract has no call-site proof obligation"
         );
     }
+}
+
+#[test]
+fn canonical_actor_ffi_actor_method_boundary_is_per_callsite() {
+    let source = r#"
+extern "C" {
+    func actor_ffi_probe(value: i32) -> i32
+        requires: value > 0
+        ensures: result == value;
+}
+actor Counter {
+    base: i32 = 0;
+    func check(value: i32) -> i32 {
+        actor_ffi_probe(value)
+    }
+}
+func actor_ffi_free(value: i32) -> i32 {
+    requires: value > 0
+    actor_ffi_probe(value)
+}
+func main() -> i32 { 0 }
+"#;
+    let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
+    let mut file = crate::parser::Parser::new(tokens).parse_file().unwrap();
+    crate::loader::merge_prelude_into(&mut file);
+    let checked = crate::core::check_program(&file).expect("Actor method FFI source checks");
+    let actor_method = checked
+        .actor_descriptors()
+        .values()
+        .flat_map(|descriptor| descriptor.methods.iter())
+        .find(|method| method.name == "check")
+        .expect("Actor method descriptor")
+        .owner
+        .clone();
+    let actor_callsite = checked
+        .call_sites_sorted()
+        .into_iter()
+        .find(|site| site.owner == actor_method.0 && site.callee == "actor_ffi_probe")
+        .expect("Checker preserves the Actor method's exact FFI call site")
+        .node_id
+        .0
+        .clone();
+
+    let results = crate::verifier::verify_ffi_checked_with_source_hash(
+        &checked,
+        "actor-method-ffi-callsite-boundary".into(),
+    )
+    .expect("FFI verifier retains per-owner results");
+    let free = results
+        .iter()
+        .find(|result| result.func_name == "actor_ffi_free calls actor_ffi_probe")
+        .expect("isolated free-function FFI result");
+    assert_eq!(
+        free.status,
+        crate::verifier::VerifStatus::Proven,
+        "{results:#?}"
+    );
+    assert!(
+        free.artifact.as_ref().is_some_and(|artifact| {
+            artifact.engine == crate::verifier::ProofArtifact::ENGINE_MIR
+                && artifact
+                    .mir_route_receipt
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.profile == "verifier-ffi-owner-slice-v1")
+        }),
+        "free-function proof carries its independent verifier-only MIR route receipt"
+    );
+
+    let method_result = results
+        .iter()
+        .find(|result| result.func_name == "Counter::check calls actor_ffi_probe")
+        .expect("Actor method FFI Requires remains visible");
+    assert_eq!(
+        method_result.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "Actor method owner {} is not an isolated free-function proof slice: {results:#?}",
+        actor_method.0
+    );
+    assert!(method_result.artifact.is_none());
+    assert!(method_result.message.contains(&actor_method.0));
+    assert!(method_result.message.contains(&actor_callsite));
+    assert!(method_result.message.contains("exact call site"));
+
+    let ensures = results
+        .iter()
+        .filter(|result| {
+            result
+                .func_name
+                .contains("-> extern actor_ffi_probe Ensures")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ensures.len(),
+        2,
+        "each call site keeps a foreign Ensures row"
+    );
+    assert!(ensures.iter().all(|result| {
+        result.status == crate::verifier::VerifStatus::NotInTrustedSubset
+            && result.artifact.is_none()
+    }));
 }
 
 #[test]
@@ -947,52 +1308,17 @@ func main() -> i32 {
 }
 
 #[test]
-fn canonical_actor_complete_proof_census_does_not_promote_scoped_requires_to_function_assumptions()
-{
+fn checker_rejects_nested_requires_before_canonical_proof_census() {
     let source = "func guarded(x: i32) -> i32 {\nensures: false\nx + {\nrequires: false\n0\n}\n}\nfunc main() -> i32 { 0 }";
     let tokens = crate::lexer::Lexer::new(source).tokenize().unwrap();
     let file = crate::parser::Parser::new(tokens).parse_file().unwrap();
-    let checked = crate::core::check_program(&file).unwrap();
-    let callable = checked
-        .callable(&NodeId("function:guarded".into()))
-        .unwrap();
-    assert!(callable.has_proof_obligations() && callable.has_unmodeled_proof_roots());
-    assert_eq!(
-        callable.contracts.len(),
-        2,
-        "scope-aware census still retains both source obligations"
-    );
-    let program = MirProgram::from_checked_program(&checked)
-        .expect("scoped proof roots are retained as explicit MIR boundaries");
-    let guarded = program
-        .functions()
-        .get(&NodeId("function:guarded".into()))
-        .expect("guarded MIR owner");
+    let diagnostics = crate::core::check_program(&file)
+        .expect_err("nested Requires is not a function-level contract field");
     assert!(
-        guarded.contracts.iter().all(|contract| {
-            contract.id.0.contains("stmt.ensures") && !contract.id.0.contains("stmt.requires")
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0503)
+                && diagnostic.message.contains("requires")
         }),
-        "only the direct entry Ensures may become a MIR function contract"
+        "{diagnostics:?}"
     );
-    let boundary = guarded
-        .proof_worklist
-        .as_ref()
-        .expect("scoped proof boundary worklist")
-        .boundaries
-        .iter()
-        .flat_map(|boundary| boundary.scoped_boundaries.iter())
-        .find(|boundary| boundary.point.0.contains("expr.binary"))
-        .expect("nested Requires must remain a scoped, reason-bearing boundary");
-    assert!(boundary.reason.contains("proof root") || boundary.reason.contains("evaluation-order"));
-    let mut verifier = crate::verifier::Verifier::new().unwrap();
-    let results = verifier.verify_checked(&checked);
-    let result = results
-        .iter()
-        .find(|result| result.func_name == "guarded")
-        .unwrap();
-    assert_eq!(
-        result.status,
-        crate::verifier::VerifStatus::NotInTrustedSubset
-    );
-    assert!(result.artifact.is_none());
 }

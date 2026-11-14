@@ -1,10 +1,7 @@
-use crate::ast::*;
-use crate::interp::SharedString;
-use std::collections::{HashMap, HashSet};
 #[cfg(test)]
-use std::sync::Arc;
-
+use crate::ast::*;
 use crate::error::{CompileError, MimiResult};
+use std::collections::{HashMap, HashSet};
 
 use super::CodeGenerator;
 use inkwell::module::Linkage;
@@ -23,6 +20,18 @@ fn encode_resolved_const_value(value: &crate::core::ResolvedConstValue) -> Strin
         crate::core::ResolvedConstValue::Unit => "unit".into(),
         crate::core::ResolvedConstValue::Complex => "complex".into(),
     }
+}
+
+fn checked_native_data_exports(
+    program: &crate::core::CheckedProgram,
+) -> Vec<crate::core::native_data_export::CheckedNativeDataExport> {
+    let mut exports = program
+        .constants()
+        .values()
+        .filter_map(|constant| constant.native_data_export.clone())
+        .collect::<Vec<_>>();
+    exports.sort_by(|left, right| left.symbol.cmp(&right.symbol));
+    exports
 }
 
 /// Receipt profile for concrete, checker-selected trait specializations that
@@ -275,7 +284,7 @@ fn has_user_main_flow_state_use(program: &crate::core::CheckedProgram) -> bool {
             .node_meta()
             .get(node)
             .is_some_and(|meta| !matches!(meta.origin, crate::core::Origin::RuntimeSystem { .. }))
-            && type_arguments.iter().any(|type_id| contains(type_id))
+            && type_arguments.iter().any(&contains)
         {
             return true;
         }
@@ -371,9 +380,12 @@ pub fn has_static_generic_trait_specialization_candidate(
             return false;
         }
 
-        let Some(receiver) = binding.signature.parameters.first().and_then(|parameter| {
-            program.resolved_types().get(&parameter.ty)
-        }) else {
+        let Some(receiver) = binding
+            .signature
+            .parameters
+            .first()
+            .and_then(|parameter| program.resolved_types().get(&parameter.ty))
+        else {
             return false;
         };
         let crate::core::ResolvedType::Nominal {
@@ -384,14 +396,16 @@ pub fn has_static_generic_trait_specialization_candidate(
         };
         if item.as_str() != "builtin:type:List"
             || !matches!(arguments.as_slice(), [element]
-                if matches!(
-                    program.resolved_types().get(element),
-                    Some(
-                        crate::core::ResolvedType::Primitive(
-                            crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::I64
-                        )
+            if matches!(
+                program.resolved_types().get(element),
+                Some(
+                    crate::core::ResolvedType::Primitive(
+                    crate::core::PrimitiveType::I32
+                        | crate::core::PrimitiveType::I64
+                        | crate::core::PrimitiveType::String
                     )
-                ))
+                )
+            ))
         {
             return false;
         }
@@ -425,11 +439,123 @@ impl<'ctx> CodeGenerator<'ctx> {
         // module currently in this generator. Clear stale provenance before
         // every attempt; compilation can fail after a partial emission.
         self.shared_dynamic_any_preflight_passed = false;
-        let result = self.compile_checked_inner(program);
-        if result.is_ok() && self.shared {
+        self.preflight_checked_native_data_exports(program)?;
+        self.compile_checked_inner(program)?;
+        self.emit_checked_native_data_exports(program)?;
+        if self.shared {
             self.shared_dynamic_any_preflight_passed = true;
         }
-        result
+        Ok(())
+    }
+
+    /// Validate every checked scalar data export before a native body route
+    /// starts emitting LLVM. This also rejects collisions with declarations
+    /// already installed in the module, including runtime function symbols.
+    pub fn preflight_checked_native_data_exports(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        crate::core::native_data_export::validate_checked_native_data_exports(program)?;
+        let exports = checked_native_data_exports(program);
+        let mut errors = Vec::new();
+        for export in exports {
+            if self.module.get_function(&export.symbol).is_some()
+                || self.module.get_global(&export.symbol).is_some()
+            {
+                errors.push(crate::diagnostic::Diagnostic::error_code(
+                    crate::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE,
+                    format!(
+                        "exported data symbol '{}' collides with an existing native symbol",
+                        export.symbol
+                    ),
+                    export.span,
+                ));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Emit the Checker-owned scalar data exports after the selected body route
+    /// succeeds. Callers must run the preflight before route compilation.
+    pub fn emit_checked_native_data_exports(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
+        crate::core::native_data_export::validate_checked_native_data_exports(program)?;
+        let exports = checked_native_data_exports(program);
+        let mut errors = Vec::new();
+        for export in &exports {
+            if self.module.get_function(&export.symbol).is_some()
+                || self.module.get_global(&export.symbol).is_some()
+            {
+                errors.push(crate::diagnostic::Diagnostic::error_code(
+                    crate::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE,
+                    format!(
+                        "exported data symbol '{}' collides with an existing native symbol",
+                        export.symbol
+                    ),
+                    export.span,
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        for export in exports {
+            use crate::core::native_data_export::{
+                NativeDataExportType as ExportType, NativeDataExportValue as ExportValue,
+            };
+            let (ty, initializer): (BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>) = match (
+                export.ty,
+                export.value,
+            ) {
+                (ExportType::I32, ExportValue::I32(value)) => {
+                    let ty = self.context.i32_type();
+                    let initializer = ty.const_int(value as u32 as u64, false);
+                    (ty.into(), initializer.into())
+                }
+                (ExportType::I64, ExportValue::I64(value)) => {
+                    let ty = self.context.i64_type();
+                    let initializer = ty.const_int(value as u64, false);
+                    (ty.into(), initializer.into())
+                }
+                (ExportType::F32, ExportValue::F32(value)) => {
+                    let ty = self.context.f32_type();
+                    let initializer = ty.const_float(f64::from(value));
+                    (ty.into(), initializer.into())
+                }
+                (ExportType::F64, ExportValue::F64(value)) => {
+                    let ty = self.context.f64_type();
+                    let initializer = ty.const_float(value);
+                    (ty.into(), initializer.into())
+                }
+                (ExportType::Bool, ExportValue::Bool(value)) => {
+                    let ty = self.context.bool_type();
+                    let initializer = ty.const_int(if value { 1 } else { 0 }, false);
+                    (ty.into(), initializer.into())
+                }
+                _ => {
+                    return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                            crate::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE,
+                            format!(
+                                "checked descriptor for exported data symbol '{}' has a mismatched scalar type and value",
+                                export.symbol
+                            ),
+                            export.span,
+                        )]);
+                }
+            };
+            let global = self.module.add_global(ty, None, &export.symbol);
+            global.set_linkage(Linkage::External);
+            global.set_constant(true);
+            global.set_initializer(&initializer);
+        }
+        Ok(())
     }
 
     /// Check the native entry roots that can be invoked from outside the
@@ -439,28 +565,122 @@ impl<'ctx> CodeGenerator<'ctx> {
         &self,
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
-        let dynamic_any_unpack = if self.shared {
-            let external_roots = program
-                .callables()
-                .keys()
-                .filter(|owner| {
-                    !program
-                        .functions()
-                        .get(*owner)
-                        .is_some_and(|function| function.is_comptime)
-                })
-                .cloned()
-                .collect();
-            super::resolved::first_reachable_dynamic_any_unpack_from_roots(program, &external_roots)
-        } else {
-            super::resolved::first_reachable_dynamic_any_unpack(program)
-        };
+        let dynamic_any_roots = self.native_dynamic_any_preflight_roots(program);
+        let dynamic_any_unpack = super::resolved::first_reachable_dynamic_any_unpack_from_roots(
+            program,
+            &dynamic_any_roots,
+        );
         if let Some((owner, node)) = dynamic_any_unpack {
             return Err(vec![super::resolved::dynamic_any_unpack_diagnostic(
                 program, &owner, &node,
             )]);
         }
         Ok(())
+    }
+
+    /// Return the Checker-owned entry roots for native DynamicAny preflight.
+    /// Reachability from these roots is resolved through `CheckedProgram`'s
+    /// call-site directory by the shared scanner; dormant imported helpers do
+    /// not become executable roots merely because their module was loaded.
+    fn native_dynamic_any_preflight_roots(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> std::collections::BTreeSet<crate::core::NodeId> {
+        let mut roots = std::collections::BTreeSet::new();
+        if self.shared {
+            roots.extend(
+                program
+                    .callables()
+                    .keys()
+                    .filter(|owner| {
+                        !program
+                            .functions()
+                            .get(*owner)
+                            .is_some_and(|function| function.is_comptime)
+                    })
+                    .cloned(),
+            );
+            return roots;
+        }
+
+        roots.extend(
+            program
+                .functions()
+                .values()
+                .filter(|function| {
+                    !function.is_comptime
+                        && (function.qualified_name == "main"
+                            || function.qualified_name.ends_with("::main")
+                            || function.qualified_name.ends_with(":main"))
+                        && program.callable(&function.node_id).is_some()
+                })
+                .map(|function| function.node_id.clone()),
+        );
+        roots.extend(
+            program
+                .native_declarations()
+                .exports
+                .keys()
+                .filter(|owner| program.callable(owner).is_some())
+                .cloned(),
+        );
+        roots
+    }
+
+    /// Admit the narrow dormant-import exception only when every Map owner
+    /// signal belongs to an unreachable callable from the exact checker-owned
+    /// stdlib maps source. Dormant user helpers and unknown dispatch must keep
+    /// their ordinary fail-closed admission result.
+    fn has_only_dormant_std_maps_owner_signal(
+        &self,
+        program: &crate::core::CheckedProgram,
+    ) -> bool {
+        fn analysis_has_map_owner_signal(analysis: &crate::core::ResourceAnalysis) -> bool {
+            !analysis.map_root_actions.is_empty()
+                || !analysis.map_root_new_attempts.is_empty()
+                || !analysis.map_any_owner_actions.is_empty()
+                || !analysis.map_any_owner_new_attempts.is_empty()
+                || !analysis.ordinary_map_owner_lifecycle_v1_actions.is_empty()
+                || !analysis
+                    .ordinary_map_owner_lifecycle_v1_new_attempts
+                    .is_empty()
+                || !analysis
+                    .ordinary_map_owner_lifecycle_v1_operation_attempts
+                    .is_empty()
+                || !analysis.ordinary_map_owner_observer_v1_attempts.is_empty()
+                || !analysis.ordinary_map_owner_observer_v1_receipts.is_empty()
+                || !analysis
+                    .ordinary_map_owned_get_i32_string_v1_actions
+                    .is_empty()
+                || !analysis
+                    .ordinary_map_owned_get_i32_string_v1_new_attempts
+                    .is_empty()
+                || !analysis
+                    .ordinary_map_owned_get_i32_string_v1_operation_attempts
+                    .is_empty()
+                || analysis
+                    .ordinary_map_owned_get_i32_string_v1_cfg_receipt
+                    .is_some()
+                || !analysis.ordinary_map_owned_any_v2_actions.is_empty()
+                || !analysis
+                    .ordinary_map_owned_any_v2_operation_attempts
+                    .is_empty()
+                || analysis.ordinary_map_owned_any_v2_cfg_receipt.is_some()
+        }
+
+        let roots = self.native_dynamic_any_preflight_roots(program);
+        let reachable = super::resolved::reachable_callable_ids_from_roots(program, &roots);
+        let mut found_dormant_maps_signal = false;
+        for (owner, analysis) in program.resource_analyses() {
+            if !analysis_has_map_owner_signal(analysis) {
+                continue;
+            }
+            if reachable.contains(owner) || !super::resolved::is_std_maps_callable(program, owner) {
+                return false;
+            }
+            found_dormant_maps_signal = true;
+        }
+        found_dormant_maps_signal
     }
 
     fn install_checked_actor_metadata(&mut self, program: &crate::core::CheckedProgram) {
@@ -504,6 +724,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         program: &crate::core::CheckedProgram,
     ) -> Result<(), Vec<crate::diagnostic::Diagnostic>> {
         program.validate_backend(crate::core::BackendProfile::Native)?;
+        if program.dynamic_protocol_method_boundary_reason().is_some() {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                "dynamic Protocol method dispatch through a `dyn Trait` receiver is removed by language-spec §3.9; checked native consumers cannot use a compatibility fallback",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
         // Keep the public CheckedProgram API on the same FFI boundary as CLI
         // dispatch. `Compatibility` from canonical MIR means this declaration
         // is outside the migrated scalar C ABI; treating that as permission to
@@ -525,7 +752,20 @@ impl<'ctx> CodeGenerator<'ctx> {
             Ok(()) => false,
             Err(original_error) => {
                 let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
-                if !admission.ordinary_map_owned_any_v2_complete() {
+                if !admission.ordinary_map_owned_any_v2_complete()
+                    && !admission.ordinary_map_owned_any_v2_zero_miss_i32()
+                    && !admission.ordinary_map_owned_any_v2_get_or_default_string()
+                    && !admission.ordinary_map_owned_any_v2_set_get_any_result_i32()
+                    && !admission
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3()
+                    && !admission
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4()
+                    && !admission.ordinary_map_owned_any_v2_persistent_root_alias_replacement()
+                {
+                    // The reachable unpack itself is the precise safety
+                    // boundary. An unrelated incomplete owner-v2 operation
+                    // must not replace its E0722 with a broader route-coverage
+                    // diagnostic.
                     return Err(original_error);
                 }
                 // Defer the exception until canonical MIR materialization
@@ -560,6 +800,461 @@ impl<'ctx> CodeGenerator<'ctx> {
         // checker-owned coverage result until a record descriptor/owner
         // contract exists.
         let admission = crate::core::mir::classify_canonical_mir_route_admission(program);
+        if let Some(error) =
+            crate::core::mir::scalar_export_map_owner_composition_failure(admission)
+        {
+            return Err(vec![error.to_diagnostic()]);
+        }
+        // The coarse admission summary includes imported maps helpers. Only
+        // exact stdlib:maps.mimi bodies proven unreachable from native roots
+        // may contribute the dormant signal ignored here. A dormant user Map
+        // helper or an uncertain dispatch retains the normal coverage error.
+        let incomplete_owned_get_is_dormant_only = admission.ordinary_map_owned_get_i32_string_v1
+            == crate::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::IncompleteCoverage
+            && self.has_only_dormant_std_maps_owner_signal(program);
+        if admission.ordinary_map_owned_any_v2_get_or_default_string() {
+            let excluded_sources = program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id)
+                .collect::<HashSet<_>>();
+            let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
+            let route =
+                crate::core::mir::materialize_canonical_mir_route(program, excluded_sources)
+                    .map_err(|error| vec![error.to_diagnostic()])?;
+            let receipt =
+                crate::core::mir::validate_ordinary_map_owned_any_v2_get_or_default_string_route(
+                    program,
+                    &route.program,
+                )
+                .map_err(|message| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                        format!("GetOrDefault<String> native route rejected: {message}"),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
+            if !route
+                .admission
+                .ordinary_map_owned_any_v2_get_or_default_string()
+                || receipt.profile
+                    != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE
+                || receipt
+                    != route.program.route_receipt(
+                        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE,
+                    )
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    "MIR-COVERAGE-001: GetOrDefault<String> native route lacks its exact profile receipt for this MIR digest",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            crate::core::mir::validate_ordinary_map_owned_any_v2_get_or_default_string_mir_route(
+                &route.program,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("GetOrDefault<String> native MIR route rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            self.install_checked_actor_metadata(program);
+            return self
+                .compile_checked_mir_native_with_ordinary_map_owned_any_v2_get_or_default_string_route(
+                    program,
+                    &route.program,
+                    &receipt,
+                );
+        }
+        if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+            let excluded_sources = program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id)
+                .collect::<HashSet<_>>();
+            let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
+            let route =
+                crate::core::mir::materialize_canonical_mir_route(program, excluded_sources)
+                    .map_err(|error| vec![error.to_diagnostic()])?;
+            let receipt = crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!(
+                        "ValuesResultCrosscallStringCallerIndex1 V4 native route rejected: {message}"
+                    ),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            let profile = crate::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+                .as_str();
+            if !route
+                .admission
+                .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4()
+                || receipt.profile != profile
+                || route
+                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+                    .as_ref()
+                    != Some(&receipt)
+                || receipt != route.program.route_receipt(profile)
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    "MIR-COVERAGE-001: ValuesResultCrosscallStringCallerIndex1 V4 native route lacks its exact receipt for this MIR digest",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_mir_route(
+                &route.program,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!(
+                        "ValuesResultCrosscallStringCallerIndex1 V4 native MIR route rejected: {message}"
+                    ),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_index1_route(
+                program,
+                &route.program,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCallerIndex1 V4 Bytecode route rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::codegen::mir::validate_checked_mir_native_values_result_crosscall_string_caller_index1_route(
+                program,
+                &route.program,
+                &receipt,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCallerIndex1 V4 native capability rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+                program,
+                &route.program,
+                &receipt,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCallerIndex1 V4 verifier capability rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+                program,
+                &route.program,
+                &receipt,
+                String::new(),
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCallerIndex1 V4 verifier rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            if !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCallerIndex1 V4 verifier did not prove the route: {results:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            self.install_checked_actor_metadata(program);
+            return self
+                .compile_checked_mir_native_with_values_result_crosscall_string_caller_index1_route(
+                    program,
+                    &route.program,
+                    &receipt,
+                );
+        }
+        if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3() {
+            let excluded_sources = program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id)
+                .collect::<HashSet<_>>();
+            let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
+            let route =
+                crate::core::mir::materialize_canonical_mir_route(program, excluded_sources)
+                    .map_err(|error| vec![error.to_diagnostic()])?;
+            let receipt = crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 native route rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            let profile = crate::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+                .as_str();
+            if !route
+                .admission
+                .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3()
+                || receipt.profile != profile
+                || route
+                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt
+                    .as_ref()
+                    != Some(&receipt)
+                || receipt != route.program.route_receipt(profile)
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    "MIR-COVERAGE-001: ValuesResultCrosscallStringCaller V3 native route lacks its exact receipt for this MIR digest",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_mir_route(
+                &route.program,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 native MIR route rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 Bytecode route rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::codegen::mir::validate_checked_mir_native_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+                &receipt,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 native capability rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+                &receipt,
+            )
+            .map_err(|errors| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 verifier capability rejected: {errors:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                program,
+                &route.program,
+                &receipt,
+                String::new(),
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 verifier rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            if !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("ValuesResultCrosscallStringCaller V3 verifier did not prove the route: {results:?}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            self.install_checked_actor_metadata(program);
+            return self
+                .compile_checked_mir_native_with_values_result_crosscall_string_caller_route(
+                    program,
+                    &route.program,
+                    &receipt,
+                );
+        }
+        if admission.ordinary_map_owned_any_v2_zero_miss_i32() {
+            let excluded_sources = program
+                .source_registry()
+                .records()
+                .iter()
+                .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+                .map(|record| record.id)
+                .collect::<HashSet<_>>();
+            let excluded_sources = (!excluded_sources.is_empty()).then_some(&excluded_sources);
+            let route =
+                crate::core::mir::materialize_canonical_mir_route(program, excluded_sources)
+                    .map_err(|error| vec![error.to_diagnostic()])?;
+            let expected_receipt = route
+                .ordinary_map_owned_any_v2_zero_miss_i32_route_receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                        "MIR-COVERAGE-001: missing exact ZeroMissI32 native route receipt",
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
+            if !route.admission.ordinary_map_owned_any_v2_zero_miss_i32()
+                || !route.materialized_ordinary_map_owned_any_v2_zero_miss_i32_candidate
+                || expected_receipt.profile
+                    != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE
+                || expected_receipt
+                    != &route.program.route_receipt(
+                        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE,
+                    )
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    "MIR-COVERAGE-001: ZeroMissI32 native route has no exact candidate/receipt for this MIR digest",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            crate::core::mir::validate_ordinary_map_owned_any_v2_zero_miss_i32_route(
+                program,
+                &route.program,
+            )
+            .and_then(|()| {
+                crate::core::mir::validate_ordinary_map_owned_any_v2_zero_miss_i32_mir_route(
+                    &route.program,
+                )
+            })
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("MIR-COVERAGE-001: ZeroMissI32 native route rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            self.install_checked_actor_metadata(program);
+            return self
+                .compile_checked_mir_native_with_ordinary_map_owned_any_v2_zero_miss_i32_route(
+                    program,
+                    &route.program,
+                    expected_receipt,
+                );
+        }
+        if admission.ordinary_map_owned_any_v2
+            == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::MapEmptyRootRootQueriesV1
+        {
+            let route = crate::core::mir::materialize_canonical_mir_route(program, None)
+                .map_err(|e| vec![e.to_diagnostic()])?;
+            let receipt = route
+                .map_empty_root_root_queries_v1_route_receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        "MIR-COVERAGE-001",
+                        "missing exact empty-root production receipt",
+                        crate::span::Span::UNKNOWN,
+                    )]
+                })?;
+            crate::interp::bytecode::compile_mir_program_with_empty_root_root_queries_v1_route(
+                program,
+                &route.program,
+            )
+            .map_err(|e| {
+                Self::mir_gate_diagnostics(
+                    program,
+                    "MIR bytecode",
+                    crate::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE,
+                    e,
+                )
+            })?;
+            let results = crate::verifier::verify_mir_with_map_empty_root_root_queries_v1_route(
+                program,
+                &route.program,
+                receipt,
+                String::new(),
+            )
+            .map_err(|e| {
+                Self::mir_gate_diagnostics(
+                    program,
+                    "MIR verifier",
+                    crate::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE,
+                    e,
+                )
+            })?;
+            if !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR verifier",
+                    crate::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE,
+                    format!("{results:?}"),
+                ));
+            }
+            return self.compile_checked_mir_native_with_empty_root_root_queries_v1_route(
+                program,
+                &route.program,
+                receipt,
+            );
+        }
+
+        // A generic declaration is a template, not an executable native body.
+        // The canonical route must own every reachable generic call with a
+        // concrete instance receipt.  If no generic island admitted this
+        // checked program, stop here before `supports_resolved_native` can
+        // enter the resolved emitter and report the older E0722 ABI failure.
+        // DynamicAny calls are checked above first so their established E0722
+        // tag-safety diagnostic remains the more precise boundary.
+        let has_generic_function_call = program.call_sites_sorted().into_iter().any(|site| {
+            let Some(crate::core::ir::ResolvedCallee::Function(target)) =
+                site.resolved_callee.as_ref()
+            else {
+                return false;
+            };
+            program
+                .functions()
+                .get(target)
+                .is_some_and(|function| !function.generics.is_empty())
+        });
+        let generic_route_complete = admission.scalar_generic_identity_i32_complete()
+            || admission.scalar_generic_identity_i64_complete()
+            || admission.generic_variant_complete()
+            || admission.generic_option_projection_complete()
+            || admission.generic_option_projection_fallback_complete()
+            || admission.generic_result_projection_complete()
+            || admission.generic_result_projection_fallback_complete()
+            || admission.managed_result_call_complete()
+            || admission.map_any_owner_complete();
+        if has_generic_function_call && !generic_route_complete {
+            return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                "MIR-COVERAGE-001/NITS: reachable generic call has no complete canonical instance receipt; legacy and erased resolved generic bodies are retired",
+                program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+            )]);
+        }
         if crate::core::mir::has_scalar_actor_nested_callable_candidate(program)
             && !admission.scalar_actor
         {
@@ -582,6 +1277,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             .ordinary_map_owned_get_i32_string_v1
             .has_profile_signal()
             && !admission.ordinary_map_owned_get_i32_string_v1_complete()
+            && !incomplete_owned_get_is_dormant_only
         {
             return Err(vec![crate::diagnostic::Diagnostic::error_code(
                 crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
@@ -614,9 +1310,12 @@ impl<'ctx> CodeGenerator<'ctx> {
         if crate::core::mir::exported_abi_body_boundary_reason(program).is_none()
             && crate::core::mir::scalar_actor_contract_boundary_reason(program).is_none()
             && !ordinary_map_compatibility
+            && !incomplete_owned_get_is_dormant_only
         {
             if let Some(canonical) = self.try_compile_exact_migrated_mir_island(program)? {
-                if checked_v2_unpack_candidate {
+                let persistent_root_alias_replacement =
+                    admission.ordinary_map_owned_any_v2_persistent_root_alias_replacement();
+                if checked_v2_unpack_candidate && !persistent_root_alias_replacement {
                     if let Err(message) =
                         super::mir::checked_managed_any_unpack_coverage(program, &canonical)
                     {
@@ -630,8 +1329,53 @@ impl<'ctx> CodeGenerator<'ctx> {
                     }
                 }
                 self.install_checked_actor_metadata(program);
-                let receipt =
-                    canonical.route_receipt(crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE);
+                if canonical.functions().values().any(|function| {
+                    function
+                        .ownership
+                        .ordinary_map_owned_get_result_branch_v3_receipt()
+                        .is_some()
+                }) {
+                    let receipt = canonical.route_receipt(
+                        crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND,
+                    );
+                    return self
+                        .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                            program,
+                            &canonical,
+                            &receipt,
+                        );
+                }
+                if persistent_root_alias_replacement {
+                    let receipt = canonical.route_receipt(
+                        crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE,
+                    );
+                    return self
+                        .compile_checked_mir_native_with_persistent_root_alias_replacement_route(
+                            program, &canonical, &receipt,
+                        );
+                }
+                let receipt_profile = if admission.ordinary_map_owned_any_v2.is_direct_print() {
+                    // The single direct-print profile has a distinct native
+                    // consumer receipt. Never label a merely materialized V2
+                    // graph as DirectPrint: recheck the exact MIR shape before
+                    // passing that receipt to the production emitter.
+                    crate::core::mir::validate_ordinary_map_owned_any_v2_direct_print_mir_route(
+                        &canonical,
+                    )
+                    .map_err(|message| {
+                        vec![crate::diagnostic::Diagnostic::error_code(
+                            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                            format!(
+                                "ordinary Map/Any owner-v2 DirectPrint native route rejected: {message}"
+                            ),
+                            program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                        )]
+                    })?;
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE
+                } else {
+                    crate::core::mir::MIR_NATIVE_DIRECT_ROUTE_PROFILE
+                };
+                let receipt = canonical.route_receipt(receipt_profile);
                 return self.compile_mir_native_with_route_receipt(&canonical, &receipt);
             }
             if has_static_generic_trait_specialization_candidate(program) {
@@ -752,13 +1496,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                 .map(|capability| capability.qualified_name.clone())
                 .collect(),
         );
-        let mut capability_combined = std::collections::HashMap::new();
-        for capability in program.capabilities().values() {
-            if let Some(combined) = &capability.combined_with {
-                capability_combined.insert(capability.qualified_name.clone(), combined.clone());
-            }
-        }
-        self.resolved_capability_combined = Some(capability_combined);
         self.resolved_constants = Some(
             program
                 .constants()
@@ -1140,17 +1877,24 @@ impl<'ctx> CodeGenerator<'ctx> {
                 span,
             )]);
         }
+        if incomplete_owned_get_is_dormant_only {
+            // Select and validate one complete native cohort before declaring
+            // any body. This production path skips only dormant stdlib maps
+            // validation; every other helper keeps the strict native boundary.
+            let native_roots = self.native_dynamic_any_preflight_roots(program);
+            return self.compile_resolved_native_reachable(program, &native_roots);
+        }
         if super::resolved::supports_resolved_native(program) {
             return self.compile_resolved_native(program);
         }
         // No canonical route admitted this checked program. The former
-        // per-function dispatch would retain a surface AST snapshot here and
-        // send the ineligible remainder to `compile_func_legacy`; that owner
-        // is retired. Return a checker-owned coverage result before any body
-        // accessor or compatibility emitter can run.
+        // per-function dispatch retained a surface AST snapshot here and sent
+        // the ineligible remainder to the old AST function emitter. That
+        // native surface-AST emitter has been physically removed. Return a
+        // checker-owned coverage result before any body accessor can run.
         Err(vec![crate::diagnostic::Diagnostic::error_code(
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
-            "MIR-COVERAGE-001/NITS: CodegenLegacyRemainder is retired; this checked program has no complete canonical native route",
+            "MIR-COVERAGE-001/NITS: native surface-AST emission has been removed; this checked program has no complete canonical native route",
             program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
         )])
     }
@@ -1273,6 +2017,9 @@ impl<'ctx> CodeGenerator<'ctx> {
             || admission.session_complete()
             || admission.flow_failure_retry
             || admission.flow_complete()
+            || admission.ordinary_map_owned_any_v2.is_direct_print()
+            || admission.ordinary_map_owned_any_v2_persistent_root_alias_replacement()
+            || admission.ordinary_map_owned_any_v2_branch_local_set_diamond()
             || admission.map_any_owner_complete()
             || admission.ordinary_map_owned_any_v2_complete()
             || admission.ordinary_map_owned_get_i32_string_v1_complete()
@@ -1306,6 +2053,80 @@ impl<'ctx> CodeGenerator<'ctx> {
                 message,
             }) => {
                 let (code, detail) = match (profile, stage) {
+                    (crate::core::mir::CanonicalMirRouteProfile::MapEmptyRootRootQueriesV1,
+                     crate::core::mir::CanonicalMirRouteFailureStage::Construction) => ("MIR-LOWERING-001", format!("MapEmptyRootRootQueriesV1 construction failed: {message}")),
+                    (crate::core::mir::CanonicalMirRouteProfile::MapEmptyRootRootQueriesV1,
+                     crate::core::mir::CanonicalMirRouteFailureStage::Coverage) => ("MIR-COVERAGE-001", format!("MapEmptyRootRootQueriesV1 exact receipt failed: {message}")),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2SetGetAnyI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("Map/Any Set/GetAny-i32 MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2SetGetAnyI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("Map/Any Set/GetAny-i32 exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2SetGetAnyResultI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("Map/Any Set/GetAny-Result-i32 MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2SetGetAnyResultI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("Map/Any Set/GetAny-Result-i32 exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DynamicKeysGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("Map/Any DynamicKeysGet MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DynamicKeysGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("Map/Any DynamicKeysGet exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CloneIsolation,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("Map/Any CloneIsolation MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CloneIsolation,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("Map/Any CloneIsolation exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2PersistentRootAliasReplacement,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("Map/Any PersistentRootAliasReplacement MIR construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2PersistentRootAliasReplacement,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("Map/Any PersistentRootAliasReplacement exact receipt failed: {message}"),
+                    ),
                     (
                         crate::core::mir::CanonicalMirRouteProfile::ScalarActor,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
@@ -1357,6 +2178,20 @@ impl<'ctx> CodeGenerator<'ctx> {
                         format!("ordinary Map owner lifecycle MIR island materialization failed: {message}"),
                     ),
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map owner lifecycle observer MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map owner lifecycle observer MIR island materialization failed: {message}"),
+                    ),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetI32StringV1,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (
@@ -1371,6 +2206,13 @@ impl<'ctx> CodeGenerator<'ctx> {
                         format!("ordinary Map owned-get MIR island materialization failed: {message}"),
                     ),
                     (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedGetAnyTupleL2Verifier,
+                        stage,
+                    ) => (
+                        "MIR-CAPABILITY-001",
+                        format!("VerifierOnly legacy tuple GetAny L2 profile cannot enter the build route ({stage:?}): {message}"),
+                    ),
+                    (
                         crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
                     ) => (
@@ -1383,6 +2225,384 @@ impl<'ctx> CodeGenerator<'ctx> {
                     ) => (
                         "MIR-COVERAGE-001",
                         format!("ordinary Map/Any owner v2 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RecordUnit,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any RecordUnit MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RecordUnit,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any RecordUnit exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrint,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 DirectPrint MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrint,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 DirectPrint MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 DirectPrintResult MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 DirectPrintResult exact receipt failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2GetOrDefaultI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 GetOrDefaultI32 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2GetOrDefaultI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 GetOrDefaultI32 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2GetOrDefaultString,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 GetOrDefaultString MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2GetOrDefaultString,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 GetOrDefaultString MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CheckedGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 CheckedGet MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CheckedGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 CheckedGet MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedKeyGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 ComputedKeyGet MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedKeyGet,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 ComputedKeyGet MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChain,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 ComputedStringKeyOwnerChain MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChain,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 ComputedStringKeyOwnerChain MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ZeroMissI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 ZeroMissI32 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ZeroMissI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 ZeroMissI32 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RemovedKeyCheckedMiss,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 RemovedKeyCheckedMiss MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RemovedKeyCheckedMiss,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 RemovedKeyCheckedMiss MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesFieldMove,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values field-move MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesFieldMove,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values field-move MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values local-index i32 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values local-index i32 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranch,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values local-index i32 Result-branch MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranch,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values local-index i32 Result-branch MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesHeterogeneousStringIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 heterogeneous Values String index-one MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesHeterogeneousStringIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 heterogeneous Values String index-one MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2KeysSnapshot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Keys snapshot MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2KeysSnapshot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Keys snapshot MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesSnapshotReplacement,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values snapshot-replacement MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesSnapshotReplacement,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values snapshot-replacement MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values mixed-snapshot MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshot,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values mixed-snapshot MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshotRemove,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values mixed-snapshot Remove MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesMixedSnapshotRemove,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values mixed-snapshot Remove MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values producer-caller MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values producer-caller MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values cross-call string-caller MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values cross-call string-caller MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 Values cross-call string-caller Index1 MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 Values cross-call string-caller Index1 MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 MapRoot producer-caller MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 MapRoot producer-caller MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 MapRootGetAnyCaller MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 MapRootGetAnyCaller MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2IsEmpty,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 IsEmpty MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2IsEmpty,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 IsEmpty MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapSetDropControl,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 MapSetDropControl MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapSetDropControl,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 MapSetDropControl MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapSetDropControlResult,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 MapSetDropControlResult MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapSetDropControlResult,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 MapSetDropControlResult MIR island materialization failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2BranchLocalSetDiamond,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!("ordinary Map/Any owner v2 BranchLocalSetDiamond MIR island construction failed: {message}"),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2BranchLocalSetDiamond,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!("ordinary Map/Any owner v2 BranchLocalSetDiamond MIR island materialization failed: {message}"),
                     ),
                     (crate::core::mir::CanonicalMirRouteProfile::ScalarFfi, stage) => (
                         "MIR-FFI-COVERAGE-001",
@@ -1442,7 +2662,6 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete scalar collection MIR island materialization failed: {message}"
                         ),
                     ),
-
                     (
                         crate::core::mir::CanonicalMirRouteProfile::FlatCopyRecord,
                         crate::core::mir::CanonicalMirRouteFailureStage::Construction,
@@ -1747,6 +2966,78 @@ impl<'ctx> CodeGenerator<'ctx> {
                             "complete recoverable Flow MIR island materialization failed: {message}"
                         ),
                     ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapDirectTupleGetUnpackL2Verifier,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "direct tuple Get L2 VerifierOnly semantic projection cannot enter native code generation: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapDirectTupleGetUnpackL2Verifier,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "direct tuple Get L2 VerifierOnly semantic projection has no native emission route: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "Values Result cross-call String caller V3 MIR construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "Values Result cross-call String caller V3 exact receipt failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "Values Result cross-call String caller V4 MIR construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "Values Result cross-call String caller V4 exact receipt failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+                    ) => (
+                        "MIR-LOWERING-001",
+                        format!(
+                            "Values Result producer-caller MIR construction failed: {message}"
+                        ),
+                    ),
+                    (
+                        crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller,
+                        crate::core::mir::CanonicalMirRouteFailureStage::Coverage,
+                    ) => (
+                        "MIR-COVERAGE-001",
+                        format!(
+                            "Values Result producer-caller exact receipt failed: {message}"
+                        ),
+                    ),
                 };
                 return Err(vec![crate::diagnostic::Diagnostic::error_code(
                     code,
@@ -1931,6 +3222,84 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
         };
         let canonical = &route.program;
+        if route
+            .admission
+            .ordinary_map_owned_any_v2_persistent_root_alias_replacement()
+        {
+            let profile = crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2PersistentRootAliasReplacement;
+            let profile_name =
+                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE;
+            let materialized_receipt = route
+                .ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_receipt
+                .as_ref()
+                .ok_or_else(|| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                        "MIR-COVERAGE-001: PersistentRootAliasReplacement admission has no exact materialized route receipt",
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
+            let receipt = canonical.route_receipt(profile_name);
+            if !profile.is_admitted(route.admission)
+                || !profile.is_materialized(&route)
+                || !route.materialized_ordinary_map_owned_any_v2_persistent_root_alias_replacement_candidate
+                || materialized_receipt.profile != profile_name
+                || materialized_receipt != &receipt
+            {
+                return Err(vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+                    "MIR-RECEIPT-001: PersistentRootAliasReplacement Checker admission, materialization, and canonical route receipt disagree",
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]);
+            }
+            crate::core::mir::validate_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route(
+                program, canonical,
+            )
+            .map_err(|message| {
+                vec![crate::diagnostic::Diagnostic::error_code(
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    format!("PersistentRootAliasReplacement native route rejected: {message}"),
+                    program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                )]
+            })?;
+            receipt
+                .validate_against_program(canonical)
+                .map_err(|message| {
+                    vec![crate::diagnostic::Diagnostic::error_code(
+                        crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE,
+                        format!("PersistentRootAliasReplacement route receipt rejected: {message}"),
+                        program.entry_span().unwrap_or(crate::span::Span::UNKNOWN),
+                    )]
+                })?;
+            crate::verifier::validate_mir_capabilities(canonical).map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR verifier capability", profile_name, errors)
+            })?;
+            crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route(
+                program, canonical,
+            )
+            .map_err(|errors| {
+                Self::mir_gate_diagnostics(program, "MIR bytecode", profile_name, errors)
+            })?;
+            crate::codegen::mir::validate_mir_native(canonical)?;
+            let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_persistent_root_alias_replacement_route(
+                program,
+                canonical,
+                &receipt,
+                String::new(),
+            )
+            .map_err(|error| {
+                Self::mir_gate_diagnostics(program, "MIR verifier", profile_name, error)
+            })?;
+            if !crate::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+                return Err(Self::mir_gate_diagnostics(
+                    program,
+                    "MIR verifier",
+                    profile_name,
+                    format!("unsupported or inconclusive result: {results:?}"),
+                ));
+            }
+            return Ok(Some(route.program));
+        }
         let scalar_export_candidate =
             route.admission.scalar_export && route.materialized_scalar_export_candidate;
         if scalar_export_candidate {
@@ -2420,599 +3789,10 @@ impl<'ctx> CodeGenerator<'ctx> {
         crate::core::subst_type_params(ty, &generics, &self.type_map)
     }
 
-    /// Apply a handler to every top-level item.
-    fn process_items<F>(items: &[Item], f: &mut F) -> MimiResult<()>
-    where
-        F: FnMut(&Item) -> MimiResult<()>,
-    {
-        for item in items {
-            f(item)?;
-        }
-        Ok(())
-    }
-
-    // Test-only compatibility harness. Production code must enter through
-    // compile_checked, whose route gate is canonical-only and fail-closed.
-    #[allow(dead_code)]
-    #[cfg(test)]
-    pub(crate) fn compile_file(&mut self, file: &File) -> MimiResult<()> {
-        self.shared_dynamic_any_preflight_passed = false;
-        self.compile_file_inner(
-            Arc::new(File {
-                sources: file.sources.clone(),
-                imports: file.imports.clone(),
-                items: file.items.clone(),
-                implicit_single: false,
-            }),
-            None,
-            true,
-        )
-    }
-
-    /// Return true only when the resolved emitter has produced a complete LLVM
-    /// body for this top-level callable.  The fifth pass must not enter the
-    /// legacy emitter for that body: doing so would consume the retained AST
-    /// snapshot even though the canonical body is already authoritative.
-    ///
-    /// A declaration, exported C wrapper, generic callable, or a resolved
-    /// emission that failed verification is not admitted here. The caller
-    /// turns that miss into a structured MIR-COVERAGE-001 result instead of
-    /// handing the body to the retired surface-AST emitter. The module-body
-    /// check is the proof that the selected callable actually emitted
-    /// successfully; eligibility alone is not enough.
-    #[cfg(test)]
-    fn resolved_top_level_body_emitted(
-        &self,
-        program: &crate::core::CheckedProgram,
-        eligible: &std::collections::BTreeSet<crate::core::NodeId>,
-        function: &FuncDef,
-    ) -> bool {
-        if function.is_comptime || function.extern_abi.is_some() || !function.generics.is_empty() {
-            return false;
-        }
-        let fallback_owner = crate::core::NodeId(format!("function:{}", function.name));
-        let callable = program.functions().get(&fallback_owner).or_else(|| {
-            program
-                .functions()
-                .values()
-                .find(|candidate| candidate.qualified_name == function.name)
-        });
-        let Some(callable) = callable else {
-            return false;
-        };
-        if !eligible.contains(&callable.node_id) {
-            return false;
-        }
-        self.module
-            .get_function(&callable.qualified_name)
-            .is_some_and(|llvm_function| llvm_function.count_basic_blocks() != 0)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn compile_file_inner(
-        &mut self,
-        file_arc: Arc<File>,
-        resolved_ctx: Option<(
-            &crate::core::CheckedProgram,
-            Option<&std::collections::BTreeSet<crate::core::NodeId>>,
-        )>,
-        allow_legacy_test_harness: bool,
-    ) -> MimiResult<()> {
-        let file = file_arc.as_ref();
-        // Register built-in Record types used by builtins
-        self.register_builtin_record_types()?;
-
-        // Keep the checked program's immutable AST snapshot alive for comptime
-        // consumers without deep-cloning every item a second time. The Arc is
-        // intentionally shared only through the tagged codegen legacy owner.
-        // Codegen's historical comptime view normalized `implicit_single` to
-        // false; preserve that exact view at each bytecode evaluation boundary
-        // instead of mutating the shared checker snapshot.
-        self.comptime_file = Some(Arc::clone(&file_arc));
-
-        // Actor values are opaque runtime handles (i8*), while `type_llvm`
-        // stores each actor's separate state-field struct for allocation and
-        // GEP access. Seed every actor name before resolving any user type so
-        // forward references in records, tuples, and function signatures use
-        // the runtime handle ABI instead of the state layout or i64 fallback.
-        if resolved_ctx.is_none() {
-            Self::process_items(&file.items, &mut |item| {
-                if let Item::Actor(actor) = item {
-                    self.actor_names.insert(actor.name.clone());
-                }
-                Ok(())
-            })?;
-        }
-
-        // v0.28.21 — Evaluate top-level `comptime func` and `const` items via the
-        // interpreter and cache the results so `Expr::Comptime` blocks and
-        // `comptime func name()` calls can fold to constants at codegen time.
-        self.fold_comptime_items(file)?;
-
-        // 0.36.4 Fault nominal: pre-register ALL type defs (including the
-        // flow-generated StateId/EventId enums, which expand_items appends after
-        // each flow) BEFORE the flow-state pass below. Otherwise the Fault
-        // record's `last_state: flow::<name>::StateId` field lowers via
-        // llvm_type_for before the enum is registered, falling back to i64 and
-        // corrupting the Fault record LLVM layout (enum Display prints raw
-        // tag/payload). register_type_def is idempotent (constructor/type_llvm
-        // inserts overwrite), so the later pass is a harmless no-op.
-        Self::process_items(&file.items, &mut |item| {
-            if let Item::Type(t) = item {
-                self.register_type_def(t)?;
-            }
-            Ok(())
-        })?;
-
-        // First pass: collect type definitions, function definitions, and cap definitions
-        Self::process_items(&file.items, &mut |item| {
-            match item {
-                Item::Type(t) => {
-                    self.register_type_def(t)?;
-                }
-                Item::Actor(actor) => {
-                    // Retained body metadata; name installation already came
-                    // from CheckedProgram before the tagged AST remainder.
-                    self.actor_defs.insert(actor.name.clone(), actor.clone());
-                    self.register_actor_def(actor)?;
-                }
-                Item::Func(f) => {
-                    self.func_defs.insert(f.name.clone(), f.clone());
-                    if f.is_comptime {
-                        self.comptime_func_names.insert(f.name.clone());
-                    }
-                }
-                Item::Cap(cap) if resolved_ctx.is_none() => {
-                    self.cap_type_names.insert(cap.name.clone());
-                    let components = if let Some(ref combined) = cap.combined_with {
-                        let parts: Vec<String> = combined
-                            .split(" + ")
-                            .map(|s| s.trim().to_string())
-                            .collect();
-                        if parts.len() > 1 {
-                            parts
-                        } else {
-                            vec![cap.name.clone(), combined.trim().to_string()]
-                        }
-                    } else {
-                        vec![cap.name.clone()]
-                    };
-                    self.cap_components.insert(cap.name.clone(), components);
-                }
-                Item::Trait(t) if resolved_ctx.is_none() => {
-                    // Test-only surface compile_file harness. Production
-                    // obtains this directory from CheckedProgram.
-                    self.trait_method_names.insert(
-                        t.name.clone(),
-                        t.methods.iter().map(|method| method.name.clone()).collect(),
-                    );
-                }
-                Item::Impl(imp) if resolved_ctx.is_none() => {
-                    // Test-only surface harness. Production impl signatures and
-                    // method selection are installed from checked native owner
-                    // receipts; AST methods are retained separately as bodies.
-                    self.type_impls
-                        .entry(imp.type_name.clone())
-                        .or_default()
-                        .insert(imp.trait_name.clone(), imp.methods.clone());
-                    if !imp.type_args.is_empty() {
-                        self.impl_type_args
-                            .entry(imp.type_name.clone())
-                            .or_insert_with(|| imp.type_args.clone());
-                    }
-                }
-                Item::Impl(_) => {}
-                Item::Const {
-                    name,
-                    value,
-                    ty,
-                    extern_abi,
-                    ..
-                } => {
-                    // Store const for later reference (inlined at use sites)
-                    self.const_values.insert(name.clone(), value.clone());
-                    // M-004: `extern "C" const NAME: T = V` exports a C-visible
-                    // data symbol. Emit an `External`-linkage module global with
-                    // the initializer so `--shared` exposes `NAME` to dlopen/
-                    // dlsym consumers (component data API / clap_entry). Plain
-                    // `const` items are inlined and never emit a global.
-                    if extern_abi.is_some() {
-                        self.emit_exported_const(name, ty.as_ref(), value)?;
-                    }
-                }
-                Item::Flow(f) => {
-                    // Register flow state payload types so record construction
-                    // (e.g. `Zero { count: 0 }`) works in function codegen.
-                    let qualified = format!("flow::{}", f.name);
-                    for s in &f.states {
-                        let type_name = format!("{}::{}", qualified, s.name);
-                        let fields = s.payload.clone().unwrap_or_default();
-                        let td = TypeDef {
-                            meta: AstNodeMeta::inherited(
-                                s.meta.span,
-                                AstOrigin::RuntimeSystem("codegen.flow_state_type"),
-                            ),
-                            name: type_name.clone(),
-                            pub_: false,
-                            kind: TypeDefKind::Record(fields),
-                            generics: vec![],
-                            derives: vec![],
-                            attributes: vec![],
-                        };
-                        self.register_type_def(&td)?;
-                        // Also register unqualified name (skip built-in names like "i32").
-                        //
-                        // 0.34.36 (audit §6.9): the QUALIFIED key above
-                        // (`flow::{flow}::{state}`) is the authoritative layout
-                        // source — the multi-target return wrap resolves it via
-                        // `flow_state_llvm_type` (mod.rs). The bare alias below is
-                        // only a construction shim for bare-name record literals
-                        // (`Big { v }`). It is first-wins across flows, so it can
-                        // alias a same-named state of another flow; layout-sensitive
-                        // paths must therefore never read the bare alias.
-                        if !Self::is_builtin_type_name(&s.name)
-                            && !self.type_defs.contains_key(&s.name)
-                        {
-                            let td = TypeDef {
-                                meta: AstNodeMeta::inherited(
-                                    s.meta.span,
-                                    AstOrigin::RuntimeSystem("codegen.flow_state_alias"),
-                                ),
-                                name: s.name.clone(),
-                                pub_: false,
-                                kind: TypeDefKind::Record(s.payload.clone().unwrap_or_default()),
-                                generics: vec![],
-                                derives: vec![],
-                                attributes: vec![],
-                            };
-                            self.register_type_def(&td)?;
-                        }
-                    }
-                    // Cache the flow definition for transition compilation.
-                    self.flow_defs.insert(f.name.clone(), f.clone());
-                    // v0.34.16 (ADR-002): register the synthetic multi-target
-                    // union enum here (first pass) — match arms in main()
-                    // resolve variant ordinals before the fifth pass compiles
-                    // transition bodies.
-                    self.register_flow_multi_target_enums(f)?;
-                    // v0.29.24: first @max_children(N) wins as process spawn quota.
-                    if self.max_children.is_none() {
-                        for a in &f.annotations {
-                            if let crate::ast::FlowAnnotationKind::MaxChildren(n) = &a.kind {
-                                self.max_children = Some(*n);
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
-        if let Some((program, _)) = resolved_ctx {
-            self.install_checked_impl_method_bodies(file, program)?;
-        }
-        // Second pass: register extern functions and external types
-        Self::process_items(&file.items, &mut |item| {
-            match item {
-                Item::ExternBlock(block) => {
-                    self.register_extern_block(block)?;
-                }
-                Item::Type(t) => {
-                    self.register_type_def(t)?;
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
-        // v0.28.26 — Forward-declare all non-extern, non-comptime
-        // user functions before any bodies are compiled. This lets functions
-        // (including those in imported modules) call later-defined functions.
-        // Iterate over file.items to keep declaration order deterministic and
-        // match the order used for the rest of codegen.
-        for item in &file.items {
-            if let Item::Func(f) = item {
-                if f.is_comptime {
-                    continue;
-                }
-                if f.extern_abi.is_some() {
-                    // Exported C functions have a distinct C boundary
-                    // wrapper and a Mimi-internal body. Declare the body
-                    // before any caller is emitted so recursion and forward
-                    // calls can use Mimi's ABI without going through the C
-                    // conversion wrapper.
-                    if f.generics.is_empty() {
-                        let mut body = f.clone();
-                        body.name = Self::export_body_symbol(&f.name);
-                        body.extern_abi = None;
-                        self.declare_func(&body)?.0.set_linkage(Linkage::Internal);
-                    }
-                    continue;
-                }
-                if matches!(
-                    f.ret.as_ref().map(Type::unlocated),
-                    Some(Type::ImplTrait(_))
-                ) {
-                    continue;
-                }
-                self.declare_func(f)?;
-            }
-        }
-        // Forward-declare flow transitions so user functions can call them.
-        {
-            let flow_defs: Vec<FlowDef> = self.flow_defs.values().cloned().collect();
-            for flow in &flow_defs {
-                for t in &flow.transitions {
-                    let func = Self::transition_to_func(flow, t);
-                    self.func_defs.insert(func.name.clone(), func.clone());
-                    self.declare_func(&func)?;
-                }
-            }
-        }
-
-        // Third pass: compile impl methods (needed before vtable construction).
-        // Production walks checked impl identities and their body payloads;
-        // the name-keyed compatibility map remains only for the test harness.
-        if let Some((program, eligible)) = resolved_ctx {
-            self.compile_checked_impl_methods_with_eligibility(program, eligible)?;
-        } else {
-            // The surface-AST impl emitter exists only for the unit-test
-            // compatibility harness.  Production compilation must have an
-            // explicit checked/resolved eligibility receipt before it can
-            // materialize any impl body; otherwise fail closed instead of
-            // silently reopening the legacy owner.
-            #[cfg(test)]
-            {
-                self.compile_impl_methods()?;
-            }
-            #[cfg(not(test))]
-            {
-                return Err(CompileError::CanonicalMirCoverage(
-                    "MIR-COVERAGE-001/NITS: unchecked impl body compilation is test-only; production requires checked resolved-native eligibility".into(),
-                ));
-            }
-        }
-        // Fourth pass: compile vtables (needed before user function compilation)
-        self.compile_vtables()?;
-        // S12: Per-function resolved dispatch — compile eligible function bodies
-        // through the resolved native emitter AFTER all declarations, impl methods,
-        // and vtables are set up. The compile_func_legacy skip guard
-        // (count_basic_blocks != 0) prevents double-emission in the fifth pass.
-        if let Some((program, Some(eligible))) = resolved_ctx {
-            if let Err(diagnostics) = self.compile_resolved_subset(program, eligible) {
-                // 0.40.1.3 (A3, blind-spots-evaluation-2026-08-29.md §1.3-3/4): a
-                // fail-closed ownership error (E0723) must NOT be silently
-                // downgraded to the legacy emitter — that would re-emit broken IR
-                // that aliases freed heap (the BUG P hole). Escalate it as a hard
-                // compile error.
-                if diagnostics
-                    .iter()
-                    .any(|d| d.code.as_deref() == Some("E0723"))
-                {
-                    return Err(CompileError::Unsupported(
-                        diagnostics
-                            .iter()
-                            .find(|d| d.code.as_deref() == Some("E0723"))
-                            .map(|d| d.message.clone())
-                            .unwrap_or_else(|| "E0723: unsupported native return".into()),
-                    ));
-                }
-                if let Some(diag) = diagnostics
-                    .iter()
-                    .find(|d| d.code.as_deref() == Some("MIR-COVERAGE-001"))
-                {
-                    return Err(CompileError::CanonicalMirCoverage(diag.message.clone()));
-                }
-                // 0.1.8 Phase 0: core-callee emit failures are hard errors
-                // (function name + reason), not a quiet legacy downgrade.
-                if let Some(diag) = diagnostics
-                    .iter()
-                    .find(|d| d.message.contains("core callee"))
-                {
-                    return Err(CompileError::Unsupported(diag.message.clone()));
-                }
-                if std::env::var("MIMI_VERBOSE").is_ok() {
-                    for d in &diagnostics {
-                        eprintln!("warning: resolved subset issue: {}", d.message);
-                    }
-                }
-            }
-        }
-        // Fifth pass: compile actors and flow transitions from the retained
-        // declaration view. Ordinary top-level functions have no legacy
-        // fallback anymore: every body must either have a complete canonical
-        // resolved/MIR emission above or fail closed with MIR-COVERAGE-001.
-        // This keeps an eligibility miss from silently re-entering the old
-        // surface-AST emitter and preserves one native semantic producer.
-        // v0.28.21 — `comptime func` items are folded at codegen-start by
-        // `fold_comptime_items` and intentionally NOT compiled to LLVM IR
-        // (the caller resolves them via the cached `comptime_values` map,
-        // so no runtime symbol is required for the function body).
-        Self::process_items(&file.items, &mut |item| {
-            match item {
-                Item::Func(f) => {
-                    if f.is_comptime {
-                        // Skip — folded value lives in self.comptime_values.
-                    } else {
-                        let resolved_native_body = resolved_ctx
-                            .and_then(|(program, eligible)| {
-                                eligible.map(|eligible| {
-                                    self.resolved_top_level_body_emitted(program, eligible, f)
-                                })
-                            })
-                            .unwrap_or(false);
-                        if !resolved_native_body {
-                            // The production path is canonical-only. A
-                            // cfg(test) surface harness still exercises the
-                            // historical emitter through an explicitly named
-                            // adapter in `codegen::tests`; this keeps the
-                            // compatibility tests useful without leaving a
-                            // production call edge from the fifth pass.
-                            #[cfg(test)]
-                            {
-                                if allow_legacy_test_harness {
-                                    self.compile_legacy_test_function(f)
-                                        .map_err(|e| e.at(f.meta.span))?;
-                                } else {
-                                    return Err(CompileError::CanonicalMirCoverage(format!(
-                                        "MIR-COVERAGE-001/NITS: ordinary function '{}' has no complete canonical MIR body; legacy fifth-pass codegen is retired",
-                                        f.name
-                                    ))
-                                    .at(f.meta.span));
-                                }
-                            }
-                            #[cfg(not(test))]
-                            {
-                                return Err(CompileError::CanonicalMirCoverage(format!(
-                                    "MIR-COVERAGE-001/NITS: ordinary function '{}' has no complete canonical MIR body; legacy fifth-pass codegen is retired",
-                                    f.name
-                                ))
-                                .at(f.meta.span));
-                            }
-                        }
-                    }
-                }
-                Item::Actor(actor) => {
-                    self.compile_actor(actor)?;
-                }
-                Item::Flow(f) => {
-                    self.compile_flow(f)?;
-                }
-                _ => {}
-            }
-            Ok(())
-        })?;
-        // Warn about comptime functions that could not be compiled
-        // (from external modules that were excluded)
-        for item in &file.items {
-            if let Item::Func(f) = item {
-                if f.is_comptime {
-                    eprintln!("warning: comptime function '{}' was not compiled", f.name);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Check if a name is a built-in Mimi type (should not be registered as a flow state type).
-    fn is_builtin_type_name(name: &str) -> bool {
-        matches!(
-            name,
-            "i32"
-                | "i64"
-                | "f32"
-                | "f64"
-                | "bool"
-                | "string"
-                | "unit"
-                | "char"
-                | "Int"
-                | "Float"
-                | "Bool"
-                | "String"
-                | "List"
-                | "Option"
-                | "Result"
-                | "Set"
-                | "Map"
-        )
-    }
-
     /// Mangle a flow transition into an ordinary function name.
     /// Format: `{FlowName}__{transition}__from_{FromState}`
     pub(super) fn transition_fn_name(flow: &str, transition: &str, from: &str) -> String {
         format!("{}__{}__from_{}", flow, transition, from)
-    }
-
-    /// v0.34.16 (ADR-002): register a synthetic `flow::{Name}::__MultiTarget`
-    /// enum for each flow that has a multi-target transition. Variants are the
-    /// target states (declared order = tag ordinal); payload is the state's
-    /// record struct type (boxed: ptrtoint-encoded into the uniform i64 slot
-    /// of the enum's `{i32 tag, i64 payload}` layout). The synthetic enum is
-    /// what match arms on `Small { v }` / `Large { v }` dispatch against.
-    pub(super) fn register_flow_multi_target_enums(&mut self, flow: &FlowDef) -> MimiResult<()> {
-        let multi_target_states: Vec<&str> = flow
-            .transitions
-            .iter()
-            .filter(|t| t.to_states.len() > 1)
-            .flat_map(|t| t.to_states.iter())
-            .map(|s| s.as_str())
-            .collect();
-        if multi_target_states.is_empty() {
-            return Ok(());
-        }
-        // Dedup preserving first-seen order.
-        let mut seen = std::collections::HashSet::new();
-        let states: Vec<&str> = multi_target_states
-            .into_iter()
-            .filter(|s| seen.insert((*s).to_string()))
-            .collect();
-        let qualified = format!("flow::{}::__MultiTarget", flow.name);
-        let meta = AstNodeMeta::inherited(
-            flow.meta.span,
-            AstOrigin::RuntimeSystem("codegen.multi_target_union"),
-        );
-        let variants: Vec<Variant> = states
-            .iter()
-            .map(|state_name| {
-                let state_ty =
-                    Type::Name(format!("flow::{}::{}", flow.name, state_name), Vec::new())
-                        .deep_reorigin(meta);
-                Variant {
-                    meta,
-                    name: state_name.to_string(),
-                    payload: Some(VariantPayload::Tuple(vec![state_ty])),
-                }
-            })
-            .collect();
-        let td = TypeDef {
-            meta,
-            name: qualified.clone(),
-            pub_: false,
-            kind: TypeDefKind::Enum(variants),
-            generics: vec![],
-            derives: vec![],
-            attributes: vec![],
-        };
-        self.register_type_def(&td)?;
-        // C1 fix: build the flow-wide state-name → tag-ordinal map using the
-        // SAME ordering register_type_def applies (variants sorted by name).
-        // Return sites query this map so a transition whose target set is a
-        // proper subset of the flow union still emits the global ordinal —
-        // the receiving match dispatches on the global enum ordinal, and a
-        // subset-relative tag would silently alias a different state.
-        // Bucketed by flow name: each flow's __MultiTarget enum is its own
-        // enum with independent ordinals.
-        {
-            let mut sorted_states = states.clone();
-            sorted_states.sort_unstable();
-            let mut ordinals = std::collections::HashMap::with_capacity(sorted_states.len());
-            for (ord, s) in sorted_states.into_iter().enumerate() {
-                ordinals.insert(s.to_string(), ord as u64);
-            }
-            self.multi_target_global_ordinals
-                .insert(flow.name.clone(), ordinals);
-        }
-        // Also register the unqualified alias so `match r { Small { .. } }`
-        // resolves the owning enum through find_variant_owner.
-        if !self
-            .type_defs
-            .contains_key(&format!("__MultiTarget_{}", flow.name))
-        {
-            let alias = TypeDef {
-                meta,
-                name: format!("__MultiTarget_{}", flow.name),
-                pub_: false,
-                kind: TypeDefKind::Alias(
-                    Type::Name(qualified.clone(), Vec::new()).deep_reorigin(meta),
-                ),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            self.register_type_def(&alias)?;
-        }
-        Ok(())
     }
 
     /// Convert a flow transition into a synthetic FuncDef for test-only
@@ -3022,6 +3802,7 @@ impl<'ctx> CodeGenerator<'ctx> {
     /// This descriptor remains useful for symbol declarations and for the
     /// explicit fail-closed test adapter; `compile_flow` never emits it into
     /// the deleted legacy production owner.
+    #[cfg(test)]
     pub(super) fn transition_to_func(flow: &FlowDef, t: &TransitionDef) -> FuncDef {
         let origin = AstOrigin::RuntimeSystem("codegen.transition_lowering");
         let meta = AstNodeMeta::inherited(t.meta.span, origin);
@@ -3094,287 +3875,6 @@ impl<'ctx> CodeGenerator<'ctx> {
         }
     }
 
-    /// Guard the retired surface-AST Flow emission entry point.
-    ///
-    /// Canonical MIR owns every production transition body; reaching this
-    /// helper is therefore a coverage failure rather than permission to emit
-    /// a legacy LLVM function.
-    pub(super) fn compile_flow(&mut self, flow: &FlowDef) -> MimiResult<()> {
-        // Flow transition bodies are emitted only by the canonical MIR route.
-        // Re-entering the surface-AST emitter here would make a mixed or
-        // unsupported Flow silently regain the deleted CodegenLegacyRemainder
-        // owner. Exact S8/recoverable Flow graphs return from
-        // `compile_checked_inner` after `compile_mir_native_with_route_receipt`
-        // and never reach this compatibility entry point. Any body that does
-        // reach it therefore stops before LLVM emission with the checker-owned
-        // coverage code used by the route selector.
-        if let Some(transition) = flow
-            .transitions
-            .iter()
-            .find(|transition| transition.body.is_some())
-        {
-            return Err(CompileError::CanonicalMirCoverage(format!(
-                "Flow '{}' transition '{}' is outside the canonical MIR route; legacy transition emission is disabled",
-                flow.name, transition.name
-            ))
-            .at(transition.meta.span));
-        }
-        Ok(())
-    }
-
-    /// Register built-in Record types used by builtin functions (exec, file_stat, etc.)
-    /// so that field access and struct construction work in codegen.
-    fn register_builtin_record_types(&mut self) -> MimiResult<()> {
-        use inkwell::types::BasicTypeEnum;
-        let meta = AstNodeMeta::synthetic(AstOrigin::RuntimeSystem("codegen.builtin_type"));
-        let generated_type =
-            |name: &str| crate::ast::Type::Name(name.to_string(), vec![]).deep_reorigin(meta);
-        let i32_ty = BasicTypeEnum::IntType(self.context.i32_type());
-        let i64_ty = BasicTypeEnum::IntType(self.context.i64_type());
-        let bool_ty = BasicTypeEnum::IntType(self.context.bool_type());
-        let string_ty = {
-            let i8_ptr = self.context.ptr_type(inkwell::AddressSpace::default());
-            BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[BasicTypeEnum::PointerType(i8_ptr), i64_ty], false),
-            )
-        };
-        // ExecResult { exit_code: i32, stdout: string, stderr: string }
-        if !self.type_defs.contains_key("ExecResult") {
-            let exec_ty = crate::ast::TypeDef {
-                meta,
-                name: "ExecResult".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "exit_code".to_string(),
-                        ty: generated_type("i32"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "stdout".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "stderr".to_string(),
-                        ty: generated_type("string"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[i32_ty, string_ty, string_ty], false),
-            );
-            self.type_llvm.insert("ExecResult".to_string(), llvm_ty);
-            self.type_defs.insert("ExecResult".to_string(), exec_ty);
-        }
-        // StatResult { size: i64, modified: i64, is_file: bool, is_dir: bool }
-        if !self.type_defs.contains_key("StatResult") {
-            let stat_ty = crate::ast::TypeDef {
-                meta,
-                name: "StatResult".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "size".to_string(),
-                        ty: generated_type("i64"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "modified".to_string(),
-                        ty: generated_type("i64"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "is_file".to_string(),
-                        ty: generated_type("bool"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "is_dir".to_string(),
-                        ty: generated_type("bool"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[i64_ty, i64_ty, bool_ty, bool_ty], false),
-            );
-            self.type_llvm.insert("StatResult".to_string(), llvm_ty);
-            self.type_defs.insert("StatResult".to_string(), stat_ty);
-        }
-        // v0.29.20 PeerFault { peer_id, reason }
-        if !self.type_defs.contains_key("PeerFault") {
-            let pf_ty = crate::ast::TypeDef {
-                meta,
-                name: "PeerFault".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "peer_id".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "reason".to_string(),
-                        ty: generated_type("string"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            let llvm_ty =
-                BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, string_ty], false));
-            self.type_llvm.insert("PeerFault".to_string(), llvm_ty);
-            self.type_defs.insert("PeerFault".to_string(), pf_ty);
-        }
-        // v0.29.12 SystemTrace { last_state_name, unexpected_event, snapshot, memory_dump, panic_payload }
-        // v0.29.39: added memory_dump + panic_payload structured sub-records
-        if !self.type_defs.contains_key("SystemTrace") {
-            let st_ty = crate::ast::TypeDef {
-                meta,
-                name: "SystemTrace".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "last_state_name".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "unexpected_event".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "snapshot".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "memory_dump".to_string(),
-                        ty: generated_type("MemoryDump"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "panic_payload".to_string(),
-                        ty: generated_type("PanicPayload"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            // SystemTrace LLVM struct: { string, string, string, MemoryDump, PanicPayload }
-            let memory_dump_ty =
-                self.type_llvm
-                    .get("MemoryDump")
-                    .copied()
-                    .unwrap_or(BasicTypeEnum::StructType(
-                        self.context.struct_type(&[string_ty, i32_ty], false),
-                    ));
-            let panic_payload_ty =
-                self.type_llvm
-                    .get("PanicPayload")
-                    .copied()
-                    .unwrap_or(BasicTypeEnum::StructType(
-                        self.context
-                            .struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
-                    ));
-            let llvm_ty = BasicTypeEnum::StructType(self.context.struct_type(
-                &[
-                    string_ty,
-                    string_ty,
-                    string_ty,
-                    memory_dump_ty,
-                    panic_payload_ty,
-                ],
-                false,
-            ));
-            self.type_llvm.insert("SystemTrace".to_string(), llvm_ty);
-            self.type_defs.insert("SystemTrace".to_string(), st_ty);
-        }
-        // v0.29.39: PanicPayload { error_type: string, file: string, line: i32, stack: string }
-        if !self.type_defs.contains_key("PanicPayload") {
-            let pp_ty = crate::ast::TypeDef {
-                meta,
-                name: "PanicPayload".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "error_type".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "file".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "line".to_string(),
-                        ty: generated_type("i32"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "stack".to_string(),
-                        ty: generated_type("string"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            let llvm_ty = BasicTypeEnum::StructType(
-                self.context
-                    .struct_type(&[string_ty, string_ty, i32_ty, string_ty], false),
-            );
-            self.type_llvm.insert("PanicPayload".to_string(), llvm_ty);
-            self.type_defs.insert("PanicPayload".to_string(), pp_ty);
-        }
-        // v0.29.39: MemoryDump { fields: string, count: i32 }
-        if !self.type_defs.contains_key("MemoryDump") {
-            let md_ty = crate::ast::TypeDef {
-                meta,
-                name: "MemoryDump".to_string(),
-                pub_: false,
-                kind: crate::ast::TypeDefKind::Record(vec![
-                    crate::ast::Field {
-                        meta,
-                        name: "fields".to_string(),
-                        ty: generated_type("string"),
-                    },
-                    crate::ast::Field {
-                        meta,
-                        name: "count".to_string(),
-                        ty: generated_type("i32"),
-                    },
-                ]),
-                generics: vec![],
-                derives: vec![],
-                attributes: vec![],
-            };
-            let llvm_ty =
-                BasicTypeEnum::StructType(self.context.struct_type(&[string_ty, i32_ty], false));
-            self.type_llvm.insert("MemoryDump".to_string(), llvm_ty);
-            self.type_defs.insert("MemoryDump".to_string(), md_ty);
-        }
-        Ok(())
-    }
-
     /// Run LLVM optimization passes on the module (O2).
     /// Called from compile_to_object during actual builds.
     ///
@@ -3419,205 +3919,5 @@ impl<'ctx> CodeGenerator<'ctx> {
         self.module
             .run_passes("internalize,default<O2>,globaldce", &tm, options)
             .map_err(|e| CompileError::LlvmError(format!("optimization failed: {}", e)))
-    }
-
-    /// v0.28.21 — Walk top-level items and fold any `comptime func` or
-    /// `const` declaration into `self.comptime_values` by running the
-    /// interpreter. This is what allows `comptime { ... }` blocks and
-    /// `comptime func name()` call sites in subsequent compilation to
-    /// resolve to a constant value without re-evaluating the AST at
-    /// codegen time.
-    ///
-    /// Errors from individual items are downgraded to `eprintln!`
-    /// warnings so a single broken `comptime` declaration does not
-    /// prevent the rest of the file from compiling. (This matches
-    /// the v0.28.19 behaviour of warning-on-uncompilable-comptime.)
-    fn fold_comptime_items(&mut self, _file: &File) -> MimiResult<()> {
-        let file_ref = match &self.comptime_file {
-            Some(rc) => rc.as_ref(),
-            None => return Ok(()),
-        };
-        // v0.33 Phase F: compile ONLY comptime functions (avoid non-comptime
-        // functions that may have patterns the bytecode compiler rejects).
-        let has_comptime = file_ref
-            .items
-            .iter()
-            .any(|item| matches!(item, crate::ast::Item::Func(f) if f.is_comptime && f.params.is_empty()));
-        if !has_comptime {
-            return Ok(());
-        }
-        let bytecode_result = (|| {
-            // Build a synthetic file with only comptime functions + supporting items.
-            let mut synth = crate::ast::File {
-                sources: file_ref.sources.clone(),
-                items: Vec::new(),
-                imports: Vec::new(),
-                implicit_single: false,
-            };
-            for item in &file_ref.items {
-                match item {
-                    // Include comptime functions (the ones we want to evaluate).
-                    crate::ast::Item::Func(f) if f.is_comptime && f.params.is_empty() => {
-                        synth.items.push(item.clone());
-                    }
-                    // Include types, constants, traits, impls (dependencies).
-                    crate::ast::Item::Type(_)
-                    | crate::ast::Item::Const { .. }
-                    | crate::ast::Item::Trait(_)
-                    | crate::ast::Item::Impl(_)
-                    | crate::ast::Item::Cap(_) => {
-                        synth.items.push(item.clone());
-                    }
-                    // Skip non-comptime functions, actors, flows, sessions, etc.
-                    // (they may have patterns the bytecode compiler rejects).
-                    _ => {}
-                }
-            }
-            let mut compiler = crate::interp::bytecode::BytecodeCompiler::new();
-            let prog = compiler
-                .compile_for_comptime(&synth)
-                .map_err(|e| e.to_string())?;
-            let mut vm = crate::interp::bytecode::BytecodeVM::new(prog.clone());
-            let mut results = std::collections::HashMap::new();
-            for item in &synth.items {
-                if let crate::ast::Item::Func(f) = item {
-                    if f.is_comptime && f.params.is_empty() {
-                        if let Some(fidx) = prog.function_index(&f.name) {
-                            let value = vm.call_function(fidx, &[]).map_err(|e| e.to_string())?;
-                            results.insert(f.name.clone(), value);
-                        }
-                    }
-                }
-            }
-            Ok::<_, String>(results)
-        })();
-        match bytecode_result {
-            Ok(results) => {
-                for (name, value) in results {
-                    self.comptime_values.insert(name, value);
-                }
-                Ok(())
-            }
-            Err(err) => {
-                // If bytecode comptime folding fails, skip gracefully rather
-                // than aborting the whole compilation. Report the failure so
-                // it is not silently swallowed (the doc comment above promises
-                // a warning; comptime values will be evaluated at runtime).
-                eprintln!(
-                    "warning: comptime folding failed ({}); comptime values will be evaluated at runtime",
-                    err
-                );
-                Ok(())
-            }
-        }
-    }
-
-    /// M-004: emit a C-visible data symbol for `extern "C" const NAME: T = V`.
-    ///
-    /// Builds an `External`-linkage module global initialised with the const
-    /// value so a `--shared` object exposes `NAME` to dlopen/dlsym consumers
-    /// (component data API, e.g. `clap_entry`). Only scalar literals (int /
-    /// float / bool) and string initializers are supported today; computed or
-    /// composite consts are rejected loudly rather than emitted as a broken
-    /// (zero-initialised) symbol.
-    fn emit_exported_const(
-        &self,
-        name: &str,
-        ty: Option<&crate::ast::Type>,
-        value: &Expr,
-    ) -> MimiResult<()> {
-        // 1. Resolve the const's type (explicit annotation, else inferred from
-        //    the literal).
-        let const_ty: crate::ast::Type = match ty {
-            Some(t) => t.clone(),
-            None => match value.unlocated() {
-                Expr::Literal(Lit::Int(_)) => Type::Name("i64".into(), vec![]),
-                Expr::Literal(Lit::Float(_)) => Type::Name("f64".into(), vec![]),
-                Expr::Literal(Lit::Bool(_)) => Type::Name("bool".into(), vec![]),
-                Expr::Literal(Lit::String(_)) => Type::Name("string".into(), vec![]),
-                _ => {
-                    return Err(CompileError::LlvmError(format!(
-                        "exported const '{}' must have an explicit type annotation \
-                         (computed/untyped initializers are not supported for `extern \"C\" const`)",
-                        name
-                    )))
-                }
-            },
-        };
-
-        // 2. Fold the initializer to a concrete value (literals only — computed
-        //    consts would need VM evaluation, which is not wired up for data
-        //    export yet).
-        let val = match value.unlocated() {
-            Expr::Literal(Lit::Int(n)) => crate::interp::Value::Int(*n),
-            Expr::Literal(Lit::Float(f)) => crate::interp::Value::Float(*f),
-            Expr::Literal(Lit::Bool(b)) => crate::interp::Value::Bool(*b),
-            Expr::Literal(Lit::String(s)) => {
-                crate::interp::Value::String(SharedString::new(s.clone()))
-            }
-            _ => {
-                return Err(CompileError::LlvmError(format!(
-                    "exporting computed const '{}' via `extern \"C\" const` is not yet \
-                     supported; use a literal initializer (e.g. `const {} = 42;`)",
-                    name, name
-                )))
-            }
-        };
-
-        // 3. Determine the LLVM type and build the initializer constant.
-        let llvm_ty = self.llvm_type_for(&const_ty).ok_or_else(|| {
-            CompileError::LlvmError(format!(
-                "cannot determine LLVM type for exported const '{}' of type {:?}",
-                name, const_ty
-            ))
-        })?;
-        let init = self.const_global_initializer(name, &const_ty, &llvm_ty, &val)?;
-
-        // 4. Emit the External-linkage global. The `u_` namespacing pass only
-        //    renames functions, so the exported data symbol keeps its clean
-        //    source name.
-        let gv = self.module.add_global(llvm_ty, None, name);
-        gv.set_linkage(Linkage::External);
-        gv.set_initializer(&init);
-        Ok(())
-    }
-
-    /// Build an LLVM constant initializer for an exported const value.
-    fn const_global_initializer(
-        &self,
-        name: &str,
-        ty: &crate::ast::Type,
-        llvm_ty: &BasicTypeEnum<'ctx>,
-        val: &crate::interp::Value,
-    ) -> MimiResult<BasicValueEnum<'ctx>> {
-        match (val, llvm_ty) {
-            (crate::interp::Value::Int(n), BasicTypeEnum::IntType(it)) => {
-                Ok(it.const_int(*n as u64, false).into())
-            }
-            (crate::interp::Value::Float(f), BasicTypeEnum::FloatType(ft)) => {
-                Ok(ft.const_float(*f).into())
-            }
-            (crate::interp::Value::Bool(b), BasicTypeEnum::IntType(it)) => {
-                Ok(it.const_int(*b as u64, false).into())
-            }
-            (crate::interp::Value::String(s), BasicTypeEnum::StructType(_st)) => {
-                // Mimi string ABI = { i8*, i64 } (ptr + len).
-                let bytes = s.as_bytes();
-                let arr_ty = self.context.i8_type().array_type((bytes.len() as u32) + 1);
-                let gstr =
-                    self.module
-                        .add_global(arr_ty, None, &format!("__mimi_const_str_{}", name));
-                gstr.set_linkage(Linkage::Internal);
-                gstr.set_initializer(&self.context.const_string(bytes, true));
-                let ptr = gstr.as_pointer_value();
-                let len = self.context.i64_type().const_int(bytes.len() as u64, false);
-                let struct_val = self.context.const_struct(&[ptr.into(), len.into()], false);
-                Ok(struct_val.into())
-            }
-            _ => Err(CompileError::LlvmError(format!(
-                "exporting const '{}' of value {:?} (type {:?}) is not yet supported",
-                name, val, ty
-            ))),
-        }
     }
 }

@@ -48,6 +48,16 @@ fn expect_type_error(src: &str, expected_substring: &str) {
     );
 }
 
+fn expect_diagnostic_code(src: &str, expected_code: &str) {
+    let errors = check_source(src).expect_err("source should fail type checking");
+    assert!(
+        errors
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(expected_code)),
+        "expected {expected_code}, got: {errors:?}"
+    );
+}
+
 #[test]
 fn shared_not_allowed_in_ffi() {
     let src = r#"
@@ -95,7 +105,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(&x)
 }
 "#;
-    expect_scalar_ffi_boundary(src);
+    expect_diagnostic_code(src, crate::diagnostic::codes::E0449);
 }
 
 #[test]
@@ -110,7 +120,7 @@ func main() -> i32 {
     __mimi_test_no_such_function_12345(&mut x)
 }
 "#;
-    expect_scalar_ffi_boundary(src);
+    expect_diagnostic_code(src, crate::diagnostic::codes::E0449);
 }
 
 #[test]
@@ -189,8 +199,12 @@ extern "C" {
     func __mimi_test_no_such_function_12345(x: f64) -> f64;
 }
 
-func main() -> f64 {
+func call_foreign_float() -> f64 {
     __mimi_test_no_such_function_12345(3.14)
+}
+
+func main() -> i32 {
+    if call_foreign_float() > 0.0 { 1 } else { 0 }
 }
 "#;
     expect_symbol_not_found(src);
@@ -225,12 +239,12 @@ func main() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1: FFI passport types (*T, *mut T) are allowed in extern "C"
-// signatures but rejected everywhere else.
+// FFI import declarations are not an unsafe source context. Raw pointer types
+// require an explicit `extern "C" func` wrapper or an unsafe lexical body.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn raw_ptr_allowed_in_extern_signature() {
+fn raw_ptr_rejected_in_extern_declaration() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: *i32) -> i32;
@@ -240,14 +254,11 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "raw pointer should be allowed in extern signature"
-    );
+    expect_diagnostic_code(src, crate::diagnostic::codes::E0449);
 }
 
 #[test]
-fn raw_ptr_mut_allowed_in_extern_signature() {
+fn raw_ptr_mut_rejected_in_extern_declaration() {
     let src = r#"
 extern "C" {
     func __mimi_test_no_such_function_12345(x: *mut i32) -> i32;
@@ -257,10 +268,7 @@ func main() -> i32 {
     0
 }
 "#;
-    assert!(
-        check_source(src).is_ok(),
-        "raw mutable pointer should be allowed in extern signature"
-    );
+    expect_diagnostic_code(src, crate::diagnostic::codes::E0449);
 }
 
 #[test]

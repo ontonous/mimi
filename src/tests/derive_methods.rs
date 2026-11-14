@@ -1,5 +1,15 @@
 use super::*;
 
+fn run_non_scalar_helper(src: &str, helper: &str) -> Result<interp::Value, String> {
+    let main_value = run_source_result(src)?;
+    if main_value != interp::Value::Int(0) {
+        return Err(format!(
+            "valid main must invoke {helper} before returning its process status; got {main_value:?}"
+        ));
+    }
+    bytecode_call_named(src, helper, Vec::new())
+}
+
 #[test]
 fn derive_debug_to_string() {
     let src = r#"
@@ -9,12 +19,17 @@ type Point {
     y: i32
 }
 
-func main() -> string {
+func derived_debug_string() -> string {
     let p = Point { x: 1, y: 2 };
     p.to_string()
 }
+
+func main() -> i32 {
+    derived_debug_string()
+    0
+}
 "#;
-    let result = run_source_result(src);
+    let result = run_non_scalar_helper(src, "derived_debug_string");
     assert!(
         result.is_ok(),
         "Debug derive should work: {:?}",

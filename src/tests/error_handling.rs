@@ -3,12 +3,7 @@ use super::*;
 #[test]
 fn on_failure_executes_on_error() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func fail() -> Res {
+func fail() -> Result<i32, string> {
     Err("boom")
 }
 
@@ -16,74 +11,84 @@ func cleanup() {
     println("CLEANUP_RAN");
 }
 
-func main() -> i32 {
+func execute() -> Result<i32, string> {
     on failure { cleanup(); }
     let _ = fail()?;
-    0
+    Ok(0)
+}
+
+func main() -> i32 {
+    match execute() {
+        Ok(_) => 0,
+        Err(error) => { println(error); 1 },
+    }
 }
 "#;
-    let result = run_source_result(src);
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(1));
     assert!(
-        result.is_ok(),
-        "? should propagate error as value, got: {:?}",
-        result
+        stdout.contains("CLEANUP_RAN"),
+        "cleanup did not run: {stdout}"
     );
-    let val = result.expect("src/tests/error_handling.rs:27 unwrap failed");
-    match &val {
-        interp::Value::Variant(name, _) if name == "Err" => {}
-        other => panic!("Expected Err variant, got: {}", other),
-    }
+    assert!(
+        stdout.contains("boom"),
+        "propagated error was lost: {stdout}"
+    );
 }
 
 #[test]
 fn on_failure_lifo_order() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func fail() -> Res {
+func fail() -> Result<i32, string> {
     Err("boom")
 }
 
-func main() -> i32 {
+func execute() -> Result<i32, string> {
     on failure { println("C"); }
     on failure { println("B"); }
     on failure { println("A"); }
     let _ = fail()?;
-    0
+    Ok(0)
+}
+
+func main() -> i32 {
+    match execute() {
+        Ok(_) => 0,
+        Err(error) => { println(error); 1 },
+    }
 }
 "#;
-    let result = run_source_result(src);
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(1));
+    let positions = ["A", "B", "C", "boom"].map(|marker| {
+        stdout
+            .find(marker)
+            .unwrap_or_else(|| panic!("missing {marker}: {stdout}"))
+    });
     assert!(
-        result.is_ok(),
-        "? should propagate error as value, got: {:?}",
-        result
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "failure handlers must run in LIFO order before the propagated error: {stdout}"
     );
-    let val = result.expect("src/tests/error_handling.rs:56 unwrap failed");
-    match &val {
-        interp::Value::Variant(name, _) if name == "Err" => {}
-        other => panic!("Expected Err variant, got: {}", other),
-    }
 }
 
 #[test]
 fn on_failure_no_execute_on_success() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func succeed() -> Res {
+func succeed() -> Result<i32, string> {
     Ok(42)
 }
 
-func main() -> i32 {
+func execute() -> Result<i32, string> {
     on failure { println("SHOULD_NOT_RUN"); }
     let x = succeed()?;
-    x
+    Ok(x)
+}
+
+func main() -> i32 {
+    match execute() {
+        Ok(x) => x,
+        Err(_) => -1,
+    }
 }
 "#;
     let v = run_source(src);
@@ -234,38 +239,40 @@ func main() -> i32 {
 
 #[test]
 fn bugfix_error_in_expr_statement() {
-    // Value::Error from ? operator should propagate through expression statements
+    // Result errors must propagate through expression statements to the
+    // enclosing Result-returning helper.
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
+func fail() -> Result<i32, string> { Err("boom") }
 
-func fail() -> Res { Err("boom") }
+func execute() -> Result<i32, string> {
+    fail()?;
+    Ok(1)
+}
 
 func main() -> i32 {
-    fail()?;
-    1
+    match execute() {
+        Ok(_) => 0,
+        Err(error) => { println(error); 1 },
+    }
 }
 "#;
-    let result = run_source_result(src);
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(1));
     assert!(
-        result.is_ok(),
-        "? should propagate error as value through expr statement, got: {:?}",
-        result
+        stdout.contains("boom"),
+        "expression-statement `?` lost its propagated error: {stdout}"
     );
-    let val = result.expect("src/tests/error_handling.rs:170 unwrap failed");
-    match &val {
-        interp::Value::Variant(name, _) if name == "Err" => {}
-        other => panic!("Expected Err variant, got: {}", other),
-    }
 }
 
 #[test]
 fn bugfix_float_division_by_zero() {
     let src = r#"
-func main() -> f64 {
+func divide_float() -> f64 {
     10.0 / 0.0
+}
+func main() -> i32 {
+    let _ = divide_float();
+    0
 }
 "#;
     let result = run_source_result(src);

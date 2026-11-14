@@ -59,13 +59,15 @@ func distance(p: Point) -> f64 {
     sqrt(p.x * p.x + p.y * p.y)
 }
 
-func main() -> f64 {
+func record_fields_result() -> f64 {
     let origin = Point { x: 0.0, y: 0.0 };
     let p = Point { x: 3.0, y: 4.0 };
     distance(origin) + distance(p)
 }
+func main() -> i32 { 0 }
 "#;
-    let v = run_source(src);
+    let v = bytecode_call_named(src, "record_fields_result", vec![])
+        .expect("record-fields helper should run");
     assert!(matches!(v, interp::Value::Float(x) if (x - 5.0).abs() < 0.001));
 }
 
@@ -113,21 +115,23 @@ func main() -> i32 {
 #[test]
 fn interp_try_operator() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(i32)
-}
-
-func safe_div(a: i32, b: i32) -> Res {
+func safe_div(a: i32, b: i32) -> Result<i32, i32> {
     if b == 0 {
         return Err(999);
     }
     return Ok(a / b);
 }
 
-func main() -> i32 {
+func run_division() -> Result<i32, i32> {
     let result = safe_div(10, 2)?;
-    result
+    Ok(result)
+}
+
+func main() -> i32 {
+    match run_division() {
+        Ok(result) => result,
+        Err(_) => 0,
+    }
 }
 "#;
     let v = run_source(src);
@@ -232,12 +236,7 @@ func main() -> i32 {
 #[test]
 fn interp_on_failure_success_no_compensation() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func succeed() -> Res {
+func succeed() -> Result<i32, string> {
     Ok(42)
 }
 
@@ -245,10 +244,17 @@ func cleanup() {
     println("cleanup should not run");
 }
 
-func main() -> i32 {
+func run_success() -> Result<i32, string> {
     on failure { cleanup(); }
     let x = succeed()?;
-    x
+    Ok(x)
+}
+
+func main() -> i32 {
+    match run_success() {
+        Ok(x) => x,
+        Err(_) => -1,
+    }
 }
 "#;
     let v = run_source(src);
@@ -258,12 +264,7 @@ func main() -> i32 {
 #[test]
 fn interp_on_failure_compensation() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func fail_task() -> Res {
+func fail_task() -> Result<i32, string> {
     Err("task failed")
 }
 
@@ -271,76 +272,86 @@ func cleanup() {
     println("cleanup executed");
 }
 
-func main() -> i32 {
+func run_failure() -> Result<i32, string> {
     on failure { cleanup(); }
     let x = fail_task()?;
-    0
+    Ok(0)
+}
+
+func main() -> i32 {
+    match run_failure() {
+        Ok(_) => 0,
+        Err(error) => { println(error); 1 },
+    }
 }
 "#;
-    let result = run_source_result(src);
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(1));
     assert!(
-        result.is_ok(),
-        "? should propagate error as value, got: {:?}",
-        result
+        stdout.contains("cleanup executed"),
+        "cleanup did not run: {stdout}"
     );
-    let val = result.expect("src/tests/basic_other.rs:270 unwrap failed");
-    match &val {
-        interp::Value::Variant(name, _) if name == "Err" => {}
-        other => panic!("Expected Err variant, got: {}", other),
-    }
+    assert!(
+        stdout.contains("task failed"),
+        "propagated error was lost: {stdout}"
+    );
 }
 
 #[test]
 fn interp_on_failure_nested() {
     let src = r#"
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func step1() -> Res { Ok(1) }
-func step2() -> Res { Err("failed") }
-func step3() -> Res { Ok(3) }
+func step1() -> Result<i32, string> { Ok(1) }
+func step2() -> Result<i32, string> { Err("failed") }
+func step3() -> Result<i32, string> { Ok(3) }
 
 func cleanup1() { println("cleanup1"); }
 func cleanup2() { println("cleanup2"); }
 
-func main() -> i32 {
+func run_nested() -> Result<i32, string> {
     on failure { cleanup1(); }
     let a = step1()?;
     on failure { cleanup2(); }
     let b = step2()?;
     let c = step3()?;
-    0
+    Ok(c)
+}
+
+func main() -> i32 {
+    match run_nested() {
+        Ok(_) => 0,
+        Err(error) => { println(error); 1 },
+    }
 }
 "#;
-    let result = run_source_result(src);
+    let (value, stdout) = run_source_with_stdout(src);
+    assert_eq!(value, interp::Value::Int(1));
     assert!(
-        result.is_ok(),
-        "? should propagate error as value, got: {:?}",
-        result
+        stdout.contains("cleanup1"),
+        "outer cleanup did not run: {stdout}"
     );
-    let val = result.expect("src/tests/basic_other.rs:303 unwrap failed");
-    match &val {
-        interp::Value::Variant(name, _) if name == "Err" => {}
-        other => panic!("Expected Err variant, got: {}", other),
-    }
+    assert!(
+        stdout.contains("cleanup2"),
+        "inner cleanup did not run: {stdout}"
+    );
+    assert!(
+        stdout.contains("failed"),
+        "propagated error was lost: {stdout}"
+    );
 }
 
 #[test]
 fn interp_actor_spawn_and_methods() {
     let src = r#"
-actor Counter {
-    count: i32 = 0;
-
-    func increment() {
-        self.count = self.count + 1;
+flow CounterFlow {
+    state Ready { count: i32 }
+    transition increment(Ready) -> Ready {
+        return Ready { count: self.count + 1 }
     }
-
-    func get_count() -> i32 {
-        return self.count;
+    transition get_count(Ready) -> Ready {
+        return Ready { count: self.count }
     }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn();
@@ -349,7 +360,7 @@ func main() -> i32 {
     let n2 = c.get_count();
     c.increment();
     let n3 = c.get_count();
-    n3
+    if n1.count == 0 && n2.count == 1 && n3.count == 2 { n3.count } else { -1 }
 }
 "#;
     let v = run_source(src);

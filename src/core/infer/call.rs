@@ -198,4 +198,39 @@ mod tests {
         );
         assert!(checker.linear_value_erased_by_any(&result_name_actual, &result_struct_expected));
     }
+
+    #[test]
+    fn bare_list_len_is_allowed_but_element_sensitive_methods_fail_closed() {
+        let file = crate::tests::parse("func main() -> i32 { 0 }");
+        let bare_list = Type::Name("List".into(), vec![]);
+        let object = Expr::Ident("values".into());
+        let mut scopes = vec![HashMap::from([("values".into(), bare_list)])];
+
+        let mut checker = Checker::new(&file);
+        let len_ty = checker.infer_method_call(&object, "len", &[], &mut scopes);
+        assert_eq!(len_ty, Type::Name("i32".into(), vec![]));
+        assert!(
+            checker.errors.is_empty(),
+            "unexpected diagnostics: {:?}",
+            checker.errors
+        );
+
+        for method in ["reverse", "concat"] {
+            let mut checker = Checker::new(&file);
+            let result = checker.infer_method_call(&object, method, &[], &mut scopes);
+
+            assert_eq!(result, Type::TyErr, "List.{method} should fail closed");
+            assert_eq!(
+                checker.errors.len(),
+                1,
+                "unexpected diagnostics: {:?}",
+                checker.errors
+            );
+            assert_eq!(
+                checker.errors[0].code.as_deref(),
+                Some(crate::diagnostic::codes::E0242),
+                "List.{method} should report the unsupported bare-list method"
+            );
+        }
+    }
 }

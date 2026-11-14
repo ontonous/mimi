@@ -600,13 +600,30 @@ func main() -> i32 {
 fn is_empty_map_codegen_dual_backend() {
     let src = r#"
 func main() -> i32 {
-    let m = map_new()
-    let m2 = map_set(m, "k", 1)
-    let e = is_empty(m2)
-    if e { println("map-wrong") } else { println("map-nonempty") }
-    let e2 = is_empty(map_new())
-    if e2 { println("map-empty") } else { println("map-wrong2") }
-    0
+    match map_new() {
+        Ok(empty) => {
+            let e2 = is_empty(empty)
+            match map_set(empty, "k", 1) {
+                Ok(nonempty) => {
+                    let e = is_empty(nonempty)
+                    drop(empty)
+                    drop(nonempty)
+                    if e { println("map-wrong") } else { println("map-nonempty") }
+                    if e2 { println("map-empty") } else { println("map-wrong2") }
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    println("unexpected map_set error: " + to_string(status))
+                    1000000 + status
+                },
+            }
+        },
+        Err(status) => {
+            println("unexpected map_new error: " + to_string(status))
+            1000000 + status
+        },
+    }
 }
 "#;
     check_source(src).expect("is_empty map must check");
@@ -1421,9 +1438,18 @@ fn linear_map_set_builtin_rejects_system_token_at_value_span() {
         r#"
 func main() -> i32 {
     let token = make_token()
-    let m = map_new()
-    let updated = map_set(m, "token", token)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "token", token)
+            drop(m)
+            token_id(token)
+            0
+        },
+        Err(status) => {
+            token_id(token)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = map_set",
@@ -1440,9 +1466,18 @@ use std::maps
 func main() -> i32 {
     let mutex = mutex_new(0)
     let guard = mutex_lock(mutex)
-    let m = map_new()
-    let updated = m.set("guard", guard)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = m.set("guard", guard)
+            drop(m)
+            mutex_unlock(guard)
+            0
+        },
+        Err(status) => {
+            mutex_unlock(guard)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = m.set",
@@ -1458,9 +1493,18 @@ fn linear_stdlib_map_set_wrapper_rejects_any_ingress() {
 use std::maps
 func main() -> i32 {
     let token = make_token()
-    let m = map_new()
-    let updated = set(m, "token", token)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = set(m, "token", token)
+            drop(m)
+            token_id(token)
+            0
+        },
+        Err(status) => {
+            token_id(token)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = set",
@@ -1476,9 +1520,18 @@ fn linear_map_get_or_default_rejects_any_default() {
 use std::maps
 func main() -> i32 {
     let token = make_token()
-    let m = map_new()
-    let value = m.get_or_default("token", token)
-    0
+    match map_new() {
+        Ok(m) => {
+            let value = m.get_or_default("token", token)
+            drop(m)
+            token_id(token)
+            0
+        },
+        Err(status) => {
+            token_id(token)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let value = m.get_or_default",
@@ -1492,18 +1545,36 @@ fn linear_map_any_ingress_recurses_through_option_list_tuple_and_alias() {
     let src = r#"
 type TokenAlias = SystemToken
 func main() -> i32 {
-    let m = map_new()
-    let xs: List<SystemToken> = [make_token()]
-    let list_map = map_set(m, "list", xs)
-    let maybe: Option<SystemToken> = Some(make_token())
-    let option_map = map_set(m, "option", maybe)
-    let pair = (make_token(), 1)
-    let tuple_map = map_set(m, "tuple", pair)
-    let result: Result<SystemToken, i32> = Ok(make_token())
-    let result_map = map_set(m, "result", result)
-    let token: TokenAlias = make_token()
-    let alias_map = map_set(m, "alias", token)
-    0
+    match map_new() {
+        Err(status) => 1000000 + status,
+        Ok(m) => {
+            let xs: List<SystemToken> = [make_token()]
+            let list_map = map_set(m, "list", xs)
+            drop(xs)
+            let maybe: Option<SystemToken> = Some(make_token())
+            let option_map = map_set(m, "option", maybe)
+            match maybe {
+                Some(value) => { token_id(value); },
+                None => {},
+            }
+            let pair = (make_token(), 1)
+            let tuple_map = map_set(m, "tuple", pair)
+            match pair {
+                (value, _) => token_id(value),
+            }
+            let result: Result<SystemToken, i32> = Ok(make_token())
+            let result_map = map_set(m, "result", result)
+            match result {
+                Ok(value) => { token_id(value); },
+                Err(_) => {},
+            }
+            let token: TokenAlias = make_token()
+            let alias_map = map_set(m, "alias", token)
+            token_id(token)
+            drop(m)
+            0
+        },
+    }
 }
 "#;
     let errors = check_source(src).expect_err("nested linear Any ingress must be rejected");
@@ -1545,9 +1616,18 @@ fn linear_map_any_ingress_rejects_named_record_payloads() {
 type TokenBox { token: SystemToken }
 func main() -> i32 {
     let boxed = TokenBox { token: make_token() }
-    let m = map_new()
-    let updated = map_set(m, "boxed", boxed)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "boxed", boxed)
+            drop(m)
+            drop(boxed)
+            0
+        },
+        Err(status) => {
+            drop(boxed)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = map_set",
@@ -1564,9 +1644,18 @@ type TokenBox { token: SystemToken }
 func main() -> i32 {
     let boxed = TokenBox { token: make_token() }
     let boxes: List<TokenBox> = [boxed]
-    let m = map_new()
-    let updated = map_set(m, "boxes", boxes)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "boxes", boxes)
+            drop(m)
+            drop(boxes)
+            0
+        },
+        Err(status) => {
+            drop(boxes)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = map_set",
@@ -1580,9 +1669,24 @@ type TokenBox { token: SystemToken }
 func main() -> i32 {
     let boxed = TokenBox { token: make_token() }
     let maybe: Option<TokenBox> = Some(boxed)
-    let m = map_new()
-    let updated = map_set(m, "maybe", maybe)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "maybe", maybe)
+            drop(m)
+            match maybe {
+                Some(value) => drop(value),
+                None => {},
+            }
+            0
+        },
+        Err(status) => {
+            match maybe {
+                Some(value) => drop(value),
+                None => {},
+            }
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = map_set",
@@ -1601,9 +1705,18 @@ type TokenChain { next: List<TokenChain>, item: BoxAlias }
 func main() -> i32 {
     let boxed = TokenBox { token: make_token() }
     let chain = TokenChain { next: [], item: boxed }
-    let m = map_new()
-    let updated = map_set(m, "chain", chain)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "chain", chain)
+            drop(m)
+            drop(chain)
+            0
+        },
+        Err(status) => {
+            drop(chain)
+            1000000 + status
+        },
+    }
 }
 "#,
         "let updated = map_set",
@@ -1617,13 +1730,32 @@ fn linear_free_generic_any_wrapper_keeps_scalar_use_and_rejects_record_payload()
     check_source_with_std_maps_import(
         r#"
 use std::maps
-func pack<T>(value: T) -> Record {
-    let m = map_new()
-    set(m, "value", value)
+func pack<T>(value: T) -> Result<Record, i32> {
+    match map_new() {
+        Ok(m) => match set(m, "value", value) {
+            Ok(updated) => {
+                drop(m)
+                Ok(updated)
+            },
+            Err(status) => {
+                drop(m)
+                Err(status)
+            },
+        },
+        Err(status) => {
+            drop(value)
+            Err(status)
+        },
+    }
 }
 func main() -> i32 {
-    let packed = pack(7)
-    0
+    match pack(7) {
+        Ok(packed) => {
+            drop(packed)
+            0
+        },
+        Err(status) => 1000000 + status,
+    }
 }
 "#,
     )
@@ -1633,13 +1765,28 @@ func main() -> i32 {
         r#"
 use std::maps
 type TokenBox { token: SystemToken }
-func pack<T>(value: T) -> Record {
-    let m = map_new()
-    set(m, "value", value)
+func pack<T>(value: T) -> Result<Record, i32> {
+    match map_new() {
+        Ok(m) => match set(m, "value", value) {
+            Ok(updated) => {
+                drop(m)
+                Ok(updated)
+            },
+            Err(status) => {
+                drop(m)
+                Err(status)
+            },
+        },
+        Err(status) => {
+            drop(value)
+            Err(status)
+        },
+    }
 }
 func main() -> i32 {
     let boxed = TokenBox { token: make_token() }
     let packed = pack(boxed)
+    drop(boxed)
     0
 }
 "#,
@@ -1722,9 +1869,18 @@ fn linear_map_any_ingress_rejects_named_union_payloads() {
 #[repr(C)]
 type TokenUnion = union { token: SystemToken, spare: i64 }
 func store(value: TokenUnion) -> i32 {
-    let m = map_new()
-    let updated = map_set(m, "union", value)
-    0
+    match map_new() {
+        Ok(m) => {
+            let updated = map_set(m, "union", value)
+            drop(m)
+            drop(value)
+            0
+        },
+        Err(status) => {
+            drop(value)
+            1000000 + status
+        },
+    }
 }
 func main() -> i32 { 0 }
 "#,
@@ -1770,13 +1926,21 @@ fn linear_map_any_ingress_rejects_session_endpoint() {
         r#"
 session S = !i32 . ?i32 . end
 func main() -> i32 {
-    let (ch0, ch1) = session_pair::<S>()
-    let m = map_new()
-    let updated = map_set(m, "session", ch0)
-    let value = session_recv(ch1)
-    session_send(ch1, value + 1)
-    session_close(ch1)
-    0
+    match map_new() {
+        Ok(m) => {
+            let (ch0, ch1) = session_pair::<S>()
+            let updated = map_set(m, "session", ch0)
+            drop(m)
+            session_send(ch0, 10)
+            let value = session_recv(ch1)
+            session_send(ch1, value + 1)
+            let response = session_recv(ch0)
+            session_close(ch0)
+            session_close(ch1)
+            response
+        },
+        Err(status) => 1000000 + status,
+    }
 }
 "#,
         "let updated = map_set",

@@ -82,6 +82,35 @@ fn register_mir_list_runtime<'ctx>(
     let i8 = ctx.i8_type();
     let i32 = ctx.i32_type();
     let ptr = i8_ptr;
+    // Flat owning String Lists use ABI-v3 length-bearing boxes. These
+    // lifecycle-only helpers never share the scalar i64 payload ABI.
+    module.add_function(
+        "mimi_mir_list_new_string",
+        ptr.fn_type(&[], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_push_string",
+        i8.fn_type(
+            &[
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::PointerType(ptr),
+                BasicMetadataTypeEnum::IntType(i64),
+            ],
+            false,
+        ),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_clone_string",
+        ptr.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    module.add_function(
+        "mimi_mir_list_drop_string",
+        void.fn_type(&[BasicMetadataTypeEnum::PointerType(ptr)], false),
+        Some(inkwell::module::Linkage::External),
+    );
     module.add_function(
         "mimi_mir_list_new_scalar",
         ptr.fn_type(&[BasicMetadataTypeEnum::IntType(i8)], false),
@@ -4046,6 +4075,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             "read_file" => self.compile_read_file(args),
             "read_file_guarded" => self.compile_read_file_guarded(args),
             "write_file" => self.compile_write_file(args),
+            "write_file_guarded" => self.compile_write_file_guarded(args),
             "listdir" => self.compile_listdir(args),
             "is_dir" => self.compile_is_dir(args),
             "is_file" => self.compile_is_file(args),

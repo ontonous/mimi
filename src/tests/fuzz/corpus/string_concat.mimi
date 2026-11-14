@@ -1,5 +1,10 @@
-func main() -> string {
+func concatenated_greeting() -> string {
     let a = "Hello";
     let b = "World";
     a + ", " + b + "!"
+}
+
+func main() -> i32 {
+    println(concatenated_greeting());
+    0
 }

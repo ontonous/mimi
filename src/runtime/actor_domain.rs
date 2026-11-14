@@ -517,6 +517,28 @@ impl Drop for TaskResources {
     }
 }
 
+/// Execute one scalar Actor turn against a private candidate state. The
+/// candidate becomes the worker's persistent state only when the dispatch
+/// returns a successful scalar reply. This is shared by Bytecode and native
+/// Actor dispatch, so a failed Flow-backed turn cannot publish a partial
+/// transition.
+fn execute_turn_transactionally(
+    state: &mut [i32],
+    candidate: &mut [i32],
+    dispatch: impl FnOnce(&mut [i32]) -> ActorDomainReply,
+) -> ActorDomainReply {
+    if state.len() != candidate.len() {
+        return Err(ActorDomainError::InvalidPayload);
+    }
+    candidate.copy_from_slice(state);
+    let reply = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(candidate)))
+        .unwrap_or(Err(ActorDomainError::WorkerPanicked));
+    if reply.is_ok() {
+        state.copy_from_slice(candidate);
+    }
+    reply
+}
+
 impl ActorDomainParticipant {
     fn execution_role(&self, domain: u64) -> Result<ParticipantRole, ActorDomainError> {
         match CURRENT_DOMAIN_EXECUTION.with(|current| current.get()) {
@@ -614,6 +636,10 @@ impl ActorDomainParticipant {
                 let _marker = ExecutionMarker::enter(domain_id, ParticipantRole::Worker);
                 let _resources = WorkerResources::enter(counters);
                 let mut fields = initial_fields;
+                // Allocate one candidate buffer for the actor lifetime. Each
+                // turn starts from committed state, so failed mutations are
+                // overwritten before any later dispatch and never published.
+                let mut candidate_fields = vec![0; fields.len()];
                 let context = ActorTurnContext { participant, actor };
                 while let Ok(command) = receiver.recv() {
                     match command {
@@ -627,11 +653,13 @@ impl ActorDomainParticipant {
                                 reply.settle(Err(ActorDomainError::Cancelled));
                                 continue;
                             }
-                            let result =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    dispatch(&mut fields, method, &arguments.values, &context)
-                                }))
-                                .unwrap_or(Err(ActorDomainError::WorkerPanicked));
+                            let result = execute_turn_transactionally(
+                                &mut fields,
+                                &mut candidate_fields,
+                                |candidate| {
+                                    dispatch(candidate, method, &arguments.values, &context)
+                                },
+                            );
                             if let Err(error) = result {
                                 // Any poisoned admission also records a
                                 // terminal domain failure and wakes siblings.
@@ -1126,10 +1154,12 @@ fn dispatch_status(status: i32, result: i32) -> ActorDomainReply {
     Err(error)
 }
 
-/// Dispatch must write result only on SUCCESS and return E0800/E0801/E0802 as an
-/// explicit status. Known runtime failure statuses also propagate unchanged;
-/// unknown statuses are invalid payloads. It must neither retain pointers nor
-/// unwind across C ABI.
+/// Dispatch receives a turn-local candidate state. The runtime commits that
+/// candidate and the result only on SUCCESS; every error discards the
+/// candidate. Dispatch must return E0800/E0801/E0802 as an explicit status.
+/// Known runtime failure statuses also propagate unchanged; unknown statuses
+/// are invalid payloads. It must neither retain pointers nor unwind across C
+/// ABI.
 pub type NativeScalarActorDispatch = unsafe extern "C" fn(
     fields: *mut i32,
     field_count: u64,
@@ -1387,6 +1417,59 @@ mod tests {
                 Ok(next)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn actor_turn_candidate_commits_only_after_successful_reply() {
+        let mut state = [15];
+        let mut candidate = [0];
+        assert_eq!(
+            execute_turn_transactionally(&mut state, &mut candidate, |candidate| {
+                candidate[0] = 32;
+                Ok(candidate[0])
+            }),
+            Ok(32)
+        );
+        assert_eq!(state, [32]);
+
+        let result = execute_turn_transactionally(&mut state, &mut candidate, |candidate| {
+            candidate[0] = 99;
+            Err(ActorDomainError::Trap(801))
+        });
+        assert_eq!(result, Err(ActorDomainError::Trap(801)));
+        assert_eq!(state, [32], "failed turn must not publish candidate state");
+
+        let result = execute_turn_transactionally(&mut state, &mut candidate, |candidate| {
+            candidate[0] = 101;
+            panic!("actor dispatch panic")
+        });
+        assert_eq!(result, Err(ActorDomainError::WorkerPanicked));
+        assert_eq!(
+            state,
+            [32],
+            "panicked turn must not publish candidate state"
+        );
+
+        let result = execute_turn_transactionally(&mut state, &mut candidate, |candidate| {
+            candidate[0] = 88;
+            Err(ActorDomainError::InvalidPayload)
+        });
+        assert_eq!(result, Err(ActorDomainError::InvalidPayload));
+        assert_eq!(
+            state,
+            [32],
+            "invalid reply must not publish candidate state"
+        );
+
+        assert_eq!(
+            execute_turn_transactionally(&mut state, &mut candidate, |candidate| {
+                candidate[0] += 5;
+                Ok(candidate[0])
+            }),
+            Ok(37),
+            "a later successful turn starts from the last committed state"
+        );
+        assert_eq!(state, [37]);
     }
 
     #[test]

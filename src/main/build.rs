@@ -22,6 +22,288 @@ use mimi::runtime_cache::{
 };
 use mimi::{lexer, loader, verifier};
 
+fn native_build_route_profile(
+    mir_route_profile: &str,
+    data_exports: Option<&mimi::core::native_data_export::NativeDataExportTableReceipt>,
+) -> String {
+    if data_exports.is_none_or(|receipt| receipt.export_count == 0)
+        || mir_route_profile == crate::canonical_dispatch::NATIVE_DATA_EXPORT_ROUTE_PROFILE
+    {
+        mir_route_profile.to_owned()
+    } else {
+        format!(
+            "{}+{}",
+            mir_route_profile,
+            crate::canonical_dispatch::NATIVE_DATA_EXPORT_ROUTE_PROFILE
+        )
+    }
+}
+
+fn compile_checked_mir_native_for_route(
+    codegen: &mut codegen::CodeGenerator<'_>,
+    checked: &mimi::core::resolved::CheckedProgram,
+    canonical: &mimi::core::mir::reference::MirProgram,
+    receipt: &mimi::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), Vec<mimi::diagnostic::Diagnostic>> {
+    codegen.preflight_checked_native_data_exports(checked)?;
+    if receipt.profile == crate::canonical_dispatch::NATIVE_DATA_EXPORT_ROUTE_PROFILE {
+        crate::canonical_dispatch::preflight_native_data_export_route(checked, canonical, receipt)
+            .map_err(|error| {
+                let span = checked
+                    .constants()
+                    .values()
+                    .find(|constant| constant.native_data_export.is_some())
+                    .map(|constant| constant.origin.user_span())
+                    .unwrap_or(mimi::span::Span::UNKNOWN);
+                vec![mimi::diagnostic::Diagnostic::error_code(
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    error,
+                    span,
+                )]
+            })?;
+    }
+    let result = if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_any_v2_direct_print_result_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_route(
+                checked,
+                canonical,
+                receipt,
+            )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+        && canonical.functions().values().any(|function| {
+            function
+                .ownership
+                .has_ordinary_map_owned_get_result_branch_v3_receipt()
+        })
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_ordinary_map_owned_any_v2_set_get_any_i32_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_any_v2_set_get_any_result_i32_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE {
+        codegen.compile_checked_mir_native_with_ordinary_map_new_result_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE {
+        codegen.compile_checked_mir_native_with_ordinary_map_set_result_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE
+    {
+        // Keep String Set/Get on its Checker-receipt-bound L1 adapter; the
+        // i32 and generic owner-v2 native entries cannot authorize this route.
+        codegen.compile_checked_mir_native_with_ordinary_map_set_get_string_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE {
+        codegen.compile_checked_mir_native_with_ordinary_map_set_get_i32_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_any_v2_get_or_default_string_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_ordinary_map_owned_any_v2_get_or_default_i32_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_ordinary_map_owned_any_v2_zero_miss_i32_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_ordinary_map_owned_any_v2_removed_key_checked_miss_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_KEYS_SNAPSHOT_PROFILE {
+        // KeysSnapshot requires the exact CheckedProgram/MIR source receipt;
+        // the generic owner-v2 native entry cannot authorize this consumer.
+        codegen.compile_checked_mir_native_with_keys_snapshot_route(checked, canonical, receipt)
+    } else if receipt.profile == mimi::core::mir::MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE {
+        codegen.compile_checked_mir_native_with_empty_root_root_queries_v1_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_computed_key_get_route(checked, canonical, receipt)
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_computed_string_key_owner_chain_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DYNAMIC_KEYS_GET_PROFILE
+    {
+        // DynamicArg0 is backed by argv-owned bytes, so only the dedicated
+        // CheckedProgram/MIR route may authorize the native emitter.
+        codegen.compile_checked_mir_native_with_dynamic_keys_get_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_IS_EMPTY_PROFILE {
+        codegen.compile_checked_mir_native_with_is_empty_route(checked, canonical, receipt)
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_RECORD_UNIT_PROFILE {
+        codegen.compile_checked_mir_native_with_record_unit_route(checked, canonical, receipt)
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_map_set_drop_control_route(checked, canonical, receipt)
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_map_set_drop_control_result_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_BRANCH_LOCAL_SET_DIAMOND_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_branch_local_set_diamond_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CLONE_ISOLATION_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_clone_isolation_route(checked, canonical, receipt)
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE
+    {
+        codegen
+            .compile_checked_mir_native_with_persistent_root_alias_replacement_route(
+                checked, canonical, receipt,
+            )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE
+    {
+        // This exact profile needs the CheckedProgram/MIR route validator;
+        // the generic checked-receipt entry intentionally cannot authorize it.
+        codegen.compile_checked_mir_native_with_values_snapshot_replacement_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE
+    {
+        // This exact profile needs the CheckedProgram/MIR route validator;
+        // the generic checked-receipt entry intentionally cannot authorize it.
+        codegen.compile_checked_mir_native_with_values_mixed_snapshot_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_values_mixed_snapshot_remove_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
+    {
+        // This nested Result route has a dedicated native adapter bound to
+        // its Checker/MIR receipt; straight-line Values authorization is
+        // intentionally not reused.
+        codegen.compile_checked_mir_native_with_values_local_index_i32_result_branch_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_values_local_index_i32_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE
+    {
+        codegen.compile_checked_mir_native_with_values_heterogeneous_string_index1_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller
+            .as_str()
+    {
+        // Values producer/caller transfers require their Checker-bound
+        // receipt and dedicated native route; generic owner-v2 compilation
+        // cannot authorize this cross-call ownership bridge.
+        codegen.compile_checked_mir_native_with_values_producer_caller_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+            .as_str()
+    {
+        // The literal-index-one Values profile has a separate native
+        // adapter bound to its V2 Checker/MIR receipt and two-entry shape.
+        codegen.compile_checked_mir_native_with_values_crosscall_string_caller_index1_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE
+    {
+        // The String-unpack caller uses its own Checker/MIR cross-call owner
+        // receipt and dedicated native copy/drop route.
+        codegen.compile_checked_mir_native_with_values_crosscall_string_caller_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller
+            .as_str()
+    {
+        // Map-root transfer across the producer/caller boundary has its own
+        // Checker-bound native route; the generic receipt cannot authorize a
+        // root-returning function.
+        codegen.compile_checked_mir_native_with_map_root_producer_caller_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller
+            .as_str()
+    {
+        // A returned Map root consumed by a checked GetAny/String-unpack
+        // caller has its own Checker-bound native route receipt.
+        codegen.compile_checked_mir_native_with_map_root_get_any_caller_route(
+            checked, canonical, receipt,
+        )
+    } else {
+        codegen.compile_checked_mir_native_with_route_receipt(checked, canonical, receipt)
+    };
+    if result.is_ok() {
+        codegen.emit_checked_native_data_exports(checked)?;
+    }
+    result
+}
+
 /// Extract the OS component from a target triple (e.g. "x86_64-pc-windows-gnu" -> "windows")
 fn target_os(triple: &str) -> &str {
     triple.split('-').nth(2).unwrap_or("linux")
@@ -613,6 +895,43 @@ pub(crate) fn build(
         }
     }
 
+    // Explicit --mir must still select the exact checker-owned profile when
+    // the program exports data symbols alongside another canonical island.
+    // Direct generic materialization here would bypass that island's
+    // profile-specific preflight and could produce a different route from
+    // the default build.
+    let has_native_data_export = checked_program
+        .constants()
+        .values()
+        .any(|constant| constant.extern_abi.is_some() || constant.native_data_export.is_some());
+    if mir && has_native_data_export {
+        canonical_for_build = Some(
+            match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
+                crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => *canonical,
+                crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
+                    return Err(format!("explicit Canonical MIR route rejected: {reason}"));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::Legacy(reason) => {
+                    return Err(format!(
+                        "explicit Canonical MIR route cannot use compatibility path: {}",
+                        reason.as_str()
+                    ));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                    return Err(
+                        "explicit Canonical MIR build cannot use the verifier-only FFI owner slice"
+                            .into(),
+                    );
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    return Err(
+                        "explicit Canonical MIR build cannot use the VerifierOnly direct tuple Get L2 projection".into(),
+                    );
+                }
+            },
+        );
+    }
+
     // A canonical scalar FFI build with --verify-ffi must verify and compile
     // the same MIR object.  The default selector already performs all
     // consumer preflights; explicit --mir uses the shared constructor above.
@@ -633,6 +952,17 @@ pub(crate) fn build(
                         "canonical scalar FFI route unexpectedly retained compatibility path: {}",
                         reason.as_str()
                     ));
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                    return Err(
+                        "verifier-only FFI owner slice cannot be used by the build execution route"
+                            .into(),
+                    );
+                }
+                crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                    return Err(
+                        "VerifierOnly direct tuple Get L2 semantic projection cannot be used by the build execution route".into(),
+                    );
                 }
             }
         });
@@ -699,79 +1029,98 @@ pub(crate) fn build(
     codegen.shared = shared;
     codegen.target_triple = target.map(|s| s.to_string());
 
-    let (compile_result, canonical_default, route_admission_census_line) = if mir {
+    let (compile_result, canonical_default, route_receipt, route_consumer) = if mir {
         let canonical = match canonical_for_build.take() {
             Some(canonical) => canonical,
             None => {
                 crate::canonical_dispatch::build_canonical_program(&checked_program, &merged_file)?
             }
         };
-        let receipt = canonical.route_receipt("build-canonical-v1");
-        let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+        let receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+            &checked_program,
+            mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+        );
+        let receipt = canonical.route_receipt(receipt_profile);
+        let compile_result = compile_checked_mir_native_for_route(
+            &mut codegen,
             &checked_program,
             &canonical,
             &receipt,
         );
-        let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
-            let admission_mode = if mir { "explicit-mir" } else { "default" };
-            Some(format!(
-                "MIMI_ROUTE_CENSUS route-admission consumer=build mode={} checker_profile={} mir_digest={} receipt_identity_digest={}",
-                admission_mode,
-                "build-canonical-v1",
-                receipt.mir_digest,
-                receipt.semantic_identity_digest(),
-            ))
-        } else {
-            None
-        };
-        (compile_result, false, route_admission_census_line)
+        (compile_result, false, Some(receipt), "explicit-mir")
     } else if let Some(canonical) = canonical_for_build.take() {
-        let receipt = canonical.route_receipt("build-canonical-v1");
-        let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+        let receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+            &checked_program,
+            mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+        );
+        let receipt = canonical.route_receipt(receipt_profile);
+        let compile_result = compile_checked_mir_native_for_route(
+            &mut codegen,
             &checked_program,
             &canonical,
             &receipt,
         );
-        let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
-            Some(format!(
-                "MIMI_ROUTE_CENSUS route-admission consumer=build mode=default checker_profile={} mir_digest={} receipt_identity_digest={}",
-                "build-canonical-v1",
-                receipt.mir_digest,
-                receipt.semantic_identity_digest(),
-            ))
-        } else {
-            None
-        };
-        (compile_result, true, route_admission_census_line)
+        (compile_result, true, Some(receipt), "default")
     } else {
         match crate::canonical_dispatch::select_default_route(&checked_program, &merged_file) {
             crate::canonical_dispatch::DefaultMirRoute::Canonical(canonical) => {
-                let receipt = canonical.route_receipt("build-canonical-v1");
-                let compile_result = codegen.compile_checked_mir_native_with_route_receipt(
+                let receipt_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+                    &checked_program,
+                    mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+                );
+                let receipt = canonical.route_receipt(receipt_profile);
+                let compile_result = compile_checked_mir_native_for_route(
+                    &mut codegen,
                     &checked_program,
                     &canonical,
                     &receipt,
                 );
-                let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
-                    Some(format!(
-                        "MIMI_ROUTE_CENSUS route-admission consumer=build mode=default checker_profile={} mir_digest={} receipt_identity_digest={}",
-                        "build-canonical-v1",
-                        receipt.mir_digest,
-                        receipt.semantic_identity_digest(),
-                    ))
-                } else {
-                    None
-                };
-                (compile_result, true, route_admission_census_line)
+                (compile_result, true, Some(receipt), "default")
             }
             crate::canonical_dispatch::DefaultMirRoute::Legacy(_reason) => {
                 crate::canonical_dispatch::report_legacy_route(_reason);
-                (codegen.compile_checked(&checked_program), false, None)
+                (
+                    codegen.compile_checked(&checked_program),
+                    false,
+                    None,
+                    "legacy",
+                )
             }
             crate::canonical_dispatch::DefaultMirRoute::Rejected(reason) => {
                 return Err(format!("default Canonical MIR route rejected: {reason}"));
             }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyFfiStringRecordOwnerSlice => {
+                return Err(
+                    "verifier-only FFI owner slice cannot be used by the default build route"
+                        .into(),
+                );
+            }
+            crate::canonical_dispatch::DefaultMirRoute::VerifierOnlyDirectTupleGetUnpackL2 => {
+                return Err(
+                    "VerifierOnly direct tuple Get L2 semantic projection cannot be used by the default build route".into(),
+                );
+            }
         }
+    };
+
+    let native_data_export_table_receipt = if checked_program
+        .constants()
+        .values()
+        .any(|constant| constant.extern_abi.is_some() || constant.native_data_export.is_some())
+    {
+        Some(
+            mimi::core::native_data_export::checked_native_data_export_table_receipt(
+                &checked_program,
+            )
+            .map_err(|errors| {
+                format!(
+                    "{}: checked native data export receipt failed: {errors:?}",
+                    mimi::core::native_data_export::NATIVE_DATA_EXPORT_ERROR_CODE
+                )
+            })?,
+        )
+    } else {
+        None
     };
 
     if let Err(diagnostics) = compile_result {
@@ -796,6 +1145,121 @@ pub(crate) fn build(
             "native backend capability check failed".into()
         });
     }
+
+    // Render the route receipt before emitting any native artifact. Keep the
+    // line in memory until the linker succeeds so a failed link cannot report
+    // a receipt as though it described a usable build output.
+    let route_admission_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+        route_receipt.as_ref().map(|receipt| {
+            let checker_profile = crate::canonical_dispatch::route_receipt_profile_for_checked(
+                &checked_program,
+                mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+            );
+            let admission_mode = if mir { "explicit-mir" } else { "default" };
+            let mir_route_identity_digest = receipt.route_identity_digest();
+            let build_route_profile =
+                native_build_route_profile(&receipt.profile, native_data_export_table_receipt.as_ref());
+            let route_identity_digest = native_data_export_table_receipt
+                .as_ref()
+                .map(|data_receipt| {
+                    data_receipt.route_identity_digest(&mir_route_identity_digest)
+                })
+                .unwrap_or_else(|| mir_route_identity_digest.clone());
+            format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=build mode={} checker_profile={} build_route_profile={} mir_digest={} mir_route_identity_digest={} receipt_identity_digest={} build_route_identity_digest={}",
+                admission_mode,
+                checker_profile,
+                build_route_profile,
+                receipt.mir_digest,
+                mir_route_identity_digest,
+                route_identity_digest,
+                route_identity_digest
+            )
+        })
+    } else {
+        None
+    };
+    let route_specialized_schema_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+        route_receipt.as_ref().and_then(|receipt| {
+                crate::canonical_dispatch::values_crosscall_string_caller_schema_for_checked(
+                    &checked_program,
+                )
+                .map(|schema| {
+                    let checker_profile =
+                        crate::canonical_dispatch::route_receipt_profile_for_checked(
+                            &checked_program,
+                            mimi::core::mir::MIR_BUILD_CANONICAL_ROUTE_PROFILE,
+                        );
+                    format!(
+                        "MIMI_ROUTE_CENSUS route-specialized-schema consumer={} checker_profile={} receipt_profile={} schema={} mir_digest={} receipt_identity_digest={}",
+                        route_consumer,
+                        checker_profile,
+                        receipt.profile,
+                        schema,
+                        receipt.mir_digest,
+                        receipt.route_identity_digest()
+                    )
+                })
+            })
+    } else {
+        None
+    };
+    let native_data_export_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+        route_receipt
+            .as_ref()
+            .zip(native_data_export_table_receipt.as_ref())
+            .filter(|(_, data_receipt)| data_receipt.export_count > 0)
+            .map(|(receipt, data_receipt)| {
+                let build_route_profile =
+                    native_build_route_profile(&receipt.profile, Some(data_receipt));
+                let route_identity_digest =
+                    data_receipt.route_identity_digest(&receipt.route_identity_digest());
+                format!(
+                    "MIMI_ROUTE_CENSUS native-data-export build_route_profile={} schema={} export_count={} table_digest={} mir_route_identity_digest={} route_identity_digest={}",
+                    build_route_profile,
+                    data_receipt.schema,
+                    data_receipt.export_count,
+                    data_receipt.table_digest,
+                    receipt.route_identity_digest(),
+                    route_identity_digest,
+                )
+            })
+    } else {
+        None
+    };
+    let route_census_line = if std::env::var_os("MIMI_ROUTE_CENSUS").is_some() {
+        if let Some(receipt) = route_receipt.as_ref() {
+            // `profile` is the route identifier carried by the canonical
+            // receipt schema. Surface that exact value as `route_id`, then
+            // render the full manifest from this same receipt.
+            let manifest = receipt.manifest_text().map_err(|error| {
+                format!("failed to render canonical native build route receipt: {error}")
+            })?;
+            let fields = manifest.lines().skip(1).collect::<Vec<_>>().join(" ");
+            let build_route_profile = native_build_route_profile(
+                &receipt.profile,
+                native_data_export_table_receipt.as_ref(),
+            );
+            let mir_route_identity_digest = receipt.route_identity_digest();
+            let route_identity_digest = native_data_export_table_receipt
+                .as_ref()
+                .map(|data_receipt| data_receipt.route_identity_digest(&mir_route_identity_digest))
+                .unwrap_or_else(|| mir_route_identity_digest.clone());
+            Some(format!(
+                "MIMI_ROUTE_CENSUS canonical-native-build consumer={} route_id={} build_route_profile={} {} mir_route_identity_digest={} route_identity_digest={}",
+                route_consumer,
+                receipt.profile,
+                build_route_profile,
+                fields,
+                mir_route_identity_digest,
+                route_identity_digest
+            ))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     if emit_ir {
         println!("{}", codegen.emit_ir());
@@ -962,6 +1426,15 @@ pub(crate) fn build(
 
     if status.success() {
         if let Some(line) = route_admission_census_line {
+            eprintln!("{line}");
+        }
+        if let Some(line) = route_specialized_schema_census_line {
+            eprintln!("{line}");
+        }
+        if let Some(line) = native_data_export_census_line {
+            eprintln!("{line}");
+        }
+        if let Some(line) = route_census_line {
             eprintln!("{line}");
         }
         let kind = if shared {

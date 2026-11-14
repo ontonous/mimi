@@ -1,4 +1,5 @@
 use super::*;
+use crate::interp::SharedString;
 #[test]
 fn func_with_where_clause_ok() {
     let src = r#"
@@ -413,14 +414,19 @@ type Box<T> {
     value: T
 }
 
-func main() -> string {
+func boxed_string() -> string {
     let b = Box { value: "hello" };
     b.value
 }
+
+func main() -> i32 {
+    let _value = boxed_string()
+    0
+}
 "#;
     assert_eq!(
-        run_source(src),
-        interp::Value::String(crate::interp::SharedString::new("hello".to_string()))
+        bytecode_call_named(src, "boxed_string", vec![]).expect("generic record helper should run"),
+        interp::Value::String(SharedString::new("hello".to_string()))
     );
 }
 

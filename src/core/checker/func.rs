@@ -9,6 +9,7 @@ use super::Checker;
 impl<'a> Checker<'a> {
     pub(crate) fn check_func(&mut self, func: &FuncDef) {
         self.set_span(func.meta.span);
+        self.reject_nested_requires_ensures(&func.body, &func.name);
         // Function generic binders remain in scope while checking local type
         // annotations in the body (`let xs: List<T> = ...`). Declaration
         // collection already establishes this scope for the signature; body
@@ -16,7 +17,11 @@ impl<'a> Checker<'a> {
         let generic_scope_len = self.generic_scope.len();
         self.generic_scope
             .extend(func.generics.iter().map(|generic| generic.name.clone()));
-        let owner_name = func.name.clone();
+        let owner_name = crate::core::resolved::top_level_function_qualified_name(
+            func,
+            self.source_registry,
+            &self.function_qualified_names,
+        );
         let owner = crate::core::NodeId(format!("function:{}", owner_name));
         self.current_callable_owner = Some(owner.clone());
         self.begin_expression_type_capture(owner.clone());
@@ -113,6 +118,7 @@ impl<'a> Checker<'a> {
         // in scope, rather than re-checking cloned syntax at each call site.
         for parameter in &func.params {
             if let Some(default) = &parameter.default_value {
+                self.reject_nested_contracts_in_expr(default, &func.name);
                 let expected = self.resolve_type(&parameter.ty);
                 let actual = self.check_expr(&expected, default, &mut scopes);
                 if self.unification.unify(&actual, &expected).is_err()
@@ -240,6 +246,40 @@ impl<'a> Checker<'a> {
         self.generic_scope.truncate(generic_scope_len);
         // 0.31.24: Restore comptime context
         self.in_comptime = was_in_comptime;
+    }
+
+    /// Contracts are callable-body fields (§6.8), not lexical assumptions
+    /// inside expression or control-flow blocks. The AST parser currently
+    /// accepts those nested placements, so reject them before producing a
+    /// CheckedProgram; otherwise the typed proof census correctly sees roots
+    /// that the language has not assigned scoped semantics to.
+    pub(crate) fn reject_nested_requires_ensures(&mut self, body: &Block, callable: &str) {
+        let mut invalid = Vec::new();
+        collect_nested_contracts(body, true, &mut invalid);
+        self.emit_nested_contract_diagnostics(callable, invalid);
+    }
+
+    /// Parameter defaults are expressions outside the callable body. Every
+    /// contract statement reachable inside one is therefore nested and has
+    /// no callable-root semantics.
+    pub(crate) fn reject_nested_contracts_in_expr(&mut self, expression: &Expr, callable: &str) {
+        let mut invalid = Vec::new();
+        collect_nested_contracts_in_expr(expression, &mut invalid);
+        self.emit_nested_contract_diagnostics(callable, invalid);
+    }
+
+    fn emit_nested_contract_diagnostics(
+        &mut self,
+        callable: &str,
+        invalid: Vec<(String, crate::span::Span)>,
+    ) {
+        for (kind, span) in invalid {
+            self.errors.push(Diagnostic::error_code(
+                codes::E0503,
+                format!("{kind} in '{callable}' must be a top-level callable-body contract"),
+                span,
+            ));
+        }
     }
 
     /// 0.1.9 Phase A + 0.39.61: 定义时 `linear T` / `linear drop T` 参数体校验
@@ -463,5 +503,210 @@ impl<'a> Checker<'a> {
             Expr::Match(_subject, arms) => arms.iter().any(|arm| self.expr_can_break(&arm.body)),
             _ => false,
         }
+    }
+}
+
+fn collect_nested_contracts(
+    block: &[Stmt],
+    callable_root: bool,
+    output: &mut Vec<(String, crate::span::Span)>,
+) {
+    for statement in block {
+        match statement.unlocated() {
+            Stmt::Requires(expression, span) | Stmt::Ensures(expression, span) => {
+                if !callable_root {
+                    let kind = if matches!(statement.unlocated(), Stmt::Requires(..)) {
+                        "requires"
+                    } else {
+                        "ensures"
+                    };
+                    output.push((kind.to_string(), statement.meta().map_or(*span, |m| m.span)));
+                }
+                collect_nested_contracts_in_expr(expression, output);
+            }
+            Stmt::Let { init, .. } => {
+                if let Some(expression) = init {
+                    collect_nested_contracts_in_expr(expression, output);
+                }
+            }
+            Stmt::Return(value) | Stmt::Break(value) => {
+                if let Some(expression) = value {
+                    collect_nested_contracts_in_expr(expression, output);
+                }
+            }
+            Stmt::Expr(expression) | Stmt::Drop(expression) => {
+                collect_nested_contracts_in_expr(expression, output)
+            }
+            Stmt::If { cond, then_, else_ } => {
+                collect_nested_contracts_in_expr(cond, output);
+                collect_nested_contracts(then_, false, output);
+                if let Some(else_) = else_ {
+                    collect_nested_contracts(else_, false, output);
+                }
+            }
+            Stmt::IfLet {
+                init, then_, else_, ..
+            } => {
+                collect_nested_contracts_in_expr(init, output);
+                collect_nested_contracts(then_, false, output);
+                if let Some(else_) = else_ {
+                    collect_nested_contracts(else_, false, output);
+                }
+            }
+            Stmt::While { cond, body } => {
+                collect_nested_contracts_in_expr(cond, output);
+                collect_nested_contracts(body, false, output);
+            }
+            Stmt::WhileLet { init, body, .. } => {
+                collect_nested_contracts_in_expr(init, output);
+                collect_nested_contracts(body, false, output);
+            }
+            Stmt::For { iterable, body, .. } => {
+                collect_nested_contracts_in_expr(iterable, output);
+                collect_nested_contracts(body, false, output);
+            }
+            Stmt::Loop(body)
+            | Stmt::Block(body)
+            | Stmt::Arena(body)
+            | Stmt::Unsafe(body)
+            | Stmt::IeeeFloat(body)
+            | Stmt::Defer(body)
+            | Stmt::OnFailure(body)
+            | Stmt::Parasteps(body) => collect_nested_contracts(body, false, output),
+            Stmt::Invariant(expression, _) => collect_nested_contracts_in_expr(expression, output),
+            Stmt::Math(expressions) => {
+                for expression in expressions {
+                    collect_nested_contracts_in_expr(expression, output);
+                }
+            }
+            Stmt::Assign { target, value } => {
+                collect_nested_contracts_in_expr(target, output);
+                collect_nested_contracts_in_expr(value, output);
+            }
+            Stmt::SharedLet { init, .. } => collect_nested_contracts_in_expr(init, output),
+            Stmt::Pinned { expr, body, .. } => {
+                collect_nested_contracts_in_expr(expr, output);
+                collect_nested_contracts(body, false, output);
+            }
+            // Nested functions are checked as independent callables. Their
+            // bodies receive a fresh root-aware scan from the Stmt::Func
+            // checker, where the nested signature and owner are established.
+            Stmt::Func(_) | Stmt::Continue | Stmt::Located { .. } | Stmt::Ellipsis => {}
+        }
+    }
+}
+
+fn collect_nested_contracts_in_expr(
+    expression: &Expr,
+    output: &mut Vec<(String, crate::span::Span)>,
+) {
+    match expression.unlocated() {
+        // `unlocated()` recursively strips metadata wrappers, but keep this
+        // arm for exhaustiveness as the match type still includes `Located`.
+        Expr::Located { expr, .. } => collect_nested_contracts_in_expr(expr, output),
+        Expr::Binary(_, left, right) => {
+            collect_nested_contracts_in_expr(left, output);
+            collect_nested_contracts_in_expr(right, output);
+        }
+        Expr::Unary(_, inner)
+        | Expr::Try(inner)
+        | Expr::OptionalChain(inner, _)
+        | Expr::Spawn(inner)
+        | Expr::Await(inner)
+        | Expr::QuoteInterpolate(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Old(inner)
+        | Expr::Cast(inner, _) => collect_nested_contracts_in_expr(inner, output),
+        Expr::Call(callee, arguments) => {
+            collect_nested_contracts_in_expr(callee, output);
+            for argument in arguments {
+                collect_nested_contracts_in_expr(argument, output);
+            }
+        }
+        Expr::Field(value, _) | Expr::TupleIndex(value, _) => {
+            collect_nested_contracts_in_expr(value, output)
+        }
+        Expr::Index(value, index) => {
+            collect_nested_contracts_in_expr(value, output);
+            collect_nested_contracts_in_expr(index, output);
+        }
+        Expr::Tuple(values) | Expr::List(values) | Expr::SetLiteral(values) => {
+            for value in values {
+                collect_nested_contracts_in_expr(value, output);
+            }
+        }
+        Expr::Comprehension {
+            expr, iter, guard, ..
+        } => {
+            collect_nested_contracts_in_expr(expr, output);
+            collect_nested_contracts_in_expr(iter, output);
+            if let Some(guard) = guard {
+                collect_nested_contracts_in_expr(guard, output);
+            }
+        }
+        Expr::Match(scrutinee, arms) => {
+            collect_nested_contracts_in_expr(scrutinee, output);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_nested_contracts_in_expr(guard, output);
+                }
+                collect_nested_contracts_in_expr(&arm.body, output);
+            }
+        }
+        Expr::Record { fields, rest, .. } => {
+            for field in fields {
+                collect_nested_contracts_in_expr(&field.value, output);
+            }
+            if let Some(rest) = rest {
+                collect_nested_contracts_in_expr(rest, output);
+            }
+        }
+        Expr::Block(block) | Expr::Arena(block) | Expr::Comptime(block) | Expr::Quote(block) => {
+            collect_nested_contracts(block, false, output)
+        }
+        Expr::If { cond, then_, else_ } => {
+            collect_nested_contracts_in_expr(cond, output);
+            collect_nested_contracts(then_, false, output);
+            if let Some(else_) = else_ {
+                collect_nested_contracts(else_, false, output);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            for parameter in params {
+                if let Some(default) = &parameter.default_value {
+                    collect_nested_contracts_in_expr(default, output);
+                }
+            }
+            collect_nested_contracts(body, false, output);
+        }
+        Expr::SliceExpr { target, start, end } => {
+            collect_nested_contracts_in_expr(target, output);
+            if let Some(start) = start {
+                collect_nested_contracts_in_expr(start, output);
+            }
+            if let Some(end) = end {
+                collect_nested_contracts_in_expr(end, output);
+            }
+        }
+        Expr::Turbofish(_, _, arguments) => {
+            for argument in arguments {
+                collect_nested_contracts_in_expr(argument, output);
+            }
+        }
+        Expr::MapLiteral { entries } => {
+            for (key, value) in entries {
+                collect_nested_contracts_in_expr(key, output);
+                collect_nested_contracts_in_expr(value, output);
+            }
+        }
+        Expr::NamedArg(_, value) => collect_nested_contracts_in_expr(value, output),
+        Expr::Literal(Lit::FString(parts)) => {
+            for part in parts {
+                if let FStringPart::Interp(expression) = part {
+                    collect_nested_contracts_in_expr(expression, output);
+                }
+            }
+        }
+        Expr::Literal(_) | Expr::Ident(_) | Expr::TypeInfo(_) => {}
     }
 }

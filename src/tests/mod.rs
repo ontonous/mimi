@@ -1845,15 +1845,58 @@ pub(crate) fn parse_prod(src: &str) -> crate::ast::File {
     file
 }
 
+/// Preserve the test harness's historical leniency for checker errors while
+/// making executable-entry diagnostics fail closed before any backend runs.
+/// `main` is the only source function subject to E0447; ordinary named helper
+/// calls intentionally remain available to focused tests.
+fn check_program_for_main_execution(
+    file: &crate::ast::File,
+) -> Result<Option<core::CheckedProgram>, String> {
+    match core::check_program(file) {
+        Ok(program) => Ok(Some(program)),
+        Err(diagnostics) => {
+            let e0447_diagnostics = diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0447)
+                })
+                .map(|diagnostic| {
+                    let mut rendered = format!(
+                        "{} at line {}, column {}",
+                        diagnostic, diagnostic.span.start_line, diagnostic.span.start_col
+                    );
+                    for note in &diagnostic.notes {
+                        rendered.push_str(&format!(
+                            "\n  note at line {}, column {}: {}",
+                            note.span.start_line, note.span.start_col, note.message
+                        ));
+                    }
+                    if let Some(help) = &diagnostic.help {
+                        rendered.push_str(&format!("\n  help: {help}"));
+                    }
+                    rendered
+                })
+                .collect::<Vec<_>>();
+            if e0447_diagnostics.is_empty() {
+                Ok(None)
+            } else {
+                Err(e0447_diagnostics.join("\n"))
+            }
+        }
+    }
+}
+
 /// Run source via the Bytecode VM (default backend since 0.33).
 /// Panics on compile or runtime error.
 pub(crate) fn run_source(src: &str) -> interp::Value {
     let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    // Checker-gated bytecode features (casts, method receipts) require the
-    // CheckedProgram; valid sources install it, invalid ones keep the
-    // pre-installation failure mode of the lenient compile below.
-    if let Ok(program) = core::check_program(&file) {
+    // Checker-gated bytecode features require the CheckedProgram. Preserve
+    // legacy leniency for non-E0447 checker failures, but never execute an
+    // invalid process entry.
+    if let Some(program) = check_program_for_main_execution(&file)
+        .unwrap_or_else(|error| panic!("checker rejected executable main in run_source:\n{error}"))
+    {
         compiler.install_checked_program(&program);
     }
     let prog = compiler
@@ -1869,10 +1912,11 @@ pub(crate) fn run_source(src: &str) -> interp::Value {
 pub(crate) fn run_source_with_stdout(src: &str) -> (interp::Value, String) {
     let file = parse_prod(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    // Checker-gated bytecode features (casts, method receipts) require the
-    // CheckedProgram; valid sources install it, invalid ones keep the
-    // pre-installation failure mode of the lenient compile below.
-    if let Ok(program) = core::check_program(&file) {
+    // Preserve non-E0447 checker leniency while rejecting invalid process
+    // entries before bytecode compilation.
+    if let Some(program) = check_program_for_main_execution(&file).unwrap_or_else(|error| {
+        panic!("checker rejected executable main in run_source_with_stdout:\n{error}")
+    }) {
         compiler.install_checked_program(&program);
     }
     let prog = compiler
@@ -1907,6 +1951,7 @@ pub(crate) fn run_source_result(src: &str) -> Result<interp::Value, String> {
     let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
+    check_program_for_main_execution(&file)?;
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler.compile_file(&file).map_err(|e| e.to_string())?;
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
@@ -2035,6 +2080,9 @@ fn compile_test_bytecode_program(
 /// Panics on compile or runtime error (mirrors `run_source` semantics).
 pub(crate) fn run_source_bytecode(src: &str) -> interp::Value {
     let file = parse_prod(src);
+    check_program_for_main_execution(&file).unwrap_or_else(|error| {
+        panic!("checker rejected executable main in run_source_bytecode:\n{error}")
+    });
     let prog = compile_test_bytecode_program(&file, None).expect("bytecode compile failed");
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().expect("bytecode run_value failed")
@@ -2047,6 +2095,7 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
     let file = parser::Parser::new(tokens)
         .parse_file()
         .map_err(|e| e.message)?;
+    check_program_for_main_execution(&file)?;
     let prog = compile_test_bytecode_program(&file, None)?;
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.run_value().map_err(|e| e.message().to_string())
@@ -2056,6 +2105,9 @@ pub(crate) fn run_source_bytecode_result(src: &str) -> Result<interp::Value, Str
 /// Returns `(main return value, captured stdout)`.
 pub(crate) fn run_source_bytecode_with_stdout(src: &str) -> (interp::Value, String) {
     let file = parse_prod(src);
+    check_program_for_main_execution(&file).unwrap_or_else(|error| {
+        panic!("checker rejected executable main in run_source_bytecode_with_stdout:\n{error}")
+    });
     let prog = compile_test_bytecode_program(&file, None).expect("bytecode compile failed");
     let mut vm = interp::bytecode::BytecodeVM::new(prog.clone());
     vm.enable_stdout_capture();
@@ -2083,7 +2135,8 @@ pub(crate) fn checked_run_source_bytecode_result(src: &str) -> Result<interp::Va
 
 /// Compile source to bytecode and call a named function (test helper).
 /// Returns Result<Value, String>. Panics on parse/compile failure.
-/// Does NOT require type checking to pass (mirrors tree-walker's direct eval).
+/// Other checker errors remain lenient, but source execution still rejects an
+/// invalid executable `main` even when the requested function is a helper.
 pub(crate) fn bytecode_call_named(
     src: &str,
     func_name: &str,
@@ -2091,9 +2144,9 @@ pub(crate) fn bytecode_call_named(
 ) -> Result<interp::Value, String> {
     let file = parse(src);
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
-    // Install CheckedProgram if type check passes (enables better dispatch),
-    // but don't fail if it doesn't (some tests intentionally use unchecked code).
-    if let Ok(program) = core::check_program(&file) {
+    // Install CheckedProgram when available, but preserve the raw bytecode
+    // path for non-E0447 checker errors used by focused helper tests.
+    if let Some(program) = check_program_for_main_execution(&file)? {
         compiler.install_checked_program(&program);
     }
     let prog = compiler
@@ -2104,6 +2157,21 @@ pub(crate) fn bytecode_call_named(
         .map_err(|e| e.message().to_string())
 }
 
+/// Compile source with the shared test bytecode route and call a named
+/// non-entry helper. The executable-main gate still applies to the source;
+/// non-E0447 checker errors retain this helper's historical compile behavior.
+fn bytecode_call_named_via_test_helper(
+    src: &str,
+    func_name: &str,
+) -> Result<interp::Value, String> {
+    let file = parse_prod(src);
+    check_program_for_main_execution(&file)?;
+    let prog = compile_test_bytecode_program(&file, None)?;
+    let mut vm = interp::bytecode::BytecodeVM::new(prog);
+    vm.call_named(func_name, Vec::new())
+        .map_err(|error| error.message().to_string())
+}
+
 /// Compile source to bytecode and run main with verify_contracts toggle.
 /// Returns Result<Value, String>.
 pub(crate) fn bytecode_run_with_contracts(
@@ -2111,7 +2179,13 @@ pub(crate) fn bytecode_run_with_contracts(
     verify: bool,
 ) -> Result<interp::Value, String> {
     let file = parse(src);
-    let program = core::check_program(&file).expect("type check failed");
+    let program = match check_program_for_main_execution(&file) {
+        Ok(Some(program)) => program,
+        Ok(None) => panic!("type check failed"),
+        Err(error) => {
+            panic!("checker rejected executable main in bytecode_run_with_contracts:\n{error}")
+        }
+    };
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     compiler.install_checked_program(&program);
     let prog = compiler
@@ -2171,19 +2245,28 @@ fn compile_and_run_with_config(src: &str, config: &E2EConfig) -> Result<String, 
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let file = parse_prod(src);
+    check_program_for_main_execution(&file)?;
 
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
     if config.verify_contracts {
         codegen.verify_contracts = true;
     }
-    codegen.compile_file(&file).map_err(|e| e.to_string())?;
+    let checked_program = core::check_program(&file).map_err(|diags| {
+        diags
+            .iter()
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    codegen
+        .compile_checked(&checked_program)
+        .map_err(|diagnostics| format!("{diagnostics:?}"))?;
     link_and_run_module(&codegen, config, counter)
 }
 
-/// Compile the linked object to a binary, link against the cached runtime, and
-/// run. Shared by the legacy (`compile_file`) and checked (`compile_checked`)
-/// codegen harnesses since 0.34.30.
+/// Compile the checked native module to a binary, link against the cached
+/// runtime, and run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NativeArtifactEvidence {
     pub role: &'static str,
@@ -2378,22 +2461,23 @@ fn link_and_observe_module<'ctx>(
         }
     }
 
-    let mut actual_run_command = None;
-    let output = if config.use_valgrind {
+    let (output, actual_run_command) = if config.use_valgrind {
         let mut cmd = Command::new("valgrind");
         for arg in &config.valgrind_args {
             cmd.arg(arg);
         }
         cmd.arg(&bin_path);
-        actual_run_command = Some(native_command_argv(&cmd));
-        cmd.output().map_err(|e| format!("valgrind run: {}", e))?
+        let argv = native_command_argv(&cmd);
+        let out = cmd.output().map_err(|e| format!("valgrind run: {}", e))?;
+        (out, Some(argv))
     } else if let Some(timeout) = config.run_timeout {
-        actual_run_command = Some(vec![bin_path.to_string_lossy().into_owned()]);
-        run_binary_with_timeout(&bin_path, timeout)?
+        let out = run_binary_with_timeout(&bin_path, timeout)?;
+        (out, Some(vec![bin_path.to_string_lossy().into_owned()]))
     } else {
         let mut cmd = Command::new(&bin_path);
-        actual_run_command = Some(native_command_argv(&cmd));
-        cmd.output().map_err(|e| format!("run: {}", e))?
+        let argv = native_command_argv(&cmd);
+        let out = cmd.output().map_err(|e| format!("run: {}", e))?;
+        (out, Some(argv))
     };
     if keep_tmp {
         for artifact in &mut artifacts {
@@ -2499,6 +2583,24 @@ pub(crate) fn checked_codegen_compile_and_run(src: &str) -> Result<String, Strin
         .compile_checked(&checked_program)
         .map_err(|e| format!("{:?}", e))?;
     link_and_run_module(&codegen, &E2EConfig::default(), counter)
+}
+
+/// Run a canonical checked-codegen consumer and pin that it does not invoke
+/// the legacy function emitter.
+/// Keep this as an opt-in wrapper: the broader checked-codegen corpus also
+/// contains explicit compatibility coverage whose route is not yet canonical.
+pub(crate) fn checked_codegen_compile_and_run_without_legacy(src: &str) -> Result<String, String> {
+    crate::core::CheckedProgram::reset_test_legacy_codegen_function_calls();
+
+    let result = checked_codegen_compile_and_run(src);
+
+    let legacy_function_calls = crate::core::CheckedProgram::test_legacy_codegen_function_calls();
+    assert!(
+        legacy_function_calls.is_empty(),
+        "canonical checked Codegen must not invoke compile_func_legacy: {legacy_function_calls:?}"
+    );
+
+    result
 }
 
 /// Production `compile_checked` path under Valgrind's memory gate. The legacy
@@ -2627,29 +2729,6 @@ pub(crate) fn checked_codegen_compile_and_run_with_value_glue(src: &str) -> Resu
     checked_codegen_compile_and_run_with_value_glue_config(src, &E2EConfig::default())
 }
 
-/// A2 opt-in legacy-emitter path. This deliberately uses `compile_file`, so
-/// ownership tests can exercise legacy callees and callers without relying on
-/// an incidental resolved-emitter fallback. The switch remains instance-local
-/// and therefore safe under the parallel test runner.
-pub(crate) fn legacy_codegen_compile_and_run_with_value_glue(src: &str) -> Result<String, String> {
-    legacy_codegen_compile_and_run_with_value_glue_config(src, &E2EConfig::default())
-}
-
-fn legacy_codegen_compile_and_run_with_value_glue_config(
-    src: &str,
-    config: &E2EConfig,
-) -> Result<String, String> {
-    let file = parse_prod(src);
-    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_legacy_value_glue_test");
-    codegen.set_value_glue_enabled(true);
-    codegen
-        .compile_file(&file)
-        .map_err(|error| error.to_string())?;
-    link_and_run_module(&codegen, config, counter)
-}
-
 fn checked_codegen_compile_and_run_with_value_glue_config(
     src: &str,
     config: &E2EConfig,
@@ -2677,19 +2756,6 @@ pub(crate) fn checked_codegen_compile_and_run_with_value_glue_valgrind(
     src: &str,
 ) -> Result<String, String> {
     checked_codegen_compile_and_run_with_value_glue_config(
-        src,
-        &E2EConfig {
-            use_valgrind: true,
-            ..Default::default()
-        },
-    )
-}
-
-/// A2 opt-in legacy-emitter path under the same Valgrind ownership gate.
-pub(crate) fn legacy_codegen_compile_and_run_with_value_glue_valgrind(
-    src: &str,
-) -> Result<String, String> {
-    legacy_codegen_compile_and_run_with_value_glue_config(
         src,
         &E2EConfig {
             use_valgrind: true,
@@ -2887,46 +2953,46 @@ pub(crate) fn compile_and_run(src: &str) -> Result<String, String> {
     compile_and_run_with_config(src, &E2EConfig::default())
 }
 
-/// Exercise the retired surface-AST native emitter in its explicit test-only
-/// adapter. The parser injects a synthetic `Main.run` Flow for scripts; remove
-/// only that known RuntimeSystem wrapper so this test can directly exercise
-/// the legacy expression/FFI implementation without pretending the production
-/// checked route admitted it. Production routing is tested separately through
-/// `checked_codegen_compile_and_observe`.
-pub(crate) fn legacy_codegen_compile_and_run_for_test(src: &str) -> Result<String, String> {
-    legacy_codegen_compile_and_run_with_contracts_for_test(src, false)
-}
-
-/// Emit LLVM IR through the retired surface-AST emitter for low-level codegen
-/// mechanism tests. Keep these tests explicitly on the test-only compatibility
-/// route and strip only the parser's synthetic `Main.run` wrapper.
-pub(crate) fn legacy_codegen_compile_to_ir_for_test(src: &str) -> Result<String, String> {
-    let file = legacy_codegen_file_for_test(parse(src));
+/// Emit LLVM IR for a checked native Codegen test fixture.
+pub(crate) fn checked_codegen_compile_to_ir_for_test(src: &str) -> Result<String, String> {
+    let file = parse(src);
+    let checked = core::check_program(&file).map_err(|diagnostics| {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
     let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_ir_test");
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "checked_codegen_ir_test");
     codegen
-        .compile_file(&file)
-        .map_err(|error| error.to_string())?;
+        .compile_checked(&checked)
+        .map_err(|diagnostics| format!("{diagnostics:?}"))?;
     Ok(codegen.emit_ir())
 }
 
-/// Compile a bare test source to an object with the retired surface-AST
-/// emitter. This is an explicit compatibility-only path for tests that need
-/// to link or run the generated object; production helpers remain checked.
-/// The caller is responsible for cleaning up the returned path.
-pub(crate) fn legacy_codegen_compile_to_object_for_test(
+/// Compile a checked test source to an object file. The caller is responsible
+/// for cleaning up the returned path.
+pub(crate) fn checked_codegen_compile_to_object_for_test(
     src: &str,
 ) -> Result<std::path::PathBuf, String> {
     let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file = legacy_codegen_file_for_test(parse(src));
+    let file = parse(src);
+    let checked = core::check_program(&file).map_err(|diagnostics| {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
     let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_object_test");
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "checked_codegen_object_test");
     codegen
-        .compile_file(&file)
-        .map_err(|error| error.to_string())?;
+        .compile_checked(&checked)
+        .map_err(|diagnostics| format!("{diagnostics:?}"))?;
 
     let tmp_dir = std::env::temp_dir().join(format!(
-        "mimi_legacy_obj_{}_{}",
+        "mimi_checked_obj_{}_{}",
         std::process::id(),
         counter
     ));
@@ -2936,47 +3002,6 @@ pub(crate) fn legacy_codegen_compile_to_object_for_test(
         .compile_to_object(&obj_path)
         .map_err(|error| error.to_string())?;
     Ok(obj_path)
-}
-
-pub(crate) fn legacy_codegen_compile_and_verify_contracts_for_test(
-    src: &str,
-) -> Result<String, String> {
-    legacy_codegen_compile_and_run_with_contracts_for_test(src, true)
-}
-
-fn legacy_codegen_compile_and_run_with_contracts_for_test(
-    src: &str,
-    verify_contracts: bool,
-) -> Result<String, String> {
-    if !can_link() {
-        return Err("cc is unavailable".into());
-    }
-
-    let counter = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file = legacy_codegen_file_for_test(parse_prod(src));
-
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "legacy_codegen_test");
-    codegen.verify_contracts = verify_contracts;
-    codegen
-        .compile_file_inner(Arc::new(file), None, true)
-        .map_err(|error| error.to_string())?;
-    link_and_run_module(&codegen, &E2EConfig::default(), counter)
-}
-
-fn legacy_codegen_file_for_test(mut file: crate::ast::File) -> crate::ast::File {
-    file.items.retain(|item| {
-        !matches!(
-            item,
-            crate::ast::Item::Flow(flow)
-                if matches!(
-                    flow.meta.origin,
-                    crate::ast::AstOrigin::RuntimeSystem("progressive.main")
-                )
-        )
-    });
-    file.implicit_single = false;
-    file
 }
 
 /// E2E codegen test with contracts verification enabled.
@@ -3046,7 +3071,16 @@ pub(crate) fn compile_only(src: &str) -> Result<std::path::PathBuf, String> {
         .map_err(|e| format!("parser: {}", e))?;
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "e2e_test");
-    codegen.compile_file(&file).map_err(|e| e.to_string())?;
+    let checked = core::check_program(&file).map_err(|diagnostics| {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    codegen
+        .compile_checked(&checked)
+        .map_err(|diagnostics| format!("{diagnostics:?}"))?;
     let tmp_dir = std::env::temp_dir().join(format!("mimi_obj_{}_{}", std::process::id(), counter));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
     let obj_path = tmp_dir.join("test.o");
@@ -3062,6 +3096,9 @@ pub(crate) fn compile_only(src: &str) -> Result<std::path::PathBuf, String> {
 pub(crate) fn dual_assert_contract_ok(src: &str) {
     // Bytecode VM with contract checking (0.33: replaces tree-walker).
     let file = parse(src);
+    check_program_for_main_execution(&file).unwrap_or_else(|error| {
+        panic!("checker rejected executable main in dual_assert_contract_ok:\n{error}")
+    });
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -3079,6 +3116,9 @@ pub(crate) fn dual_assert_contract_ok(src: &str) {
 /// legacy）；无论哪条发射路径，VM 与 codegen 的 trap 必须对等。
 pub(crate) fn dual_assert_contract_violation(src: &str) {
     let file = parse(src);
+    check_program_for_main_execution(&file).unwrap_or_else(|error| {
+        panic!("checker rejected executable main in dual_assert_contract_violation:\n{error}")
+    });
     let mut compiler = interp::bytecode::BytecodeCompiler::new();
     let prog = compiler
         .compile_file(&file)
@@ -3322,6 +3362,29 @@ mod bytecode_equiv_smoke {
     use super::*;
 
     #[test]
+    fn executable_main_gate_keeps_full_e0447_diagnostics() {
+        let file = parse_prod("func main() -> Result<i32, string> { Ok(0) }");
+        let error = check_program_for_main_execution(&file)
+            .expect_err("an executable main with a Result return must be rejected");
+        assert!(error.contains("E0447"), "missing diagnostic code: {error}");
+        assert!(
+            error.contains("executable `main` must return unit, bool, i32, or i64"),
+            "missing complete E0447 message: {error}"
+        );
+        assert!(error.contains("help:"), "missing E0447 help text: {error}");
+        assert!(
+            error.contains("line 1, column"),
+            "missing E0447 span: {error}"
+        );
+
+        let invalid_body = parse_prod("func main() -> i32 { missing_name }");
+        assert!(
+            matches!(check_program_for_main_execution(&invalid_body), Ok(None)),
+            "non-E0447 checker failures should keep their historical leniency"
+        );
+    }
+
+    #[test]
     fn bc_smoke_int() {
         let tw = run_source("func main() -> i32 { 42 }");
         let bc = run_source_bytecode("func main() -> i32 { 42 }");
@@ -3337,8 +3400,19 @@ mod bytecode_equiv_smoke {
 
     #[test]
     fn bc_smoke_string_concat() {
-        let src = r#"func main() -> string { "hello" + " " + "world" }"#;
-        assert_eq!(run_source(src), run_source_bytecode(src));
+        let src = r#"
+func concat_value() -> string { "hello" + " " + "world" }
+func main() -> i32 { 0 }
+"#;
+        let direct = bytecode_call_named(src, "concat_value", Vec::new())
+            .expect("direct named helper call should succeed");
+        let test_helper = bytecode_call_named_via_test_helper(src, "concat_value")
+            .expect("test-helper named call should succeed");
+        assert_eq!(direct, test_helper, "named helper result mismatch");
+        assert_eq!(
+            direct,
+            interp::Value::String(interp::SharedString::new("hello world".to_string()))
+        );
     }
 
     #[test]
@@ -3478,6 +3552,41 @@ mod bytecode_batch_probe {
         }
     }
 
+    /// Compare the actual return value of a named helper through the direct
+    /// bytecode call path and the shared test-bytecode compilation path. The
+    /// source still has a valid executable `main`; only the helper's return
+    /// type may be outside the process-entry ABI.
+    fn probe_named(name: &str, src: &str, helper_name: &str) -> Result<(), String> {
+        let direct = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bytecode_call_named(src, helper_name, Vec::new())
+        }));
+        let shared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bytecode_call_named_via_test_helper(src, helper_name)
+        }));
+
+        let direct_value = direct.ok().and_then(Result::ok);
+        let shared_value = shared.ok().and_then(Result::ok);
+        match (direct_value, shared_value) {
+            (Some(direct), Some(shared)) if direct == shared => Ok(()),
+            (Some(direct), Some(shared)) => Err(format!(
+                "{}: NAMED VALUE MISMATCH\n  direct={:?}\n  shared={:?}",
+                name, direct, shared
+            )),
+            (Some(direct), None) => Err(format!(
+                "{}: shared named-call path failed, direct={:?}",
+                name, direct
+            )),
+            (None, Some(shared)) => Err(format!(
+                "{}: direct named-call path failed, shared={:?}",
+                name, shared
+            )),
+            (None, None) => Err(format!(
+                "{}: both named-call paths failed before comparing a helper value",
+                name
+            )),
+        }
+    }
+
     /// Run a program through both backends with stdout capture.
     fn probe_stdout(name: &str, src: &str) -> Result<(), String> {
         let tw = std::panic::catch_unwind(|| run_source_with_stdout(src));
@@ -3508,10 +3617,8 @@ mod bytecode_batch_probe {
         let cases: Vec<(&str, &str)> = vec![
             // === Scalars ===
             ("int_literal", "func main() -> i32 { 42 }"),
-            ("float_literal", "func main() -> f64 { 3.14 }"),
             ("bool_true", "func main() -> bool { true }"),
             ("bool_false", "func main() -> bool { false }"),
-            ("string_literal", r#"func main() -> string { "hello" }"#),
             ("unit_return", "func main() { }"),
 
             // === Arithmetic ===
@@ -3520,10 +3627,7 @@ mod bytecode_batch_probe {
             ("int_mul", "func main() -> i32 { 6 * 7 }"),
             ("int_div", "func main() -> i32 { 100 / 4 }"),
             ("int_mod", "func main() -> i32 { 17 % 5 }"),
-            ("float_add", "func main() -> f64 { 1.5 + 2.5 }"),
-            ("float_mul", "func main() -> f64 { 2.0 * 3.0 }"),
             ("neg_int", "func main() -> i32 { 0 - 42 }"),
-            ("neg_float", "func main() -> f64 { 0.0 - 1.5 }"),
             ("paren_precedence", "func main() -> i32 { (2 + 3) * 4 }"),
 
             // === Comparisons ===
@@ -3564,7 +3668,6 @@ mod bytecode_batch_probe {
             ("func_nested_call", "func double(x: i32) -> i32 { x * 2 }\nfunc main() -> i32 { double(double(3)) }"),
 
             // === Strings ===
-            ("string_concat", r#"func main() -> string { "a" + "b" + "c" }"#),
             ("string_len", r#"func main() -> i32 { len("hello") }"#),
             ("string_eq", r#"func main() -> bool { "abc" == "abc" }"#),
             ("string_ne", r#"func main() -> bool { "abc" != "def" }"#),
@@ -3607,11 +3710,6 @@ mod bytecode_batch_probe {
             ("builtin_abs", "func main() -> i32 { abs(0 - 5) }"),
             ("builtin_min", "func main() -> i32 { min(3, 7) }"),
             ("builtin_max", "func main() -> i32 { max(3, 7) }"),
-            ("builtin_to_string", "func main() -> string { to_string(42) }"),
-
-            // === Type casts ===
-            ("cast_int_to_float", "func main() -> f64 { 42 as f64 }"),
-
             // === Nested blocks ===
             ("nested_blocks", "func main() -> i32 {\n let x = {\n let y = 10\n {\n let z = 20\n y + z\n }\n }\n x }"),
             ("multi_stmt", "func main() -> i32 {\n let a = 1\n let b = 2\n let c = a + b\n c * 2 }"),
@@ -3631,6 +3729,58 @@ mod bytecode_batch_probe {
             match probe(name, src) {
                 Ok(()) => passes += 1,
                 Err(e) => failures.push(e),
+            }
+        }
+
+        // These functions return values outside executable `main`'s process
+        // ABI. Keep a legal main and compare each named function's actual
+        // value through both bytecode call paths.
+        let named_cases: Vec<(&str, &str, &str)> = vec![
+            (
+                "float_literal",
+                "float_value",
+                "func float_value() -> f64 { 3.14 }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "float_add",
+                "float_add_value",
+                "func float_add_value() -> f64 { 1.5 + 2.5 }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "float_mul",
+                "float_mul_value",
+                "func float_mul_value() -> f64 { 2.0 * 3.0 }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "string_literal",
+                "string_value",
+                "func string_value() -> string { \"hello\" }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "neg_float",
+                "neg_float_value",
+                "func neg_float_value() -> f64 { 0.0 - 1.5 }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "string_concat",
+                "string_concat_value",
+                "func string_concat_value() -> string { \"a\" + \"b\" + \"c\" }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "builtin_to_string",
+                "to_string_value",
+                "func to_string_value() -> string { to_string(42) }\nfunc main() -> i32 { 0 }",
+            ),
+            (
+                "cast_int_to_float",
+                "cast_value",
+                "func cast_value() -> f64 { 42 as f64 }\nfunc main() -> i32 { 0 }",
+            ),
+        ];
+        for (name, helper_name, src) in &named_cases {
+            match probe_named(name, src, helper_name) {
+                Ok(()) => passes += 1,
+                Err(error) => failures.push(error),
             }
         }
 

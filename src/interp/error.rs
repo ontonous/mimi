@@ -22,6 +22,9 @@ pub struct ErrorContext {
 /// specific variants, or `InterpError::new(msg)` for generic runtime errors.
 #[derive(Debug, Clone)]
 pub enum InterpError {
+    /// Allocation failure (E0800) whose owned context was prepared before
+    /// execution. Moving it through the VM never allocates.
+    AllocationFailure(Box<ErrorContext>),
     /// Generic runtime error (E0800).
     Generic(Box<ErrorContext>),
     /// Division by zero at runtime (E0801).
@@ -69,7 +72,7 @@ impl InterpError {
     /// Return the error code for this variant.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::Generic(_) => codes::E0800,
+            Self::AllocationFailure(_) | Self::Generic(_) => codes::E0800,
             Self::DivisionByZero(_) => codes::E0801,
             Self::IntegerOverflow(_) => codes::E0802,
             Self::IndexOutOfBounds(_) => codes::E0803,
@@ -87,10 +90,41 @@ impl InterpError {
         }
     }
 
+    /// Kernel-card traps bypass Flow Fault absorption and compensation.
+    /// Integer overflow retains its historical E0802 identity.
+    pub fn is_trap(&self) -> bool {
+        matches!(
+            self,
+            Self::AllocationFailure(_)
+                | Self::Generic(_)
+                | Self::DivisionByZero(_)
+                | Self::IntegerOverflow(_)
+        )
+    }
+
+    pub(crate) fn is_allocation_failure(&self) -> bool {
+        matches!(self, Self::AllocationFailure(_))
+    }
+
+    /// Prepare the existing owned ErrorContext before a fallible operation.
+    /// This preserves ctx/ctx_mut and formatting APIs without allocating on
+    /// the error-return path. Setup itself is outside the denial boundary.
+    pub(crate) fn prepare_allocation_failure(message: &'static str) -> Self {
+        Self::AllocationFailure(Box::new(ErrorContext {
+            msg: message.into(),
+            function: None,
+            operation: None,
+            help: None,
+            call_stack: Vec::new(),
+            line: None,
+        }))
+    }
+
     /// Borrow the inner `ErrorContext`.
     pub fn ctx(&self) -> &ErrorContext {
         match self {
-            Self::Generic(c)
+            Self::AllocationFailure(c)
+            | Self::Generic(c)
             | Self::DivisionByZero(c)
             | Self::IntegerOverflow(c)
             | Self::IndexOutOfBounds(c)
@@ -111,7 +145,8 @@ impl InterpError {
     /// Mutably borrow the inner `ErrorContext`.
     pub fn ctx_mut(&mut self) -> &mut ErrorContext {
         match self {
-            Self::Generic(c)
+            Self::AllocationFailure(c)
+            | Self::Generic(c)
             | Self::DivisionByZero(c)
             | Self::IntegerOverflow(c)
             | Self::IndexOutOfBounds(c)
@@ -380,7 +415,13 @@ impl fmt::Display for InterpError {
         if !ctx.call_stack.is_empty() {
             // Dense single-line stack (matches to_diagnostic's note shape);
             // storage order joined by arrows.
-            write!(f, " | call stack: {}", ctx.call_stack.join(" → "))?;
+            write!(f, " | call stack: ")?;
+            for (index, frame) in ctx.call_stack.iter().enumerate() {
+                if index != 0 {
+                    write!(f, " → ")?;
+                }
+                write!(f, "{frame}")?;
+            }
         }
         Ok(())
     }
@@ -453,6 +494,36 @@ impl From<InterpError> for Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_card_trap_classification_keeps_existing_codes() {
+        for error in [
+            InterpError::new("generic"),
+            InterpError::div_by_zero(),
+            InterpError::integer_overflow("overflow"),
+            InterpError::prepare_allocation_failure("allocation failed"),
+        ] {
+            assert!(error.is_trap());
+        }
+        assert!(!InterpError::index_out_of_bounds("oob").is_trap());
+        assert!(!InterpError::contract_violation("contract").is_trap());
+    }
+
+    #[test]
+    fn prepared_allocation_error_preserves_owned_context_apis() {
+        let mut error = InterpError::prepare_allocation_failure("allocation failed");
+        error.ctx_mut().msg = "changed context".into();
+        error.ctx_mut().line = Some(7);
+        let error = error.in_func("caller").at_op("publish");
+        assert_eq!(error.code(), "E0800");
+        assert_eq!(error.message(), "changed context");
+        assert_eq!(error.ctx().line, Some(7));
+        assert_eq!(error.ctx().function.as_deref(), Some("caller"));
+        assert!(error
+            .to_string()
+            .contains("changed context (in publish) [caller] (line 7)"));
+        assert_eq!(error.to_diagnostic().code.as_deref(), Some("E0800"));
+    }
 
     #[test]
     fn test_basic_error() {

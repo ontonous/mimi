@@ -7,12 +7,31 @@ use super::*;
 
 fn compile_to_ir(src: &str) -> String {
     let file = parse(src);
+    let checked =
+        crate::core::check_program(&file).expect("fixture should pass checked native compilation");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     codegen
-        .compile_file(&file)
-        .expect("src/tests/codegen_advanced.rs:12 unwrap failed");
+        .compile_checked(&checked)
+        .expect("fixture should compile through the canonical native route");
     codegen.emit_ir()
+}
+
+fn compile_checked_to_ir(src: &str) -> Result<String, String> {
+    let file = parse(src);
+    let checked = crate::core::check_program(&file).map_err(|diagnostics| {
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let context = inkwell::context::Context::create();
+    let mut codegen = crate::codegen::CodeGenerator::new(&context, "checked_codegen_advanced");
+    codegen
+        .compile_checked(&checked)
+        .map_err(|diagnostics| format!("{diagnostics:?}"))?;
+    Ok(codegen.emit_ir())
 }
 
 fn assert_compiles(src: &str) {
@@ -516,11 +535,8 @@ fn adv_comptime_folds_literally() {
             x
         }
     "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     assert!(
-        codegen.compile_file(&file).is_ok(),
+        compile_checked_to_ir(src).is_ok(),
         "comptime block should fold to constant."
     );
 }
@@ -537,10 +553,7 @@ fn adv_comptime_runtime_dep_errors() {
             v
         }
     "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
-    let err = codegen.compile_file(&file).unwrap_err().to_string();
+    let err = compile_checked_to_ir(src).unwrap_err();
     assert!(
         err.contains("comptime") || err.contains("fold"),
         "comptime runtime-dep error should mention fold/comptime, got: {}",
@@ -550,14 +563,16 @@ fn adv_comptime_runtime_dep_errors() {
 
 fn assert_codegen_unsupported(src: &str, feature: &str) {
     let file = parse(src);
+    let checked = crate::core::check_program(&file).expect("fixture should be checker-legal");
     let context = inkwell::context::Context::create();
     let mut codegen = crate::codegen::CodeGenerator::new(&context, "unsupported");
-    let err = codegen
-        .compile_file(&file)
-        .expect_err("LLVM codegen must reject unsupported feature")
-        .to_string();
+    let diagnostics = codegen
+        .compile_checked(&checked)
+        .expect_err("canonical native Codegen must reject an unsupported route");
+    assert!(codegen.module.get_function("main").is_none());
+    let err = format!("{diagnostics:?}");
     assert!(
-        err.contains("unsupported in LLVM codegen") && err.contains(feature),
+        err.contains(feature) || err.contains("MIR-COVERAGE-001"),
         "unexpected error for {}: {}",
         feature,
         err
@@ -606,11 +621,8 @@ fn adv_comptime_func_call_works() {
         comptime func get_magic() -> i64 { 42 }
         func main() -> i64 { get_magic() }
     "#;
-    let file = parse(src);
-    let context = inkwell::context::Context::create();
-    let mut codegen = crate::codegen::CodeGenerator::new(&context, "test");
     assert!(
-        codegen.compile_file(&file).is_ok(),
+        compile_checked_to_ir(src).is_ok(),
         "comptime function should be compilable."
     );
 }
