@@ -1,20 +1,148 @@
 #!/usr/bin/env bash
-# Emit a reproducible static inventory of the retained surface-body owners.
-# Dynamic zero-access probes live in the Rust test suite; this script keeps the
-# production call-site count and owner labels auditable without parsing output
-# from a compiler build.
+# The default entry point performs the static inventory and every required
+# dynamic probe. --static-only is reserved for the static helper and never
+# represents the complete owner audit.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="$ROOT_DIR/src"
 
-# Production code must not enter any retained surface-body owner.  The
-# compatibility adapters remain available to the cfg(test) module only; the
-# production inventory below excludes that module explicitly and reports its
-# references separately.  A new production accessor or legacy call therefore
-# fails this audit instead of silently widening the raw-AST surface.
-readonly EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES=0
-readonly EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES=0
+static_only=0
+if [ "${1:-}" = "--static-only" ]; then
+    static_only=1
+    shift
+    if [ "$#" -ne 0 ]; then
+        printf 'static_audit_error=unexpected_arguments\n' >&2
+        exit 2
+    fi
+elif [ "$#" -ne 0 ]; then
+    printf 'owner_audit_error=unexpected_arguments value=%s\n' "$*" >&2
+    exit 2
+fi
+
+if [ "${MIMI_LEGACY_OWNER_AUDIT_SKIP_DYNAMIC_PROBES:-0}" != "0" ]; then
+    printf 'owner_audit_error=dynamic_probe_skip_is_forbidden value=%s\n' \
+        "$MIMI_LEGACY_OWNER_AUDIT_SKIP_DYNAMIC_PROBES" >&2
+    exit 2
+fi
+
+if [ "$static_only" -eq 1 ]; then
+    canonical_target_dir=''
+    AUDIT_EVIDENCE_DIR=''
+else
+requested_target_dir="${MIMI_LEGACY_OWNER_AUDIT_TARGET_DIR:-${CARGO_TARGET_DIR:-/tmp/mimi-legacy-owner-audit-target}}"
+if [[ "$requested_target_dir" != /* ]]; then
+    printf 'owner_audit_error=target_dir_must_be_absolute path=%s\n' "$requested_target_dir" >&2
+    exit 2
+fi
+canonical_target_dir="$(realpath -m -- "$requested_target_dir")" || {
+    printf 'owner_audit_error=cannot_resolve_target_dir path=%s\n' "$requested_target_dir" >&2
+    exit 2
+}
+if [[ "$canonical_target_dir" == "$ROOT_DIR" || "$canonical_target_dir" == "$ROOT_DIR"/* ]]; then
+    printf 'owner_audit_error=target_dir_inside_repository path=%s\n' "$canonical_target_dir" >&2
+    exit 2
+fi
+mkdir -p -- "$canonical_target_dir"
+canonical_target_dir="$(realpath -e -- "$canonical_target_dir")" || {
+    printf 'owner_audit_error=cannot_create_target_dir path=%s\n' "$requested_target_dir" >&2
+    exit 2
+}
+if [[ "$canonical_target_dir" == "$ROOT_DIR" || "$canonical_target_dir" == "$ROOT_DIR"/* ]]; then
+    printf 'owner_audit_error=target_dir_resolves_inside_repository path=%s\n' "$canonical_target_dir" >&2
+    exit 2
+fi
+
+# Probe artifacts are always written outside the repository.  The environment
+# variable selects an external base directory; each invocation gets a unique
+# child so reruns never overwrite earlier evidence.  The default is /tmp (or
+# /var/tmp when /tmp resolves inside this checkout), never ROOT_DIR/evidence.
+readonly AUDIT_EVIDENCE_ENV=MIMI_LEGACY_OWNER_AUDIT_EVIDENCE_DIR
+requested_evidence_base="${!AUDIT_EVIDENCE_ENV:-}"
+if [ -n "$requested_evidence_base" ]; then
+    if [[ "$requested_evidence_base" != /* ]]; then
+        printf '%s must be an absolute directory path; got: %s\n' \
+            "$AUDIT_EVIDENCE_ENV" "$requested_evidence_base" >&2
+        exit 2
+    fi
+else
+    requested_evidence_base=/tmp
+fi
+
+is_inside_repository() {
+    local candidate="$1"
+    [[ "$candidate" == "$ROOT_DIR" || "$candidate" == "$ROOT_DIR"/* ]]
+}
+
+canonical_evidence_base="$(realpath -m -- "$requested_evidence_base")" || {
+    printf 'cannot resolve evidence directory: %s\n' "$requested_evidence_base" >&2
+    exit 2
+}
+if is_inside_repository "$canonical_evidence_base"; then
+    if [ -n "${!AUDIT_EVIDENCE_ENV:-}" ]; then
+        printf '%s resolves inside the repository; choose an external directory: %s\n' \
+            "$AUDIT_EVIDENCE_ENV" "$canonical_evidence_base" >&2
+        exit 2
+    fi
+    canonical_evidence_base="$(realpath -m -- /var/tmp)" || exit 2
+    if is_inside_repository "$canonical_evidence_base"; then
+        printf 'no external default evidence directory is available\n' >&2
+        exit 2
+    fi
+fi
+mkdir -p -- "$canonical_evidence_base"
+canonical_evidence_base="$(realpath -e -- "$canonical_evidence_base")" || {
+    printf 'cannot create evidence directory: %s\n' "$requested_evidence_base" >&2
+    exit 2
+}
+if is_inside_repository "$canonical_evidence_base"; then
+    printf 'evidence directory resolves inside the repository: %s\n' \
+        "$canonical_evidence_base" >&2
+    exit 2
+fi
+run_stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+AUDIT_EVIDENCE_DIR="$canonical_evidence_base/legacy-owner-audit-$run_stamp"
+mkdir -- "$AUDIT_EVIDENCE_DIR"
+AUDIT_EVIDENCE_DIR="$(realpath -e -- "$AUDIT_EVIDENCE_DIR")"
+if is_inside_repository "$AUDIT_EVIDENCE_DIR"; then
+    printf 'run evidence directory resolves inside the repository: %s\n' \
+        "$AUDIT_EVIDENCE_DIR" >&2
+    exit 2
+fi
+
+printf 'evidence_dir=%s\n' "$AUDIT_EVIDENCE_DIR"
+fi
+
+write_probe_source_hashes() {
+    local destination="$1"
+    local source_root source_file
+    (
+        cd "$ROOT_DIR"
+        {
+            for source_root in src tests std; do
+                if [ -d "$source_root" ]; then
+                    find "$source_root" -type f -print0
+                fi
+            done
+            for source_file in \
+                Cargo.toml Cargo.lock build.rs \
+                .cargo/config.toml rust-toolchain.toml rust-toolchain \
+                scripts/audit-mir-legacy-owners.sh \
+                scripts/audit-mir-legacy-owners-static.sh; do
+                if [ -f "$source_file" ]; then
+                    printf '%s\0' "$source_file"
+                fi
+            done
+        } | LC_ALL=C sort -zu | while IFS= read -r -d '' source_file; do
+            sha256sum -- "$source_file"
+        done
+    ) > "$destination"
+    sha256sum -- "$destination" | awk '{print $1}' > "$destination.sha256"
+}
+
+# The CheckedProgram surface-body snapshot and accessor have been physically
+# retired. Keep the absence check independent of production reachability: no
+# test-only accessor or trace API may quietly reappear.
 readonly EXPECTED_PRODUCTION_RAW_AST_CALL_SITES=0
 readonly EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES=0
 readonly EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES=0
@@ -22,9 +150,6 @@ readonly EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGACY_REFS=0
 # The deletion conditions are part of the compatibility contract. Keep a
 # digest beside each prose condition so scope changes are detected by the
 # gate and reviewed together with the migration that changes the condition.
-readonly EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST=fc5d620ce5d0ca2182f85bcc629ab0729cd0f162b511cfccd0b6bf9bb682a7b3
-readonly EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST=aa3f8f0d35d38b92bcc71fde640abfa53989bfa506c43d8964c70e4c5a211d95
-readonly EXPECTED_OWNER_CONDITION_SET_DIGEST=76abec5ddfe605f4a2bd791b1871b748ca3f42cb4b7a1bd7ab23020df60988f3
 audit_failed=0
 closed_scalar_marker_sequence=()
 
@@ -34,14 +159,12 @@ emit_closed_scalar_marker() {
     printf '%s\n' "$marker"
 }
 
-printf 'schema=canonical-mir-legacy-owner-audit-v1\n'
+printf 'schema=canonical-mir-legacy-owner-boundary-audit-v2\n'
 printf 'root=%s\n' "$ROOT_DIR"
 
-# Keep one executable evidence case for each retired production owner.  Every
-# case proves either a canonical route or an explicit MIR-COVERAGE-001/NITS
-# rejection and an empty legacy-access receipt. Removing that test without a
-# replacement must fail this audit rather than silently erasing migration
-# evidence.
+# Keep executable behavior evidence for each active compatibility owner.
+# Removing these tests without equivalent canonical-route or explicit
+# rejection coverage must fail this audit.
 owner_evidence() {
     local owner="$1"
     local source_file="$2"
@@ -77,7 +200,7 @@ owner_evidence \
     src/verifier/tests.rs \
     typed_ffi_symbolic_string_contexts_defer_without_legacy_access \
     'typed String FFI context reports checker-owned coverage without any legacy owner' \
-    'Vec::<crate::core::LegacyBodyConsumer>::new()'
+    'VerifStatus::NotInTrustedSubset'
 owner_evidence \
     FfiVerifierCompatibility \
     src/verifier/tests.rs \
@@ -96,13 +219,19 @@ owner_evidence \
     typed_ffi_aggregate_nested_string_fields_preserve_nul_unicode_and_length \
     'nested repr(C) String fields preserve exact caller identity through MIR' \
     'Some("verifier-ffi-owner-slice-v1")'
-retired_flow_dual_owner_evidence() {
+owner_evidence \
+    FfiVerifierCompatibility \
+    tests/real_world_cli.rs \
+    canonical_ffi_string_record_default_dual_cli_proven_disproven_nits \
+    'default verify reports proven, disproven, and unsupported String-record Ensures' \
+    '"? unknown"'
+flow_dual_open_migration_evidence() {
     local verifier_dir="$SRC_DIR/verifier"
     local parity_tests="$verifier_dir/flow_retirement_tests.rs"
     local scalar transition kinds body test_name
 
     if [ -e "$verifier_dir/flow.rs" ]; then
-        printf 'owner_audit_error=retired_flow_ast_owner_file_still_exists\n' >&2
+        printf 'owner_audit_error=unexpected_flow_ast_owner_file_present path=src/verifier/flow.rs\n' >&2
         audit_failed=1
         return
     fi
@@ -117,7 +246,7 @@ retired_flow_dual_owner_evidence() {
         'TypestateAxioms' \
         'typestate_context'; do
         if rg -n -F --glob '*.rs' "$marker" "$SRC_DIR/verifier" "$SRC_DIR/core/resolved" >/dev/null; then
-            printf 'owner_audit_error=retired_flow_dual_symbol_remains marker=%s\n' "$marker" >&2
+            printf 'owner_audit_error=removed_flow_dual_adapter_symbol_reappeared marker=%s\n' "$marker" >&2
             audit_failed=1
             return
         fi
@@ -160,11 +289,11 @@ retired_flow_dual_owner_evidence() {
             return
         fi
     done
-    printf 'retired_flow_dual_owners=physical;ast-owner=deleted;file-adapter=deleted;transition-vir-adapter=deleted;MIR-positive-negative-single-dual-evidence=%s+%s+%s\n' \
+    printf 'flow_dual_legacy_ast_observation=source-adapter-absent;capability_migration=open;coverage_status=partial;evidence=%s+%s+%s;retirement_status=unproven\n' \
         "$scalar" "$transition" "$kinds"
 }
 
-retired_flow_dual_owner_evidence
+flow_dual_open_migration_evidence
 
 # Generic trait specialization tests must exercise the checker-owned impl
 # catalog and canonical MIR consumers.  The old compatibility fixture for
@@ -183,7 +312,6 @@ codegen_generic_trait_mir_evidence() {
     for marker in \
         'install_checked_declaration_names(&program)' \
         'compile_vtables()' \
-        'test_legacy_body_access().is_empty()' \
         'test_legacy_codegen_function_calls().is_empty()'; do
         if ! printf '%s\n' "$context" | rg -F "$marker" >/dev/null; then
             printf 'owner_audit_error=generic_trait_checked_vtable_evidence_missing test=%s marker=%s\n' \
@@ -210,8 +338,7 @@ codegen_generic_trait_mir_evidence() {
         'has_static_generic_trait_specialization_candidate(&program)' \
         '.compile_checked(&program)' \
         '22\n11\n' \
-        'cross-specialization receiver ABI drift must fail closed' \
-        'test_legacy_body_access().is_empty()'; do
+        'cross-specialization receiver ABI drift must fail closed'; do
         if ! printf '%s\n' "$context" | rg -F "$marker" >/dev/null; then
             printf 'owner_audit_error=generic_trait_mir_execution_evidence_missing test=%s marker=%s\n' \
                 "$name" "$marker" >&2
@@ -272,30 +399,43 @@ codegen_generic_trait_mir_evidence() {
 
 codegen_generic_trait_mir_evidence
 
-# The retained body accessor and AST adapters are deliberately test-only. Keep
-# their location explicit so moving one back into production cannot be hidden
-# by the production exclusion used by the call-site inventory.
-test_only_legacy_body_adapter_context() {
-    local context
-    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn legacy_body_file\(' \
-        "$ROOT_DIR/src/core/resolved/mod.rs"; then
-        printf 'owner_audit_error=legacy_body_file_accessor_lost_cfg_test\n' >&2
+# The old body snapshot/accessor is an explicitly retired surface. Keep a
+# fail-closed inventory of every former storage/access/trace symbol, while
+# retaining source provenance and route facts in CheckedProgram.
+checked_program_surface_body_snapshot_retired() {
+    local forbidden_pattern offenders resolved_tests
+    forbidden_pattern='(^|[^[:alnum:]_])(legacy_file[[:space:]]*:|legacy_body_file[[:space:]]*\(|LegacyBodyConsumer|TEST_LEGACY_BODY_ACCESS|test_legacy_body_access|reset_test_legacy_body_access)([^[:alnum:]_]|$)'
+    offenders="$(rg -n --glob '*.rs' --glob '!**/audit_fix_scripts.rs' \
+        "$forbidden_pattern" "$SRC_DIR" || true)"
+    if [ -n "$offenders" ]; then
+        printf 'owner_audit_error=checked_program_surface_body_snapshot_present\n%s\n' \
+            "$offenders" >&2
         audit_failed=1
         return
     fi
+    resolved_tests="$ROOT_DIR/src/core/resolved/tests.rs"
+    for marker in \
+        'fn resolved_lowering_reads_source_provenance_from_checker_registry(' \
+        'program.source_registry().key(source_id)' \
+        'fn checked_program_keeps_import_route_fact_without_surface_snapshot(' \
+        'program.has_imports()'; do
+        if ! rg -F "$marker" "$resolved_tests" >/dev/null; then
+            printf 'owner_audit_error=checked_program_surface_fact_test_missing marker=%s\n' \
+                "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'checked_program_surface_body_snapshot=physically-retired;source_registry=retained;has_imports=retained\n'
+}
+
+test_only_codegen_adapter_module_is_cfg_test() {
     if ! rg -U -q '#\[cfg\(test\)\]\nmod tests;' "$ROOT_DIR/src/codegen/mod.rs"; then
         printf 'owner_audit_error=test_only_codegen_adapter_module_not_cfg_test\n' >&2
         audit_failed=1
         return
     fi
-    context="$(sed -n '/pub(crate) fn legacy_body_file(/,/pub(crate) fn has_imports(/p' \
-        "$ROOT_DIR/src/core/resolved/mod.rs")"
-    if ! printf '%s\n' "$context" | rg -F 'Arc::clone(&self.legacy_file)' >/dev/null; then
-        printf 'owner_audit_error=test_only_legacy_body_accessor_context_missing\n' >&2
-        audit_failed=1
-        return
-    fi
-    printf 'test_only_legacy_body_adapter_context=core::CheckedProgram::legacy_body_file+codegen::tests\n'
+    printf 'test_only_codegen_adapter_module=src/codegen/mod.rs::tests+cfg-test\n'
 }
 
 # The closed scalar guard may live in the public entry function while the
@@ -349,7 +489,8 @@ route_receipt_profile_binding() {
         "$profile_name" "$receipt_label" "$source_file" "$start_function"
 }
 
-test_only_legacy_body_adapter_context
+checked_program_surface_body_snapshot_retired
+test_only_codegen_adapter_module_is_cfg_test
 
 # Generic surface-AST verifier helpers remain test-only for the still-active
 # FFI audit. The Flow state-machine engine, file batch adapter, and transition
@@ -390,16 +531,17 @@ test_only_ast_verifier_modules() {
 
 test_only_ast_verifier_modules
 
-# Native Codegen's retained surface-file adapter is test-only. The Bytecode
-# source compiler is a separate, explicitly named compatibility consumer for
+# Native Codegen has no retained surface-file adapter. The Bytecode source
+# compiler is a separate, explicitly named compatibility consumer for
 # `run`/`test`/`disasm`: each production call must sit behind the dispatcher’s
 # `DefaultMirRoute::Legacy` arm, while the native build has no such ingress.
 # Keep this distinction visible so removing LLVM legacy edges is not confused
 # with silently deleting the interpreter's graph-outside compatibility route.
 codegen_legacy_consumer_boundary() {
-    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn compile_file\(' \
+    if rg -n \
+        '^[[:space:]]*(pub\([^)]*\)[[:space:]]+)?(pub[[:space:]]+)?fn (compile_file|compile_file_inner|compile_file_with_resolved)\(' \
         "$ROOT_DIR/src/codegen/compile.rs"; then
-        printf 'owner_audit_error=codegen_compile_file_not_cfg_test\n' >&2
+        printf 'owner_audit_error=native_codegen_surface_file_adapter_reintroduced\n' >&2
         audit_failed=1
         return
     fi
@@ -418,7 +560,7 @@ codegen_legacy_consumer_boundary() {
             return
         fi
     done
-    printf 'codegen_legacy_consumer_boundary=llvm_compile_file_cfg_test;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route\n'
+    printf 'codegen_legacy_consumer_boundary=llvm_surface_file_adapter_absent;native_build_no_bytecode_legacy;run-test-disasm_explicit_legacy_route\n'
 }
 
 codegen_legacy_consumer_boundary
@@ -475,7 +617,9 @@ bytecode_vm_canonical_ffi_preflight_order() {
     local vm="$1"
     local structural_context
     local execution_context
-    local tail_expression
+    local ffi_validation_line
+    local frame_validation_line
+    local any_cfg_validation_line
     local structure_line
     local begin_line
     local worker_symbol_line
@@ -483,12 +627,14 @@ bytecode_vm_canonical_ffi_preflight_order() {
     local worker_execute_line
     local normal_execute_line
     structural_context="$(sed -n '/fn preflight_canonical_program_structure(/,/^    }/p' "$vm")"
-    tail_expression="$(printf '%s\n' "$structural_context" \
-        | awk 'NF { previous = last; last = $0 } END { print previous }' \
-        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    if [ -z "$structural_context" ] \
-        || [ "$tail_expression" != 'self.validate_canonical_ffi_program()' ]; then
-        printf 'owner_audit_error=bytecode_vm_ffi_preflight_marker_missing marker=preflight_canonical_program_structure-tail-self.validate_canonical_ffi_program()\n' >&2
+    ffi_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_canonical_ffi_program()?") { print NR; exit }')"
+    frame_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_bytecode_call_frames()?") { print NR; exit }')"
+    any_cfg_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_canonical_managed_any_cfg_program()") { print NR; exit }')"
+    if [ -z "$structural_context" ] || [ -z "$ffi_validation_line" ] \
+        || [ -z "$frame_validation_line" ] || [ -z "$any_cfg_validation_line" ] \
+        || [ "$ffi_validation_line" -ge "$frame_validation_line" ] \
+        || [ "$frame_validation_line" -ge "$any_cfg_validation_line" ]; then
+        printf 'owner_audit_error=bytecode_vm_ffi_preflight_marker_or_order_missing function=preflight_canonical_program_structure expected=canonical-ffi-before-call-frame-before-managed-any-cfg-seal\n' >&2
         audit_failed=1
         return
     fi
@@ -516,7 +662,7 @@ bytecode_vm_canonical_ffi_preflight_order() {
         audit_failed=1
         return
     fi
-    printf 'bytecode_vm_ffi_preflight_order=canonical-receipts-before-actor-root+host-symbols-before-execution\n'
+    printf 'bytecode_vm_ffi_preflight_order=canonical-receipts+ffi-descriptors-before-actor-root;worker-and-normal-host-symbol-preflight-before-first-instruction\n'
 }
 
 retired_receiptless_bytecode_ffi_path() {
@@ -628,64 +774,6 @@ retired_checked_directory_viewer_from_production() {
 
 retired_checked_directory_viewer_from_production
 
-# The retained AST snapshot is a test-only adapter. Canonical lowering now
-# uses CheckedProgram::source_registry() for NodeId construction; no
-# production source may read `legacy_file` directly. Keep the test-only
-# accessor shape checked separately so an accidental cfg removal fails closed.
-direct_legacy_file_reads_are_owner_only() {
-    local reads unapproved
-    reads="$(rg -n '\.legacy_file\b' "$SRC_DIR" \
-        --glob '*.rs' \
-        --glob '!**/tests.rs' \
-        --glob '!**/test.rs' \
-        --glob '!src/tests/**' || true)"
-    unapproved="$(printf '%s\n' "$reads" | rg -v \
-        'src/core/resolved/mod\.rs:[0-9]+: *Arc::clone\(&self\.legacy_file\)$' || true)"
-    if [ -n "$unapproved" ]; then
-        printf 'owner_audit_error=production_direct_legacy_file_reads\n%s\n' \
-            "$unapproved" >&2
-        audit_failed=1
-        return
-    fi
-    if ! rg -U -q '#\[cfg\(test\)\]\n    pub\(crate\) fn legacy_body_file\(' \
-        "$ROOT_DIR/src/core/resolved/mod.rs"; then
-        printf 'owner_audit_error=legacy_body_file_accessor_lost_cfg_test\n' >&2
-        audit_failed=1
-        return
-    fi
-    printf 'production_direct_legacy_file_accessors=0 source-metadata-reads=0 body_bypasses=0\n'
-    printf 'test_only_legacy_file_accessor=src/core/resolved/mod.rs::legacy_body_file\n'
-}
-
-direct_legacy_file_reads_are_owner_only
-
-checked_program_legacy_file_residency() {
-    local source="$ROOT_DIR/src/core/resolved/mod.rs"
-    local checked_program_context
-    checked_program_context="$(sed -n '/^pub struct CheckedProgram {/,/^}/p' "$source")"
-    if ! printf '%s\n' "$checked_program_context" \
-        | rg -U '#\[cfg\(test\)\]\s+legacy_file:\s*Arc<File>,' >/dev/null; then
-        printf 'owner_audit_error=checked_program_legacy_file_field_lost_cfg_test\n' >&2
-        audit_failed=1
-        return
-    fi
-    if ! rg -U '#\[cfg\(test\)\]\s+let legacy_file_clone = File\s*\{\s*[^}]*\};' \
-        "$source" >/dev/null; then
-        printf 'owner_audit_error=checked_program_legacy_file_construction_lost_cfg_test\n' >&2
-        audit_failed=1
-        return
-    fi
-    if ! rg -U '#\[cfg\(test\)\]\s+legacy_file:\s*Arc::new\(legacy_file_clone\),' \
-        "$source" >/dev/null; then
-        printf 'owner_audit_error=checked_program_legacy_file_initializer_lost_cfg_test\n' >&2
-        audit_failed=1
-        return
-    fi
-    printf 'checked_program_legacy_file_residency=field+construction+initializer-cfg-test-only\n'
-}
-
-checked_program_legacy_file_residency
-
 route_receipt_profile_binding \
     src/main/canonical_dispatch.rs \
     'fn select_scalar_ffi_route(' \
@@ -708,10 +796,22 @@ consumer_receipt_binding() {
     if [[ "$receipt_label" == "native-direct-v1" ]]; then
         receipt_pattern="MIR_NATIVE_DIRECT_ROUTE_PROFILE"
     elif [[ "$receipt_label" == "verify-ffi-v1" ]]; then
-        # The FFI verifier selects one of two receipt labels at runtime. The
-        # branch mapping is checked separately below; here bind that selected
-        # label to the canonical graph that the receipt actually describes.
-        receipt_pattern='canonical.route_receipt(receipt_profile)'
+        # The admitted ScalarFfi route delegates execution and receipt binding
+        # to ffi_compat::verify_scalar_route; keep both the mod.rs hand-off and
+        # the ffi_compat.rs receipt lookup + program validation pinned together.
+        local compat_context
+        compat_context="$(sed -n '/^pub(crate) fn verify_scalar_route(/,/^pub(crate) fn verify_literal_contracts(/p' "$ROOT_DIR/src/verifier/ffi_compat.rs")"
+        if ! printf '%s\n' "$context" | rg -F 'ffi_compat::verify_scalar_route(program, &canonical, source_hash)' >/dev/null \
+            || ! printf '%s\n' "$compat_context" | rg -F 'mir.route_receipt("verify-ffi-v1")' >/dev/null \
+            || ! printf '%s\n' "$compat_context" | rg -F 'receipt.validate_against_program(mir)' >/dev/null; then
+            printf 'owner_audit_error=consumer_receipt_missing=%s::%s label=%s\n' \
+                "$source_file" "$start_function" "$receipt_label" >&2
+            audit_failed=1
+            return
+        fi
+        printf 'consumer_receipt_binding=%s consumer=%s::%s\n' \
+            "$receipt_label" "$source_file" "$start_function"
+        return
     fi
     if ! printf '%s\n' "$context" | rg -F "$receipt_pattern" >/dev/null; then
         printf 'owner_audit_error=consumer_receipt_missing=%s::%s label=%s\n' \
@@ -754,6 +854,17 @@ consumer_receipt_provenance_binding() {
         audit_failed=1
         return
     fi
+    if [[ "$receipt_label" == "verify-ffi-v1" ]]; then
+        local compat_context
+        compat_context="$(sed -n '/^pub(crate) fn verify_scalar_route(/,/^pub(crate) fn verify_literal_contracts(/p' "$ROOT_DIR/src/verifier/ffi_compat.rs")"
+        if ! printf '%s\n' "$compat_context" | rg -F 'super::verify_ffi_mir_results_with_route_receipt(mir, source_hash.clone(), &receipt)' >/dev/null \
+            || ! printf '%s\n' "$compat_context" | rg -F 'super::validate_mir_result_provenance(' >/dev/null; then
+            printf 'owner_audit_error=consumer_receipt_invocation_missing=%s::%s label=%s\n' \
+                "$source_file" "$start_function" "$receipt_label" >&2
+            audit_failed=1
+            return
+        fi
+    fi
     printf 'consumer_receipt_provenance_binding=%s graph=canonical provenance=%s consumer=%s::%s\n' \
         "$receipt_label" "$provenance_kind" "$source_file" "$start_function"
 }
@@ -770,7 +881,7 @@ consumer_receipt_provenance_binding \
     'fn verify_ffi_checked_with_source_hash(' \
     'pub fn is_z3_available(' \
     verify-ffi-v1 \
-    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)' \
+    'ffi_compat::verify_scalar_route(program, &canonical, source_hash)' \
     canonical-mir-graph+source-hash
 
 # The direct native entry performs bytecode and verifier preflight before LLVM
@@ -1008,23 +1119,24 @@ consumer_receipt_profile_binding() {
     local end_function="$3"
     local receipt_label="$4"
     local profile_name="$5"
-    local context
-    local expected_mapping
+    local context compat_context
     context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    compat_context="$(sed -n '/^pub(crate) fn verify_scalar_route(/,/^pub(crate) fn verify_literal_contracts(/p' "$ROOT_DIR/src/verifier/ffi_compat.rs")"
     if ! printf '%s\n' "$context" | rg -F "CanonicalMirRouteProfile::${profile_name}" >/dev/null; then
         printf 'owner_audit_error=consumer_receipt_profile_missing=%s::%s label=%s profile=%s\n' \
             "$source_file" "$start_function" "$receipt_label" "$profile_name" >&2
         audit_failed=1
         return
     fi
-    expected_mapping='let receipt_profile = "verify-ffi-v1";'
-    if ! printf '%s\n' "$context" | rg -U -F "$expected_mapping" >/dev/null; then
+    if ! printf '%s\n' "$context" | rg -F 'profile.is_admitted(admission)' >/dev/null \
+        || ! printf '%s\n' "$context" | rg -F 'ffi_compat::verify_scalar_route(program, &canonical, source_hash)' >/dev/null \
+        || ! printf '%s\n' "$compat_context" | rg -F "mir.route_receipt(\"${receipt_label}\")" >/dev/null; then
         printf 'owner_audit_error=consumer_receipt_profile_mapping_missing=%s::%s expected=verify-ffi-v1-on-admitted-scalar-ffi\n' \
             "$source_file" "$start_function" >&2
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$context" | rg -F 'canonical.route_receipt(receipt_profile)' >/dev/null; then
+    if ! printf '%s\n' "$compat_context" | rg -F 'receipt.validate_against_program(mir)' >/dev/null; then
         printf 'owner_audit_error=consumer_receipt_profile_mapping_not_applied=%s::%s\n' \
             "$source_file" "$start_function" >&2
         audit_failed=1
@@ -1048,16 +1160,18 @@ consumer_receipt_profile_binding \
 # only after the independent checked-source census and phase-aware call-site
 # identity join; the MIR consumer still keeps foreign Requires independent.
 owner_slice_ffi_receipt_binding() {
-    local context
+    local context compat_context projection_context source_identity_context
     context="$(sed -n '/^fn verify_isolated_ffi_callers(/,/^fn order_ffi_contract_sites_by_identity(/p' "$ROOT_DIR/src/verifier/mod.rs")"
+    compat_context="$ROOT_DIR/src/verifier/ffi_compat.rs"
+    projection_context="$(sed -n '/^impl FfiVerifierOnlyProjection {/,/^fn checked_body_calls(/p' "$compat_context")"
+    source_identity_context="$(sed -n '/^impl CheckerFfiSourceIdentity {/,/^impl FfiVerifierOnlyProjection {/p' "$compat_context")"
     for pattern in \
-        'canonical.route_receipt("verifier-ffi-owner-slice-v1")' \
-        'canonical.validate_ffi_source_census()' \
+        'ffi_compat::FfiVerifierOnlyProjection::from_checked_caller(' \
+        'projection.verify(program, source_hash.clone(), &selected_ensures)' \
         'ResolvedFfiContractRoot::Ready { node_id }' \
         'contract.ensures_root.as_ref() == Some(node_id)' \
         'selected_ensures.insert(instruction.clone())' \
         'order_ffi_contract_sites_by_identity(' \
-        'verify_ffi_mir_with_selected_ensures_route_receipt(' \
         'modeled_ensures_sites.extend(selected_ensures_sites)'; do
         if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
             printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/mod.rs pattern=%s\n' \
@@ -1066,10 +1180,86 @@ owner_slice_ffi_receipt_binding() {
             return
         fi
     done
+    if ! rg -Fq 'const MIR_FFI_OWNER_SLICE_ROUTE_PROFILE: &str = "verifier-ffi-owner-slice-v1";' "$compat_context"; then
+        printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/ffi_compat.rs pattern=%s\n' \
+            'MIR_FFI_OWNER_SLICE_ROUTE_PROFILE="verifier-ffi-owner-slice-v1"' >&2
+        audit_failed=1
+        return
+    fi
+    for pattern in \
+        'mir.route_receipt(MIR_FFI_OWNER_SLICE_ROUTE_PROFILE)' \
+        'receipt.validate_against_program(&mir)' \
+        'checker_source.validate_mir(&mir)' \
+        'super::verify_ffi_mir_with_selected_ensures_route_receipt('; do
+        if ! printf '%s\n' "$projection_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/ffi_compat.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    if ! printf '%s\n' "$projection_context" | rg -U 'self\.receipt\s*\.validate_against_program\(&self\.mir\)' >/dev/null; then
+        printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/ffi_compat.rs pattern=%s\n' \
+            'self.receipt.validate_against_program(&self.mir)' >&2
+        audit_failed=1
+        return
+    fi
+    if ! printf '%s\n' "$source_identity_context" | rg -F 'mir.validate_ffi_source_census()' >/dev/null; then
+        printf 'owner_audit_error=owner_slice_ffi_receipt_binding_missing=src/verifier/ffi_compat.rs pattern=%s\n' \
+            'mir.validate_ffi_source_census()' >&2
+        audit_failed=1
+        return
+    fi
     printf 'owner_slice_ffi_receipt_binding=verifier-ffi-owner-slice-v1+Requires+selected-Ready-Ensures+phase-identity+checked-source-census consumer=src/verifier/mod.rs::verify_isolated_ffi_callers(\n'
 }
 
 owner_slice_ffi_receipt_binding
+
+dual_ffi_string_record_owner_slice_binding() {
+    local dual_context shared_owner_context owner_context
+    dual_context="$(sed -n '/^pub fn verify_checked_dual(/,/^fn verify_deferred_dual_mir(/p' \
+        "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'verify_dual_isolated_ffi_string_record_owner_slice(program, &source_hash)' \
+        'verify_dual_isolated_ffi_mir_route(program, &source_hash)'; do
+        if ! printf '%s\n' "$dual_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=dual_ffi_string_record_route_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    shared_owner_context="$(sed -n '/^fn isolated_ffi_string_record_owner_slice_callsite(/,/^\/\/\/ Whether the checked program has the exact verifier-only/p' \
+        "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'contract_declarations.len() != 1' \
+        'caller_contract_roots.len() != 1' \
+        'ResolvedFfiParameterMode::Value' \
+        'is_canonical_ffi_verifier_string_record(&signature.result)'; do
+        if ! printf '%s\n' "$shared_owner_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=dual_ffi_string_record_shared_guard_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    owner_context="$(sed -n '/^fn verify_dual_isolated_ffi_string_record_owner_slice(/,/^fn verify_dual_isolated_ffi_mir_route(/p' \
+        "$ROOT_DIR/src/verifier/mod.rs")"
+    for pattern in \
+        'isolated_ffi_string_record_owner_slice_callsite(program)' \
+        'verify_ffi_checked_with_source_hash(program, source_hash.to_owned())' \
+        'verifier-ffi-owner-slice-v1'; do
+        if ! printf '%s\n' "$owner_context" | rg -F "$pattern" >/dev/null; then
+            printf 'owner_audit_error=dual_ffi_string_record_owner_guard_missing=src/verifier/mod.rs pattern=%s\n' \
+                "$pattern" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'dual_ffi_owner_slice_binding=single-top-level-repr-c-string-record+single-caller-requires+exact-checker-callsite+verifier-ffi-owner-slice-v1 consumer=src/verifier/mod.rs::verify_checked_dual\n'
+}
+
+dual_ffi_string_record_owner_slice_binding
 
 # The AST-free bytecode adapter must retain the route receipt that admitted
 # the MIR graph.  Without this hand-off the compile-time receipt check would
@@ -1098,7 +1288,7 @@ bytecode_direct_print_route_adapter_binding() {
     local direct_print_profile_pattern direct_print_validator_pattern
     local direct_print_token_pattern receipt_validation_pattern inner_handoff_pattern
     local inner_call_count
-    adapter_context="$(sed -n '/^pub fn compile_mir_program_with_route_receipt(/,/^pub fn compile_mir_program_with_route_manifest(/p' "$source")"
+    adapter_context="$(sed -n '/^pub fn compile_mir_program_with_route_receipt(/,/^pub fn compile_mir_program_with_ordinary_map_owned_any_v2_direct_print_result_route(/p' "$source")"
     token_context="$(sed -n '/^enum ValidatedOrdinaryMapOwnedAnyV2Route/,/^fn compile_mir_program_inner(/p' "$source")"
     inner_context="$(sed -n '/^fn compile_mir_program_inner(/,/^fn materialize_canonical_ffi_bindings(/p' "$source")"
     direct_print_profile_pattern='receipt\.profile == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE'
@@ -1180,7 +1370,17 @@ bytecode_narrow_map_any_route_adapter() {
     local token_profile_pattern
     local token_declaration_pattern
     local token_context
-    adapter_context="$(sed -n "/^pub fn ${adapter}(/,/^${next_marker}/p" "$ROOT_DIR/src/interp/bytecode/mir.rs")"
+    adapter_context="$(awk -v signature="pub fn ${adapter}(" '
+        index($0, signature) == 1 { in_adapter = 1; start_line = NR; found = 1 }
+        in_adapter && NR > start_line && $0 ~ /^(pub[[:space:]]+)?fn[[:space:]]/ { exit }
+        in_adapter { print }
+        END { if (!found) exit 1 }
+    ' "$ROOT_DIR/src/interp/bytecode/mir.rs")" || {
+        printf 'owner_audit_error=bytecode_narrow_map_any_adapter_missing=src/interp/bytecode/mir.rs::%s pattern=pub-fn-signature\n' \
+            "$adapter" >&2
+        audit_failed=1
+        return
+    }
     token_context="$(sed -n '/^enum ValidatedOrdinaryMapOwnedAnyV2Route/,/^fn compile_mir_program_inner(/p' "$ROOT_DIR/src/interp/bytecode/mir.rs")"
     for pattern in \
         "pub fn ${adapter}(" \
@@ -1401,7 +1601,53 @@ bytecode_narrow_map_any_route_binding() {
         MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE \
         EmptyRootRootQueriesV1
 
-    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=19-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
+    # The two Result-branch routes share one materializer but carry distinct
+    # profiles, typed route-token variants, and VM anchors. Check both public
+    # adapters and the shared receipt validation path explicitly.
+    local result_profile_context result_route_token_context wrapper_context
+    result_profile_context="$(sed -n '/^fn compile_mir_program_with_values_result_crosscall_string_caller_profile(/,/^pub fn compile_mir_program_with_map_root_producer_caller_route(/p' "$mir_source")"
+    result_route_token_context="$(sed -n '/fn expected_profile(self)/,/^    }/p' "$mir_source")"
+    for spec in \
+        'compile_mir_program_with_values_result_crosscall_string_caller_route|ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE|false|ValuesResultCrosscallStringCaller' \
+        'compile_mir_program_with_values_result_crosscall_string_caller_index1_route|ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE|true|ValuesResultCrosscallStringCallerIndex1'; do
+        IFS='|' read -r adapter profile index_flag variant <<< "$spec"
+        wrapper_context="$(sed -n "/^pub fn ${adapter}(/,/^}$/p" "$mir_source")"
+        if ! printf '%s\n' "$wrapper_context" | rg -F "crate::core::mir::${profile}" >/dev/null \
+            || ! printf '%s\n' "$wrapper_context" | rg -F "$index_flag" >/dev/null; then
+            printf 'owner_audit_error=bytecode_result_crosscall_wrapper_profile_missing adapter=%s profile=%s index=%s\n' \
+                "$adapter" "$profile" "$index_flag" >&2
+            audit_failed=1
+        fi
+        if ! printf '%s\n' "$result_profile_context" | rg -F 'validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(' >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -F 'if receipt.profile != expected_profile' >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -F '.validate_against_program(program)' >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -F 'receipt.manifest_round_trip()' >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -F "ValidatedOrdinaryMapOwnedAnyV2Route::${variant}(&receipt)" >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -U 'compile_mir_program_inner\(\s*program,\s*Some\(&receipt\),\s*Some\(route\)\s*\)' >/dev/null; then
+            printf 'owner_audit_error=bytecode_result_crosscall_receipt_binding_missing adapter=%s variant=%s\n' \
+                "$adapter" "$variant" >&2
+            audit_failed=1
+        fi
+        case "$variant" in
+            ValuesResultCrosscallStringCaller)
+                token_pattern='Self::ValuesResultCrosscallStringCaller\(_\) => \{[[:space:]]*crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE[[:space:]]*\}'
+                token_declaration='ValuesResultCrosscallStringCaller(&'
+                ;;
+            ValuesResultCrosscallStringCallerIndex1)
+                token_pattern='Self::ValuesResultCrosscallStringCallerIndex1\(_\) => \{[[:space:]]*crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE[[:space:]]*\}'
+                token_declaration='ValuesResultCrosscallStringCallerIndex1(&'
+                ;;
+        esac
+        if ! printf '%s\n' "$result_route_token_context" | rg -U "$token_pattern" >/dev/null \
+            || ! rg -Fq "$token_declaration" "$mir_source"; then
+            printf 'owner_audit_error=bytecode_result_crosscall_route_token_profile_mismatch variant=%s profile=%s\n' \
+                "$variant" "$profile" >&2
+            audit_failed=1
+        fi
+    done
+    printf 'bytecode_result_crosscall_route_binding=V3-index0+V4-index1->separate-profile+validated-Checker-MIR-receipt+typed-token+VM-anchor consumer=src/interp/bytecode/mir.rs+src/interp/bytecode/vm.rs\n'
+
+    printf 'bytecode_ordinary_map_owned_any_v2_route_binding=21-dedicated-adapters->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_inner(\n'
     printf 'bytecode_record_unit_route_binding=ordinary-map-owned-any-v2-record-unit-v1->Checker-validated-adapter+RecordUnit-token+validated-narrow-route consumer=src/interp/bytecode/mir.rs\n'
     printf 'bytecode_map_empty_root_root_queries_v1_route_binding=1-dedicated-adapter->ValidatedOrdinaryMapOwnedAnyV2Route-third-argument+exact-profile-guard consumer=src/interp/bytecode/mir.rs::compile_mir_program_with_empty_root_root_queries_v1_route(\n'
 }
@@ -1524,7 +1770,7 @@ bytecode_observer_v1_route_receipt_binding() {
     local native_source="$ROOT_DIR/src/codegen/mir/eligibility.rs"
     local build_source="$ROOT_DIR/src/main/build.rs"
     local inner_context observer_nodes_context observer_anchor_context profile_context
-    local main_profile_context main_route_context materialization_context preflight_context
+    local main_profile_context main_profile_context_without_result main_route_context materialization_context preflight_context
     local native_context native_receipt_adapter checked_native_receipt_adapter build_route_context
     local profile_pattern observer_pattern anchor_pattern main_profile_pattern main_route_pattern
     inner_context="$(sed -n '/^fn compile_mir_program_inner(/,/^fn materialize_canonical_ffi_bindings(/p' "$source")"
@@ -1532,6 +1778,49 @@ bytecode_observer_v1_route_receipt_binding() {
     observer_anchor_context="$(printf '%s\n' "$inner_context" | sed -n '/if let (Some(route_receipt), Some(checker_receipts)) = (/,/observer_bindings,/p')"
     profile_context="$(sed -n '/^impl CanonicalMirRouteProfile {/,/^    \/\/\/ Return whether checker-owned/p' "$route_source")"
     main_profile_context="$(sed -n '/^pub(crate) fn route_receipt_profile_for_checked(/,/^}/p' "$dispatcher")"
+    # Strip only the three newer Result-branch prefix guards (and explanatory
+    # leading comments inside that prefix) after validating each guard
+    # independently below, leaving the established ordered selector contract intact.
+    main_profile_context_without_result="$(printf '%s\n' "$main_profile_context" | awk '
+        /^[[:space:]]*\/\// { next }
+        /^[[:space:]]*if admission$/ {
+            if (getline line2 <= 0) { print; exit }
+            if (getline line3 <= 0) { print; print line2; exit }
+            if (line2 ~ /\.ordinary_map_owned_any_v2$/ && line3 ~ /\.ordinary_map_owned_any_v2_values_local_index_i32_result_branch\(\)$/) {
+                while (getline body > 0 && body !~ /^[[:space:]]*}[[:space:]]*$/) {}
+                next
+            }
+            print
+            print line2
+            print line3
+            next
+        }
+        /^[[:space:]]*if checked$/ {
+            if (getline line2 <= 0) { print; exit }
+            if (getline line3 <= 0) { print; print line2; exit }
+            if (getline line4 <= 0) { print; print line2; print line3; exit }
+            if (line2 ~ /\.resource_analyses\(\)$/ && line3 ~ /\.values\(\)$/ && line4 ~ /\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)$/) {
+                while (getline body > 0 && body !~ /^[[:space:]]*}[[:space:]]*$/) {}
+                next
+            }
+            print
+            print line2
+            print line3
+            print line4
+            next
+        }
+        /if admission\.ordinary_map_owned_any_v2$/ {
+            if (getline condition <= 0) exit
+            if (condition ~ /OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult/) {
+                while (getline body > 0 && body !~ /^[[:space:]]*}[[:space:]]*$/) {}
+                next
+            }
+            print
+            print condition
+            next
+        }
+        { print }
+    ')"
     main_route_context="$(sed -n '/^fn select_default_route_inner(/,/^fn select_scalar_actor_route(/p' "$dispatcher")"
     materialization_context="$(sed -n '/^fn ordinary_map_owner_lifecycle_observer_v1_materialization_is_exact(/,/^\/\/\/ Revalidate the Checker-derived Observer V1/p' "$dispatcher")"
     preflight_context="$(sed -n '/^fn preflight_ordinary_map_owner_lifecycle_observer_v1(/,/^fn select_ordinary_map_owner_lifecycle_observer_v1_route(/p' "$dispatcher")"
@@ -1546,7 +1835,7 @@ bytecode_observer_v1_route_receipt_binding() {
     profile_pattern='const ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE:\s*&str\s*=\s*crate::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnerLifecycleObserverV1\s*\.as_str\(\);'
     observer_pattern='let ordinary_map_owner_observer_v1_receipts = match route_receipt \{\s*Some\(receipt\) if receipt\.profile == ORDINARY_MAP_OWNER_OBSERVER_V1_PROFILE => \{[\s\S]*?receipt\.validate_against_program\(program\)[\s\S]*?validate_ordinary_map_owner_lifecycle_observer_v1_mir_route\(\s*program,?\s*\)[\s\S]*?Some\(receipts\)\s*\}\s*_ if has_observer_mir_nodes => \{[\s\S]*?instructions require the exact route receipt[\s\S]*?\}\s*_\s*=> None,\s*\};'
     anchor_pattern='bind_ordinary_map_owner_observer_v1_route_anchor\(\s*entry,\s*&functions,\s*&builtin_names,\s*route_receipt,\s*checker_receipts\.clone\(\),\s*observer_bindings,'
-    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_set_result_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_new_result_route_candidate\(checked\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_persistent_root_alias_replacement\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_get_or_default_string\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE;\s*}'
+    main_profile_pattern='let admission\s*=\s*mimi::core::mir::classify_canonical_mir_route_admission\(checked\);\s*if admission\.ordinary_map_owned_any_v2\.is_direct_print_result\(\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult\s*\.as_str\(\)\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l1_reference_candidate\(\s*checked,?\s*\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L1_CORE_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_owned_any_v2_direct_tuple_get_unpack_l2_candidate\(checked\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_DIRECT_TUPLE_GET_UNPACK_L2_VERIFIER_PROFILE;\s*\}\s*if mimi::core::mir::has_ordinary_map_set_get_any_result_i32_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_set_get_any_i32_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_set_get_string_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_STRING_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_set_get_i32_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_GET_I32_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_set_result_route_candidate\(checked\)\s*\{\s*return if default_profile == "verify-canonical-v1"\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE\s*\}\s*else\s*\{\s*mimi::core::mir::ORDINARY_MAP_SET_RESULT_EXECUTION_PROFILE\s*\};\s*\}\s*if mimi::core::mir::has_ordinary_map_new_result_route_candidate\(checked\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_NEW_RESULT_EXECUTION_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_persistent_root_alias_replacement\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE;\s*\}\s*if admission\.ordinary_map_owned_any_v2_get_or_default_string\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_STRING_PROFILE;\s*}'
     main_profile_pattern+="\\s*if admission\\.ordinary_map_owned_any_v2_get_or_default_i32\\(\\)\\s*\\{\\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_GET_OR_DEFAULT_I32_PROFILE;\\s*\\}"
     main_profile_pattern+="\\s*if admission\\.ordinary_map_owned_any_v2_removed_key_checked_miss\\(\\)\\s*\\{\\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_REMOVED_KEY_CHECKED_MISS_PROFILE;\\s*\\}"
     main_profile_pattern+='\s*if admission\.ordinary_map_owned_any_v2_zero_miss_i32\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE;\s*\}'
@@ -1589,11 +1878,11 @@ bytecode_observer_v1_route_receipt_binding() {
     main_profile_pattern+='\s*else if mimi::codegen::has_static_generic_trait_specialization_candidate\(checked\)\s*\{\s*mimi::codegen::STATIC_GENERIC_TRAIT_SPECIALIZATION_ROUTE_PROFILE\s*\}\s*else\s*\{\s*default_profile\s*\}'
     main_route_pattern='let observer_admission = admission\.ordinary_map_owner_lifecycle_observer_v1;[\s\S]*?if observer_admission\.has_profile_signal\(\) && !observer_admission\.is_complete\(\)[\s\S]*?if observer_admission\.is_complete\(\)\s*\{\s*return match materialize_canonical_route\(checked, merged_file\)\s*\{\s*Ok\(route\)\s*if ordinary_map_owner_lifecycle_observer_v1_materialization_is_exact\(&route\)\s*=>\s*\{\s*select_ordinary_map_owner_lifecycle_observer_v1_route\(checked, route\.program\)'
     local selector_profile_count
-    selector_profile_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller([^[:alnum:]_])|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootGetAnyCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(GET_OR_DEFAULT_I32_PROFILE|GET_OR_DEFAULT_STRING_PROFILE|REMOVED_KEY_CHECKED_MISS_PROFILE|ZERO_MISS_I32_PROFILE|KEYS_SNAPSHOT_PROFILE|DYNAMIC_KEYS_GET_PROFILE|IS_EMPTY_PROFILE|RECORD_UNIT_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE|VALUES_LOCAL_INDEX_I32_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || printf '0')"
+    selector_profile_count="$(printf '%s\n' "$main_profile_context_without_result" | rg -U --count-matches 'MAP_EMPTY_ROOT_ROOT_QUERIES_V1_PROFILE|ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1|OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller([^[:alnum:]_])|OrdinaryMapOwnedAnyV2ValuesProducerCaller|OrdinaryMapOwnedAnyV2MapRootGetAnyCaller|OrdinaryMapOwnedAnyV2MapRootProducerCaller|ORDINARY_MAP_OWNED_ANY_V2_(GET_OR_DEFAULT_I32_PROFILE|GET_OR_DEFAULT_STRING_PROFILE|REMOVED_KEY_CHECKED_MISS_PROFILE|ZERO_MISS_I32_PROFILE|KEYS_SNAPSHOT_PROFILE|DYNAMIC_KEYS_GET_PROFILE|IS_EMPTY_PROFILE|RECORD_UNIT_PROFILE|MAP_SET_DROP_CONTROL_PROFILE|BRANCH_LOCAL_SET_DIAMOND_PROFILE|CLONE_ISOLATION_PROFILE|PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE|DIRECT_PRINT_PROFILE|CHECKED_GET_PROFILE|COMPUTED_KEY_GET_PROFILE|COMPUTED_STRING_KEY_OWNER_CHAIN_PROFILE|VALUES_FIELD_MOVE_PROFILE|VALUES_HETEROGENEOUS_STRING_INDEX1_PROFILE|VALUES_LOCAL_INDEX_I32_PROFILE|VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE|VALUES_SNAPSHOT_REPLACEMENT_PROFILE|VALUES_MIXED_SNAPSHOT_PROFILE)' || printf '0')"
     local values_crosscall_v1_selector_count
     local values_crosscall_v2_selector_count
-    values_crosscall_v1_selector_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)' || printf '0')"
-    values_crosscall_v2_selector_count="$(printf '%s\n' "$main_profile_context" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)' || printf '0')"
+    values_crosscall_v1_selector_count="$(printf '%s\n' "$main_profile_context_without_result" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller\s*\.as_str\(\)' || printf '0')"
+    values_crosscall_v2_selector_count="$(printf '%s\n' "$main_profile_context_without_result" | rg -U --count-matches 'OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1\s*\.as_str\(\)' || printf '0')"
     if ! printf '%s\n' "$inner_context" | rg -U "$profile_pattern" >/dev/null \
         || ! printf '%s\n' "$profile_context" | rg -U 'Self::OrdinaryMapOwnerLifecycleObserverV1\s*=>\s*\{\s*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE\s*\}' >/dev/null \
         || ! rg -U 'pub use super::receipt::\{\s*[^}]*ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_PROFILE[^}]*\};' "$route_source" >/dev/null \
@@ -1606,7 +1895,10 @@ bytecode_observer_v1_route_receipt_binding() {
         || [ "$selector_profile_count" -ne 29 ] \
         || [ "$values_crosscall_v1_selector_count" -ne 1 ] \
         || [ "$values_crosscall_v2_selector_count" -ne 1 ] \
-        || ! printf '%s\n' "$main_profile_context" | rg -U "$main_profile_pattern" >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\s*\.ordinary_map_owned_any_v2\s*\.ordinary_map_owned_any_v2_values_local_index_i32_result_branch\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if checked\s*\.resource_analyses\(\)\s*\.values\(\)\s*\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context_without_result" | rg -U "$main_profile_pattern" >/dev/null \
         || ! printf '%s\n' "$main_route_context" | rg -U "$main_route_pattern" >/dev/null \
         || ! printf '%s\n' "$materialization_context" | rg -F 'route.materialized_ordinary_map_owner_lifecycle_observer_v1_candidate' >/dev/null \
         || ! printf '%s\n' "$materialization_context" | rg -F 'ordinary_map_owner_lifecycle_observer_v1_route_receipt' >/dev/null \
@@ -1958,15 +2250,19 @@ source_hash_parameter_binding() {
     local end_function="$3"
     local parameter_pattern="$4"
     local invocation_pattern="$5"
-    local context
+    local context compat_context
     context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
+    compat_context="$(sed -n '/^pub(crate) fn verify_scalar_route(/,/^pub(crate) fn verify_literal_contracts(/p' "$ROOT_DIR/src/verifier/ffi_compat.rs")"
     if ! printf '%s\n' "$context" | rg -F "$parameter_pattern" >/dev/null; then
         printf 'owner_audit_error=source_hash_parameter_missing=%s::%s\n' \
             "$source_file" "$start_function" >&2
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$context" | rg -F "$invocation_pattern" >/dev/null; then
+    if ! printf '%s\n' "$context" | rg -F "$invocation_pattern" >/dev/null \
+        || ! printf '%s\n' "$compat_context" | rg -F "$parameter_pattern" >/dev/null \
+        || ! printf '%s\n' "$compat_context" | rg -F 'super::verify_ffi_mir_results_with_route_receipt(mir, source_hash.clone(), &receipt)' >/dev/null \
+        || ! printf '%s\n' "$compat_context" | rg -F 'super::validate_mir_result_provenance(' >/dev/null; then
         printf 'owner_audit_error=source_hash_parameter_forward_missing=%s::%s\n' \
             "$source_file" "$start_function" >&2
         audit_failed=1
@@ -1981,7 +2277,7 @@ source_hash_parameter_binding \
     'fn verify_ffi_checked_with_source_hash(' \
     'pub fn is_z3_available(' \
     'source_hash: String' \
-    'verify_ffi_mir_with_route_receipt(&canonical, &receipt, source_hash)'
+    'ffi_compat::verify_scalar_route(program, &canonical, source_hash)'
 
 # Keep the FFI MIR adapter's proof artifacts sourced from the same hash passed
 # into the MIR verifier.  The route-level check above proves the caller passes
@@ -2314,11 +2610,11 @@ if ! rg -q '^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_c
 else
     emit_closed_scalar_marker 'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers'
     if ! sed -n "/^[[:space:]]*fn scalar_ffi_c_abi_and_side_effect_order_match_three_consumers(/,/^[[:space:]]*#\[test\]/p" \
-        "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs" | rg 'test_legacy_body_access\(\)\.is_empty\(\)' >/dev/null; then
-        printf 'owner_audit_error=closed_scalar_zero_owner_evidence_missing_empty_legacy_assertion\n' >&2
+        "$ROOT_DIR/src/tests/canonical_scalar_ffi.rs" | rg -F 'CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route)' >/dev/null; then
+        printf 'owner_audit_error=closed_scalar_zero_owner_evidence_missing_canonical_route_assertion\n' >&2
         audit_failed=1
     else
-        emit_closed_scalar_marker 'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()'
+        emit_closed_scalar_marker 'closed_scalar_zero_owner_evidence_marker=CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route)'
     fi
 fi
 
@@ -2365,7 +2661,7 @@ fi
 
 expected_closed_scalar_marker_sequence=(
     'closed_scalar_zero_owner_evidence=src/tests/canonical_scalar_ffi.rs::scalar_ffi_c_abi_and_side_effect_order_match_three_consumers'
-    'closed_scalar_zero_owner_evidence_marker=test_legacy_body_access().is_empty()'
+    'closed_scalar_zero_owner_evidence_marker=CanonicalMirRouteProfile::ScalarFfi.is_materialized(&route)'
     'closed_scalar_cli_evidence=tests/real_world_cli.rs::canonical_scalar_ffi_default_cli_transports_all_abis_with_and_without_contracts'
     'closed_scalar_cli_matrix_marker=contracts:[true, false];explicit_mir:[false, true]'
     'closed_scalar_cli_abi_marker=mir_ffi_i32,mir_ffi_i64,mir_ffi_bool,mir_ffi_f32,mir_ffi_f32_code,mir_ffi_f64,mir_ffi_store;legacy_route_asserted_absent'
@@ -2422,173 +2718,314 @@ require_codegen_closed_route_tripwire() {
 require_codegen_closed_route_tripwire \
     dynamic-trait \
     compile_checked_rejects_dynamic_protocol_method_without_legacy_owner \
-    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
-    'test_legacy_body_access().is_empty()'
+    'MIR_ROUTE_COVERAGE_ERROR_CODE'
 require_codegen_closed_route_tripwire \
     flow-transition \
     compile_checked_routes_multi_transition_flow_through_canonical_mir \
-    'test_legacy_body_access().is_empty()' \
     'canonical multi-transition Flow must emit main'
 require_codegen_closed_route_tripwire \
     trait-impl-specialization \
     compile_checked_rejects_trait_impl_specialization_without_legacy_owner \
-    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
-    'test_legacy_body_access().is_empty()'
+    'MIR_ROUTE_COVERAGE_ERROR_CODE'
 require_codegen_closed_route_tripwire \
     nested-function-body \
     compile_checked_routes_captured_nested_helper_without_legacy_owner \
     'nested_callable_scopes().len()' \
     'canonical MIR default route' \
-    'test_legacy_body_access().is_empty()' \
     'test_legacy_codegen_function_calls().is_empty()'
 require_codegen_closed_route_tripwire \
     export-wrapper \
     compile_checked_routes_scalar_export_wrapper_without_legacy_access \
-    'test_legacy_body_access().is_empty()' \
+    'classify_canonical_mir_route_admission(&program).scalar_export' \
     'owner_tripwire_export'
 require_codegen_closed_route_tripwire \
     actor-method \
     compile_checked_routes_scalar_actor_through_canonical_mir_without_legacy_access \
     'CanonicalMirRouteProfile::ScalarActor' \
-    'Vec::<crate::core::LegacyBodyConsumer>::new()' \
+    'route.admission.scalar_actor' \
+    'actor_execution_plan()' \
     'OwnerTripwireWorker__read__method'
 require_codegen_closed_route_tripwire \
     actor-method-rejected \
     compile_checked_rejects_contract_bearing_actor_without_legacy_owner \
-    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
-    'test_legacy_body_access().is_empty()'
+    'scalar_actor_contract_boundary_reason(&program)'
 require_codegen_closed_route_tripwire \
-    map-any-owned \
-    compile_checked_routes_closed_map_any_owner_v1_without_legacy_access \
-    'test_legacy_body_access().is_empty()' \
-    'MapAnyOwnerAdmission::CompleteCoverage'
+    map-any-native-hard-gate \
+    compile_checked_fails_closed_on_reachable_map_any_unpack \
+    'expect_err("native compilation must not truncate a stored String into i32")' \
+    'Some(crate::diagnostic::codes::E0722)' \
+    'runtime Any value has no checked tag'
 require_codegen_closed_route_tripwire \
     map-any-rejected \
     compile_checked_rejects_map_any_borrowed_access_without_legacy_owner \
-    'MIR_ROUTE_COVERAGE_ERROR_CODE' \
-    'test_legacy_body_access().is_empty()'
-require_direct_mir_no_legacy_tripwire() {
+    'MIR_ROUTE_COVERAGE_ERROR_CODE'
+require_direct_mir_behavior_tripwire() {
     local test_name="$1"
     local body
     body="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
         "$ROOT_DIR/src/codegen/tests.rs")"
     if [ -z "$body" ]; then
-        printf 'owner_audit_error=missing_direct_mir_no_legacy_tripwire test=%s\n' \
+        printf 'owner_audit_error=missing_direct_mir_behavior_tripwire test=%s\n' \
             "$test_name" >&2
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$body" | rg 'reset_test_legacy_body_access\(\)' >/dev/null; then
-        printf 'owner_audit_error=direct_mir_no_legacy_tripwire_missing_reset test=%s\n' \
+    if ! printf '%s\n' "$body" | rg -F 'is_exact_s8_flow_transition(&program)' >/dev/null \
+        || ! printf '%s\n' "$body" | rg -F '__mimi_transition_Counter__inc__Zero' >/dev/null; then
+        printf 'owner_audit_error=direct_mir_behavior_tripwire_missing_flow_and_emission test=%s\n' \
             "$test_name" >&2
         audit_failed=1
         return
     fi
-    if ! printf '%s\n' "$body" | rg 'test_legacy_body_access\(\)\.is_empty\(\)' >/dev/null; then
-        printf 'owner_audit_error=direct_mir_no_legacy_tripwire_missing_empty_assertion test=%s\n' \
-            "$test_name" >&2
-        audit_failed=1
-        return
-    fi
-    printf 'direct_mir_no_legacy_tripwire=%s\n' "$test_name"
+    printf 'direct_mir_behavior_tripwire=%s\n' "$test_name"
 }
 
-require_direct_mir_no_legacy_tripwire \
+require_direct_mir_behavior_tripwire \
     compile_checked_routes_exact_s8_flow_through_canonical_mir
 
-owner_count=0
-condition_inventory=''
-for owner in \
-    CodegenLegacyRemainder \
-    FfiVerifierCompatibility; do
-    owner_count=$((owner_count + 1))
-    matches="$(rg -n \
-        --glob '*.rs' \
-        --glob '!**/tests.rs' \
-        --glob '!src/tests/**' \
-        "legacy_body_file\\([^)]*LegacyBodyConsumer::${owner}" \
-        "$SRC_DIR" || true)"
-    count=0
-    if [ -n "$matches" ]; then
-        count="$(printf '%s\n' "$matches" | wc -l)"
-    fi
-    printf 'owner=%s production_accessor_call_sites=%s\n' "$owner" "$count"
-    if [ -n "$matches" ]; then
-        printf '%s\n' "$matches"
-    fi
-    if [ "$count" -ne "$EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES" ]; then
-        printf 'owner_audit_error=%s expected_accessor_call_sites=%s actual=%s\n' \
-            "$owner" "$EXPECTED_PRODUCTION_OWNER_ACCESSOR_CALL_SITES" "$count" >&2
-        audit_failed=1
-    fi
-    case "$owner" in
-        CodegenLegacyRemainder)
-            dependency_class='legacy-codegen-remainder'
-            deletion_blocker='cfg(test) compatibility adapters and the surface body compiler remain retained'
-            condition='delete after cfg(test) legacy codegen adapters and the surface body compiler are removed; the production owner is already closed'
-            ;;
-        FfiVerifierCompatibility)
-            dependency_class='ffi-declaration-compatibility'
-            deletion_blocker='canonical MIR proofs remain limited to admitted ScalarFfi and verifier-only owner slices; uncovered declarations and call-site contexts remain, with test-only AST oracles retained'
-            condition='retire test oracles after canonical MIR receipts and proofs cover every FFI declaration and call-site obligation'
-            ;;
-    esac
-    if [ "$count" -eq 0 ]; then
-        production_access_status='sealed'
-        accessor_blocker='no production accessor'
-    else
-        production_access_status='open'
-        accessor_blocker='production accessor remains reachable'
-    fi
-    # Accessor reachability is only one deletion prerequisite. Keep the
-    # readiness gate conservative until a migration explicitly proves the
-    # owner-specific condition above; a zero accessor count alone must never
-    # be reported as permission to delete the owner.
-    deletion_ready=0
-    condition_digest="$(printf '%s' "$condition" | sha256sum | awk '{print $1}')"
-    case "$owner" in
-        CodegenLegacyRemainder)
-            expected_condition_digest="$EXPECTED_CODEGEN_OWNER_CONDITION_DIGEST"
-            ;;
-        FfiVerifierCompatibility)
-            expected_condition_digest="$EXPECTED_FFI_VERIFIER_OWNER_CONDITION_DIGEST"
-            ;;
-    esac
-    printf 'owner=%s owner_deletion_condition_digest=%s\n' "$owner" "$condition_digest"
-    if [ "$condition_digest" != "$expected_condition_digest" ]; then
-        printf 'owner_audit_error=%s owner_deletion_condition_digest expected=%s actual=%s\n' \
-            "$owner" "$expected_condition_digest" "$condition_digest" >&2
-        audit_failed=1
-    fi
-    condition_inventory+="${owner}=${condition_digest}"$'\n'
-    printf 'owner=%s production_access_status=%s dependency_class=%s owner_deletion_ready=%s owner_deletion_blocker=%s; %s\n' \
-        "$owner" "$production_access_status" "$dependency_class" "$deletion_ready" "$accessor_blocker" "$deletion_blocker"
-    printf 'owner_deletion_condition=%s\n' "$condition"
-done
-condition_set_digest="$(printf '%s' "$condition_inventory" | sha256sum | awk '{print $1}')"
-printf 'owner_deletion_condition_set_digest=%s\n' "$condition_set_digest"
-if [ "$condition_set_digest" != "$EXPECTED_OWNER_CONDITION_SET_DIGEST" ]; then
-    printf 'owner_audit_error=owner_deletion_condition_set_digest expected=%s actual=%s\n' \
-        "$EXPECTED_OWNER_CONDITION_SET_DIGEST" "$condition_set_digest" >&2
-    audit_failed=1
-fi
+# A direct native CodeGenerator API must reject reachable DynamicAnyUnpack
+# before it can create an LLVM entry point. The same fixture also proves that
+# strict Resolved-native and public subset APIs cannot bypass that gate. Keep
+# the exact test in the reproducible probe runner so this source contract is
+# paired with an executed direct probe before the audit can be accepted.
+map_any_native_codegen_direct_probe_contract() {
+    local test_name=compile_checked_fails_closed_on_reachable_map_any_unpack
+    local body="$ROOT_DIR/src/codegen/tests.rs"
+    local context
+    context="$(sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" "$body")"
+    for marker in \
+        '.compile_checked(&program)' \
+        'Some(crate::diagnostic::codes::E0722)' \
+        'compile_resolved_native(&program)' \
+        'compile_resolved_subset(&program' \
+        'public subset API must not bypass the reachable Any hard gate'; do
+        if ! printf '%s\n' "$context" | rg -F "$marker" >/dev/null; then
+            printf 'owner_audit_error=map_any_native_codegen_direct_contract_missing test=%s marker=%s\n' \
+                "$test_name" "$marker" >&2
+            audit_failed=1
+            return
+        fi
+    done
+    printf 'map_any_native_codegen_direct_probe_contract=direct-CheckedProgram-API+E0722+strict-Resolved+subset-hard-gates test=codegen::tests::%s\n' \
+        "$test_name"
+}
 
-body_refs="$(rg -n \
-    --glob '*.rs' \
-    --glob '!**/tests.rs' \
-    --glob '!src/tests/**' \
-    'legacy_body_file\(' \
-    "$SRC_DIR" | rg -v ':[0-9]+:[[:space:]]*(//|.*fn legacy_body_file)' || true)"
-body_count=0
-if [ -n "$body_refs" ]; then
-    body_count="$(printf '%s\n' "$body_refs" | wc -l)"
-fi
-printf 'production_legacy_body_file_call_sites=%s\n' "$body_count"
-if [ "$body_count" -ne "$EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES" ]; then
-    printf 'owner_audit_error=production_legacy_body_file_call_sites expected=%s actual=%s\n' \
-        "$EXPECTED_PRODUCTION_LEGACY_BODY_CALL_SITES" "$body_count" >&2
-    audit_failed=1
-fi
+map_any_native_codegen_direct_probe_contract
+
+audit_original_legacy_owner_gates() {
+    local build_legacy_context flow_context ffi_context native_checked_context codegen_probe_context
+    local native_ast_entry_defs native_ast_body_defs
+    local owner production_edge consumer_edge migration coverage scope blocker row path actual_roster=''
+    local expected_roster='CodegenLegacyRemainder,FlowVerifierCompatibility,FfiVerifierCompatibility,DualVerifierCompatibility'
+    local owner_count=0
+    local -a rows=()
+
+    build_legacy_context="$(sed -n '/DefaultMirRoute::Legacy/,/DefaultMirRoute::Rejected/p' \
+        "$ROOT_DIR/src/main/build.rs")"
+    if ! printf '%s\n' "$build_legacy_context" | rg -F 'codegen.compile_checked(&checked_program)' >/dev/null; then
+        printf 'owner_audit_error=CodegenLegacyRemainder_production_call_edge_missing=src/main/build.rs::DefaultMirRoute::Legacy->codegen.compile_checked\n' >&2
+        audit_failed=1
+    fi
+    for path in src/main/run.rs src/main/test.rs src/main/disasm_cmd.rs; do
+        if ! rg -Fq 'DefaultMirRoute::Legacy' "$ROOT_DIR/$path" \
+            || ! rg -Fq '.compile_file(' "$ROOT_DIR/$path" \
+            || ! rg -Fq 'report_legacy_route' "$ROOT_DIR/$path"; then
+            printf 'owner_audit_error=CodegenLegacyRemainder_legacy_consumer_edge_missing path=%s\n' "$path" >&2
+            audit_failed=1
+        fi
+    done
+    native_ast_entry_defs="$(rg -n \
+        '^[[:space:]]*(pub\([^)]*\)[[:space:]]+)?(pub[[:space:]]+)?fn (compile_file|compile_file_inner|compile_file_with_resolved)\(' \
+        "$ROOT_DIR/src/codegen/compile.rs" || true)"
+    if [ -n "$native_ast_entry_defs" ]; then
+        printf 'owner_audit_error=CodegenLegacyRemainder_native_file_ast_entry_remains\n%s\n' \
+            "$native_ast_entry_defs" >&2
+        audit_failed=1
+    fi
+    native_ast_body_defs="$(rg -n \
+        '^[[:space:]]*(pub\([^)]*\)[[:space:]]+)?(pub[[:space:]]+)?fn (compile_func_legacy|compile_generic_func|compile_func_body|emit_return|emit_implicit_return|declare_func|legacy_param_llvm_type|bind_func_params)\(' \
+        "$ROOT_DIR/src/codegen/func.rs" || true)"
+    if [ -n "$native_ast_body_defs" ]; then
+        printf 'owner_audit_error=CodegenLegacyRemainder_native_ast_body_emitter_remains\n%s\n' \
+            "$native_ast_body_defs" >&2
+        audit_failed=1
+    fi
+    native_checked_context="$(sed -n '/pub fn compile_checked(/,/fn try_compile_exact_migrated_mir_island(/p' \
+        "$ROOT_DIR/src/codegen/compile.rs")"
+    if printf '%s\n' "$native_checked_context" \
+        | rg -q '\.legacy_body_file[[:space:]]*\(|\.compile_file_inner[[:space:]]*\(|\.compile_func_legacy[[:space:]]*\(|\.compile_generic_func[[:space:]]*\('; then
+        printf 'owner_audit_error=CodegenLegacyRemainder_checked_native_boundary_reopened_AST_emitter\n' >&2
+        audit_failed=1
+    fi
+    codegen_probe_context="$(sed -n \
+        '/^[[:space:]]*fn native_checked_boundary_preserves_positive_rejection_and_bytecode_compatibility(/,/^[[:space:]]*#\[test\]/p' \
+        "$ROOT_DIR/src/codegen/tests.rs")"
+    for marker in \
+        '.compile_checked(&positive)' \
+        '.compile_checked(&compatibility)' \
+        'test_legacy_codegen_function_calls().is_empty()' \
+        'BytecodeCompiler::new()' \
+        'bytecode_program.ast.is_some()' \
+        'crate::interp::Value::Int(41)'; do
+        if ! printf '%s\n' "$codegen_probe_context" | rg -F "$marker" >/dev/null; then
+            printf 'owner_audit_error=CodegenLegacyRemainder_direct_compatibility_probe_missing marker=%s\n' \
+                "$marker" >&2
+            audit_failed=1
+            break
+        fi
+    done
+    printf 'native_codegen_ast_fifth_pass=physically-retired production_file_ast_entry=0 cfg_test_adapter=0 old_body_emitter=0 direct_probe=codegen::tests::native_checked_boundary_preserves_positive_rejection_and_bytecode_compatibility\n'
+    printf 'default_bytecode_ast_compatibility=reachable status=open consumers=src/main/run.rs+src/main/test.rs+src/main/disasm_cmd.rs\n'
+
+    if ! rg -Fq 'mimi::verifier::verify_checked_dual(&checked_program' "$ROOT_DIR/src/main/verify.rs" \
+        || ! rg -Fq 'mimi::verifier::verify_checked(&checked_program' "$ROOT_DIR/src/main/verify.rs"; then
+        printf 'owner_audit_error=FlowVerifierCompatibility_production_call_edge_missing=src/main/verify.rs::verify_checked_dual+verify_checked\n' >&2
+        audit_failed=1
+    fi
+    flow_context="$(sed -n '/^pub fn verify_checked(/,/^\/\/\/ Parse source and verify extern call sites/p' \
+        "$ROOT_DIR/src/verifier/mod.rs")"
+    if ! printf '%s\n' "$flow_context" | rg -F 'return Ok(verifier.verify_checked(program));' >/dev/null \
+        || ! printf '%s\n' "$flow_context" | rg -F 'if actor_compatibility' >/dev/null; then
+        printf 'owner_audit_error=FlowVerifierCompatibility_legacy_consumer_edge_missing=verify_checked_actor_compatibility_fallback\n' >&2
+        audit_failed=1
+    fi
+
+    if ! rg -Fq 'verify_ffi_checked_with_source_hash(' "$ROOT_DIR/src/main/verify.rs"; then
+        printf 'owner_audit_error=FfiVerifierCompatibility_production_call_edge_missing=src/main/verify.rs->verify_ffi_checked_with_source_hash\n' >&2
+        audit_failed=1
+    fi
+    ffi_context="$(sed -n '/^pub fn verify_ffi_checked_with_source_hash(/,/^fn verify_ffi_checked_with_source_hash_and_z3_override(/p' \
+        "$ROOT_DIR/src/verifier/mod.rs")"
+    if ! printf '%s\n' "$ffi_context" | rg -F 'verify_ffi_checked_with_source_hash_and_z3_override(program, source_hash, None)' >/dev/null \
+        || ! rg -Fq 'verify_ffi_checked_body_with_source_hash_and_z3_override(' "$ROOT_DIR/src/verifier/mod.rs"; then
+        printf 'owner_audit_error=FfiVerifierCompatibility_legacy_consumer_edge_missing=checked_ffi_body_consumer\n' >&2
+        audit_failed=1
+    fi
+
+    if ! rg -Fq 'mimi::verifier::verify_checked_dual(&checked_program' "$ROOT_DIR/src/main/verify.rs" \
+        || ! rg -Fq 'let mut resolved_results = primary.verify_checked(program);' "$ROOT_DIR/src/verifier/mod.rs" \
+        || ! rg -Fq 'mir_request::verify(&request, program' "$ROOT_DIR/src/verifier/mod.rs"; then
+        printf 'owner_audit_error=DualVerifierCompatibility_production_or_consumer_edge_missing=default-dual-entry+Resolved-primary+MIR-secondary\n' >&2
+        audit_failed=1
+    fi
+
+    rows+=(
+        'CodegenLegacyRemainder|src/main/build.rs::DefaultMirRoute::Legacy->codegen.compile_checked[checked-native-MIR-or-Resolved-or-coverage;no-surface-AST-body]|src/codegen/compile.rs::CodeGenerator.compile_checked->MIR-or-Resolved-checked-native-consumer[old-body-edge-absent]|open|partial|native-AST-fifth-pass+test-adapters+orphan-body-physically-retired;original-Codegen-capability-coverage-remains-partial|original-Codegen-supported-capability-migration-and-behavior-regression-not-fully-proven'
+        'FlowVerifierCompatibility|src/main/verify.rs::verify_checked_dual->verifier.verify_checked_dual;verify_checked|src/verifier/mod.rs::verify_checked[actor_compatibility]->Verifier.verify_checked|open|partial|selected-flow-parity-tests;actor-compatibility-fallback-remains|whole-Flow-proof-coverage-is-unproven-and-actor-compatibility-fallback-remains'
+        'FfiVerifierCompatibility|src/main/verify.rs::ExportedAbiBodyCompatibility->verify_ffi_checked_with_source_hash|src/verifier/mod.rs::verify_ffi_checked_with_source_hash->verify_ffi_checked_body_with_source_hash_and_z3_override|open|partial|ScalarFfi+verifier-only-String-record-slice;unsupported-Ensures-deferred|unsupported-call-contexts-and-Ensures-remain-deferred'
+        'DualVerifierCompatibility|src/main/verify.rs::default-verify->verify_checked_dual|src/verifier/mod.rs::verify_checked_dual->primary.Verifier.verify_checked+secondary.mir_request.verify|open|partial|selected-Resolved-plus-MIR-pairs;all-owner-peer-coverage-unproven|peer-coverage-divergence-and-deferred-boundaries-remain-open'
+    )
+    printf 'legacy_gate_owner_schema=canonical-mir-original-owner-gate-v1\n'
+    for row in "${rows[@]}"; do
+        IFS='|' read -r owner production_edge consumer_edge migration coverage scope blocker <<< "$row"
+        owner_count=$((owner_count + 1))
+        actual_roster+="${actual_roster:+,}${owner}"
+        if [ "$migration" != open ] || [ "$coverage" != partial ] \
+            || [ -z "$production_edge" ] || [ -z "$consumer_edge" ] \
+            || [ -z "$scope" ] || [ -z "$blocker" ]; then
+            printf 'owner_audit_error=original_legacy_owner_not_honestly_open owner=%s migration=%s coverage=%s\n' \
+                "$owner" "$migration" "$coverage" >&2
+            audit_failed=1
+        fi
+        printf 'legacy_gate_owner=%s production_call_edge=%s legacy_consumer_edge=%s capability_migration=%s coverage_status=%s coverage_scope=%s blocker=%s\n' \
+            "$owner" "$production_edge" "$consumer_edge" "$migration" "$coverage" "$scope" "$blocker"
+    done
+    printf 'legacy_gate_owner_count=%s\n' "$owner_count"
+    if [ "$owner_count" -ne 4 ]; then
+        printf 'owner_audit_error=original_legacy_owner_gate_count expected=4 actual=%s\n' "$owner_count" >&2
+        audit_failed=1
+    fi
+    if [ "$actual_roster" != "$expected_roster" ]; then
+        printf 'owner_audit_error=original_legacy_owner_roster_mismatch expected=%s actual=%s\n' \
+            "$expected_roster" "$actual_roster" >&2
+        audit_failed=1
+    fi
+}
+
+audit_owner_roster() {
+    local owner_count=0
+    local owner path_description source_file marker test_name execution_marker
+    local actual_roster=''
+    local expected_roster='DefaultBytecodeAstCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice'
+    local -a roster=()
+
+    # This current compatibility-path roster supplements the original four
+    # gate owners emitted by audit_original_legacy_owner_gates; it never
+    # replaces or renames them.
+    roster+=(
+        'DefaultBytecodeAstCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|tests/legacy_owner_boundary_api.rs|default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts|OWNER_ARTIFACTS_NONE=source-fixture-only|OWNER_PROBE_EXECUTED=default-bytecode-ast-compatibility'
+        'NativeCheckedCompatibilityBoundary|public CheckedProgram API; canonical native lowering or explicit rejection, no raw-AST emitter|tests/legacy_owner_boundary_api.rs|native_checked_api_rejects_dynamic_protocol_receivers_without_main_artifact|OWNER_ARTIFACTS_NONE=dynamic-main-absent;OWNER_CANONICAL_ROUTE=checked-native-main-emitted|OWNER_PROBE_EXECUTED=native-checked-api'
+        'CheckedVerifierActorProofCompatibility|single/dual CheckedProgram proof route for Actor proof obligations|tests/legacy_owner_boundary_api.rs|checked_verifier_actor_proof_compatibility_preserves_contracts_and_rejects_mir_without_artifacts|OWNER_ARTIFACTS_NONE=source-fixtures-only|OWNER_PROBE_EXECUTED=checked-verifier-actor-proof-route'
+        'FfiVerifierOnlyOwnerSlice|exact isolated checked String-record FFI proof route; never an execution route|tests/legacy_owner_boundary_api.rs|ffi_verifier_only_owner_proves_and_defers_without_execution_or_file_artifacts|OWNER_ARTIFACTS_NONE=source-fixtures-only|OWNER_PROBE_EXECUTED=ffi-verifier-only-owner'
+    )
+
+    for row in "${roster[@]}"; do
+        IFS='|' read -r owner path_description source_file test_name marker execution_marker <<< "$row"
+        owner_count=$((owner_count + 1))
+        actual_roster+="${actual_roster:+,}${owner}"
+        if ! rg -q "^[[:space:]]*fn ${test_name}\\(" "$ROOT_DIR/$source_file"; then
+            printf 'owner_audit_error=%s direct_route_probe_missing=%s::%s\n' \
+                "$owner" "$source_file" "$test_name" >&2
+            audit_failed=1
+            continue
+        fi
+        if ! sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
+            "$ROOT_DIR/$source_file" | rg -F "$marker" >/dev/null \
+            || ! sed -n "/^[[:space:]]*fn ${test_name}(/,/^[[:space:]]*#\\[test\\]/p" \
+                "$ROOT_DIR/$source_file" | rg -F "$execution_marker" >/dev/null; then
+            printf 'owner_audit_error=%s direct_probe_contract_marker_missing=%s::%s artifact=%s execution=%s\n' \
+                "$owner" "$source_file" "$test_name" "$marker" "$execution_marker" >&2
+            audit_failed=1
+            continue
+        fi
+        printf 'owner=%s reachability=production kind=compatibility-route-or-boundary description=%s probe_test=%s::%s artifact_assertion=%s execution_marker=%s\n' \
+            "$owner" "$path_description" "$source_file" "$test_name" "$marker" "$execution_marker"
+    done
+
+    if [ "$owner_count" -ne 4 ]; then
+        printf 'owner_audit_error=classified_production_path_count expected=4 actual=%s\n' "$owner_count" >&2
+        audit_failed=1
+    fi
+    if [ "$actual_roster" != "$expected_roster" ]; then
+        printf 'owner_audit_error=production_path_roster_mismatch expected=%s actual=%s\n' \
+            "$expected_roster" "$actual_roster" >&2
+        audit_failed=1
+    fi
+
+    if ! rg -Fq 'pub fn compile_file(' "$ROOT_DIR/src/interp/bytecode/compiler.rs" \
+        || ! rg -q 'DefaultMirRoute::Legacy' "$ROOT_DIR/src/main/run.rs" \
+        || ! rg -q 'DefaultMirRoute::Legacy' "$ROOT_DIR/src/main/test.rs" \
+        || ! rg -q 'DefaultMirRoute::Legacy' "$ROOT_DIR/src/main/disasm_cmd.rs"; then
+        printf 'owner_audit_error=default_bytecode_ast_compatibility_route_unbound\n' >&2
+        audit_failed=1
+    fi
+    if ! rg -Fq 'pub fn compile_checked(' "$ROOT_DIR/src/codegen/compile.rs" \
+        || rg -n 'BytecodeCompiler|\.compile_file\(' "$ROOT_DIR/src/main/build.rs" >/dev/null; then
+        printf 'owner_audit_error=native_checked_boundary_route_unbound_or_reentered_bytecode\n' >&2
+        audit_failed=1
+    fi
+    if ! rg -Fq 'pub fn verify_checked(' "$ROOT_DIR/src/verifier/mod.rs" \
+        || ! rg -Fq 'pub fn verify_checked_dual(' "$ROOT_DIR/src/verifier/mod.rs" \
+        || ! rg -q 'actor-proof-obligations-compatibility' "$ROOT_DIR/src/main/canonical_dispatch.rs"; then
+        printf 'owner_audit_error=checked_verifier_actor_proof_route_unbound\n' >&2
+        audit_failed=1
+    fi
+    if ! rg -q 'verifier-ffi-owner-slice-v1' "$ROOT_DIR/src/verifier/mod.rs" \
+        || ! rg -q 'VerifierOnlyFfiStringRecordOwnerSlice' "$ROOT_DIR/src/main/canonical_dispatch.rs"; then
+        printf 'owner_audit_error=ffi_verifier_only_owner_route_unbound\n' >&2
+        audit_failed=1
+    fi
+
+    printf 'classified_production_path_count=%s\n' "$owner_count"
+    printf 'reachable_legacy_ast_owner_count=1 owner=DefaultBytecodeAstCompatibility\n'
+    printf 'reachable_checked_proof_compatibility_owner_count=2 owners=CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice\n'
+    printf 'checked_native_boundary_count=1 path=NativeCheckedCompatibilityBoundary kind=canonical-or-reject-no-AST-fallback\n'
+    printf 'production_path_roster=%s\n' "$actual_roster"
+}
+
+audit_original_legacy_owner_gates
+audit_owner_roster
+printf 'owner_retirement_status=reachable-compatibility-surfaces-remain;route-and-boundary-evidence-only\n'
 
 raw_ast_refs="$(rg -n \
     --glob '*.rs' \
@@ -2628,107 +3065,34 @@ if [ "$legacy_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SIT
         "$EXPECTED_PRODUCTION_COMPILE_FUNC_LEGACY_CALL_SITES" "$legacy_call_count" >&2
     audit_failed=1
 fi
-legacy_body_compiler_context="$(sed -n \
-    '/Test-only legacy surface-AST function body compiler/,/^[[:space:]]*fn compile_func_legacy_clean(/p' \
-    "$ROOT_DIR/src/codegen/func.rs")"
-if ! printf '%s\n' "$legacy_body_compiler_context" | rg -F '#[cfg(test)]' >/dev/null \
-    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'pub(super) fn compile_func_legacy(' >/dev/null \
-    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'fn compile_func_legacy_inner(' >/dev/null \
-    || ! printf '%s\n' "$legacy_body_compiler_context" | rg -F 'fn compile_func_legacy_clean(' >/dev/null; then
-    printf 'owner_audit_error=compile_func_legacy_cfg_test_adapter_shape_missing\n' >&2
-    audit_failed=1
-fi
-printf 'test_only_codegen_legacy_body_compiler=src/codegen/func.rs::compile_func_legacy+inner+clean\n'
-
-# Generic monomorphization is retained only as a cfg(test) adapter in
-# codegen/func.rs. Keep the production inventory separate from that block so
-# a new resolved/generic caller cannot hide behind the adapter exclusion.
-generic_func_adapter_context="$(sed -n \
-    '/The only caller is the cfg(test) compatibility adapter below/,/^[[:space:]]*fn compile_generic_func_inner(/p' \
-    "$ROOT_DIR/src/codegen/func.rs")"
-if ! printf '%s\n' "$generic_func_adapter_context" | rg -F '#[cfg(test)]' >/dev/null \
-    || ! printf '%s\n' "$generic_func_adapter_context" | rg -F 'self.compile_generic_func(function, type_map)' >/dev/null; then
-    printf 'owner_audit_error=compile_generic_func_cfg_test_adapter_shape_missing\n' >&2
-    audit_failed=1
-fi
-generic_func_adapter_start="$(rg -n 'pub\(super\) fn compile_generic_func\(' \
-    "$ROOT_DIR/src/codegen/func.rs" | head -n1 | cut -d: -f1)"
-generic_func_adapter_end="$(rg -n '^[[:space:]]*fn compile_generic_func_inner\(' \
-    "$ROOT_DIR/src/codegen/func.rs" | head -n1 | cut -d: -f1)"
-generic_func_outside_adapter=''
-while IFS=: read -r line_number line_text; do
-    [ -z "$line_number" ] && continue
-    if [ -z "$generic_func_adapter_start" ] || [ -z "$generic_func_adapter_end" ] \
-        || [ "$line_number" -lt "$generic_func_adapter_start" ] \
-        || [ "$line_number" -ge "$generic_func_adapter_end" ]; then
-        generic_func_outside_adapter+="src/codegen/func.rs:${line_number}:${line_text}"$'\n'
-    fi
-done < <(rg -n 'compile_generic_func\(' "$ROOT_DIR/src/codegen/func.rs" || true)
-if [ -n "$generic_func_outside_adapter" ]; then
-    printf 'owner_audit_error=compile_generic_func_outside_cfg_test_adapter\n%s' \
-        "$generic_func_outside_adapter" >&2
-    audit_failed=1
-fi
-generic_refs="$(rg -n \
+native_ast_body_refs="$(rg -n \
     --glob '*.rs' \
     --glob '!**/tests.rs' \
     --glob '!src/tests/**' \
-    --glob '!src/codegen/func.rs' \
-    'compile_generic_func\(' \
-    "$SRC_DIR" || true)"
-generic_call_count=0
-if [ -n "$generic_refs" ]; then
-    generic_call_count="$(printf '%s\n' "$generic_refs" | rg -v 'fn compile_generic_func' | wc -l)"
-fi
-printf 'production_compile_generic_func_call_sites=%s\n' "$generic_call_count"
-if [ "$generic_call_count" -ne "$EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES" ]; then
-    printf 'owner_audit_error=production_compile_generic_func_call_sites expected=%s actual=%s\n' \
-        "$EXPECTED_PRODUCTION_COMPILE_GENERIC_FUNC_CALL_SITES" "$generic_call_count" >&2
+    'compile_file_with_resolved\(|compile_file_inner\(|compile_func_body\(|emit_implicit_return\(|compile_func_legacy\(|compile_generic_func\(' \
+    "$ROOT_DIR/src/codegen" || true)"
+if [ -n "$native_ast_body_refs" ]; then
+    printf 'owner_audit_error=native_codegen_ast_body_refs_remain\n%s\n' \
+        "$native_ast_body_refs" >&2
     audit_failed=1
 fi
-generic_adapter_ref_count=0
-if [ -n "$generic_func_adapter_context" ]; then
-    generic_adapter_ref_count="$(printf '%s\n' "$generic_func_adapter_context" \
-        | rg -c 'compile_generic_func\(' || true)"
+native_ast_test_refs="$(rg -n \
+    --glob '*.rs' \
+    'compile_file_with_resolved\(|compile_file_inner\(|compile_func_body\(|emit_implicit_return\(|compile_func_legacy\(|compile_generic_func\(' \
+    "$SRC_DIR" || true)"
+if [ -n "$native_ast_test_refs" ]; then
+    printf 'owner_audit_error=native_codegen_ast_test_or_call_refs_remain\n%s\n' \
+        "$native_ast_test_refs" >&2
+    audit_failed=1
 fi
-printf 'test_only_codegen_func_generic_adapter_refs=%s excluded_from_production=1\n' \
-    "$generic_adapter_ref_count"
+printf 'native_codegen_ast_test_adapters=physically-absent old-body-call-refs=0\n'
 
-# The cfg(test) adapters are intentionally excluded from the production
-# inventory above. Keep their count visible so a future edit cannot silently
-# broaden the exclusion to an untracked production file.
-test_legacy_refs="$(rg -n 'compile_func_legacy\(|compile_generic_func\(|legacy_body_file\(' \
-    "$ROOT_DIR/src/codegen/tests.rs" || true)"
-test_legacy_count=0
-if [ -n "$test_legacy_refs" ]; then
-    test_legacy_count="$(printf '%s\n' "$test_legacy_refs" | wc -l)"
+if ! rg -Fq 'self.clear_partial_body(llvm_function)' "$ROOT_DIR/src/codegen/resolved/mod.rs" \
+    || ! rg -Fq 'pub(crate) fn clear_partial_body' "$ROOT_DIR/src/codegen/func.rs"; then
+    printf 'owner_audit_error=resolved_partial_body_cleanup_missing\n' >&2
+    audit_failed=1
 fi
-printf 'test_only_codegen_legacy_adapter_refs=%s excluded_from_production=1\n' "$test_legacy_count"
-
-# The resolved emitter deliberately leaves a failed/partial body for the
-# fifth pass to rebuild. Removing the top-level call without replacing this
-# status handoff would strand an invalid LLVM body or drop supported code.
-resolved_failure_recompile_guard() {
-    local context
-    context="$(sed -n '/fn compile_func_legacy_clean(/,/^    fn /p' \
-        "$ROOT_DIR/src/codegen/func.rs")"
-    for pattern in \
-        'function.count_basic_blocks() != 0' \
-        'resolved_failed_functions.contains(&func.name)' \
-        'resolved_failed_functions.contains(&llvm_symbol)' \
-        'self.clear_partial_body(function)'; do
-        if ! printf '%s\n' "$context" | rg -F "$pattern" >/dev/null; then
-            printf 'owner_audit_error=resolved_failure_recompile_guard_missing=src/codegen/func.rs pattern=%s\n' \
-                "$pattern" >&2
-            audit_failed=1
-            return
-        fi
-    done
-    printf 'resolved_failure_recompile_guard=resolved-success-skip+failed-body-clear-and-recompile consumer=src/codegen/func.rs::compile_func_legacy_clean\n'
-}
-
-resolved_failure_recompile_guard
-printf 'owner_count=%s\n' "$owner_count"
+printf 'resolved_partial_body_cleanup=clear-on-emission-failure consumer=src/codegen/resolved/mod.rs\n'
 
 # R6-15 removed the former direct-expression-only scalar FFI admission helper.
 # Keep its names in this audit so a future compatibility refactor cannot
@@ -2751,20 +3115,248 @@ if [ "$scalar_ffi_legacy_count" -ne "$EXPECTED_SCALAR_FFI_DIRECT_EXPRESSION_LEGA
     audit_failed=1
 fi
 
-printf 'dynamic_probe_status=not_run\n'
-printf 'dynamic_probe_test=%s\n' \
-    'codegen::tests::compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access'
-printf 'dynamic_probe_test=%s\n' \
-    'verifier::tests::public_checked_verifier_routes_recoverable_cross_state_flow_to_mir'
-printf 'dynamic_probe_test=%s\n' \
-    'verifier::tests::typed_ffi_symbolic_string_contexts_defer_without_legacy_access'
-printf 'dynamic_probe_test=%s\n' \
-    'verifier::tests::canonical_mir_bool_result_postconditions_keep_flow_verdicts_through_dual'
-printf 'dynamic_probe_command=%s\n' \
-    'run each dynamic_probe_test as an exact serial cargo test with --features llvm18-host-dynamic --lib --test-threads=1'
+if [ "$static_only" -eq 1 ]; then
+    if [ "$audit_failed" -ne 0 ]; then
+        printf 'static_audit_status=failed\n'
+        exit 1
+    fi
+    printf 'static_audit_status=ok\n'
+    exit 0
+fi
+
+run_focused_owner_probe() {
+    local owner="$1"
+    local probe_name="$2"
+    local expected_outcome="$3"
+    local artifact_assertion="$4"
+    local expected_marker="$5"
+    shift 5
+    dynamic_probe_count=$((dynamic_probe_count + 1))
+    dynamic_owner_seen["$owner"]=1
+    if [ -n "${dynamic_probe_seen[$probe_name]:-}" ]; then
+        printf 'owner_audit_error=duplicate_dynamic_probe name=%s owner=%s\n' \
+            "$probe_name" "$owner" >&2
+        audit_failed=1
+    else
+        dynamic_probe_seen["$probe_name"]="$owner"
+    fi
+    local probe_dir stdout_file stderr_file exit_file command_file context_file
+    local result_line probe_exit probe_validation source_manifest_hash command_hash
+    local tool_cargo tool_rustc tool_llvm_config tool_cc tool_z3_library probe_transcript
+    local -a probe_command
+
+    probe_dir="$AUDIT_EVIDENCE_DIR/$probe_name"
+    mkdir -- "$probe_dir"
+    stdout_file="$probe_dir/stdout.log"
+    stderr_file="$probe_dir/stderr.log"
+    exit_file="$probe_dir/exit-status.txt"
+    command_file="$probe_dir/command.sh"
+    context_file="$probe_dir/execution-context.txt"
+    probe_command=(env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper CARGO_TARGET_DIR="$canonical_target_dir" cargo test "$@" -- --exact --test-threads=1 --nocapture)
+
+    {
+        printf '#!/usr/bin/env bash\nset -euo pipefail\ncd -- %q\nexec' "$ROOT_DIR"
+        printf ' %q' "${probe_command[@]}"
+        printf '\n'
+    } > "$command_file"
+    chmod 700 "$command_file"
+    write_probe_source_hashes "$probe_dir/source-hashes.sha256"
+    command_hash="$(sha256sum -- "$command_file" | awk '{print $1}')"
+    source_manifest_hash="$(cat "$probe_dir/source-hashes.sha256.sha256")"
+    {
+        printf 'probe=%s\n' "$probe_name"
+        printf 'owner=%s\nexpected_outcome=%s\nartifact_assertion=%s\n' \
+            "$owner" "$expected_outcome" "$artifact_assertion"
+        printf 'started_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'repository=%s\n' "$ROOT_DIR"
+        printf 'target_dir=%s\n' "$canonical_target_dir"
+        printf 'git_head=%s\n' "$(git -C "$ROOT_DIR" rev-parse HEAD)"
+        printf 'git_branch=%s\n' "$(git -C "$ROOT_DIR" branch --show-current)"
+        printf 'git_source_status_sha256=%s\n' \
+            "$(git -C "$ROOT_DIR" status --porcelain=v1 -- src tests std Cargo.toml Cargo.lock build.rs scripts/audit-mir-legacy-owners.sh | sha256sum | awk '{print $1}')"
+        printf 'command_file=%s\ncommand_sha256=%s\n' "$command_file" "$command_hash"
+        printf 'source_hash_manifest=%s\nsource_hash_manifest_sha256=%s\n' \
+            "$probe_dir/source-hashes.sha256" "$source_manifest_hash"
+        printf 'stdout_file=%s\nstderr_file=%s\n' "$stdout_file" "$stderr_file"
+        printf 'RUSTFLAGS=unset\nLD_PRELOAD=unset\nLLVM_SYS_181_PREFIX=/tmp/llvm-wrapper\n'
+        printf 'CARGO_TARGET_DIR=%s\n' "$canonical_target_dir"
+        tool_cargo="$(command -v cargo)"
+        tool_rustc="$(command -v rustc)"
+        printf 'tool_cargo_path=%s\n' "$tool_cargo"
+        printf 'tool_cargo_sha256=%s\n' "$(sha256sum -- "$tool_cargo" | awk '{print $1}')"
+        printf 'tool_rustc_path=%s\n' "$tool_rustc"
+        printf 'tool_rustc_sha256=%s\n' "$(sha256sum -- "$tool_rustc" | awk '{print $1}')"
+        printf 'toolchain_rustc='
+        rustc --version
+        printf 'toolchain_cargo='
+        cargo --version
+        tool_llvm_config=/tmp/llvm-wrapper/bin/llvm-config
+        printf 'tool_llvm_config_path=%s\n' "$tool_llvm_config"
+        if [ -x "$tool_llvm_config" ]; then
+            printf 'tool_llvm_config_sha256=%s\n' "$(sha256sum -- "$tool_llvm_config" | awk '{print $1}')"
+            printf 'toolchain_llvm_config='
+            "$tool_llvm_config" --version
+        else
+            printf 'tool_llvm_config_status=missing\n'
+        fi
+        tool_cc="$(command -v cc || true)"
+        if [ -n "$tool_cc" ]; then
+            printf 'tool_cc_path=%s\n' "$tool_cc"
+            printf 'tool_cc_sha256=%s\n' "$(sha256sum -- "$tool_cc" | awk '{print $1}')"
+            printf 'toolchain_cc='
+            "$tool_cc" --version | sed -n '1p'
+        else
+            printf 'tool_cc_status=missing\n'
+        fi
+        tool_z3_library="$(ldconfig -p 2>/dev/null | awk 'index($0, "libz3.so (") && !found { path = $NF; found = 1 } END { if (found) print path }')"
+        if [ -n "$tool_z3_library" ] && [ -f "$tool_z3_library" ]; then
+            printf 'tool_z3_library_path=%s\n' "$tool_z3_library"
+            printf 'tool_z3_library_sha256=%s\n' "$(sha256sum -- "$tool_z3_library" | awk '{print $1}')"
+        else
+            printf 'tool_z3_library_status=not-found-in-ldconfig\n'
+        fi
+    } > "$context_file" 2>&1
+
+    printf 'dynamic_probe_start=%s\n' "$probe_name"
+    if "${probe_command[@]}" > "$stdout_file" 2> "$stderr_file"; then
+        probe_exit=0
+    else
+        probe_exit=$?
+    fi
+    printf '%s\n' "$probe_exit" > "$exit_file"
+    result_line="$( { rg '^test result:' "$stdout_file" || true; rg '^test result:' "$stderr_file" || true; } | tail -n 1 )"
+    probe_transcript="$probe_dir/combined-output.log"
+    cat -- "$stdout_file" "$stderr_file" > "$probe_transcript"
+    if [ "$probe_exit" -eq 0 ] && [[ "$result_line" == *"1 passed; 0 failed"* ]] \
+        && ! rg -F 'skipped (Z3 not available)' "$probe_transcript" >/dev/null \
+        && ! rg -F 'SKIP: Z3 not available' "$probe_transcript" >/dev/null \
+        && rg -F "$expected_marker" "$probe_transcript" >/dev/null \
+        && rg -F "$artifact_assertion" "$probe_transcript" >/dev/null; then
+        probe_validation=passed
+        printf 'dynamic_probe_status=passed owner=%s probe=%s exit=%s summary=%s artifacts=%s evidence=%s command_sha256=%s source_sha256=%s\n' \
+            "$owner" "$probe_name" "$probe_exit" "$result_line" "$artifact_assertion" "$probe_dir" \
+            "$command_hash" "$source_manifest_hash"
+    else
+        probe_validation=failed
+        audit_failed=1
+        printf 'dynamic_probe_status=failed owner=%s probe=%s exit=%s validation=exactly-one-executed-passing-test-and-execution+artifact-markers summary=%s execution_marker=%s artifact_marker=%s evidence=%s command_sha256=%s source_sha256=%s\n' \
+            "$owner" "$probe_name" "$probe_exit" "${result_line:-missing-test-result}" "$expected_marker" "$artifact_assertion" "$probe_dir" \
+            "$command_hash" "$source_manifest_hash" >&2
+    fi
+    {
+        printf 'cargo_exit_status=%s\n' "$probe_exit"
+        printf 'probe_validation=%s\n' "$probe_validation"
+        printf 'owner=%s\nexpected_outcome=%s\nartifact_assertion=%s\nrequired_execution_marker=%s\n' \
+            "$owner" "$expected_outcome" "$artifact_assertion" "$expected_marker"
+        printf 'test_result=%s\n' "${result_line:-missing-test-result}"
+        printf 'probe_transcript_sha256=%s\n' "$(sha256sum -- "$probe_transcript" | awk '{print $1}')"
+        printf 'finished_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$probe_dir/result.txt"
+}
+
+dynamic_probe_count=0
+declare -A dynamic_owner_seen=()
+declare -A dynamic_probe_seen=()
+
+run_focused_owner_probe \
+    DefaultBytecodeAstCompatibility \
+    bytecode-default-legacy-route \
+    'outside-profile default run succeeds and explicit MIR rejects without an output artifact' \
+    'OWNER_ARTIFACTS_NONE=source-fixture-only' \
+    'OWNER_PROBE_EXECUTED=default-bytecode-ast-compatibility' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts
+
+run_focused_owner_probe \
+    DefaultBytecodeAstCompatibility \
+    bytecode-ast-direct-api-dyn-rejection \
+    'direct raw-AST compile rejects dynamic Protocol field and expression receivers' \
+    'OWNER_ARTIFACTS_NONE=bytecode-program-not-returned' \
+    'OWNER_PROBE_EXECUTED=bytecode-ast-direct-api' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    bytecode_ast_compatibility_direct_api_rejects_dynamic_protocol_receivers
+
+run_focused_owner_probe \
+    NativeCheckedCompatibilityBoundary \
+    native-checked-direct-api-dyn-rejection \
+    'direct checked native compile rejects dynamic Protocol receivers without emitting main' \
+    'OWNER_ARTIFACTS_NONE=dynamic-main-absent;OWNER_CANONICAL_ROUTE=checked-native-main-emitted' \
+    'OWNER_PROBE_EXECUTED=native-checked-api' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    native_checked_api_rejects_dynamic_protocol_receivers_without_main_artifact
+
+run_focused_owner_probe \
+    NativeCheckedCompatibilityBoundary \
+    default-cli-dyn-field-expression-rejection \
+    'default and explicit CLI routes reject both dynamic receiver shapes; build artifacts are absent' \
+    'OWNER_ARTIFACTS_NONE=source-fixtures-only' \
+    'OWNER_PROBE_EXECUTED=default-cli-dynamic-protocol-routes' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    default_and_explicit_routes_reject_dynamic_protocol_receiver_shapes_without_artifacts
+
+run_focused_owner_probe \
+    CheckedVerifierActorProofCompatibility \
+    actor-proof-checked-compatibility-route \
+    'default checked verifier preserves proven/disproven Actor-adjacent top-level contracts; explicit MIR rejects' \
+    'OWNER_ARTIFACTS_NONE=source-fixtures-only' \
+    'OWNER_PROBE_EXECUTED=checked-verifier-actor-proof-route' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    checked_verifier_actor_proof_compatibility_preserves_contracts_and_rejects_mir_without_artifacts
+
+run_focused_owner_probe \
+    CheckedVerifierActorProofCompatibility \
+    checked-verifier-direct-api-dyn-rejection \
+    'single, dual, and configured source verifier APIs reject both dynamic receiver identities without proof outputs' \
+    'OWNER_ARTIFACTS_NONE=all-apis-returned-errors' \
+    'OWNER_PROBE_EXECUTED=checked-verifier-actor-proof-api' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    checked_verifier_apis_reject_dynamic_protocol_receivers_without_proof_results
+
+run_focused_owner_probe \
+    FfiVerifierOnlyOwnerSlice \
+    ffi-verifier-only-direct-and-default-route \
+    'isolated FFI owner proves/disproves, preserves unsupported NITS without artifact, and cannot execute' \
+    'OWNER_ARTIFACTS_NONE=source-fixtures-only;PROOF_ARTIFACTS=expected-for-proven-and-disproven-only' \
+    'OWNER_PROBE_EXECUTED=ffi-verifier-only-owner' \
+    --features llvm18-host-dynamic --test legacy_owner_boundary_api \
+    ffi_verifier_only_owner_proves_and_defers_without_execution_or_file_artifacts
+
+expected_dynamic_probes=(
+    bytecode-default-legacy-route
+    bytecode-ast-direct-api-dyn-rejection
+    native-checked-direct-api-dyn-rejection
+    default-cli-dyn-field-expression-rejection
+    actor-proof-checked-compatibility-route
+    checked-verifier-direct-api-dyn-rejection
+    ffi-verifier-only-direct-and-default-route
+)
+for expected_probe in "${expected_dynamic_probes[@]}"; do
+    if [ -z "${dynamic_probe_seen[$expected_probe]:-}" ]; then
+        printf 'owner_audit_error=required_dynamic_probe_missing name=%s\n' \
+            "$expected_probe" >&2
+        audit_failed=1
+    fi
+done
+if [ "$dynamic_probe_count" -ne "${#expected_dynamic_probes[@]}" ]; then
+    printf 'owner_audit_error=dynamic_probe_count expected=%s actual=%s\n' \
+        "${#expected_dynamic_probes[@]}" "$dynamic_probe_count" >&2
+    audit_failed=1
+fi
+if [ "${#dynamic_probe_seen[@]}" -ne "${#expected_dynamic_probes[@]}" ]; then
+    printf 'owner_audit_error=dynamic_probe_name_coverage expected=%s actual=%s\n' \
+        "${#expected_dynamic_probes[@]}" "${#dynamic_probe_seen[@]}" >&2
+    audit_failed=1
+fi
+if [ "${#dynamic_owner_seen[@]}" -ne 4 ]; then
+    printf 'owner_audit_error=dynamic_probe_path_coverage expected=4 actual=%s\n' \
+        "${#dynamic_owner_seen[@]}" >&2
+    audit_failed=1
+fi
+printf 'dynamic_probe_status=executed probes=%s classified_paths=%s required_names=%s\n' \
+    "$dynamic_probe_count" "${#dynamic_owner_seen[@]}" "${#expected_dynamic_probes[@]}"
 
 if [ "$audit_failed" -ne 0 ]; then
-    printf 'audit_status=failed\n'
+    printf 'route_boundary_audit_status=failed\n'
     exit 1
 fi
-printf 'audit_status=ok\n'
+printf 'route_boundary_audit_status=passed\n'

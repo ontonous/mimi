@@ -81,11 +81,14 @@ echo "  本地 CI 矩阵运行器"
 echo "========================================="
 echo ""
 
-# 1. Lint
-echo "--- 1. Lint ---"
+# 1. Lint & static gates (fail-honest: matches CI --locked --all-targets)
+echo "--- 1. Lint & Static Gates ---"
+run_matrix_cell "fast-static-gates" bash "$SCRIPT_DIR/run-gates.sh" --fast --ci --fail-fast
+run_matrix_cell "unsafe-safety" python3 "$SCRIPT_DIR/check_unsafe_safety.py"
 run_matrix_cell "native-mir-production-audit" bash "$SCRIPT_DIR/audit-mir-native-production.sh"
 run_matrix_cell "mir-legacy-owner-audit" bash "$SCRIPT_DIR/audit-mir-legacy-owners.sh"
-run_matrix_cell "clippy" cargo clippy --manifest-path "$PROJECT_DIR/Cargo.toml" -- -D warnings 2>&1 || true
+run_matrix_cell "fmt" cargo fmt --manifest-path "$PROJECT_DIR/Cargo.toml" -- --check
+run_matrix_cell "clippy" cargo clippy --manifest-path "$PROJECT_DIR/Cargo.toml" --locked --all-targets -- -D warnings
 
 # 2. 解释器矩阵 (Debug, 3 allocators)
 echo "--- 2. 解释器测试 (Debug, 3 allocators) ---"

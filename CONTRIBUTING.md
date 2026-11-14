@@ -13,7 +13,7 @@ _Thank you for your interest in Mimi! This document guides you through contribut
 - [开发流程 / Development Process](#开发流程--development-process)
 - [提交规范 / Commit Convention](#提交规范--commit-convention)
 - [测试要求 / Testing Requirements](#测试要求--testing-requirements)
-- [文档要求 / Documentation Requirements](#文档要求--documentation-requirements)
+- [文档要求与权威地图 / Documentation & Authority Map](#文档要求与权威地图--documentation--authority-map)
 - [问题报告 / Issue Reporting](#问题报告--issue-reporting)
 
 ---
@@ -91,22 +91,35 @@ _This project adheres to the [Contributor Covenant 2.1](CODE_OF_CONDUCT.md). All
 
 ### 构建与测试
 
+仓库统一通过 [`Makefile`](Makefile)、[`scripts/dev-env.sh`](scripts/dev-env.sh) 与 [`scripts/run-gates.sh`](scripts/run-gates.sh) 引导 LLVM 18 环境和门禁（默认安装 `cargo-nextest` 时 `make test` 会自动优先使用）。
+
 ```bash
-# 首次构建：默认链接配置是 LLVM 18 动态宿主模式
-bash scripts/setup-llvm-wrapper.sh
-env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo build
+# 查看所有日常命令
+make help
 
-# 运行测试
-env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo test
+# 1. 初始化 /tmp/llvm-wrapper（LLVM 18.1.3，可重复运行且幂等）
+make setup
 
-# Clippy 审查（仓库仍有已知 warning 债务，-D warnings 当前可能失败）
-env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo clippy --all-targets -- -D warnings
+# 2. 快速离线静态与文档门禁（~15–20s：语言文档、V0.2 计划、核心 Python 测试等）
+make gates-fast
 
-# 格式化
-env -u RUSTFLAGS -u LD_PRELOAD LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo fmt -- --check
+# 3. 编译检查 / 格式化 / 严格 CI 静态门禁仪表盘
+make check
+make fmt
+make gates       # 依次检查 Tier 1 + unsafe + fmt + MIR audits + clippy (-D warnings)
+
+# 4. 运行测试（L1/L2 快速冒烟、Z3 单线程隔离、完整套件）
+make test-quick
+make test-z3
+make test
+
+# 5. 与 GitHub Actions 对齐的本地 CI 全流程
+make ci
 ```
 
-Clippy 的非零退出需区分本次引入的 lint 与已有基线债务；不要通过新增全局 allow 或放宽不变量来得到绿色结果。
+若需直接调用 `cargo`，请先 `source scripts/dev-env.sh` 或使用 `LLVM_SYS_181_PREFIX=/tmp/llvm-wrapper cargo ...`（与 `.github/workflows/ci.yml` 的 `--locked` 口径一致）。
+
+> **Clippy 门禁说明**：CI（[`.github/workflows/ci.yml`](.github/workflows/ci.yml)）强制执行 `cargo clippy --locked --all-targets -- -D warnings`。在活跃开发分支中如遇历史/WIP warning，请区分本次引入的 lint 与基线问题，不要通过新增全局 `#[allow(...)]` 或放宽不变量来绕过门禁。详情参见 [工作流与代码库梳理报告](docs/developer-workflow-and-audit.md)。
 
 ---
 
@@ -179,7 +192,18 @@ COMMIT C: docs: 更新文档
 
 ---
 
-## 文档要求 / Documentation Requirements
+## 文档要求与权威地图 / Documentation & Authority Map
+
+### 文档权威层级（冲突时以上层/代码实况为准）
+
+| 主题 | 权威来源 | 说明 |
+|---|---|---|
+| 当前包版本与特性开关 | [`Cargo.toml`](Cargo.toml) | 当前版本 `0.1.11-dev`，MSRV Rust `1.88`，LLVM `181.3.0` |
+| 日常开发命令与 CI 门禁 | [`Makefile`](Makefile)、[`scripts/run-gates.sh`](scripts/run-gates.sh)、[`.github/workflows/ci.yml`](.github/workflows/ci.yml) | 本地与 CI 共享同一套门禁脚本 |
+| 开发者工作流与现状审计 | [`docs/developer-workflow-and-audit.md`](docs/developer-workflow-and-audit.md) | Tier 0–3 流程、WIP 阻塞项与结构重构路线 |
+| 语言规范与语法参考 | [`docs/language-spec.md`](docs/language-spec.md)、[`docs/syntax-reference.md`](docs/syntax-reference.md) | 受 `scripts/check_language_docs.py` 校验 |
+| 运行时与内存模型 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | C ABI runtime 布局、RC 与 handle 约束 |
+| 0.2 规划与任务依赖 | [`devdocs/V0.2/README.md`](devdocs/V0.2/README.md)、[`devdocs/V0.2/plan.toml`](devdocs/V0.2/plan.toml) | 受 `devdocs/V0.2/tools/check_plan.py` 校验；`devdocs/archive/` 仅作历史记录 |
 
 ### 标准库文档
 

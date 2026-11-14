@@ -1,33 +1,20 @@
 #!/usr/bin/env bash
-# 0.1.7 full gate replay.
-#
-# Runs the standard DoD gates that can be completed in a CI job:
-#   - fmt / clippy / lib tests
-#   - dispatcher zero-fallback
-#   - stress smoke + heavy
-#   - dogfood projects
-#   - real-world CLI suite
-#   - bin CLI tests
+# Full local release-candidate gate replay (delegates shared Tier 1/2 checks to
+# `scripts/run-gates.sh` so lint/audit rules never diverge from CI).
 #
 # Usage: scripts/check_all_gates.sh
 set -euo pipefail
 
-LLVM_SYS_181_PREFIX="${LLVM_SYS_181_PREFIX:-/tmp/llvm-wrapper}"
-export LLVM_SYS_181_PREFIX
+ROOT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+# shellcheck source=/dev/null
+source "$ROOT_DIR/scripts/dev-env.sh"
 
-echo "== fmt =="
-cargo fmt -- --check
-
-echo "== native MIR production boundary audit =="
-bash scripts/audit-mir-native-production.sh
-echo "== canonical MIR legacy owner audit =="
-bash scripts/audit-mir-legacy-owners.sh
-
-echo "== clippy =="
-cargo clippy --all-targets -- -D warnings
+echo "== lint & static gates =="
+bash scripts/run-gates.sh --lint --fail-fast
 
 echo "== cargo test --lib =="
-cargo test --lib
+cargo test --locked --lib -- --test-threads="$(nproc 2>/dev/null || echo 4)"
 
 echo "== dispatch zero =="
 python3 scripts/dispatch_stat.py check --zero
@@ -42,9 +29,9 @@ echo "== dogfood =="
 make test-dogfood
 
 echo "== bin CLI tests =="
-cargo test --bin mimi -- --test-threads=1
+cargo test --locked --bin mimi -- --test-threads=1
 
 echo "== real-world CLI =="
-cargo test --test real_world_cli -- --test-threads=1
+cargo test --locked --test real_world_cli -- --test-threads=1
 
 echo "ALL GATES PASSED"

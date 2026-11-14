@@ -38,21 +38,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-mimi
 
-      # ── 静态门禁先行（秒级，失败最快路径）──────────────────────────
-      - name: Language docs gate (spec 同步闸 + 语义新鲜度)
-        run: python3 scripts/check_language_docs.py
+      # ── 静态门禁先行（秒级，失败最快路径，与 `make gates-fast` 对齐）──
+      - name: Edge isolation & fast static gates
+        run: bash scripts/run-gates.sh --fast --ci --fail-fast
 
       - name: unsafe SAFETY gate (non-runtime baseline)
         run: python3 scripts/check_unsafe_safety.py
 
-      - name: v0.31 roadmap consistency check
-        run: python3 scripts/check_v031_roadmap.py
-
-      # 0.36.0 Phase 0：边缘解耦门禁——核心门禁路径零边缘依赖（philosophy-anchor §2）。
-      - name: Edge isolation gate (core gate path zero edge deps)
-        run: python3 scripts/check_edge_isolation.py
-
-      # ── Rust 质量门禁 ──────────────────────────────────────────────
+      # ── Rust / MIR 安全与质量门禁 ───────────────────────────────────
       - name: Check Format
         run: cargo fmt -- --check
 
