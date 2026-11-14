@@ -1,0 +1,38 @@
+use std::maps;
+
+func main() -> i32 {
+    let secondary = secondary_source_owner()
+    let payload = "stored hit"
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", payload)
+            match root_result {
+                Ok(root) => {
+                    let alias = root
+                    let observed = get_or_default::<string>(alias, "hits", "fallback")
+                    println(observed)
+                    drop(observed)
+                    drop(empty)
+                    drop(root)
+                    drop(alias)
+                    drop(payload)
+                    secondary
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            status
+        },
+    }
+}
+
+func secondary_source_owner() -> i32 {
+    0
+}

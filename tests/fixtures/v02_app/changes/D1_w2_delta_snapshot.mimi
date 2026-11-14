@@ -1,0 +1,10 @@
+// D1: a delta record replaces the full snapshot representation.
+type Delta { id: i32, from: i32, to: i32 }
+func main() -> i32 {
+    let d = Delta { id: 7, from: 10, to: 20 }
+    let restored = d.from
+    println(d.to)
+    println(restored)
+    println(d.id)
+    0
+}

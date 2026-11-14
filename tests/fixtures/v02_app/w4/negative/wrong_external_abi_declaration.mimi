@@ -1,0 +1,10 @@
+// DO NOT RUN. This declares a different scalar ABI from C's
+// int32_t w4_checksum(int32_t). Current compilation has no C-header import
+// checker, so it cannot prove the external prototype matches this declaration.
+extern "C" {
+    func w4_checksum(value: i64) -> i64;
+}
+
+func main() -> i64 {
+    w4_checksum(20)
+}

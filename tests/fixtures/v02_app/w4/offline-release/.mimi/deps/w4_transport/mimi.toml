@@ -1,0 +1,5 @@
+[package]
+name = "w4_transport"
+version = "0.2.0"
+description = "Pinned W4 loopback transport adapter"
+entry = "transport.mimi"

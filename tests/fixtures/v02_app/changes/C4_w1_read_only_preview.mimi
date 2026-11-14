@@ -1,0 +1,7 @@
+// C4: read-only preview computes the same report and performs no write.
+func main() -> i32 {
+    let raw = "{\"name\":\"demo\",\"retries\":3}"
+    if !json_is_valid(raw) { println("InvalidJson"); return 2 }
+    println("preview=" + json_get_string(raw, "name") + ":" + to_string(json_get_int(raw, "retries")))
+    0
+}

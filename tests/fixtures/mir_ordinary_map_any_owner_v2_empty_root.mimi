@@ -1,0 +1,15 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            println(pair.0)
+            drop(pair)
+            let snapshot = values(root)
+            println(snapshot.len())
+            drop(snapshot)
+            drop(root)
+            0
+        },
+        Err(status) => status,
+    }
+}

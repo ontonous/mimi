@@ -1,0 +1,10 @@
+// D4: route export through a dedicated function boundary with a narrow effect.
+type Snapshot { id: i32, text: i32 }
+func export_snapshot(s: Snapshot) -> i32 {
+    s.text
+}
+func main() -> i32 {
+    let s = Snapshot { id: 7, text: 20 }
+    println(export_snapshot(s))
+    0
+}

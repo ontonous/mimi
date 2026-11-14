@@ -1,0 +1,69 @@
+// H1: replace the i64 multiply-and-clip implementation with an equivalent
+// threshold algorithm. All storage is prepared before the registered hot call.
+//
+// D-10 region: immediately before process_h1(...), through its return. The
+// transitive hot call graph is process_h1 -> len, threshold_gain, and len.
+// There are no collection operations or dynamically dispatched calls in it.
+// `no_alloc` syntax and the native allocator/capacity receipt remain language
+// seams; this is the intended program shape, not a claim that the gate passed.
+
+func threshold_gain(sample: i32) -> i32 {
+    if sample <= -500 {
+        -1000
+    } else if sample >= 500 {
+        1000
+    } else {
+        sample * 2
+    }
+}
+
+func process_h1(samples: mutate List<i32>, active_len: i32) -> i32 {
+    let slots = len(samples)
+    if active_len < 0 || active_len > slots { return -1 }
+
+    let mut index = 0
+    while index < active_len {
+        samples[index] = threshold_gain(samples[index])
+        index += 1
+    }
+    if len(samples) != slots { return -2 }
+    0
+}
+
+func check_prefix(samples: view List<i32>, expected: view List<i32>, count: i32) -> bool {
+    if len(expected) < count || len(samples) < count { return false }
+    let mut index = 0
+    let mut same = true
+    while index < count {
+        if samples[index] != expected[index] { same = false }
+        index += 1
+    }
+    same
+}
+
+func print_prefix(samples: view List<i32>, count: i32) -> i32 {
+    let mut index = 0
+    while index < count {
+        println(samples[index])
+        index += 1
+    }
+    0
+}
+
+func main() -> i32 {
+    let mut samples: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let expected: List<i32> = [-1000, -1000, 0, 1000, 1000]
+    let slots = len(samples)
+    if process_h1(samples, 5) != 0 { return 1 }
+    if !check_prefix(samples, expected, 5) { return 2 }
+    if samples[5] != 777 || len(samples) != slots { return 3 }
+    print_prefix(samples, 5)
+
+    let mut boundaries: List<i32> = [-2147483648, -501, -500, 499, 500, 2147483647]
+    let boundary_expected: List<i32> = [-1000, -1000, -1000, 998, 1000, 1000]
+    if process_h1(boundaries, 6) != 0 { return 4 }
+    if !check_prefix(boundaries, boundary_expected, 6) { return 5 }
+    let mut empty: List<i32> = []
+    if process_h1(empty, 0) != 0 || len(empty) != 0 { return 6 }
+    0
+}

@@ -1,0 +1,11 @@
+// D2: cancellation during a write leaves a retryable local responsibility.
+func write_or_cancel(cancel: bool) -> Result<i32, string> {
+    if cancel { Err("Cancelled") } else { Ok(1) }
+}
+func main() -> i32 {
+    let result = write_or_cancel(true)
+    match result {
+        Err(error) => { println(error); println("Retryable"); 0 },
+        Ok(_) => { println("Published"); 1 },
+    }
+}

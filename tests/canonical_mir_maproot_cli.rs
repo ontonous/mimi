@@ -222,23 +222,25 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     assert!(String::from_utf8_lossy(&verify.stderr)
         .contains("canonical route disposition: canonical (map-any-owner-v1) mir_digest="));
 
-    let legacy_map = Command::new(&mimi)
+    let dynamic_key_map = Command::new(&mimi)
         .env("MIMI_ROUTE_CENSUS", "1")
         .arg("run")
         .arg(fixture("mir_map_root_dynamic_key_legacy.mimi"))
         .output()
-        .expect("run legacy dynamic Map key CLI fixture");
+        .expect("run dynamic String-key Map CLI fixture");
     assert!(
-        legacy_map.status.success(),
-        "legacy Map/Any compatibility run failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&legacy_map.stdout),
-        String::from_utf8_lossy(&legacy_map.stderr)
+        dynamic_key_map.status.success(),
+        "dynamic String-key Map run failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&dynamic_key_map.stdout),
+        String::from_utf8_lossy(&dynamic_key_map.stderr)
     );
-    assert!(String::from_utf8_lossy(&legacy_map.stdout).is_empty());
-    let stderr = String::from_utf8_lossy(&legacy_map.stderr);
+    assert!(String::from_utf8_lossy(&dynamic_key_map.stdout).is_empty());
+    let stderr = String::from_utf8_lossy(&dynamic_key_map.stderr);
     assert!(
-        stderr.contains("canonical route disposition: legacy"),
-        "{stderr}"
+        stderr.contains(
+            "canonical route disposition: canonical (ordinary-map-owner-lifecycle-i32-string-v1) mir_digest="
+        ),
+        "dynamic String-key Map operations must use their own complete ordinary owner receipt: {stderr}"
     );
 
     let dynamic_remove = Command::new(&mimi)
@@ -256,8 +258,10 @@ fn default_map_root_run_build_verify_and_legacy_map_compatibility() {
     assert!(String::from_utf8_lossy(&dynamic_remove.stdout).is_empty());
     let stderr = String::from_utf8_lossy(&dynamic_remove.stderr);
     assert!(
-        stderr.contains("canonical route disposition: legacy"),
-        "dynamic-key MapRoot Remove must stay on the compatibility route: {stderr}"
+        stderr.contains(
+            "canonical route disposition: canonical (ordinary-map-owner-lifecycle-i32-string-v1) mir_digest="
+        ),
+        "dynamic String-key Map Remove must use its complete ordinary owner receipt: {stderr}"
     );
 }
 
@@ -396,7 +400,11 @@ fn default_cli_rejects_map_root_scalar_ffi_composition_without_fallback() {
             "mimi {mode} executed source before rejection: {stdout:?}"
         );
         assert!(
-            stderr.contains("MapAnyOwner v1 profile cannot be combined"),
+            // The merged CLI prelude may make the finite-effect barrier the
+            // first rejection before owner-composition classification. The
+            // unit route tests separately pin the composition-specific error.
+            stderr.contains("MapAnyOwner v1 profile cannot be combined")
+                || stderr.contains("callable 'main' carries unknown effect 'unknown'"),
             "mimi {mode} did not report the hard MIR route boundary: {stderr}"
         );
         assert!(

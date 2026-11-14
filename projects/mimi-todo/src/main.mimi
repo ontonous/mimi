@@ -21,17 +21,20 @@ func parse_detail(task: string) -> string {
     if len(parts) > 1 { parts[1] } else { task }
 }
 
-func load_tasks() -> Record {
+func load_tasks() -> Result<Record, i32> {
     if file_exists(DATA_FILE) {
         let rr = read_file(DATA_FILE)
         if rr.is_ok() {
             let json = rr.unwrap()
             if json != "" && json_is_valid(json) {
-                return from_json(json)
+                return Ok(from_json(json))
             }
         }
     }
-    map_new()
+    match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
 }
 
 func save_tasks(tasks: Record) -> bool {
@@ -40,39 +43,35 @@ func save_tasks(tasks: Record) -> bool {
     wr.is_ok()
 }
 
-func cmd_add(tasks: Record, args: string) -> Record {
+func cmd_add(tasks: Record, args: string) -> (bool, string, string) {
     if args == "" {
         println("Usage: todo add <description>")
-        return tasks
+        return (false, "", "")
     }
     let id = map_size(tasks) + 1
     let key = to_string(id)
-    let updated = map_set(tasks, key, make_task("pending", args))
-    println("Added task #" + key + ": " + args)
-    updated
+    (true, key, make_task("pending", args))
 }
 
-func cmd_done(tasks: Record, args: string) -> Record {
+func cmd_done(tasks: Record, args: string) -> (bool, string, string) {
     if args == "" {
         println("Usage: todo done <id>")
-        return tasks
+        return (false, "", "")
     }
     let id_result = str_parse_int(args)
     if !id_result.0 {
         println("Invalid task ID: " + args)
-        return tasks
+        return (false, "", "")
     }
     let key = args
     let r = map_get(tasks, key)
     if !r.0 {
         println("Task #" + key + " not found")
-        return tasks
+        return (false, "", "")
     }
     let task = to_string(r.1)
     let detail = parse_detail(task)
-    let updated = map_set(tasks, key, make_task("done", detail))
-    println("Marked task #" + key + " as done: " + detail)
-    updated
+    (true, key, make_task("done", detail))
 }
 
 func cmd_list(tasks: Record) {
@@ -124,9 +123,11 @@ func cmd_stats(tasks: Record) {
     }
 }
 
-func cmd_clear(tasks: Record) -> Record {
-    println("Cleared all tasks.")
-    map_new()
+func cmd_clear() -> Result<Record, i32> {
+    match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
 }
 
 func main() -> i32 {
@@ -134,7 +135,15 @@ func main() -> i32 {
     println("Commands: add <desc> | done <id> | list | stats | clear | quit")
     println("")
 
-    let mut tasks = load_tasks()
+    let (loaded_tasks, map_failed, map_status) = match load_tasks() {
+        Ok(loaded) => (Some(loaded), false, 0),
+        Err(status) => (None, true, status)
+    }
+    if map_failed {
+        println("Map initialization failed with status " + to_string(map_status))
+        return map_status
+    }
+    let mut tasks = loaded_tasks.unwrap()
     let count = map_size(tasks)
     if count > 0 {
         println("Loaded " + to_string(count) + " tasks from " + DATA_FILE)
@@ -166,12 +175,32 @@ func main() -> i32 {
             break
         }
         if cmd == "add" {
-            tasks = cmd_add(tasks, args)
-            let _ = save_tasks(tasks)
+            let (should_add, key, value) = cmd_add(tasks, args)
+            if should_add {
+                match map_set(tasks, key, value) {
+                    Ok(updated) => {
+                        drop(tasks)
+                        tasks = updated
+                        println("Added task #" + key + ": " + args)
+                        let _ = save_tasks(tasks)
+                    }
+                    Err(status) => println("Add failed with status " + to_string(status))
+                }
+            }
         }
         if cmd == "done" {
-            tasks = cmd_done(tasks, args)
-            let _ = save_tasks(tasks)
+            let (should_update, key, value) = cmd_done(tasks, args)
+            if should_update {
+                match map_set(tasks, key, value) {
+                    Ok(updated) => {
+                        drop(tasks)
+                        tasks = updated
+                        println("Marked task #" + key + " as done: " + parse_detail(value))
+                        let _ = save_tasks(tasks)
+                    }
+                    Err(status) => println("Mark-done failed with status " + to_string(status))
+                }
+            }
         }
         if cmd == "list" {
             cmd_list(tasks)
@@ -180,10 +209,18 @@ func main() -> i32 {
             cmd_stats(tasks)
         }
         if cmd == "clear" {
-            tasks = cmd_clear(tasks)
-            let _ = save_tasks(tasks)
+            match cmd_clear() {
+                Ok(empty) => {
+                    drop(tasks)
+                    tasks = empty
+                    println("Cleared all tasks.")
+                    let _ = save_tasks(tasks)
+                }
+                Err(status) => println("Clear failed with status " + to_string(status))
+            }
         }
     }
 
+    drop(tasks)
     0
 }

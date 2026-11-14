@@ -1,0 +1,42 @@
+func make_root() -> Result<Record, i32> {
+    let payload = "owned value"
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", payload) {
+                Ok(final_root) => {
+                    drop(empty)
+                    drop(payload)
+                    Ok(final_root)
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    Err(status)
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            Err(status)
+        },
+    }
+}
+
+func direct_caller() -> i32 {
+    match make_root() {
+        Ok(received_root) => {
+            let pair = map_get(received_root, "key")
+            drop(received_root)
+            let payload = unpack_string(pair.1)
+            drop(pair)
+            drop(payload)
+            0
+        },
+        Err(status) => status,
+    }
+}
+
+func main() -> i32 {
+    println(direct_caller())
+    0
+}

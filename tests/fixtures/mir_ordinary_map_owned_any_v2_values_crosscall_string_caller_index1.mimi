@@ -1,0 +1,55 @@
+func snapshot_values() -> List {
+    let payload_b = "second value"
+    let payload_a = "first value"
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "b", payload_b) {
+                Ok(with_b) => {
+                    match map_set(with_b, "a", payload_a) {
+                        Ok(root) => {
+                            let snapshot = values(root)
+                            drop(empty)
+                            drop(with_b)
+                            drop(root)
+                            drop(payload_b)
+                            drop(payload_a)
+                            snapshot
+                        },
+                        Err(status) => {
+                            drop(empty)
+                            drop(with_b)
+                            drop(payload_b)
+                            drop(payload_a)
+                            []
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload_b)
+                    drop(payload_a)
+                    []
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload_b)
+            drop(payload_a)
+            []
+        },
+    }
+}
+
+func direct_caller() -> bool {
+    let snapshot = snapshot_values()
+    let selected = snapshot[1] as string
+    let matches = selected == "second value"
+    drop(selected)
+    drop(snapshot)
+    matches
+}
+
+func main() -> i32 {
+    println(direct_caller())
+    0
+}

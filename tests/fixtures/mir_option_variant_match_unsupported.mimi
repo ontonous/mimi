@@ -1,7 +1,12 @@
-func main() -> string {
+func option_variant_match_result() -> string {
     let value: Option<string> = Some("owned")
     match value {
         Some(v) => v,
         None => "fallback"
     }
+}
+
+func main() -> i32 {
+    let _value = option_variant_match_result()
+    0
 }

@@ -1,9 +1,37 @@
 func main() -> i32 {
-    let empty = map_new()
-    let numbers = map_set(empty, "number", 42)
-    let full = map_set(numbers, "text", "owned text")
-    let alias = full
-    drop(full)
-    let changed = map_remove(alias, "number")
-    map_size(alias) + map_size(changed) + map_size(empty) - 3
+    match map_new() {
+        Ok(empty) => {
+            let empty_size = map_size(empty)
+            match map_set(empty, "number", 42) {
+                Ok(numbers) => {
+                    drop(empty)
+                    let payload = "owned text"
+                    let full_result = map_set(numbers, "text", payload)
+                    drop(payload)
+                    match full_result {
+                        Ok(full) => {
+                            drop(numbers)
+                            let alias = full
+                            drop(full)
+                            let changed = map_remove(alias, "number")
+                            let alias_size = map_size(alias)
+                            let changed_size = map_size(changed)
+                            drop(alias)
+                            drop(changed)
+                            alias_size + changed_size + empty_size - 3
+                        },
+                        Err(status) => {
+                            drop(numbers)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }

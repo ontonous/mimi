@@ -1,0 +1,33 @@
+func probe(key_prefix: string, key_suffix: string, payload_prefix: string, payload_suffix: string) -> bool {
+    let key = key_prefix + key_suffix
+    let payload = payload_prefix + payload_suffix
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, key, payload) {
+        Ok(updated) => {
+            drop(payload)
+            let pair = map_get(updated, key)
+            drop(empty)
+            drop(updated)
+            drop(key)
+            let value = unpack_string(pair.1)
+            drop(pair)
+            let observed = value == "owned heap payload"
+            drop(value)
+            observed
+        },
+        Err(status) => {
+        drop(empty)
+        false
+        },
+    }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}
+
+func main() -> i32 {
+    if probe("runtime", "-key", "owned ", "heap payload") { 0 } else { 1 }
+}

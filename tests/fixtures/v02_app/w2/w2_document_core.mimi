@@ -1,0 +1,389 @@
+// V0.2 W2 baseline: an editable node document, immutable revision snapshots,
+// undo, autosave, staged export, and a closed-session boundary.
+//
+// Every edit builds a fresh node list. A saved Revision therefore remains an
+// immutable value even though its NodeIds still name the same document store.
+// The file protocol stages and reads back a complete temporary file before it
+// writes the destination. Mimi currently has no atomic rename primitive, so a
+// destination write error is recorded as "may be published" rather than being
+// described as a filesystem rollback.
+
+type NodeId { store_id: i32, slot: i32, generation: i32 }
+type DocumentNode {
+    id: NodeId,
+    parent_slot: i32,
+    kind: string,
+    text: string,
+    alive: bool,
+}
+type Revision {
+    document_id: i32,
+    revision_id: i32,
+    parent_revision: i32,
+    nodes: List<DocumentNode>,
+}
+type EditorView { cursor: NodeId, layout_epoch: i32 }
+type PublishReceipt {
+    document_id: i32,
+    revision_id: i32,
+    path: string,
+    published: bool,
+    temporary_removed: bool,
+    cleanup_error: string,
+    cleanup_owner: string,
+    temporary_path: string,
+}
+type ExportError {
+    TempWriteFailed(string)
+    TempReadFailed(string)
+    DestinationWriteFailed(string)
+    CleanupFailed(string)
+}
+type ExportFailure {
+    primary: Option<ExportError>,
+    cleanup: Option<ExportError>,
+    destination_may_exist: bool,
+    destination_path: string,
+    temporary_path: string,
+    cleanup_owner: string,
+}
+
+func same_node_id(left: NodeId, right: NodeId) -> bool {
+    left.store_id == right.store_id &&
+    left.slot == right.slot &&
+    left.generation == right.generation
+}
+
+func find_node(revision: Revision, wanted: NodeId) -> Option<DocumentNode> {
+    for node in revision.nodes {
+        if same_node_id(node.id, wanted) && node.alive {
+            return Some(node)
+        }
+    }
+    None
+}
+
+func node_text(revision: Revision, wanted: NodeId) -> Result<string, string> {
+    match find_node(revision, wanted) {
+        Some(node) => Ok(node.text),
+        None => Err("StaleNodeId"),
+    }
+}
+
+func edit_node(revision: Revision, wanted: NodeId, replacement: string) -> Result<Revision, string> {
+    let mut next_nodes: List<DocumentNode> = []
+    let mut found = false
+    for node in revision.nodes {
+        if same_node_id(node.id, wanted) && node.alive {
+            push(next_nodes, DocumentNode {
+                id: node.id,
+                parent_slot: node.parent_slot,
+                kind: node.kind,
+                text: replacement,
+                alive: true,
+            })
+            found = true
+        } else {
+            push(next_nodes, node)
+        }
+    }
+    if !found {
+        return Err("StaleNodeId")
+    }
+    Ok(Revision {
+        document_id: revision.document_id,
+        revision_id: revision.revision_id + 1,
+        parent_revision: revision.revision_id,
+        nodes: next_nodes,
+    })
+}
+
+func delete_node(revision: Revision, wanted: NodeId) -> Result<Revision, string> {
+    let mut next_nodes: List<DocumentNode> = []
+    let mut found = false
+    for node in revision.nodes {
+        if same_node_id(node.id, wanted) && node.alive {
+            push(next_nodes, DocumentNode {
+                id: NodeId { store_id: node.id.store_id, slot: node.id.slot, generation: node.id.generation + 1 },
+                parent_slot: node.parent_slot,
+                kind: node.kind,
+                text: node.text,
+                alive: false,
+            })
+            found = true
+        } else {
+            push(next_nodes, node)
+        }
+    }
+    if !found { return Err("StaleNodeId") }
+    Ok(Revision {
+        document_id: revision.document_id,
+        revision_id: revision.revision_id + 1,
+        parent_revision: revision.revision_id,
+        nodes: next_nodes,
+    })
+}
+
+func copy_snapshot(revision: Revision) -> Revision {
+    let mut copied_nodes: List<DocumentNode> = []
+    for node in revision.nodes {
+        push(copied_nodes, node)
+    }
+    Revision {
+        document_id: revision.document_id,
+        revision_id: revision.revision_id,
+        parent_revision: revision.parent_revision,
+        nodes: copied_nodes,
+    }
+}
+
+func move_cursor(view: EditorView, target: NodeId) -> EditorView {
+    // Cursor/layout state is ordinary view data and does not advance the
+    // document revision or perform a DocumentSession Flow transition.
+    EditorView { cursor: target, layout_epoch: view.layout_epoch + 1 }
+}
+
+func serialize_revision(revision: Revision) -> string {
+    let mut result = "document=" + to_string(revision.document_id) + "\n"
+    result = result + "revision=" + to_string(revision.revision_id) + "\n"
+    for node in revision.nodes {
+        if node.alive {
+            result = result + to_string(node.id.slot) + ":" + node.kind + ":" + node.text + "\n"
+        }
+    }
+    result
+}
+
+func autosave_snapshot(revision: Revision, path: string) -> Result<string, string> {
+    let contents = serialize_revision(revision)
+    match write_file(path, contents) {
+        Ok(_) => Ok(contents),
+        Err(error) => Err(error),
+    }
+}
+
+func export_snapshot(revision: Revision, temporary_path: string, destination: string) -> Result<PublishReceipt, ExportFailure> {
+    let contents = serialize_revision(revision)
+    match write_file(temporary_path, contents) {
+        Err(error) => Err(ExportFailure {
+            primary: Some(TempWriteFailed(error)),
+            cleanup: None,
+            destination_may_exist: false,
+            destination_path: destination,
+            temporary_path: temporary_path,
+            cleanup_owner: "local exporter",
+        }),
+        Ok(_) => {
+            match read_file(temporary_path) {
+                Err(error) => {
+                    let removed = remove_file(temporary_path)
+                    let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained")) }
+                    let cleanup_owner = if removed { "" } else { "local exporter" }
+                    Err(ExportFailure {
+                        primary: Some(TempReadFailed(error)),
+                        cleanup: cleanup_error,
+                        destination_may_exist: false,
+                        destination_path: destination,
+                        temporary_path: temporary_path,
+                        cleanup_owner: cleanup_owner,
+                    })
+                },
+                Ok(staged) => {
+                    if staged != contents {
+                        let removed = remove_file(temporary_path)
+                        let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained after verification mismatch")) }
+                        let cleanup_owner = if removed { "" } else { "local exporter" }
+                        Err(ExportFailure {
+                            primary: Some(TempReadFailed("staged bytes differ from snapshot")),
+                            cleanup: cleanup_error,
+                            destination_may_exist: false,
+                            destination_path: destination,
+                            temporary_path: temporary_path,
+                            cleanup_owner: cleanup_owner,
+                        })
+                    } else {
+                        match write_file(destination, staged) {
+                            Err(error) => {
+                                let removed = remove_file(temporary_path)
+                                let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained after destination failure")) }
+                                let cleanup_owner = if removed { "" } else { "local exporter" }
+                                Err(ExportFailure {
+                                    primary: Some(DestinationWriteFailed(error)),
+                                    cleanup: cleanup_error,
+                                    // write_file is not an atomic replace API;
+                                    // a failing destination write can leave bytes.
+                                    destination_may_exist: true,
+                                    destination_path: destination,
+                                    temporary_path: temporary_path,
+                                    cleanup_owner: cleanup_owner,
+                                })
+                            },
+                            Ok(_) => {
+                                let removed = remove_file(temporary_path)
+                                let cleanup_error = if removed { "" } else { "temporary file retained" }
+                                let cleanup_owner = if removed { "" } else { "local exporter" }
+                                Ok(PublishReceipt {
+                                    document_id: revision.document_id,
+                                    revision_id: revision.revision_id,
+                                    path: destination,
+                                    published: true,
+                                    temporary_removed: removed,
+                                    cleanup_error: cleanup_error,
+                                    cleanup_owner: cleanup_owner,
+                                    temporary_path: temporary_path,
+                                })
+                            },
+                        }
+                    }
+                },
+            }
+        },
+    }
+}
+
+flow DocumentSession {
+    state Open { document_id: i32, current: Revision, undo: List<Revision> }
+    state Closed { document_id: i32, final_revision: Revision }
+
+    transition edit(Open, next: Revision) -> Open {
+        let mut history: List<Revision> = []
+        for saved in self.undo { push(history, saved) }
+        push(history, self.current)
+        return Open { document_id: self.document_id, current: next, undo: history }
+    }
+
+    transition undo(Open) -> Open {
+        // The caller can only request this operation after an edit. The undo
+        // payload is retained as immutable revisions, not mutated in place.
+        let last = len(self.undo) - 1
+        let restored = self.undo[last]
+        let history = self.undo[0..last]
+        return Open { document_id: self.document_id, current: restored, undo: history }
+    }
+
+    transition close(Open) -> Closed {
+        return Closed { document_id: self.document_id, final_revision: self.current }
+    }
+}
+
+func main() -> i32 {
+    let document_id = 7
+    let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+    let body_id = NodeId { store_id: document_id, slot: 1, generation: 1 }
+    let root = DocumentNode {
+        id: title_id,
+        parent_slot: -1,
+        kind: "title",
+        text: "Meeting notes",
+        alive: true,
+    }
+    let body = DocumentNode {
+        id: body_id,
+        parent_slot: 0,
+        kind: "paragraph",
+        text: "Draft",
+        alive: true,
+    }
+    let revision_zero = Revision {
+        document_id: document_id,
+        revision_id: 0,
+        parent_revision: -1,
+        nodes: [root, body],
+    }
+
+    // Create -> edit A -> save S1 -> edit B -> undo -> export S1.
+    let revision_a_result = match edit_node(revision_zero, body_id, "A") {
+        Ok(revision) => (revision, true),
+        Err(_) => (revision_zero, false),
+    }
+    let revision_a = revision_a_result.0
+    let revision_a_ok = revision_a_result.1
+    let snapshot_s1 = copy_snapshot(revision_a)
+    let session_zero = Open { document_id: document_id, current: revision_zero, undo: [] }
+    let session_a = DocumentSession::edit(session_zero, revision_a)
+    let revision_b_result = match edit_node(session_a.current, body_id, "B") {
+        Ok(revision) => (revision, true),
+        Err(_) => (session_a.current, false),
+    }
+    let revision_b = revision_b_result.0
+    let revision_b_ok = revision_b_result.1
+    let session_b = DocumentSession::edit(session_a, revision_b)
+    let session_after_undo = DocumentSession::undo(session_b)
+
+    // The generation is part of NodeId identity. The stale generation has a
+    // deterministic typed error and cannot silently edit the current node.
+    let stale_id = NodeId { store_id: document_id, slot: 1, generation: 2 }
+    let stale_rejected = match edit_node(session_after_undo.current, stale_id, "lost update") {
+        Ok(_) => false,
+        Err(error) => error == "StaleNodeId",
+    }
+    let deletion_result = delete_node(snapshot_s1, title_id)
+    let deleted_revision = match deletion_result {
+        Ok(revision) => revision,
+        Err(_) => snapshot_s1,
+    }
+    let deleted_id_rejected = match node_text(deleted_revision, title_id) {
+        Ok(_) => false,
+        Err(error) => error == "StaleNodeId",
+    }
+    let view0 = EditorView { cursor: title_id, layout_epoch: 0 }
+    let view1 = move_cursor(view0, body_id)
+
+    let autosave_path = "/tmp/mimi-v02-w2-autosave.txt"
+    let autosave_ok = match autosave_snapshot(snapshot_s1, autosave_path) {
+        Err(_) => false,
+        Ok(contents) => match read_file(autosave_path) {
+            Ok(saved) => saved == contents,
+            Err(_) => false,
+        },
+    }
+    let export_result = export_snapshot(
+        snapshot_s1,
+        "/tmp/mimi-v02-w2-export.tmp",
+        "/tmp/mimi-v02-w2-export.txt"
+    )
+    let export_ok = match export_result {
+        Ok(receipt) => {
+            receipt.published &&
+            receipt.temporary_removed &&
+            receipt.cleanup_owner == "" &&
+            match read_file(receipt.path) {
+                Ok(contents) => contents == serialize_revision(snapshot_s1),
+                Err(_) => false,
+            }
+        },
+        Err(_) => false,
+    }
+    let output_ok = match node_text(session_after_undo.current, body_id) {
+        Ok(text) => text == "A",
+        Err(_) => false,
+    }
+    let closed = DocumentSession::close(session_after_undo)
+    let closed_revision = closed.final_revision
+
+    // There is deliberately no DocumentSession transition accepting Closed
+    // for edit. A checked negative fixture lives alongside this program.
+    let snapshot_ok = match node_text(snapshot_s1, body_id) {
+        Ok(text) => text == "A",
+        Err(_) => false,
+    }
+    let edited_b_ok = match edit_node(snapshot_s1, body_id, "B") {
+        Ok(revision) => match node_text(revision, body_id) { Ok(text) => text == "B", Err(_) => false },
+        Err(_) => false,
+    }
+    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 &&
+        closed.document_id == document_id &&
+        node_text(closed_revision, body_id) == Ok("A") &&
+        revision_a_ok && revision_b_ok && output_ok && snapshot_ok && edited_b_ok && autosave_ok && export_ok
+    if !check {
+        return 3
+    }
+
+    println(20)
+    println(10)
+    println(10)
+    println(0)
+    remove_file(autosave_path)
+    remove_file("/tmp/mimi-v02-w2-export.txt")
+    0
+}

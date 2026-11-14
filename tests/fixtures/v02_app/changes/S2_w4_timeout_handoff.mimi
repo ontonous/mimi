@@ -1,0 +1,10 @@
+// S2: timeout is a visible request outcome; ownership is handed to retry.
+func serve(request: i32) -> Result<i32, string> {
+    if request == 0 { Err("Timeout") } else { Ok(request * 2) }
+}
+func main() -> i32 {
+    match serve(0) {
+        Err(error) => { println(error); println("RetryOwner"); 0 },
+        Ok(_) => 1,
+    }
+}

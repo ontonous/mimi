@@ -1,13 +1,19 @@
-// v0.29.47: Delegate ChannelOverloaded Return
-// White-paper section 2.2: delegate to actor with backpressure returns ChannelOverloaded
-actor Worker {
-    val: i32
-    func process(n: i32) -> i32 { self.val = self.val + n; self.val }
-    func get() -> i32 { self.val }
+// v0.29.47 historical label: "Delegate ChannelOverloaded Return".
+// This fixture never opened a channel or observed an overload result; its
+// executable behavior is a stateful Worker call returning the accumulated
+// value. Persistent state now lives in a Flow transition.
+flow WorkerState {
+    state Ready { val: i32 }
+    transition process(Ready, n: i32) -> Ready {
+        return Ready { val: self.val + n }
+    }
 }
+
+actor Worker runs WorkerState {}
+
 func main() -> i32 {
     let w = Worker.spawn()
     let v = w.process(10)
-    println(v)
+    println(v.val)
     0
 }

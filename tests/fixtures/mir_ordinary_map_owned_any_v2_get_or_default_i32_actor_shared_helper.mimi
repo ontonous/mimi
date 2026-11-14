@@ -1,0 +1,44 @@
+use std::maps;
+
+func lookup() -> Result<i32, i32> {
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", 0)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<i32>(root, "hits", 99)
+                    drop(empty)
+                    drop(root)
+                    Ok(observed)
+                },
+                Err(status) => {
+                    drop(empty)
+                    Err(status)
+                },
+            }
+        },
+        Err(status) => Err(status),
+    }
+}
+
+actor Reader {
+    func lookup_from_actor() -> i32 {
+        match lookup() {
+            Ok(observed) => observed,
+            Err(status) => status,
+        }
+    }
+}
+
+func main() -> i32 {
+    let reader = Reader.spawn()
+    let actor_value = reader.lookup_from_actor()
+    match lookup() {
+        Ok(observed) => {
+            println(observed)
+            actor_value
+        },
+        Err(status) => status,
+    }
+}

@@ -1,0 +1,8 @@
+// H1: use a helper for the same deterministic gain/clip algorithm.
+func saturate(value: i64) -> i32 {
+    if value < -1000 { -1000 } else if value > 1000 { 1000 } else { value as i32 }
+}
+func gain(x: i32) -> i32 { saturate((x as i64) * 2) }
+func main() -> i32 {
+    println(gain(-2147483648)); println(gain(-501)); println(gain(0)); println(gain(501)); println(gain(2147483647)); 0
+}

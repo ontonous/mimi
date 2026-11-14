@@ -1,21 +1,25 @@
-// Regression (L1, R6-1031): a nested `func` whose bare name equals an earlier
-// global shadows it for the rest of the enclosing body (V-11), and the shadow
-// must not leak past that body. The previous actor-only duplicate silently
-// dispatched calls to the displaced global body on native (121 instead of 42)
-// while the VM honored the shadow.
+// Regression (L1, R6-1031): a nested `func` in an explicit Actor mailbox
+// method shadows a global for that body without leaking. ShadowerFlow state
+// and its transition remain explicit metadata; this case exercises the scalar
+// mailbox result.
 func helper(x: i32) -> i32 {
     x + 100
 }
 
-actor Shadower {
-    v: i32 = 0;
+flow ShadowerFlow {
+    state Active { v: i32 }
 
+    transition record(Active, value: i32) -> Active {
+        return Active { v: value }
+    }
+}
+
+actor Shadower runs ShadowerFlow {
     func touch(y: i32) -> i32 {
         func helper(x: i32) -> i32 {
             x * 2
         }
-        self.v = helper(y)
-        self.v
+        helper(y)
     }
 }
 

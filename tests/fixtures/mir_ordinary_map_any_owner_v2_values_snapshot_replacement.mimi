@@ -1,0 +1,63 @@
+type Label { text: string }
+
+func main() -> i32 {
+    let first = Label { text: "old first" }
+    let second = Label { text: "old second" }
+    let replacement = Label { text: "replacement" }
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, "a-label", first) {
+        Ok(with_a) => {
+    match map_set(with_a, "b-label", second) {
+        Ok(root) => {
+                let snapshot = values(root)
+    match map_set(root, "a-label", replacement) {
+        Ok(updated_root) => {
+                    drop(empty)
+                    drop(with_a)
+                    drop(root)
+                    drop(updated_root)
+                    drop(first)
+                    drop(second)
+                    drop(replacement)
+
+                    let first_item = snapshot[0] as Label
+                    let first_text = first_item.text
+                    let second_item = snapshot[1] as Label
+                    let second_text = second_item.text
+                    let first_matches = first_text == "old first"
+                    drop(first_text)
+                    let second_matches = second_text == "old second"
+                    drop(second_text)
+                    drop(snapshot)
+
+                    println(first_matches)
+                    println(second_matches)
+                    0
+        },
+        Err(status) => {
+        drop(empty)
+        drop(with_a)
+        drop(root)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        drop(with_a)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

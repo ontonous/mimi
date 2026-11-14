@@ -6,7 +6,7 @@ caller supplies a schema-v1 JSON document with one entry for every current
 Mimi source path. Class, diagnostic, route-reason, and failure expectations
 come only from that document. The renderer reads source files only to confirm
 the current denominator and SHA-256 identities, then emits an external bundle
-containing direct Rust tests, schema-v4 expectations, and an input/source-hash
+containing direct Rust tests, schema-v5 expectations, and an input/source-hash
 manifest.
 
 Example input shape (all current Mimi paths must be present):
@@ -54,11 +54,14 @@ Example input shape (all current Mimi paths must be present):
       }
     }
 
-Only the three direct-authority classes above generate tests. Other recognized
-expectation classes, plus ``unresolved``, remain row-level review decisions
-with a blocked ``authority_status`` and are omitted from the schema-v4
-``inputs`` object, so an authority gap is not folded into a schema class or
-represented as an accepted expectation.
+The direct compiler-route classes generate Rust tests. Every source row is
+retained in the schema-v5 ``inputs`` object. Rows without a complete direct
+contract are represented there as explicit ``unmapped`` blockers, while their
+independent semantic class, contract identifier, reason, and blocker remain in
+the generation manifest. Tool diagnostics and canonical MIR input rejections
+use dedicated dynamic executor contracts, separate from compiler-route
+diagnostics; their expected values must already be complete in the independent
+input manifest.
 
 An optional ``--fixture-adjudication-jsonl`` overlays the explicitly pinned
 19-row independent fixture adjudication. Its classes and direct-contract text
@@ -84,11 +87,12 @@ import stat
 import sys
 import tempfile
 from typing import Any, Mapping, Sequence
+import stdlib_matrix_artifacts
 
 
 EXPECTED_CURRENT_DENOMINATOR = 1187
 INPUT_SCHEMA_VERSION = 1
-OUTPUT_EXPECTATIONS_SCHEMA_VERSION = 4
+OUTPUT_EXPECTATIONS_SCHEMA_VERSION = 5
 EXPECTED_AUTHORITY_PATH = "tests/route-census/authorities.rs"
 RUST_SOURCE_FILENAME = "authorities.rs"
 EXPECTATIONS_FILENAME = "route-census-expectations.json"
@@ -100,7 +104,14 @@ DIRECT_CLASSES = frozenset({
     "required_compile",
     "expected_build_rejection",
     "expected_source_diagnostic",
+    "expected_tool_diagnostic",
+    "canonical_mir_input_rejection",
 })
+SPECIAL_EXECUTOR_CLASSES = frozenset({
+    "expected_tool_diagnostic",
+    "canonical_mir_input_rejection",
+})
+DIRECT_EXECUTOR_AUTHORITY_SCHEMA = "mimi-direct-executor-authority-v1"
 UNRESOLVED_CLASS = "unresolved"
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 ROUTE_REJECTION_PREFIXES = (
@@ -175,8 +186,15 @@ def _normalize_input_path(census: Any, value: Any) -> str:
     return normalized
 
 
-def _validate_inventory(root: Path, census: Any, generator: Any) -> list[dict[str, Any]]:
-    sources = census.enumerate_sources(root)
+def _validate_inventory(
+    root: Path,
+    census: Any,
+    generator: Any,
+    stdlib_matrix_generated_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    sources = census.enumerate_sources(
+        root, stdlib_matrix_generated_root=stdlib_matrix_generated_root
+    )
     if len(sources) != EXPECTED_CURRENT_DENOMINATOR:
         raise RendererError(
             f"current Mimi denominator is {len(sources)}, expected exactly {EXPECTED_CURRENT_DENOMINATOR}"
@@ -194,14 +212,20 @@ def _validate_inventory(root: Path, census: Any, generator: Any) -> list[dict[st
             raise RendererError(f"current inventory path is not a normalized Mimi path: {path!r}")
         if (
             source.get("present") is not True
-            or source.get("presence_kind") != "regular_file"
+            or source.get("presence_kind") not in {
+                "regular_file",
+                "external_generated_matrix_source",
+            }
             or source.get("buildable") is not True
             or source.get("target_kind") not in {"executable", "shared_library_probe"}
             or not isinstance(source.get("sha256"), str)
             or SHA256_RE.fullmatch(str(source.get("sha256"))) is None
         ):
             raise RendererError(f"current candidate is missing, symlinked, unbuildable, or unhashed: {path}")
-        if generator._source_file_sha256(root, path) != source["sha256"]:
+        physical_path = Path(
+            str(source.get("external_source_path") or (root / path))
+        )
+        if _sha256(physical_path.read_bytes()) != source["sha256"]:
             raise RendererError(f"source changed while inventory was being read: {path}")
     return sources
 
@@ -235,10 +259,14 @@ def _validate_exact_input_coverage(
         expectation_class = expectation.get("class")
         if not isinstance(expectation_class, str):
             raise RendererError(f"expectation {path!r} class must be a string")
-        recognized = set(getattr(census, "EXPECTATION_CLASSES", set()))
+        if expectation_class == "expected_checker_diagnostic":
+            raise RendererError(
+                f"expectation {path!r}: expected_checker_diagnostic is not a schema-v5 class; use canonical_mir_input_rejection"
+            )
+        recognized = set(getattr(census, "EXPECTATION_CLASSES", set())) | set(SPECIAL_EXECUTOR_CLASSES)
         if expectation_class not in recognized and expectation_class != UNRESOLVED_CLASS:
             raise RendererError(
-                f"expectation {path!r} class {expectation_class!r} is not a recognized schema-v4 class"
+                f"expectation {path!r} class {expectation_class!r} is not a recognized schema-v5 class"
             )
         source_sha = expectation.get("source_sha256")
         if not isinstance(source_sha, str) or SHA256_RE.fullmatch(source_sha) is None:
@@ -248,7 +276,253 @@ def _validate_exact_input_coverage(
         reason = expectation.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise RendererError(f"expectation {path!r} must include a non-empty reason")
+        if expectation.get("checker_diagnostic_contract") is not None:
+            raise RendererError(
+                f"{path}: obsolete checker_diagnostic_contract is not accepted by schema-v5 expectations"
+            )
+        tool_contract = expectation.get("tool_diagnostic_contract")
+        if tool_contract is not None:
+            if expectation_class not in {"expected_tool_diagnostic", UNRESOLVED_CLASS}:
+                raise RendererError(
+                    f"{path}: tool_diagnostic_contract is valid only for expected_tool_diagnostic or unresolved"
+                )
+            _validate_tool_diagnostic_contract(
+                root=Path(census.ROOT),
+                path=path,
+                source_sha256=source_sha,
+                expectation=expectation,
+            )
+        if expectation_class == "expected_tool_diagnostic":
+            if tool_contract is None:
+                raise RendererError(
+                    f"{path}: expected_tool_diagnostic requires a separate tool_diagnostic_contract"
+                )
+            _validate_expected_tool_diagnostic_contract(path, source_sha, expectation)
+        canonical_contract = expectation.get("canonical_mir_input_rejection_contract")
+        if expectation_class == "canonical_mir_input_rejection":
+            _validate_canonical_mir_input_rejection_contract(
+                root=Path(census.ROOT),
+                path=path,
+                source_sha256=source_sha,
+                expectation=expectation,
+            )
+        elif canonical_contract is not None:
+            raise RendererError(
+                f"{path}: canonical_mir_input_rejection_contract is valid only for canonical_mir_input_rejection"
+            )
     return inputs
+
+
+def _validate_tool_diagnostic_contract(
+    *, root: Path, path: str, source_sha256: str, expectation: Mapping[str, Any]
+) -> None:
+    """Validate a tool-level diagnostic contract without treating it as Mimi output."""
+    contract = expectation.get("tool_diagnostic_contract")
+    if not isinstance(contract, Mapping):
+        raise RendererError(f"{path}: tool diagnostic contract must be an object")
+    if contract.get("schema") != "mimi-tool-diagnostic-contract-v1":
+        raise RendererError(f"{path}: unsupported tool diagnostic contract schema")
+    contract_id = contract.get("contract_id")
+    if not isinstance(contract_id, str) or not contract_id.strip():
+        raise RendererError(f"{path}: tool diagnostic contract requires a stable contract_id")
+    input_record = contract.get("input")
+    if (
+        not isinstance(input_record, Mapping)
+        or input_record.get("path") != path
+        or input_record.get("source_sha256") != source_sha256
+    ):
+        raise RendererError(f"{path}: tool diagnostic contract is not bound to the exact input path/hash")
+    command = contract.get("command")
+    argv = command.get("argv") if isinstance(command, Mapping) else None
+    if (
+        not isinstance(command, Mapping)
+        or not isinstance(argv, list)
+        or len(argv) < 2
+        or any(not isinstance(arg, str) or not arg for arg in argv)
+        or command.get("cwd") != "."
+    ):
+        raise RendererError(f"{path}: tool diagnostic contract requires exact argv and repository cwd")
+    tool = contract.get("tool")
+    if not isinstance(tool, Mapping):
+        raise RendererError(f"{path}: tool diagnostic contract requires tool identity")
+    tool_source_path = tool.get("source_path")
+    tool_source_sha = tool.get("source_sha256")
+    if (
+        not isinstance(tool_source_path, str)
+        or not isinstance(tool_source_sha, str)
+        or SHA256_RE.fullmatch(tool_source_sha) is None
+    ):
+        raise RendererError(f"{path}: tool diagnostic contract must hash its tool source")
+    normalized_tool_path = _normalize_input_path_for_contract(tool_source_path)
+    tool_source_file = root / normalized_tool_path
+    try:
+        tool_metadata = tool_source_file.lstat()
+        tool_resolved = tool_source_file.resolve(strict=True)
+        tool_resolved.relative_to(root.resolve(strict=True))
+        tool_source_raw = tool_source_file.read_bytes()
+    except (OSError, ValueError) as error:
+        raise RendererError(f"{path}: tool diagnostic source hash is stale or unavailable") from error
+    if (
+        not stat.S_ISREG(tool_metadata.st_mode)
+        or tool_source_file.is_symlink()
+        or _sha256(tool_source_raw) != tool_source_sha
+    ):
+        raise RendererError(f"{path}: tool diagnostic source hash is stale or unavailable")
+    status = contract.get("status")
+    executable_path = tool.get("executable_path")
+    executable_sha = tool.get("executable_sha256")
+    expected = contract.get("expected")
+    if not isinstance(expected, Mapping):
+        raise RendererError(f"{path}: tool diagnostic contract requires an expected-output object")
+    if status == "pending_exact_execution":
+        blockers = contract.get("blockers")
+        if (
+            not isinstance(blockers, list)
+            or not blockers
+            or any(not isinstance(blocker, str) or not blocker.strip() for blocker in blockers)
+            or executable_path is not None
+            or executable_sha is not None
+            or expected.get("exit_code") is not None
+            or expected.get("stdout_utf8") is not None
+            or expected.get("stdout_sha256") is not None
+            or expected.get("stderr_utf8") is not None
+            or expected.get("stderr_sha256") is not None
+            or expected.get("full_output_captured") is not False
+        ):
+            raise RendererError(f"{path}: pending tool diagnostic must expose each missing execution binding")
+        return
+    if status != "bound":
+        raise RendererError(f"{path}: tool diagnostic status must be bound or pending_exact_execution")
+    if (
+        not isinstance(executable_path, str)
+        or not Path(executable_path).is_absolute()
+        or not isinstance(executable_sha, str)
+        or SHA256_RE.fullmatch(executable_sha) is None
+        or not isinstance(expected.get("exit_code"), int)
+        or isinstance(expected.get("exit_code"), bool)
+        or not isinstance(expected.get("stdout_utf8"), str)
+        or not isinstance(expected.get("stderr_utf8"), str)
+        or expected.get("full_output_captured") is not True
+        or expected.get("stdout_sha256") != _sha256(expected["stdout_utf8"].encode("utf-8"))
+        or expected.get("stderr_sha256") != _sha256(expected["stderr_utf8"].encode("utf-8"))
+    ):
+        raise RendererError(f"{path}: bound tool diagnostic must include executable hash, exit, and full stdout/stderr hashes")
+
+
+def _validate_expected_tool_diagnostic_contract(
+    path: str, source_sha256: str, expectation: Mapping[str, Any]
+) -> None:
+    """Require the existing v1 tool contract to be complete and directly runnable."""
+    contract = expectation.get("tool_diagnostic_contract")
+    if not isinstance(contract, Mapping) or contract.get("status") != "bound":
+        raise RendererError(f"{path}: expected_tool_diagnostic requires a bound tool contract")
+    input_record = contract.get("input")
+    tool = contract.get("tool")
+    command = contract.get("command")
+    expected = contract.get("expected")
+    if not isinstance(input_record, Mapping) or not isinstance(tool, Mapping):
+        raise RendererError(f"{path}: bound tool diagnostic contract is missing input/tool identity")
+    tool_source_path = tool.get("source_path")
+    executable_path = tool.get("executable_path")
+    if not isinstance(tool_source_path, str):
+        raise RendererError(f"{path}: bound tool diagnostic contract is missing tool source path")
+    if (
+        not isinstance(executable_path, str)
+        or not Path(executable_path).is_absolute()
+        or str(Path(executable_path).resolve(strict=False)) != executable_path
+    ):
+        raise RendererError(f"{path}: bound tool diagnostic executable path must be absolute and canonical")
+    argv = command.get("argv") if isinstance(command, Mapping) else None
+    expected_argv = ["<CURRENT_MIMI_EXECUTABLE>", "run", tool_source_path, path]
+    if (
+        input_record.get("path") != path
+        or input_record.get("source_sha256") != source_sha256
+        or not isinstance(argv, list)
+        or argv != expected_argv
+        or command.get("cwd") != "."
+        or not isinstance(expected, Mapping)
+        or not isinstance(expected.get("exit_code"), int)
+        or isinstance(expected.get("exit_code"), bool)
+        or expected.get("exit_code") == 0
+        or not (expected.get("stdout_utf8") or expected.get("stderr_utf8"))
+    ):
+        raise RendererError(
+            f"{path}: expected_tool_diagnostic must bind nonzero exact output to its input, tool source, and command"
+        )
+    blockers = contract.get("blockers", [])
+    if not isinstance(blockers, list) or blockers:
+        raise RendererError(f"{path}: bound expected_tool_diagnostic cannot retain unresolved blockers")
+    outer_contract_id = expectation.get("contract_id")
+    if outer_contract_id is not None and outer_contract_id != contract.get("contract_id"):
+        raise RendererError(f"{path}: expectation and tool diagnostic contract_id differ")
+
+
+def _validate_canonical_mir_input_rejection_contract(
+    *, root: Path, path: str, source_sha256: str, expectation: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """Validate the source-bound verifier rejection claim without execution data."""
+    del root  # The current input hash is checked by inventory and contract equality below.
+    contract = expectation.get("canonical_mir_input_rejection_contract")
+    if not isinstance(contract, Mapping):
+        raise RendererError(
+            f"{path}: canonical_mir_input_rejection requires canonical_mir_input_rejection_contract"
+        )
+    if contract.get("schema") != "mimi-canonical-mir-input-rejection-contract-v1":
+        raise RendererError(f"{path}: unsupported canonical MIR input rejection contract schema")
+    if contract.get("status") != "bound":
+        raise RendererError(f"{path}: canonical MIR input rejection contract must be bound")
+    if set(contract) != {"schema", "status", "contract_id", "input", "command", "assertions"}:
+        raise RendererError(f"{path}: canonical MIR input rejection contract has unexpected fields")
+    contract_id = contract.get("contract_id")
+    if not isinstance(contract_id, str) or not contract_id.strip():
+        raise RendererError(f"{path}: canonical MIR input rejection contract requires a stable contract_id")
+    input_record = contract.get("input")
+    if (
+        not isinstance(input_record, Mapping)
+        or set(input_record) != {"path", "source_sha256"}
+        or input_record.get("path") != path
+        or input_record.get("source_sha256") != source_sha256
+    ):
+        raise RendererError(f"{path}: canonical MIR rejection is not bound to the exact input path/hash")
+    command = contract.get("command")
+    expected_argv = ["<CURRENT_MIMI_EXECUTABLE>", "verify", path, "--mir"]
+    if (
+        not isinstance(command, Mapping)
+        or set(command) != {"argv", "cwd"}
+        or command.get("argv") != expected_argv
+        or command.get("cwd") != "."
+    ):
+        raise RendererError(
+            f"{path}: canonical MIR input rejection must pin `verify {path} --mir` from repository root"
+        )
+    assertions = contract.get("assertions")
+    expected_assertions = {
+        "exit_nonzero": True,
+        "merged_output_contains": [
+            "canonical MIR verifier input rejected",
+            "use after consuming non-Copy value",
+        ],
+        "merged_output_excludes": ["flow_ast"],
+    }
+    if (
+        not isinstance(assertions, Mapping)
+        or assertions.get("exit_nonzero") is not True
+        or dict(assertions) != expected_assertions
+    ):
+        raise RendererError(
+            f"{path}: canonical MIR input rejection must pin nonzero exit and the exact merged-output anchors"
+        )
+    outer_contract_id = expectation.get("contract_id")
+    if outer_contract_id is not None and outer_contract_id != contract_id:
+        raise RendererError(f"{path}: expectation and canonical MIR contract_id differ")
+    return contract
+
+
+def _normalize_input_path_for_contract(value: str) -> str:
+    candidate = PurePosixPath(value)
+    if candidate.is_absolute() or ".." in candidate.parts or candidate.as_posix() != value:
+        raise RendererError(f"tool source path must be normalized and repository-relative: {value!r}")
+    return value
 
 
 def _load_fixture_adjudication(
@@ -318,7 +592,7 @@ def _load_fixture_adjudication(
         if (
             not isinstance(expectation_class, str)
             or (
-                expectation_class not in census.EXPECTATION_CLASSES
+                expectation_class not in (set(census.EXPECTATION_CLASSES) | set(SPECIAL_EXECUTOR_CLASSES))
                 and expectation_class != UNRESOLVED_CLASS
             )
         ):
@@ -413,6 +687,7 @@ def _validate_required_compile(
         target_kind=str(source["target_kind"]),
         source_text=rust_test,
         assertion_line=assertion_line,
+        external_source_path=source.get("external_source_path"),
     ):
         raise RendererError(f"{path}: canonical direct test failed the current static recognizer")
     return rust_test, assertion_line
@@ -569,8 +844,58 @@ def _validate_source_diagnostic(
     return rust_test, assertion_line, actual_codes, actual_lines, derived_output_path
 
 
+def _special_executor_authority(
+    *, semantic_class: str, path: str, source_sha256: str,
+    contract: Mapping[str, Any], collector_sha256: str,
+) -> dict[str, Any]:
+    """Bind a dedicated census executor as direct test authority, without Rust authority."""
+    if semantic_class not in SPECIAL_EXECUTOR_CLASSES:
+        raise RendererError(f"unsupported special executor class: {semantic_class!r}")
+    short_identity = _sha256(f"{path}\0{source_sha256}".encode("utf-8"))[:20]
+    executor_suffix = semantic_class.removeprefix("expected_")
+    assertions = (
+        [
+            "tool_source_sha256",
+            "input_sha256",
+            "current_mimi_executable_sha256",
+            "argv",
+            "exit_code",
+            "stdout_bytes",
+            "stderr_bytes",
+        ]
+        if semantic_class == "expected_tool_diagnostic"
+        else [
+            "verify_exit_nonzero",
+            "merged_output_contains_anchors",
+            "merged_output_excludes_flow_ast",
+        ]
+    )
+    return {
+        "schema": DIRECT_EXECUTOR_AUTHORITY_SCHEMA,
+        "executor_id": f"full_route_census.{semantic_class}_executor.v1",
+        "test_id": f"route_census_{executor_suffix}_{short_identity}",
+        "test_path": "scripts/full_route_census.py",
+        "test_sha256": collector_sha256,
+        "contract_id": contract["contract_id"],
+        "contract_sha256": _canonical_json_sha256(contract),
+        "input": {"path": path, "source_sha256": source_sha256},
+        "assertions": assertions,
+        "execution_receipt_path": (
+            f"target/route-census-{semantic_class}-{short_identity}.json"
+        ),
+        "execution_status": "not_run",
+    }
+
+
 def _json_bytes(document: Any) -> bytes:
     return (json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+
+
+def _canonical_json_sha256(document: Any) -> str:
+    canonical = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return _sha256(canonical)
 
 
 def _write_staged_file(directory: Path, name: str, raw: bytes) -> None:
@@ -627,8 +952,21 @@ def render(
     generator._validate_optional_cargo_target(root)
     wrapper_path = root / EXPECTED_AUTHORITY_PATH
     wrapper_sha = _sha256(wrapper_path.read_bytes())
-    sources = _validate_inventory(root, census, generator)
     input_document, input_raw = _load_inputs(expectations_path)
+    matrix_binding = input_document.get("stdlib_matrix_generated_artifact")
+    matrix_root: Path | None = None
+    if matrix_binding is not None:
+        if (
+            not isinstance(matrix_binding, Mapping)
+            or not isinstance(matrix_binding.get("generated_root"), str)
+        ):
+            raise RendererError("expectations external stdlib matrix identity is malformed")
+        matrix_root = Path(str(matrix_binding["generated_root"]))
+        current_matrix = stdlib_matrix_artifacts.verify(root, matrix_root)
+        current_matrix = {key: value for key, value in current_matrix.items() if key != "files"}
+        if dict(matrix_binding) != current_matrix:
+            raise RendererError("expectations external stdlib matrix identity is stale")
+    sources = _validate_inventory(root, census, generator, matrix_root)
     fixture_meta: dict[str, Any] | None = None
     fixture_rows: dict[str, Mapping[str, Any]] = {}
     fixture_raw: bytes | None = None
@@ -654,6 +992,45 @@ def render(
     used_test_ids: set[str] = set()
     source_diag_output_paths: set[str] = set()
 
+    def preserve_blocker(
+        *, source_path: str, source_hash: str, semantic_class: str,
+        reason_text: str, expectation_record: Mapping[str, Any],
+        status: str, blocker: str, test_id: str | None = None,
+        direct_contract: str | None = None,
+    ) -> dict[str, Any]:
+        contract_id = expectation_record.get("contract_id")
+        if not isinstance(contract_id, str) or not contract_id.strip():
+            contract_id = "route-contract-" + _sha256(
+                (source_path + "\0" + source_hash).encode("utf-8")
+            )[:20]
+        output_expectation: dict[str, Any] = {
+            "class": "unmapped",
+            "reason": reason_text,
+            "source_sha256": source_hash,
+            "authority": None,
+            "semantic_class": semantic_class,
+            "contract_id": contract_id,
+            "blocker": blocker,
+        }
+        tool_contract = expectation_record.get("tool_diagnostic_contract")
+        generated_inputs[source_path] = output_expectation
+        manifest_row: dict[str, Any] = {
+            "path": source_path,
+            "adjudicated_class": semantic_class,
+            "authority_status": "semantic_unresolved" if semantic_class == UNRESOLVED_CLASS else "missing_exact_contract",
+            "status": status,
+            "reason": reason_text,
+            "source_sha256": source_hash,
+            "contract_id": contract_id,
+            "test_id": test_id,
+            "authority_generated": False,
+            "direct_contract": direct_contract,
+            "blocker": blocker,
+        }
+        if tool_contract is not None:
+            manifest_row["tool_diagnostic_contract"] = tool_contract
+        return manifest_row
+
     for index, path in enumerate(source_paths, 1):
         source = source_by_path[path]
         source["index"] = index
@@ -668,6 +1045,15 @@ def render(
                 if expectation_class == UNRESOLVED_CLASS
                 else "missing_exact_contract"
             )
+            contract_id = expectation.get("contract_id")
+            if not isinstance(contract_id, str) or not contract_id.strip():
+                contract_id = "route-contract-" + _sha256(
+                    (path + "\0" + source_sha).encode("utf-8")
+                )[:20]
+            blocker = (
+                adjudication.get("unresolved_reason")
+                or "fixture decision has no directly executable schema-v5 route contract"
+            )
             manifest_rows.append({
                 "path": path,
                 "adjudicated_class": expectation_class,
@@ -679,8 +1065,10 @@ def render(
                 ),
                 "reason": reason,
                 "source_sha256": source_sha,
+                "contract_id": contract_id,
                 "test_id": None,
                 "authority_generated": False,
+                "blocker": blocker,
                 "direct_contract": adjudication["direct_contract"],
                 "normative_basis": adjudication["normative_basis"],
                 "unresolved_reason": adjudication.get("unresolved_reason"),
@@ -693,6 +1081,15 @@ def render(
                     "input_class_before_adjudication": prior_classes.get(path),
                 },
             })
+            generated_inputs[path] = {
+                "class": "unmapped",
+                "reason": reason,
+                "source_sha256": source_sha,
+                "authority": None,
+                "semantic_class": expectation_class,
+                "contract_id": contract_id,
+                "blocker": blocker,
+            }
             continue
         if expectation_class not in DIRECT_CLASSES:
             if expectation_class == UNRESOLVED_CLASS:
@@ -704,16 +1101,122 @@ def render(
             else:
                 authority_status = "missing_exact_contract"
                 row_status = "blocking_without_direct_contract"
+            blocker = str(expectation.get("blocker") or (
+                expectation.get("unresolved_reason")
+                or "independent semantic expectation is not backed by a direct schema-v5 route contract"
+            ))
+            row = preserve_blocker(
+                source_path=path,
+                source_hash=source_sha,
+                semantic_class=expectation_class,
+                reason_text=reason,
+                expectation_record=expectation,
+                status=row_status,
+                blocker=blocker,
+                direct_contract=(
+                    str(expectation.get("contract_kind"))
+                    if expectation.get("contract_kind") is not None else None
+                ),
+            )
+            row["authority_status"] = authority_status
+            if expectation.get("tool_diagnostic_contract") is not None:
+                row["input_kind"] = "tool_diagnostic"
+            manifest_rows.append(row)
+            continue
+
+        # A semantic rejection/diagnostic remains in the census input manifest
+        # even when its exact output contract has not been adjudicated. Keep it
+        # as an unmapped blocker rather than dropping it or deriving output
+        # expectations from bootstrap observations.
+        if expectation_class == "expected_build_rejection" and not all(
+            field in expectation for field in (
+                "expected_exit_code", "expected_route_disposition",
+                "expected_route_classification_status", "expected_route_reason",
+                "expected_failure_class", "expected_diagnostic_codes",
+                "required_output_substrings",
+            )
+        ):
+            manifest_rows.append(preserve_blocker(
+                source_path=path,
+                source_hash=source_sha,
+                semantic_class=expectation_class,
+                reason_text=reason,
+                expectation_record=expectation,
+                status="blocked_missing_exact_contract",
+                blocker="expected build rejection lacks an independently pinned route reason, diagnostic set, exit, and output contract",
+                direct_contract="default_build_rejection_contract",
+            ))
+            continue
+        if expectation_class == "expected_source_diagnostic" and not all(
+            field in expectation for field in (
+                "expected_stderr", "expected_exit_code", "expected_diagnostic_lines",
+                "expected_diagnostic_codes", "expected_stdout_empty",
+                "expected_output_absent", "expected_output_path",
+            )
+        ):
+            manifest_rows.append(preserve_blocker(
+                source_path=path,
+                source_hash=source_sha,
+                semantic_class=expectation_class,
+                reason_text=reason,
+                expectation_record=expectation,
+                status="blocked_missing_exact_contract",
+                blocker="expected source diagnostic lacks full exact stderr, code/line set, exit, empty-stdout, and artifact-absence contract",
+                direct_contract="default_source_diagnostic_contract",
+            ))
+            continue
+
+        if expectation_class in SPECIAL_EXECUTOR_CLASSES:
+            contract_key = (
+                "tool_diagnostic_contract"
+                if expectation_class == "expected_tool_diagnostic"
+                else "canonical_mir_input_rejection_contract"
+            )
+            contract = expectation.get(contract_key)
+            if not isinstance(contract, Mapping):
+                raise RendererError(f"{path}: {expectation_class} lacks its direct executor contract")
+            executor_authority_key = (
+                "tool_diagnostic_authority"
+                if expectation_class == "expected_tool_diagnostic"
+                else "canonical_mir_input_rejection_authority"
+            )
+            executor_authority = _special_executor_authority(
+                semantic_class=expectation_class,
+                path=path,
+                source_sha256=source_sha,
+                contract=contract,
+                collector_sha256=census_initial_sha,
+            )
+            output_expectation = {
+                "class": expectation_class,
+                "reason": reason,
+                "source_sha256": source_sha,
+                contract_key: contract,
+                executor_authority_key: executor_authority,
+                "contract_id": contract["contract_id"],
+            }
+            # The executor runs only in a later full census. Rendering records
+            # an independently pinned direct test contract, never observations.
             manifest_rows.append({
                 "path": path,
                 "adjudicated_class": expectation_class,
-                "authority_status": authority_status,
-                "status": row_status,
+                "authority_status": "generated_not_executed",
+                "status": "generated_not_executed",
                 "reason": reason,
                 "source_sha256": source_sha,
-                "test_id": None,
-                "authority_generated": False,
+                "contract_id": contract["contract_id"],
+                "test_id": executor_authority["test_id"],
+                "test_path": executor_authority["test_path"],
+                "test_sha256": executor_authority["test_sha256"],
+                "execution_receipt_path": executor_authority["execution_receipt_path"],
+                "execution_status": "not_run",
+                "authority_generated": True,
+                "direct_contract": contract["schema"],
+                "independent_expected_values": contract,
+                contract_key: contract,
+                executor_authority_key: executor_authority,
             })
+            generated_inputs[path] = output_expectation
             continue
 
         test_id = _expectation_test_id(generator, index, path, used_test_ids)
@@ -736,6 +1239,11 @@ def render(
                     "sha256": "",
                 },
             }
+            if source.get("external_source_path") is not None:
+                output_expectation["authority"]["assertion"].update({
+                    "external_source_path": source["external_source_path"],
+                    "matrix_manifest_sha256": source["matrix_manifest_sha256"],
+                })
             manifest_row = {
                 "path": path,
                 "adjudicated_class": expectation_class,
@@ -854,6 +1362,13 @@ def render(
             raise RendererError(f"{path}: generated test lost its cited assertion literal")
         test_blocks.append(rust_test.rstrip())
         generated_inputs[path] = output_expectation
+        contract_id = expectation.get("contract_id")
+        if not isinstance(contract_id, str) or not contract_id.strip():
+            contract_id = "route-contract-" + _sha256(
+                (path + "\0" + source_sha).encode("utf-8")
+            )[:20]
+        output_expectation["contract_id"] = contract_id
+        manifest_row["contract_id"] = contract_id
         manifest_rows.append(manifest_row)
 
     rust_source = (
@@ -872,6 +1387,11 @@ def render(
             authority["assertion"]["sha256"] = rust_sha
     expectations_document = {
         "schema_version": OUTPUT_EXPECTATIONS_SCHEMA_VERSION,
+        **(
+            {"stdlib_matrix_generated_artifact": dict(matrix_binding)}
+            if isinstance(matrix_binding, Mapping)
+            else {}
+        ),
         "inputs": generated_inputs,
     }
     expectations_raw = _json_bytes(expectations_document)
@@ -889,7 +1409,11 @@ def render(
     if _sha256(wrapper_path.read_bytes()) != wrapper_sha:
         raise RendererError("registered route authority wrapper changed while rendering")
     for path, expected_hash in source_hashes.items():
-        if generator._source_file_sha256(root, path) != expected_hash:
+        source = source_by_path[path]
+        physical_path = Path(
+            str(source.get("external_source_path") or (root / path))
+        )
+        if _sha256(physical_path.read_bytes()) != expected_hash:
             raise RendererError(f"current Mimi source changed while rendering: {path}")
 
     input_sha = _sha256(input_raw)
@@ -903,9 +1427,11 @@ def render(
         class_name = str(row["adjudicated_class"])
         class_counts[class_name] = class_counts.get(class_name, 0) + 1
     blocked_count = sum(row.get("authority_generated") is not True for row in manifest_rows)
-    unmapped_count = sum(row.get("adjudicated_class") == "unmapped" for row in manifest_rows)
+    semantic_unmapped_count = sum(
+        row.get("adjudicated_class") == "unmapped" for row in manifest_rows
+    )
     unresolved_count = sum(row.get("adjudicated_class") == UNRESOLVED_CLASS for row in manifest_rows)
-    no_contract_count = blocked_count - unmapped_count - unresolved_count
+    no_contract_count = blocked_count - semantic_unmapped_count - unresolved_count
     generated_count = sum(row.get("authority_generated") is True for row in manifest_rows)
     manifest: dict[str, Any] = {
         "schema_version": 1,
@@ -915,6 +1441,11 @@ def render(
         "accepted": False,
         "strict_census_ready": False,
         "expectation_coverage_complete": blocked_count == 0,
+        **(
+            {"stdlib_matrix_generated_artifact": dict(matrix_binding)}
+            if isinstance(matrix_binding, Mapping)
+            else {}
+        ),
         "denominator": {
             "repository_root": str(root),
             "candidate_count": len(sources),
@@ -951,11 +1482,15 @@ def render(
             "counts": dict(sorted(class_counts.items())),
             "direct_test_count": generated_count,
             "blocked_row_count": blocked_count,
-            "unmapped_blocker_count": unmapped_count,
+            "unmapped_blocker_count": sum(
+                1 for row in manifest_rows if row.get("authority_generated") is not True
+            ),
+            "semantic_unmapped_class_count": semantic_unmapped_count,
             "semantic_unresolved_count": unresolved_count,
             "missing_direct_contract_count": no_contract_count,
-            "expectation_inputs_include_blockers": False,
+            "expectation_inputs_include_blockers": True,
             "all_direct_tests_static_recognizer_valid": True,
+            "all_special_executor_authorities_hash_bound": True,
             "tests_executed": False,
         },
         "artifacts": {
@@ -965,8 +1500,8 @@ def render(
         "rows": manifest_rows,
         "execution_contract": (
             "The declared classes and expected values came from the independent input manifest. "
-            "Generated direct tests passed source-level static recognizers only; no Mimi, Cargo, or test command was run. "
-            "A subsequent route census must execute and independently verify every generated direct test. "
+                "Generated Rust direct tests passed source-level static recognizers; dedicated tool and canonical MIR verifier executors are hash-bound but have not run. "
+            "No Mimi, Cargo, or test command was run. A subsequent route census must execute and independently verify every direct test contract. "
             "Unmapped, unresolved, and other non-direct-contract rows remain blocked review decisions and are never accepted."
         ),
     }
@@ -988,7 +1523,7 @@ def render(
             "strict_authority_disclaimer": fixture_meta["strict_authority_disclaimer"],
             "strict_authority": False,
             "note": (
-                "Rows are preserved as independent review decisions; their richer direct contracts are not represented by schema-v4 inputs until exact authority contracts are available."
+                "Rows are preserved as independent review decisions; their richer direct contracts are not represented by schema-v5 inputs until exact authority contracts are available."
             ),
         }
     manifest_raw = _json_bytes(manifest)
@@ -1135,7 +1670,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="new external directory for authorities.rs, schema-v4 expectations, and manifest",
+        help="new external directory for authorities.rs, schema-v5 expectations, and manifest",
     )
     parser.add_argument(
         "--self-check",

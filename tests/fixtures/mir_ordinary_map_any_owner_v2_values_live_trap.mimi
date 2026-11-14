@@ -1,0 +1,34 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "first", 41) {
+            Ok(one) => {
+            match map_set(one, "second", 42) {
+                Ok(root) => {
+        let snapshot = values(root)
+        println(snapshot.len())
+        assert(false)
+        drop(snapshot)
+        drop(empty)
+        drop(one)
+        drop(root)
+        0
+                },
+                Err(status) => {
+                drop(one)
+                drop(empty)
+                status
+                },
+            }
+            },
+            Err(status) => {
+            drop(empty)
+            status
+            },
+        }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

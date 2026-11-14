@@ -1,0 +1,33 @@
+use std::maps;
+
+func cold() -> Result<string, i32> {
+    let payload = "stored hit"
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", payload)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", "fallback")
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    Ok(observed)
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    Err(status)
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            Err(status)
+        },
+    }
+}
+
+func main() -> i32 {
+    0
+}

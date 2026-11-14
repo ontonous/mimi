@@ -4,13 +4,24 @@ func fail<T>(value: T) -> i32 {
 }
 
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", "owned\0🧪值")
-    let pair = map_get(root, "key")
-    let payload = pair.1
-    drop(pair)
-    drop(empty)
-    drop(root)
-    println(77)
-    fail(payload)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", "owned\0🧪值") {
+                Ok(root) => {
+                    let pair = map_get(root, "key")
+                    let payload = pair.1
+                    drop(pair)
+                    drop(empty)
+                    drop(root)
+                    println(77)
+                    fail(payload)
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

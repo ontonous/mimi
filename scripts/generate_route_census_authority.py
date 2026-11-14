@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate source-bound schema-v4 route expectations and direct Rust authorities.
+"""Generate source-bound schema-v5 route expectations and direct Rust authorities.
 
 The generator is intentionally fail-closed.  It consumes only a current,
 full-execution evidence-collection report whose entire candidate inventory is
@@ -36,7 +36,12 @@ import unicodedata
 from typing import Any, Mapping, Sequence
 
 
-REQUIRED_CENSUS_SCHEMA_VERSION = "0.1.11-full-route-census-v7"
+REQUIRED_CENSUS_SCHEMA_VERSION = "0.1.11-full-route-census-v9"
+REQUIRED_EXPECTATIONS_SCHEMA_VERSION = 5
+SPECIAL_EXECUTOR_EXPECTATION_CLASSES = frozenset({
+    "expected_tool_diagnostic",
+    "canonical_mir_input_rejection",
+})
 EXPECTED_TEST_NAME = "route-census-authorities"
 EXPECTED_FEATURE_NAME = "route-census-authorities"
 EXPECTED_TEST_PATH = "tests/route-census/authorities.rs"
@@ -93,6 +98,13 @@ SOURCE_DIAGNOSTIC_DETECT_RE = re.compile(
 SOURCE_DIAGNOSTIC_CODE_RE = re.compile(
     r"(?i)^[ \t]*error[ \t]*\[[ \t]*(?P<code>E\d{4}|MIR-[A-Z0-9_-]+-\d{3,})[ \t]*\]"
 )
+SOURCE_DIAGNOSTIC_TYPE_PREAMBLE_RE = re.compile(
+    r"(?P<path>.+\.mimi) has (?P<count>[1-9][0-9]*) type error\(s\):\Z"
+)
+SOURCE_DIAGNOSTIC_TYPE_SUMMARY = "error: type checking failed"
+SOURCE_DIAGNOSTIC_PARSE_SUMMARY_RE = re.compile(
+    r"error: (?P<count>[1-9][0-9]*) parse error\(s\) found\Z"
+)
 SOURCE_DIAGNOSTIC_FORBIDDEN_MARKERS = (
     "canonical route disposition:",
     "default canonical mir route rejected:",
@@ -101,9 +113,6 @@ SOURCE_DIAGNOSTIC_FORBIDDEN_MARKERS = (
     "fallback",
     "legacy",
     "compatibility",
-)
-SOURCE_DIAGNOSTIC_SUMMARY_RE = re.compile(
-    r"(?i)[ \t]*error:[ \t]*type checking failed[ \t]*\Z"
 )
 
 
@@ -291,6 +300,11 @@ def _validate_report_identity(
         raise GenerationError(
             f"current collector must implement census schema {REQUIRED_CENSUS_SCHEMA_VERSION}"
         )
+    if census.EXPECTATION_SCHEMA_VERSION != REQUIRED_EXPECTATIONS_SCHEMA_VERSION:
+        raise GenerationError(
+            "current collector must implement route expectation schema "
+            f"{REQUIRED_EXPECTATIONS_SCHEMA_VERSION}"
+        )
     if report.get("schema_version") != REQUIRED_CENSUS_SCHEMA_VERSION:
         raise GenerationError(
             f"census report schema_version must be {REQUIRED_CENSUS_SCHEMA_VERSION}"
@@ -327,11 +341,21 @@ def _validate_report_identity(
     ):
         raise GenerationError("census collector path/hash is stale or does not match the current collector")
 
+    source_scope = report.get("source_scope")
+    if not isinstance(source_scope, Mapping):
+        raise GenerationError("census report is missing its source-scope ledger")
+    matrix_record = source_scope.get("stdlib_matrix_generated_artifact")
+    matrix_root: Path | None = None
+    if matrix_record is not None:
+        if not isinstance(matrix_record, Mapping) or not isinstance(matrix_record.get("generated_root"), str):
+            raise GenerationError("census external stdlib matrix identity is malformed")
+        matrix_root = Path(str(matrix_record["generated_root"]))
     tracked_paths, tracked_inventory = census.tracked_mimi_paths(root)
     if tracked_inventory.get("status") != "available":
         raise GenerationError("cannot prove the current Git-indexed Mimi inventory")
-    sources, exclusions, current_scope = census.enumerate_source_scope(root, tracked_paths)
-    source_scope = report.get("source_scope")
+    sources, exclusions, current_scope = census.enumerate_source_scope(
+        root, tracked_paths, matrix_root
+    )
     if (
         current_scope.get("exactly_once") is not True
         or source_scope != current_scope
@@ -405,7 +429,16 @@ def _revalidate_current_inputs(
     tracked_paths, tracked_inventory = census.tracked_mimi_paths(root)
     if tracked_inventory.get("status") != "available":
         raise GenerationError("cannot revalidate the current Git-indexed Mimi inventory")
-    current_sources, current_exclusions, current_scope = census.enumerate_source_scope(root, tracked_paths)
+    matrix_record = source_scope.get("stdlib_matrix_generated_artifact")
+    matrix_root = (
+        Path(str(matrix_record["generated_root"]))
+        if isinstance(matrix_record, Mapping)
+        and isinstance(matrix_record.get("generated_root"), str)
+        else None
+    )
+    current_sources, current_exclusions, current_scope = census.enumerate_source_scope(
+        root, tracked_paths, matrix_root
+    )
     if (
         list(sources) != current_sources
         or list(exclusions) != current_exclusions
@@ -469,12 +502,18 @@ def _source_diagnostic_authority_output_path(source_path: str, source_sha256: st
 def _source_diagnostic_from_raw_logs(
     stderr: bytes, *, source_path: str, root: Path
 ) -> dict[str, Any]:
-    """Derive the complete source diagnostic set directly from captured stderr."""
+    """Derive the complete Mimi build source-diagnostic set from stderr."""
     try:
         text = stderr.decode("utf-8")
     except UnicodeDecodeError as error:
         raise GenerationError(f"{source_path}: source diagnostic stderr is not complete UTF-8") from error
-    if not text or "\x00" in text or "\r" in text or "\x1b" in text:
+    if (
+        not text
+        or not text.endswith("\n")
+        or "\x00" in text
+        or "\r" in text
+        or "\x1b" in text
+    ):
         raise GenerationError(f"{source_path}: source diagnostic stderr is not deterministic plain text")
     lowered = text.lower()
     if any(marker in lowered for marker in SOURCE_DIAGNOSTIC_FORBIDDEN_MARKERS):
@@ -482,15 +521,43 @@ def _source_diagnostic_from_raw_logs(
     absolute_source = str((root / source_path).resolve())
     lines = text.splitlines()
     diagnostic_lines = [line for line in lines if SOURCE_DIAGNOSTIC_RE.search(line)]
-    summary_lines = [line for line in lines if SOURCE_DIAGNOSTIC_SUMMARY_RE.fullmatch(line)]
-    nonempty_lines = [line for line in lines if line.strip()]
-    if (
-        not diagnostic_lines
-        or len(summary_lines) > 1
-        or len(nonempty_lines) != len(diagnostic_lines) + len(summary_lines)
-        or any(line not in diagnostic_lines and line not in summary_lines for line in nonempty_lines)
-        or any(absolute_source not in line for line in diagnostic_lines)
-    ):
+    if not diagnostic_lines or not lines or any(not line.strip() for line in lines):
+        raise GenerationError(
+            f"{source_path}: raw stderr contains an unknown, extra or unbound diagnostic"
+        )
+    type_preambles = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := SOURCE_DIAGNOSTIC_TYPE_PREAMBLE_RE.fullmatch(line)) is not None
+    ]
+    type_summaries = [
+        index for index, line in enumerate(lines)
+        if line == SOURCE_DIAGNOSTIC_TYPE_SUMMARY
+    ]
+    parse_summaries = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := SOURCE_DIAGNOSTIC_PARSE_SUMMARY_RE.fullmatch(line)) is not None
+    ]
+    if type_preambles or type_summaries:
+        valid_layout = (
+            len(type_preambles) == 1
+            and len(type_summaries) == 1
+            and not parse_summaries
+            and type_preambles[0][0] == 0
+            and type_preambles[0][1].group("path") == absolute_source
+            and int(type_preambles[0][1].group("count")) == len(diagnostic_lines)
+            and type_summaries[0] == len(lines) - 1
+            and len(lines) == len(diagnostic_lines) + 2
+        )
+    else:
+        valid_layout = (
+            len(parse_summaries) == 1
+            and parse_summaries[0][0] == len(lines) - 1
+            and int(parse_summaries[0][1].group("count")) == len(diagnostic_lines)
+            and len(lines) == len(diagnostic_lines) + 1
+        )
+    if not valid_layout or any(absolute_source not in line for line in diagnostic_lines):
         raise GenerationError(
             f"{source_path}: raw stderr contains an unknown, extra or unbound diagnostic"
         )
@@ -658,16 +725,35 @@ def _render_required_compile_test(
     relative = str(source["path"])
     _rust_path_literal(relative)
     _rust_path_literal(output_path)
-    join_chain = "".join(
-        f".join({json.dumps(part, ensure_ascii=False)})"
-        for part in Path(relative).parts
-    )
+    external_source = source.get("external_source_path")
+    if external_source is not None:
+        if (
+            not isinstance(external_source, str)
+            or not Path(external_source).is_absolute()
+            or Path(external_source).is_symlink()
+        ):
+            raise GenerationError(f"{relative}: external generated source path is not canonical")
+        _rust_path_literal(external_source)
+        fixture_binding = (
+            f"    let fixture = ::std::path::Path::new({json.dumps(external_source, ensure_ascii=False)});\n"
+            f"    let expected_source: &[u8] = include_bytes!({json.dumps(external_source, ensure_ascii=False)});\n"
+            "    ::std::assert_eq!(fixture.canonicalize().expect(\"generated matrix source must exist\"), fixture, \"generated matrix source must be symlink-free\");\n"
+            "    ::std::assert_eq!(::std::fs::read(&fixture).expect(\"generated matrix source must be readable\").as_slice(), expected_source, \"generated matrix source changed after authority compilation\");\n"
+        )
+    else:
+        join_chain = "".join(
+            f".join({json.dumps(part, ensure_ascii=False)})"
+            for part in Path(relative).parts
+        )
+        fixture_binding = (
+            "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
+            f"{join_chain};\n"
+        )
     target_flag = '        .arg("--shared")\n' if source["target_kind"] == "shared_library_probe" else ""
     return (
         "#[test]\n"
         f"fn {test_id}() {{\n"
-        "    let fixture = ::std::path::Path::new(::std::env!(\"CARGO_MANIFEST_DIR\"))"
-        f"{join_chain};\n"
+        f"{fixture_binding}"
         "    let output = ::std::process::Command::new(route_census_mimi_path())\n"
         "        .current_dir(::std::env!(\"CARGO_MANIFEST_DIR\"))\n"
         "        .arg(\"build\")\n"
@@ -951,6 +1037,7 @@ def _validate_row(
             target_kind=str(source["target_kind"]),
             source_text=rust_test,
             assertion_line=_line_number_for_literal(rust_test, "canonical route disposition: canonical ("),
+            external_source_path=source.get("external_source_path"),
         )
         if not probe:
             raise GenerationError(f"{path}: generated canonical test does not satisfy strict v4 recognizer")
@@ -967,6 +1054,11 @@ def _validate_row(
                 },
             },
         }
+        if source.get("external_source_path") is not None:
+            generated_expectation["authority"]["assertion"].update({
+                "external_source_path": source["external_source_path"],
+                "matrix_manifest_sha256": source["matrix_manifest_sha256"],
+            })
     elif expectation_class == "expected_source_diagnostic":
         if (
             route_disposition != "rejected"
@@ -1736,6 +1828,7 @@ def _bootstrap_validate_row(
             target_kind=str(source["target_kind"]),
             source_text=rust_test,
             assertion_line=assertion_line,
+            external_source_path=source.get("external_source_path"),
         ):
             raise GenerationError(f"{path}: bootstrap canonical test fails the strict source recognizer")
         expectation = {
@@ -1747,6 +1840,11 @@ def _bootstrap_validate_row(
                 "assertion": {"path": EXPECTED_TEST_PATH, "line": assertion_line, "sha256": ""},
             },
         }
+        if source.get("external_source_path") is not None:
+            expectation["authority"]["assertion"].update({
+                "external_source_path": source["external_source_path"],
+                "matrix_manifest_sha256": source["matrix_manifest_sha256"],
+            })
         row = {
             "path": path,
             "test_id": test_id,
@@ -1983,6 +2081,206 @@ def _bootstrap_validate_row(
     )
 
 
+def _load_direct_executor_expectations(
+    *,
+    report: Mapping[str, Any],
+    root: Path,
+    census: Any,
+    required_paths: set[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Reload direct-lane pins from the exact manifest named by the report.
+
+    Direct executor output is never used to construct its own expectation. The
+    collector's manifest identity selects the independent schema-v5 input, and
+    this function reopens and validates that file before preserving any direct
+    executor class in the generated bundle.
+    """
+    expectations = report.get("expectations")
+    identity = expectations.get("identity") if isinstance(expectations, Mapping) else None
+    provided = identity.get("provided_manifest") if isinstance(identity, Mapping) else None
+    if not isinstance(provided, Mapping):
+        raise GenerationError("direct executor rows require the report's independent expectation manifest")
+    manifest_path_value = provided.get("path")
+    manifest_sha256 = provided.get("sha256")
+    if (
+        not isinstance(manifest_path_value, str)
+        or not Path(manifest_path_value).is_absolute()
+        or SHA256_RE.fullmatch(str(manifest_sha256)) is None
+    ):
+        raise GenerationError("direct executor source manifest identity is malformed")
+    manifest_path = Path(manifest_path_value)
+    try:
+        manifest_metadata = manifest_path.lstat()
+        resolved_manifest_path = manifest_path.resolve(strict=True)
+        current_manifest_sha256 = _sha256(manifest_path.read_bytes())
+    except OSError as error:
+        raise GenerationError("direct executor source manifest is missing or unreadable") from error
+    if (
+        not stat.S_ISREG(manifest_metadata.st_mode)
+        or manifest_path.is_symlink()
+        or str(resolved_manifest_path) != manifest_path_value
+        or current_manifest_sha256 != manifest_sha256
+    ):
+        raise GenerationError("direct executor source manifest path/hash is stale or non-canonical")
+    try:
+        declared, loaded_identity = census.load_expectations(manifest_path, root)
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        raise GenerationError(f"direct executor source manifest is not valid route-expectation schema v5: {error}") from error
+    if (
+        loaded_identity is None
+        or loaded_identity.get("path") != manifest_path_value
+        or loaded_identity.get("sha256") != manifest_sha256
+    ):
+        raise GenerationError("direct executor source manifest identity differs from the census report")
+    result: dict[str, Mapping[str, Any]] = {}
+    for path in sorted(required_paths):
+        expectation = declared.get(path)
+        if (
+            not isinstance(expectation, Mapping)
+            or expectation.get("class") not in SPECIAL_EXECUTOR_EXPECTATION_CLASSES
+        ):
+            raise GenerationError(f"{path}: independent source manifest does not pin its direct executor class")
+        result[path] = expectation
+    return result
+
+
+def _validate_direct_executor_row(
+    *,
+    index: int,
+    source: Mapping[str, Any],
+    record: Mapping[str, Any],
+    independent_expectation: Mapping[str, Any],
+    root: Path,
+    census: Any,
+    reported_mimi: str,
+    reported_mimi_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Preserve a source-pinned direct lane for execution during strict replay."""
+    path = _normalized_repo_path(source.get("path"), label="direct executor candidate path")
+    expectation_class = independent_expectation.get("class")
+    contract_key = (
+        "tool_diagnostic_contract"
+        if expectation_class == "expected_tool_diagnostic"
+        else "canonical_mir_input_rejection_contract"
+    )
+    authority_key = (
+        "tool_diagnostic_authority"
+        if expectation_class == "expected_tool_diagnostic"
+        else "canonical_mir_input_rejection_authority"
+    )
+    contract = independent_expectation.get(contract_key)
+    authority = independent_expectation.get(authority_key)
+    validator = (
+        census._validate_tool_diagnostic_contract
+        if expectation_class == "expected_tool_diagnostic"
+        else census._canonical_mir_input_rejection_contract_is_valid
+    )
+    source_sha256 = source.get("sha256")
+    if (
+        expectation_class not in SPECIAL_EXECUTOR_EXPECTATION_CLASSES
+        or record.get("path") != path
+        or record.get("input_index") != index
+        or record.get("sha256") != source_sha256
+        or record.get("source_hash_before_execution") != source_sha256
+        or record.get("source_hash_after_execution") != source_sha256
+        or record.get("source_stable_for_input") is not True
+        or _source_file_sha256(root, path) != source_sha256
+        or independent_expectation.get("source_sha256") != source_sha256
+    ):
+        raise GenerationError(f"{path}: direct executor row does not preserve its source hash and position")
+    try:
+        validated_contract = validator(root, path, source_sha256, contract)
+    except (OSError, ValueError, TypeError) as error:
+        raise GenerationError(f"{path}: independent direct executor contract is invalid: {error}") from error
+    if (
+        independent_expectation.get("contract_id") != validated_contract.get("contract_id")
+        or not census._diagnostic_executor_authority_is_valid(
+            root,
+            expectation_class=str(expectation_class),
+            source_path=path,
+            source_sha256=str(source_sha256),
+            contract=validated_contract,
+            authority=authority,
+        )
+    ):
+        raise GenerationError(f"{path}: independent direct executor authority does not match its contract")
+
+    report_expectation = record.get("expectation")
+    if not isinstance(report_expectation, Mapping):
+        raise GenerationError(f"{path}: direct executor report row has no expectation record")
+    for field in ("class", "reason", "semantic_class", "contract_id", "source_sha256", contract_key, authority_key):
+        if report_expectation.get(field) != independent_expectation.get(field):
+            raise GenerationError(f"{path}: report changed independent direct expectation field {field!r}")
+    mimi_identity = record.get("mimi_executable_identity")
+    if (
+        not isinstance(mimi_identity, Mapping)
+        or mimi_identity.get("path") != reported_mimi
+        or mimi_identity.get("sha256_expected") != reported_mimi_sha256
+        or mimi_identity.get("matches_expected") is not True
+    ):
+        raise GenerationError(f"{path}: direct executor row does not bind the current Mimi executable")
+    execution_key = (
+        "tool_diagnostic_execution"
+        if expectation_class == "expected_tool_diagnostic"
+        else "canonical_mir_input_rejection_execution"
+    )
+    execution = record.get(execution_key)
+    if not isinstance(execution, Mapping):
+        raise GenerationError(f"{path}: deferred direct executor row has no execution record")
+    expected_deferred_status = (
+        "not_run_pending_exact_execution"
+        if expectation_class == "expected_tool_diagnostic"
+        and validated_contract.get("status") == "pending_exact_execution"
+        else "not_run_deferred_until_strict_check"
+    )
+    receipt = execution.get("receipt")
+    if (
+        record.get("run_status") != "not_run"
+        or record.get("exit_code") is not None
+        or record.get("output_artifact") is not None
+        or record.get("command") is not None
+        or execution.get("status") != expected_deferred_status
+        or not isinstance(receipt, Mapping)
+        or receipt.get("status") != "not_run"
+        or receipt.get("accepted") is not False
+    ):
+        raise GenerationError(
+            f"{path}: direct executor must remain deferred during evidence collection and execute only in strict replay"
+        )
+
+    generated_expectation: dict[str, Any] = {
+        "class": expectation_class,
+        "reason": independent_expectation.get("reason"),
+        "source_sha256": source_sha256,
+        "authority": None,
+        "contract_id": validated_contract.get("contract_id"),
+        contract_key: validated_contract,
+        authority_key: dict(authority),
+    }
+    for field in ("semantic_class", "blocker"):
+        if field in independent_expectation:
+            generated_expectation[field] = independent_expectation[field]
+
+    row = {
+        "path": path,
+        "test_id": authority.get("test_id"),
+        "class": expectation_class,
+        "source_sha256": source_sha256,
+        "candidate_classification": expectation_class,
+        "route_disposition": record.get("route", {}).get("disposition")
+        if isinstance(record.get("route"), Mapping) else "unobserved",
+        "route_classification_status": record.get("route", {}).get("classification_status")
+        if isinstance(record.get("route"), Mapping) else "not_run",
+        "observed_route_rejection": False,
+        "direct_contract": validated_contract.get("schema"),
+        "direct_executor_authority": dict(authority),
+        "authority_status": "generated_not_executed",
+        "authority_generated": True,
+        "execution_status": "not_run",
+    }
+    return generated_expectation, row
+
+
 def generate(
     report_path: Path,
     root: Path,
@@ -2019,6 +2317,23 @@ def generate(
         raise GenerationError("full execution report has duplicate, missing or extra candidate records")
     if bootstrap_report and record_paths != source_paths:
         raise GenerationError("bootstrap report candidate records do not preserve exact inventory order")
+    direct_executor_paths = {
+        str(record.get("path"))
+        for record in records
+        if isinstance(record, Mapping)
+        and isinstance(record.get("expectation"), Mapping)
+        and record["expectation"].get("class") in SPECIAL_EXECUTOR_EXPECTATION_CLASSES
+    }
+    direct_executor_expectations = (
+        _load_direct_executor_expectations(
+            report=report,
+            root=root,
+            census=census,
+            required_paths=direct_executor_paths,
+        )
+        if direct_executor_paths
+        else {}
+    )
     artifacts = report.get("artifacts")
     artifacts_root = artifacts.get("root") if isinstance(artifacts, Mapping) else None
     if not isinstance(artifacts_root, str):
@@ -2075,7 +2390,28 @@ def generate(
         if test_id in generated_test_ids:
             raise GenerationError(f"duplicate generated authority test id: {test_id}")
         generated_test_ids.add(test_id)
-        if bootstrap_report:
+        report_expectation = record.get("expectation")
+        report_class = (
+            report_expectation.get("class")
+            if isinstance(report_expectation, Mapping)
+            else None
+        )
+        if report_class in SPECIAL_EXECUTOR_EXPECTATION_CLASSES:
+            independent_expectation = direct_executor_expectations.get(path)
+            if not isinstance(independent_expectation, Mapping):
+                raise GenerationError(f"{path}: direct executor class has no independent source pin")
+            expectation, row = _validate_direct_executor_row(
+                index=index,
+                source=source,
+                record=record,
+                independent_expectation=independent_expectation,
+                root=root,
+                census=census,
+                reported_mimi=reported_mimi,
+                reported_mimi_sha256=reported_mimi_sha,
+            )
+            rust_test = None
+        elif bootstrap_report:
             expectation, rust_test, row = _bootstrap_validate_row(
                 index=index,
                 source=source,
@@ -2138,7 +2474,10 @@ def generate(
         authority = expectation.get("authority")
         if isinstance(authority, Mapping):
             authority["assertion"]["sha256"] = rust_sha
-    expectation_document = {"schema_version": 4, "inputs": expectation_inputs}
+    expectation_document = {
+        "schema_version": REQUIRED_EXPECTATIONS_SCHEMA_VERSION,
+        "inputs": expectation_inputs,
+    }
     expectation_bytes = (
         json.dumps(expectation_document, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     ).encode("utf-8")
@@ -2172,6 +2511,8 @@ def generate(
             "canonical": sum(row["class"] == "required_compile" for row in row_manifest),
             "expected_build_rejection": sum(row["class"] == "expected_build_rejection" for row in row_manifest),
             "expected_source_diagnostic": sum(row["class"] == "expected_source_diagnostic" for row in row_manifest),
+            "expected_tool_diagnostic": sum(row["class"] == "expected_tool_diagnostic" for row in row_manifest),
+            "canonical_mir_input_rejection": sum(row["class"] == "canonical_mir_input_rejection" for row in row_manifest),
             **({"unmapped": len(bootstrap_blockers)} if bootstrap_report else {}),
         },
         "artifacts": {

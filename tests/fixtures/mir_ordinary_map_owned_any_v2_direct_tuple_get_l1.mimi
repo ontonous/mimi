@@ -1,0 +1,17 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => match map_set(empty, "stored", 41) {
+            Ok(root) => {
+                drop(empty)
+                let pair = map_get(root, "stored")
+                drop(root)
+                let decoded = unpack_i32(pair.1)
+                drop(pair)
+                drop(decoded)
+                0
+            },
+            Err(status) => { drop(empty); status },
+        },
+        Err(status) => status,
+    }
+}

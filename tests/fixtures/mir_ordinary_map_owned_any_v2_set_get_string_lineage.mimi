@@ -1,0 +1,36 @@
+// Exact first typed GetString after the persistent String SetResult lineage.
+// The source text and old root settle before lookup; the detached Get result
+// and updated root settle after comparing the copied payload.
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let payload = "payload"
+            let changed = map_set(root, "answer", payload)
+            drop(payload)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let lookup = map_get_string(updated, "answer")
+                    match lookup {
+                        Ok(value) => {
+                            let matches = value == "payload"
+                            drop(updated)
+                            drop(value)
+                            if matches { 42 } else { 0 }
+                        },
+                        Err(status) => {
+                            drop(updated)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

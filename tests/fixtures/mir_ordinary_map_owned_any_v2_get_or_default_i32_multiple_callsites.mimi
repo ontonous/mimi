@@ -1,0 +1,25 @@
+use std::maps;
+
+func main() -> i32 {
+    let empty_result: Result<Record, i32> = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result: Result<Record, i32> = map_set(empty, "hits", 0)
+            match root_result {
+                Ok(root) => {
+                    let first = get_or_default::<i32>(root, "hits", 73)
+                    let second = get_or_default::<i32>(root, "other", 73)
+                    drop(empty)
+                    drop(root)
+                    println(first + second)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

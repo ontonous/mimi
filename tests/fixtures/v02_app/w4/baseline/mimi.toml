@@ -1,0 +1,5 @@
+[package]
+name = "mimi-v02-w4-loopback-service"
+version = "0.2.0"
+description = "W4 loopback JSON service, trusted C ABI, cooperative stop, and host oracle"
+entry = "src/main.mimi"

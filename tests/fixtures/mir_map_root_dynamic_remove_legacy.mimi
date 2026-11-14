@@ -1,8 +1,22 @@
 func main() -> i32 {
-    let root = map_new()
-    let inserted = map_set(root, "answer", 42)
-    let key = "answer"
-    let removed = map_remove(inserted, key)
-    drop(removed)
-    0
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", 42) {
+                Ok(inserted) => {
+                    drop(root)
+                    let key = "answer"
+                    let removed = map_remove(inserted, key)
+                    drop(key)
+                    drop(inserted)
+                    drop(removed)
+                    0
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }

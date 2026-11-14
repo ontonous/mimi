@@ -1,0 +1,40 @@
+// SEQ-W2/D4: the exporter now lives in a separate file module and accepts a
+// typed snapshot request. Its implementation touches only the explicit temp
+// and destination paths. Current Mimi has no accepted syntax for a checked
+// public effect upper bound (the former `with` clause is retired), so the
+// actual module boundary is exercised here while the static effect receipt is
+// recorded as an open compiler seam rather than claimed as enforced.
+
+use w2_export_io::SnapshotNode
+use w2_export_io::ExportRequest
+use w2_export_io::ExportReceipt
+use w2_export_io::export_snapshot
+
+func main() -> i32 {
+    let request = ExportRequest {
+        document_id: 7,
+        revision_id: 1,
+        nodes: [
+            SnapshotNode { slot: 0, generation: 1, parent_slot: -1, kind: "title", text: "Meeting notes" },
+            SnapshotNode { slot: 1, generation: 1, parent_slot: 0, kind: "paragraph", text: "A" },
+        ],
+    }
+    let result = export_snapshot(
+        request,
+        "/tmp/mimi-v02-w2-d4-stage.tmp",
+        "/tmp/mimi-v02-w2-d4-published.txt"
+    )
+    match result {
+        Ok(receipt) => {
+            let bytes = read_file(receipt.destination)
+            remove_file(receipt.destination)
+            if receipt.published && receipt.revision_id == 1 && receipt.cleanup_error == "" && bytes == Ok(receipt.contents) {
+                println(20)
+                0
+            } else {
+                1
+            }
+        },
+        Err(_) => 1,
+    }
+}

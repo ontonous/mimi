@@ -1,0 +1,32 @@
+// Exact first typed Get after the narrow persistent SetResult lineage. The
+// initial root is settled on each Set path and the updated root is settled on
+// both map_get_i32 Result arms.
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let changed = map_set(root, "answer", 42)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let lookup = map_get_i32(updated, "answer")
+                    match lookup {
+                        Ok(value) => {
+                            drop(updated)
+                            value
+                        },
+                        Err(status) => {
+                            drop(updated)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

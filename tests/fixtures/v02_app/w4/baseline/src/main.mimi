@@ -1,0 +1,36 @@
+use protocol::open_loopback_listener
+use protocol::bound_loopback_port
+use protocol::note
+use server::run_service
+use exports::internal_export_probe
+
+const EVENT_READY: i32 = 1
+
+func main() -> i32 {
+    let opened = open_loopback_listener(0, 8)
+    if opened.is_err() {
+        println("W4_LISTENER_FAILED")
+        return 1
+    }
+    let listener = opened.unwrap()
+
+    let port_result = bound_loopback_port(listener)
+    if port_result.is_err() {
+        close_fd(listener)
+        println("W4_ENDPOINT_IDENTITY_FAILED")
+        return 2
+    }
+    let port = port_result.unwrap()
+    note(EVENT_READY, port)
+    println("W4_READY " + to_string(port))
+
+    // This call remains in Mimi and reaches the same source body exported to C.
+    let probe = internal_export_probe(5)
+    if probe != 145 {
+        close_fd(listener)
+        println("W4_EXPORT_BODY_MISMATCH")
+        return 3
+    }
+
+    run_service(listener)
+}

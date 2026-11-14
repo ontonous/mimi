@@ -1,16 +1,27 @@
 func carry<T>(value: T) -> T { value }
 
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", "owned\0🧪值")
-    let pair = map_get(root, "key")
-    let found = pair.0
-    let payload = pair.1
-    let carried = carry(payload)
-    drop(pair)
-    drop(empty)
-    drop(root)
-    drop(payload)
-    println(77)
-    if found { carried } else { 0 }
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", "owned\0🧪值") {
+                Ok(root) => {
+                    let pair = map_get(root, "key")
+                    let found = pair.0
+                    let payload = pair.1
+                    let carried = carry(payload)
+                    drop(pair)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    println(77)
+                    if found { carried } else { 0 }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

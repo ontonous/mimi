@@ -1,0 +1,15 @@
+// D5: two background tasks publish independent results to one queue.
+func worker(queue: Channel<i64>, value: i64) -> i32 {
+    channel_send(queue, value + 1)
+    0
+}
+func main() -> i32 {
+    let queue = channel_new()
+    let a = spawn worker(queue, 19)
+    let b = spawn worker(queue, 29)
+    await a
+    await b
+    println(channel_recv(queue) + channel_recv(queue))
+    channel_drop(queue)
+    0
+}

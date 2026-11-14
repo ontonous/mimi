@@ -1,0 +1,15 @@
+// V0.2 P6 W4 network boundary probe.  Port zero asks the OS for an ephemeral
+// loopback port, so the test never claims or reuses a fixed external port.
+use std::net
+
+func main() -> i32 {
+    let listener = tcp_listen(0, 4)
+    if listener.is_err() {
+        println("BindFailed")
+        return 1
+    }
+    let fd = listener.unwrap()
+    println("BindOk")
+    close_fd(fd)
+    0
+}

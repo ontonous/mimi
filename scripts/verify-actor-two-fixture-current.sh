@@ -9,6 +9,8 @@ set -o noclobber
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_RELATIVE="scripts/verify-actor-two-fixture-current.sh"
+CAPTURE_FIXTURE_SHA256="12ad7930f779d1454cd90919c55d76e9a126c5dc8cabfdf748b5c99992f2483f"
+SHADOW_FIXTURE_SHA256="28144bad3ccf5018250ebf3ebaf8f5ad88006ba18cfbad5388fbd515a3fa0f7e"
 # The portable contract is defined by the versioned runner, census/helper, and
 # Python contract tests listed below. AGENTS.md and the two hand-off documents
 # are non-contract review context: record them when present, but never require
@@ -33,6 +35,37 @@ MIMI_BUILD_PASSED=0
 ARTIFACT_DIR=""
 ISOLATED_MIMI_DIR=""
 ISOLATED_MIMI_PATH=""
+CURRENT_SOURCE_MIMI_PATH=""
+CURRENT_SOURCE_MIMI_SHA256=""
+ROUTE_CENSUS_UNSET_NAMES=()
+ROUTE_CENSUS_UNSET_ARGS=()
+
+route_census_unset_inherited_environment() {
+    local route_env_name existing_name found
+    ROUTE_CENSUS_UNSET_NAMES=(
+        MIMI_ROUTE_CENSUS
+        MIMI_ROUTE_CENSUS_MIMI
+        MIMI_ROUTE_CENSUS_MIMI_SHA256
+        MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE
+    )
+    while IFS= read -r route_env_name; do
+        [[ "$route_env_name" == MIMI_ROUTE_CENSUS* ]] || continue
+        found=0
+        for existing_name in "${ROUTE_CENSUS_UNSET_NAMES[@]}"; do
+            if [[ "$existing_name" == "$route_env_name" ]]; then
+                found=1
+                break
+            fi
+        done
+        if [[ "$found" -eq 0 ]]; then
+            ROUTE_CENSUS_UNSET_NAMES+=("$route_env_name")
+        fi
+    done < <(compgen -e)
+    ROUTE_CENSUS_UNSET_ARGS=()
+    for route_env_name in "${ROUTE_CENSUS_UNSET_NAMES[@]}"; do
+        ROUTE_CENSUS_UNSET_ARGS+=(-u "$route_env_name")
+    done
+}
 
 fail_early() {
     printf '%s\n' "$*" >&2
@@ -183,11 +216,43 @@ capture_environment || {
     exit 1
 }
 
+validate_actor_fixture_source_pins() {
+    local fixture expected actual fixture_entry
+    local -a fixtures=(
+        "tests/real_world/actor_nested_func_capture.mimi|$CAPTURE_FIXTURE_SHA256"
+        "tests/real_world/actor_nested_func_shadow.mimi|$SHADOW_FIXTURE_SHA256"
+    )
+    for fixture_entry in "${fixtures[@]}"; do
+        fixture="${fixture_entry%%|*}"
+        expected="${fixture_entry#*|}"
+        if [[ ! -f "$fixture" || -L "$fixture" ]]; then
+            printf 'FAIL pinned Actor fixture is missing or is a symlink: %s\n' "$fixture"
+            return 1
+        fi
+        actual="$(sha256sum -- "$fixture" | awk 'NR == 1 { print $1 }')" || {
+            printf 'FAIL could not hash pinned Actor fixture: %s\n' "$fixture"
+            return 1
+        }
+        printf '%s expected=%s actual=%s\n' "$fixture" "$expected" "$actual"
+        if [[ "$actual" != "$expected" ]]; then
+            printf 'FAIL Actor fixture source bytes do not match the reviewed source pin: %s\n' "$fixture"
+            return 1
+        fi
+    done
+    printf 'PASS both Actor nested-helper fixture hashes match the reviewed source pins\n'
+}
+
+if ! validate_actor_fixture_source_pins > "$ARTIFACT_DIR/actor-fixture-source-pins.txt" 2>&1; then
+    GATE_FAILURES=$((GATE_FAILURES + 1))
+    write_failure_state "Actor fixture source bytes do not match their reviewed SHA-256 pins"
+    exit 1
+fi
+
 # Require a caller-reviewed expectation contract before any Cargo invocation
 # (including the version probe) or Mimi build. Observations from the first census can validate this manifest;
 # they cannot supply or auto-approve its expected classes.
 if [[ -z "$EXPECTATIONS_REQUESTED" ]]; then
-    fail_early "MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS must name an independent schema-v4 expectations manifest; refusing raw-observation authority generation"
+    fail_early "MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS must name an independent schema-v5 route expectations manifest backed by schema-v4 source-authority decisions; refusing raw-observation authority generation"
 fi
 case "$EXPECTATIONS_REQUESTED" in
     /*) expectations_candidate="$EXPECTATIONS_REQUESTED" ;;
@@ -220,7 +285,7 @@ try:
         missing = sorted(source_paths - set(declared))
         extra = sorted(set(declared) - source_paths)
         raise ValueError(
-            "schema-v4 expectations must cover the exact current denominator "
+            "schema-v5 route expectations must cover the exact current denominator "
             f"(missing={len(missing)} first={missing[:3]}, extra={len(extra)} first={extra[:3]})"
         )
     for source in sources:
@@ -242,7 +307,7 @@ try:
         )
     runtime_pending = census.expectation_paths_requiring_runtime_authority(bound)
     print(json.dumps({
-        "status": "validated_independent_v4_manifest",
+        "status": "validated_schema_v5_route_expectations",
         "path": str(manifest_path),
         "sha256": identity["sha256"],
         "candidate_count": len(sources),
@@ -257,7 +322,7 @@ except (OSError, ValueError, json.JSONDecodeError) as error:
     print(f"expectations preflight refused: {error}", file=sys.stderr)
     raise SystemExit(2)
 PY
-    fail_early "independent schema-v4 expectations preflight failed; census and authority generator were not run"
+    fail_early "independent schema-v5 route expectations preflight failed; census and authority generator were not run"
 fi
 cargo --version >> "$ARTIFACT_DIR/replay-environment.txt" 2>&1 || {
     write_failure_state "could not capture Cargo version after expectations preflight"
@@ -266,7 +331,7 @@ cargo --version >> "$ARTIFACT_DIR/replay-environment.txt" 2>&1 || {
 {
     printf 'path=%s\nsha256=%s\n' "$CENSUS_EXPECTATIONS_PATH" "$CENSUS_EXPECTATIONS_SHA256"
 } > "$ARTIFACT_DIR/expectations-manifest.identity.txt"
-printf 'PASS independent schema-v4 expectations validated before Cargo tests and census\n' \
+printf 'PASS independent schema-v5 route expectations, backed by schema-v4 source-authority decisions, validated before Cargo tests and census\n' \
     > "$ARTIFACT_DIR/expectations-manifest.validation.txt"
 
 source_input_inventory() {
@@ -489,8 +554,13 @@ record_gate() {
     shift 3
     local gate_dir="$ARTIFACT_DIR/commands/$label"
     local cargo_path status result_line summary_count validation_status=0
-    local expected_pattern
-    local -a cargo_args=("$@")
+    local expected_pattern authority_scope=none route_env_names receipt_sha256 current_sha256 canonical_mimi_path
+    local -a cargo_args cargo_env
+    if [[ "${1:-}" == "--current-source-mimi-receipt" ]]; then
+        authority_scope=current-source-mimi-receipt
+        shift
+    fi
+    cargo_args=("$@")
     if [[ "${cargo_args[0]:-}" == "test" ]]; then
         cargo_args=(test --locked "${cargo_args[@]:1}")
     fi
@@ -516,24 +586,80 @@ record_gate() {
             > "$gate_dir/validation.txt"
         return 1
     fi
+    route_census_unset_inherited_environment
+    route_env_names="$(IFS=,; printf '%s' "${ROUTE_CENSUS_UNSET_NAMES[*]}")"
+    cargo_env=(env "${ROUTE_CENSUS_UNSET_ARGS[@]}")
+    if [[ "$authority_scope" == current-source-mimi-receipt ]]; then
+        if [[ "$MIMI_BUILD_PASSED" -ne 1 || -z "$CURRENT_SOURCE_MIMI_PATH" ||
+            -z "$CURRENT_SOURCE_MIMI_SHA256" || ! -x "$CURRENT_SOURCE_MIMI_PATH" ||
+            ! -f "$ARTIFACT_DIR/commands/current-source-mimi-build/mimi.sha256" ||
+            ! -f "$ARTIFACT_DIR/commands/current-source-mimi-build/build-receipt.json" ]]; then
+            GATE_FAILURES=$((GATE_FAILURES + 1))
+            printf 'FAIL current-source Mimi build receipt authority is unavailable\n' \
+                > "$gate_dir/validation.txt"
+            return 1
+        fi
+        if ! canonical_mimi_path="$(realpath -e -- "$CURRENT_SOURCE_MIMI_PATH")" ||
+            [[ "$canonical_mimi_path" != "$CURRENT_SOURCE_MIMI_PATH" ]]; then
+            GATE_FAILURES=$((GATE_FAILURES + 1))
+            printf 'FAIL current-source Mimi receipt path is not canonical\n' \
+                > "$gate_dir/validation.txt"
+            return 1
+        fi
+        if ! IFS= read -r receipt_sha256 \
+            < "$ARTIFACT_DIR/commands/current-source-mimi-build/mimi.sha256"; then
+            GATE_FAILURES=$((GATE_FAILURES + 1))
+            printf 'FAIL current-source Mimi receipt SHA-256 is unavailable\n' \
+                > "$gate_dir/validation.txt"
+            return 1
+        fi
+        if ! current_sha256="$(sha256sum -- "$CURRENT_SOURCE_MIMI_PATH" | awk 'NR == 1 { print $1 }')" ||
+            [[ ! "$CURRENT_SOURCE_MIMI_SHA256" =~ ^[0-9a-f]{64}$ ||
+                "$receipt_sha256" != "$CURRENT_SOURCE_MIMI_SHA256" ||
+                "$current_sha256" != "$CURRENT_SOURCE_MIMI_SHA256" ]]; then
+            GATE_FAILURES=$((GATE_FAILURES + 1))
+            printf 'FAIL current-source Mimi receipt does not match current binary bytes\n' \
+                > "$gate_dir/validation.txt"
+            return 1
+        fi
+        cargo_env+=(
+            MIMI_ROUTE_CENSUS=1
+            "MIMI_ROUTE_CENSUS_MIMI=$CURRENT_SOURCE_MIMI_PATH"
+            "MIMI_ROUTE_CENSUS_MIMI_SHA256=$CURRENT_SOURCE_MIMI_SHA256"
+        )
+    fi
+    cargo_env+=(
+        "RUST_MIN_STACK=$TEST_THREAD_STACK_BYTES"
+        "LLVM_SYS_181_PREFIX=$LLVM_PREFIX"
+        CARGO_BUILD_JOBS=1
+        CARGO_TERM_COLOR=never
+        "CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR"
+    )
     {
-        printf 'RUST_MIN_STACK=%q LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q %q ' \
-            "$TEST_THREAD_STACK_BYTES" "$LLVM_PREFIX" "$EFFECTIVE_TARGET_DIR" "$cargo_path"
+        printf '%q ' "${cargo_env[@]}" "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
     printf '%s\0' "$cargo_path" "${cargo_args[@]}" > "$gate_dir/argv.nul"
     {
+        printf 'route_census_environment_policy=clear inherited MIMI_ROUTE_CENSUS* variables before gate launch\n'
+        printf 'route_census_unset_names=%s\n' "$route_env_names"
+        printf 'route_census_authority=%s\n' "$authority_scope"
+        if [[ "$authority_scope" == current-source-mimi-receipt ]]; then
+            printf 'MIMI_ROUTE_CENSUS=1\nMIMI_ROUTE_CENSUS_MIMI=%s\nMIMI_ROUTE_CENSUS_MIMI_SHA256=%s\n' \
+                "$CURRENT_SOURCE_MIMI_PATH" "$CURRENT_SOURCE_MIMI_SHA256"
+            printf 'MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE=<unset>\n'
+        else
+            printf 'MIMI_ROUTE_CENSUS*=<unset>\n'
+        fi
         printf 'RUST_MIN_STACK=%s\nLLVM_SYS_181_PREFIX=%s\n' \
             "$TEST_THREAD_STACK_BYTES" "$LLVM_PREFIX"
         printf 'CARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\nCARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
         printf 'working_directory=%s\n' "$ROOT_DIR"
         printf 'expected_test_id=%s\nexpected_passed=%s\n' "$expected_test" "$expected_passed"
     } > "$gate_dir/environment.txt"
-    if env RUST_MIN_STACK="$TEST_THREAD_STACK_BYTES" LLVM_SYS_181_PREFIX="$LLVM_PREFIX" \
-        CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never \
-        CARGO_TARGET_DIR="$EFFECTIVE_TARGET_DIR" \
-        "$cargo_path" "${cargo_args[@]}" > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
+    if "${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}" \
+        > "$gate_dir/stdout.bin" 2> "$gate_dir/stderr.bin"; then
         status=0
     else
         status=$?
@@ -583,7 +709,7 @@ record_build() {
     shift
     local gate_dir="$ARTIFACT_DIR/commands/$label"
     local cargo_path python_path helper_path status receipt_status validation_status=0
-    local build_target_dir host_target
+    local build_target_dir host_target receipt_sha256 current_sha256 canonical_mimi_path route_env_names
     local -a cargo_args=("$@")
     local -a cargo_env cargo_argv receipt_command
     mkdir -- "$gate_dir" || {
@@ -643,8 +769,11 @@ record_build() {
     cargo_argv=("$cargo_path" "${cargo_args[@]}")
     python_path="$(command -v python3)"
     helper_path="$ROOT_DIR/scripts/actor_census_build_receipt.py"
+    route_census_unset_inherited_environment
+    route_env_names="$(IFS=,; printf '%s' "${ROUTE_CENSUS_UNSET_NAMES[*]}")"
     cargo_env=(
         env
+        "${ROUTE_CENSUS_UNSET_ARGS[@]}"
         -u CARGO_BUILD_TARGET
         -u CARGO_ENCODED_RUSTFLAGS
         -u _
@@ -654,13 +783,18 @@ record_build() {
         "CARGO_TARGET_DIR=$build_target_dir"
     )
     {
-        printf 'LLVM_SYS_181_PREFIX=%q CARGO_BUILD_JOBS=1 CARGO_TERM_COLOR=never CARGO_TARGET_DIR=%q ' \
-            "$LLVM_PREFIX" "$build_target_dir"
-        printf 'env -u CARGO_BUILD_TARGET -u CARGO_ENCODED_RUSTFLAGS -u _ %q ' "$cargo_path"
+        printf '%q ' "${cargo_env[@]}" "$cargo_path"
         printf '%q ' "${cargo_args[@]}"
         printf '\n'
     } > "$gate_dir/command.txt"
     printf '%s\0' "${cargo_argv[@]}" > "$gate_dir/argv.nul"
+    {
+        printf 'route_census_environment_policy=clear inherited MIMI_ROUTE_CENSUS* variables before build\n'
+        printf 'route_census_unset_names=%s\n' "$route_env_names"
+        printf 'MIMI_ROUTE_CENSUS*=<unset>\n'
+        printf 'LLVM_SYS_181_PREFIX=%q\nCARGO_BUILD_JOBS=1\nCARGO_TERM_COLOR=never\n' "$LLVM_PREFIX"
+        printf 'CARGO_TARGET_DIR=%q\n' "$build_target_dir"
+    } > "$gate_dir/environment.txt"
 
     record_build_helper() {
         local evidence_name="$1"
@@ -786,13 +920,23 @@ record_build() {
         if [[ "$receipt_status" -eq 0 && -f "$gate_dir/mimi.path" && -f "$gate_dir/mimi.sha256" ]]; then
             ISOLATED_MIMI_DIR="$build_target_dir"
             ISOLATED_MIMI_PATH="$(<"$gate_dir/mimi.path")"
-            if [[ -x "$ISOLATED_MIMI_PATH" ]]; then
+            if [[ -x "$ISOLATED_MIMI_PATH" ]] &&
+                canonical_mimi_path="$(realpath -e -- "$ISOLATED_MIMI_PATH")" &&
+                [[ "$canonical_mimi_path" == "$ISOLATED_MIMI_PATH" ]] &&
+                IFS= read -r receipt_sha256 < "$gate_dir/mimi.sha256" &&
+                current_sha256="$(sha256sum -- "$ISOLATED_MIMI_PATH" | awk 'NR == 1 { print $1 }')" &&
+                [[ "$receipt_sha256" =~ ^[0-9a-f]{64}$ &&
+                    "$current_sha256" == "$receipt_sha256" ]]; then
+                CURRENT_SOURCE_MIMI_PATH="$ISOLATED_MIMI_PATH"
+                CURRENT_SOURCE_MIMI_SHA256="$receipt_sha256"
                 printf 'PASS Cargo receipt binds raw invocation, environment, source snapshots, and Mimi artifact\n' \
+                    >> "$gate_dir/validation.txt"
+                printf 'PASS Mimi executable bytes match receipt SHA-256 %s\n' "$receipt_sha256" \
                     >> "$gate_dir/validation.txt"
                 MIMI_BUILD_PASSED=1
             else
                 validation_status=1
-                printf 'FAIL receipt Cargo-reported Mimi executable is not executable\n' \
+                printf 'FAIL receipt Mimi path/hash does not match a canonical executable and its current bytes\n' \
                     >> "$gate_dir/validation.txt"
             fi
         else
@@ -818,7 +962,7 @@ record_python_step() {
     local label="$1" run_allowed="$2" skip_reason="$3"
     shift 3
     local step_dir="$ARTIFACT_DIR/commands/$label"
-    local python_path status
+    local python_path status route_env_names
     local -a invocation
 
     mkdir -- "$step_dir" || {
@@ -826,14 +970,13 @@ record_python_step() {
         return 1
     }
     python_path="$(command -v python3)"
+    route_census_unset_inherited_environment
+    route_env_names="$(IFS=,; printf '%s' "${ROUTE_CENSUS_UNSET_NAMES[*]}")"
     invocation=(
         env
+        "${ROUTE_CENSUS_UNSET_ARGS[@]}"
         -u RUSTFLAGS
         -u CARGO_ENCODED_RUSTFLAGS
-        -u MIMI_ROUTE_CENSUS
-        -u MIMI_ROUTE_CENSUS_MIMI
-        -u MIMI_ROUTE_CENSUS_MIMI_SHA256
-        -u MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE
         "CARGO_TARGET_DIR=$EFFECTIVE_TARGET_DIR"
         "$python_path"
         "$@"
@@ -847,7 +990,9 @@ record_python_step() {
     {
         printf 'working_directory=%s\n' "$ROOT_DIR"
         printf 'CARGO_TARGET_DIR=%q\n' "$EFFECTIVE_TARGET_DIR"
-        printf 'unset_environment=MIMI_ROUTE_CENSUS,MIMI_ROUTE_CENSUS_MIMI,MIMI_ROUTE_CENSUS_MIMI_SHA256,MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE,RUSTFLAGS,CARGO_ENCODED_RUSTFLAGS\n'
+        printf 'route_census_environment_policy=clear inherited MIMI_ROUTE_CENSUS* variables before Python step\n'
+        printf 'route_census_unset_names=%s\n' "$route_env_names"
+        printf 'unset_environment=RUSTFLAGS,CARGO_ENCODED_RUSTFLAGS\n'
         printf 'collector_injects_authority_environment=true\n'
     } > "$step_dir/environment.txt"
 
@@ -1065,7 +1210,7 @@ def validate_complete_report(value, label, *, strict):
     record_paths_value = [row.get("path") for row in records_value if isinstance(row, dict)]
     manifest_value = mapping(value.get("manifest"))
     denominator_value = manifest_value.get("denominator")
-    if value.get("schema_version") != "0.1.11-full-route-census-v7":
+    if value.get("schema_version") != "0.1.11-full-route-census-v9":
         issues.append(f"{label} has an unexpected census schema version")
     if value.get("collection_mode") != "full_execution":
         issues.append(f"{label} did not run full_execution mode")
@@ -1448,15 +1593,21 @@ record_gate unsupported-shape-fail-closed-l2 \
     test --bin mimi canonical_dispatch::tests::unsupported_nested_actor_candidate_rejects_before_legacy_route \
     -- --exact --nocapture --test-threads=1 || true
 
+# Build and receipt-bind the exact current-source Mimi executable before any
+# Actor route gate can select an external CLI binary.
+record_build current-source-mimi-build build --bin mimi --locked || true
+
 # Each original fixture's exact CLI test checks default and explicit --mir
 # run/build/verify, native output, disassembly opcodes, route profile/digest,
 # receipt identity, and absence of legacy disposition.
 record_gate capture-cli-default-explicit-l2 \
     canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback 1 \
+    --current-source-mimi-receipt \
     test --test real_world_cli canonical_actor_capture_original_uses_default_and_explicit_cli_without_fallback \
     -- --exact --nocapture --test-threads=1 || true
 record_gate shadow-cli-default-explicit-l2 \
     canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback 1 \
+    --current-source-mimi-receipt \
     test --test real_world_cli canonical_actor_shadow_original_uses_default_and_explicit_cli_without_fallback \
     -- --exact --nocapture --test-threads=1 || true
 
@@ -1473,16 +1624,16 @@ record_gate no-z3-owner-attribution-l2 \
 # explicit --mir routes and runs all four native binaries under Memcheck.
 record_gate actor-strict-l3 \
     canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3 1 \
+    --current-source-mimi-receipt \
     test --test real_world_cli canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3 \
     -- --exact --ignored --nocapture --test-threads=1 || true
 if ! require_l3_memcheck_reports; then
     GATE_FAILURES=$((GATE_FAILURES + 1))
 fi
 
-# Build exactly one Mimi executable for both full-census passes. A failed or
-# missing isolated build is recorded as a skipped census chain; never fall
-# back to a possibly stale target/debug/mimi.
-record_build current-source-mimi-build build --bin mimi --locked || true
+# Reuse the same receipt-bound Mimi executable for both full-census passes. A
+# failed or missing isolated build is recorded as a skipped census chain; never
+# fall back to a possibly stale target/debug/mimi.
 census_scratch_root="$EFFECTIVE_TARGET_DIR/route-census-scratch"
 census_mimi=""
 census_mimi_sha256=""

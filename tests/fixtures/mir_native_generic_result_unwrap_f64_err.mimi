@@ -3,7 +3,12 @@ func unwrap<T>(value: Result<T, i32>) -> T {
     value.unwrap()
 }
 
-func main() -> f64 {
+func unwrap_f64_err() -> f64 {
     let value: Result<f64, i32> = Err(7)
     unwrap(value)
+}
+
+func main() -> i32 {
+    let _ = unwrap_f64_err()
+    0
 }

@@ -13,38 +13,100 @@ func apply_twice(f: fn(i64) -> i64, v: i64) -> i64 {
 }
 
 func main() -> i32 {
-    // 未类型化动态映射：混合 int/string 值
-    let m0 = map_new()
-    let m1 = map_set(m0, "name", "Alice")
-    let m2 = map_set(m1, "age", 30)
-    let m3 = map_set(m2, "city", "Oslo")
-    println(to_json(m3))
-    println(m3)
+    // 未类型化动态映射：混合 int/string 值。每次 persistent Set 都保留
+    // source root，成功与失败分支都显式释放它；最后的 root 持有 Any payload。
+    match map_new() {
+        Ok(m0) => match map_set(m0, "name", "Alice") {
+            Ok(m1) => {
+                drop(m0)
+                match map_set(m1, "age", 30) {
+                    Ok(m2) => {
+                        drop(m1)
+                        match map_set(m2, "city", "Oslo") {
+                            Ok(m3) => {
+                                drop(m2)
+                                let json = to_json(m3)
+                                println(json)
+                                drop(json)
+                                println(m3)
+                                drop(m3)
 
-    // 键序确定性（排序）：banana, apple, cherry 插入 → apple, banana, cherry
-    let k0 = map_new()
-    let k1 = map_set(k0, "banana", 2)
-    let k2 = map_set(k1, "apple", 1)
-    let k3 = map_set(k2, "cherry", 3)
-    let ks = keys(k3)
-    println(join(ks, ","))
-    let vs = values(k3)
-    println(vs[0])
-    println(vs[2])
+                                // 键序确定性（排序）：banana, apple, cherry 插入
+                                // → apple, banana, cherry。
+                                match map_new() {
+                                    Ok(k0) => match map_set(k0, "banana", 2) {
+                                        Ok(k1) => {
+                                            drop(k0)
+                                            match map_set(k1, "apple", 1) {
+                                                Ok(k2) => {
+                                                    drop(k1)
+                                                    match map_set(k2, "cherry", 3) {
+                                                        Ok(k3) => {
+                                                            drop(k2)
+                                                            let ks = keys(k3)
+                                                            let joined_keys = join(ks, ",")
+                                                            println(joined_keys)
+                                                            drop(joined_keys)
+                                                            drop(ks)
+                                                            let vs = values(k3)
+                                                            println(vs[0])
+                                                            println(vs[2])
+                                                            drop(vs)
 
-    // has_key / size / get
-    println(map_size(k3))
-    println(has_key(k3, "apple"))
+                                                            // has_key / size / get
+                                                            println(map_size(k3))
+                                                            println(has_key(k3, "apple"))
+                                                            drop(k3)
 
-    // fn(T) -> U 参数拼写 + 闭包捕获
-    let base = 100
-    let add_base = fn(x: i64) -> i64 { x + base }
-    println(apply_twice(add_base, 1))
+                                                            // fn(T) -> U 参数拼写 + 闭包捕获
+                                                            let base = 100
+                                                            let add_base = fn(x: i64) -> i64 { x + base }
+                                                            println(apply_twice(add_base, 1))
 
-    // 浮点：负零与常规运算
-    println(-0.0)
-    let zero = 0.0
-    println(-zero)
-    println(2.5 + 1.0)
-    0
+                                                            // 浮点：负零与常规运算
+                                                            println(-0.0)
+                                                            let zero = 0.0
+                                                            println(-zero)
+                                                            println(2.5 + 1.0)
+                                                            0
+                                                        },
+                                                        Err(status) => {
+                                                            drop(k2)
+                                                            status
+                                                        },
+                                                    }
+                                                },
+                                                Err(status) => {
+                                                    drop(k1)
+                                                    status
+                                                },
+                                            }
+                                        },
+                                        Err(status) => {
+                                            drop(k0)
+                                            status
+                                        },
+                                    },
+                                    Err(status) => status,
+                                }
+                            },
+                            Err(status) => {
+                                drop(m2)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => {
+                        drop(m1)
+                        status
+                    },
+                }
+            },
+            Err(status) => {
+                drop(m0)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }

@@ -1,0 +1,5 @@
+// S4: transport is routed through a function boundary while the public
+// scalar request contract remains unchanged.
+extern "C" { func v02_checksum(x: i32) -> i32; }
+func transport(request: i32) -> i32 { v02_checksum(request) }
+func main() -> i32 { println(transport(20) + transport(21) + 1); 0 }

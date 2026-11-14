@@ -1,0 +1,27 @@
+use std::maps;
+
+func main() -> i32 {
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", true)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", "fallback")
+                    println(observed)
+                    drop(observed)
+                    drop(empty)
+                    drop(root)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            status
+        },
+    }
+}

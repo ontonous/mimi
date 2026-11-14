@@ -68,40 +68,66 @@ func make_rule(line: string) -> Rule {
 
 // === Build file parsing (top-level push only) ===
 
-func parse_build_file(path: string) -> BuildFile {
+func empty_rule() -> Rule {
+    Rule { target: "", deps: [], commands: [] }
+}
+
+func empty_build_file_result() -> Result<BuildFile, i32> {
+    match map_new() {
+        Ok(vars) => Ok(BuildFile { variables: vars, rules: [] }),
+        Err(status) => Err(status)
+    }
+}
+
+func parse_one_or_blank(lines: List<string>, i: i32, vars: Result<Record, i32>, should_parse: bool) -> Result<(Rule, Record), i32> {
+    match vars {
+        Ok(root) => if should_parse { parse_one(lines, i, root) } else { Ok((empty_rule(), root)) },
+        Err(status) => Err(status)
+    }
+}
+
+func continue_parse(result: Result<(Rule, Record), i32>) -> (Rule, Result<Record, i32>) {
+    match result {
+        Ok((rule, vars)) => (rule, Ok(vars)),
+        Err(status) => (empty_rule(), Err(status))
+    }
+}
+
+func parse_build_file(path: string) -> Result<BuildFile, i32> {
     let result = read_file(path)
     if !result.is_ok() {
         println("Error: cannot read " + path)
-        return BuildFile { variables: map_new(), rules: [] }
+        return empty_build_file_result()
     }
     let content = result.unwrap()
     let lines = str_split(content, "\n")
     let n = len(lines)
-
-    let mut vars = map_new()
     let mut rules: List<Rule> = []
 
     // Parse and push at top level (one call per line, max 20 lines)
-    let r0  = if n > 0  { parse_one(lines, 0, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r1  = if n > 1  { parse_one(lines, 1, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r2  = if n > 2  { parse_one(lines, 2, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r3  = if n > 3  { parse_one(lines, 3, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r4  = if n > 4  { parse_one(lines, 4, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r5  = if n > 5  { parse_one(lines, 5, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r6  = if n > 6  { parse_one(lines, 6, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r7  = if n > 7  { parse_one(lines, 7, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r8  = if n > 8  { parse_one(lines, 8, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r9  = if n > 9  { parse_one(lines, 9, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r10 = if n > 10 { parse_one(lines, 10, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r11 = if n > 11 { parse_one(lines, 11, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r12 = if n > 12 { parse_one(lines, 12, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r13 = if n > 13 { parse_one(lines, 13, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r14 = if n > 14 { parse_one(lines, 14, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r15 = if n > 15 { parse_one(lines, 15, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r16 = if n > 16 { parse_one(lines, 16, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r17 = if n > 17 { parse_one(lines, 17, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r18 = if n > 18 { parse_one(lines, 18, vars) } else { Rule { target: "", deps: [], commands: [] } }
-    let r19 = if n > 19 { parse_one(lines, 19, vars) } else { Rule { target: "", deps: [], commands: [] } }
+    let (r0, state0) = match map_new() {
+        Ok(vars) => continue_parse(parse_one_or_blank(lines, 0, Ok(vars), n > 0)),
+        Err(status) => (empty_rule(), Err(status))
+    }
+    let (r1, state1) = continue_parse(parse_one_or_blank(lines, 1, state0, n > 1))
+    let (r2, state2) = continue_parse(parse_one_or_blank(lines, 2, state1, n > 2))
+    let (r3, state3) = continue_parse(parse_one_or_blank(lines, 3, state2, n > 3))
+    let (r4, state4) = continue_parse(parse_one_or_blank(lines, 4, state3, n > 4))
+    let (r5, state5) = continue_parse(parse_one_or_blank(lines, 5, state4, n > 5))
+    let (r6, state6) = continue_parse(parse_one_or_blank(lines, 6, state5, n > 6))
+    let (r7, state7) = continue_parse(parse_one_or_blank(lines, 7, state6, n > 7))
+    let (r8, state8) = continue_parse(parse_one_or_blank(lines, 8, state7, n > 8))
+    let (r9, state9) = continue_parse(parse_one_or_blank(lines, 9, state8, n > 9))
+    let (r10, state10) = continue_parse(parse_one_or_blank(lines, 10, state9, n > 10))
+    let (r11, state11) = continue_parse(parse_one_or_blank(lines, 11, state10, n > 11))
+    let (r12, state12) = continue_parse(parse_one_or_blank(lines, 12, state11, n > 12))
+    let (r13, state13) = continue_parse(parse_one_or_blank(lines, 13, state12, n > 13))
+    let (r14, state14) = continue_parse(parse_one_or_blank(lines, 14, state13, n > 14))
+    let (r15, state15) = continue_parse(parse_one_or_blank(lines, 15, state14, n > 15))
+    let (r16, state16) = continue_parse(parse_one_or_blank(lines, 16, state15, n > 16))
+    let (r17, state17) = continue_parse(parse_one_or_blank(lines, 17, state16, n > 17))
+    let (r18, state18) = continue_parse(parse_one_or_blank(lines, 18, state17, n > 18))
+    let (r19, state19) = continue_parse(parse_one_or_blank(lines, 19, state18, n > 19))
 
     // Push all at top level
     push(rules, r0)
@@ -125,16 +151,30 @@ func parse_build_file(path: string) -> BuildFile {
     push(rules, r18)
     push(rules, r19)
 
-    BuildFile { variables: vars, rules: rules }
+    match state19 {
+        Ok(vars) => Ok(BuildFile { variables: vars, rules: rules }),
+        Err(status) => Err(status)
+    }
 }
 
-func parse_one(lines: List<string>, i: i32, vars: Record) -> Rule {
+func parse_one(lines: List<string>, i: i32, vars: Record) -> Result<(Rule, Record), i32> {
     let line = lines[i]
+    let rule = make_rule(line)
     if is_variable(line) {
         let pair = parse_variable(line)
-        map_set(vars, pair.0, pair.1)
+        match map_set(vars, pair.0, pair.1) {
+            Ok(updated) => {
+                drop(vars)
+                Ok((rule, updated))
+            }
+            Err(status) => {
+                drop(vars)
+                Err(status)
+            }
+        }
+    } else {
+        Ok((rule, vars))
     }
-    make_rule(line)
 }
 
 // === Build engine ===
@@ -184,33 +224,38 @@ func needs_rebuild(target: string, deps: List<string>) -> bool {
     false
 }
 
-func build_target(target: string, bf: BuildFile, visited: Record) -> bool {
+func build_target(target: string, rules: List<Rule>, visited: Record) -> Result<(bool, Record), i32> {
     let v = map_get(visited, target)
     if v.0 {
-        return true
+        return Ok((true, visited))
     }
 
-    let r = find_rule(bf.rules, target)
+    let r = find_rule(rules, target)
 
     if r.target == "" {
         if file_exists(target) {
-            return true
+            return Ok((true, visited))
         }
         println("mimi-make: no rule to make target '" + target + "'")
-        return false
+        return Ok((false, visited))
     }
 
     let mut i = 0
     while i < len(r.deps) {
-        let ok = build_target(r.deps[i], bf, visited)
-        if !ok {
-            return false
+        match build_target(r.deps[i], rules, visited) {
+            Ok((ok, updated_visited)) => {
+                visited = updated_visited
+                if !ok {
+                    return Ok((false, visited))
+                }
+            }
+            Err(status) => { return Err(status) }
         }
         i = i + 1
     }
 
     if !needs_rebuild(target, r.deps) {
-        return true
+        return Ok((true, visited))
     }
 
     i = 0
@@ -223,13 +268,21 @@ func build_target(target: string, bf: BuildFile, visited: Record) -> bool {
             if len(result.stderr) > 0 {
                 println("  stderr: " + result.stderr)
             }
-            return false
+            return Ok((false, visited))
         }
         i = i + 1
     }
 
-    map_set(visited, target, true)
-    true
+    match map_set(visited, target, true) {
+        Ok(updated) => {
+            drop(visited)
+            Ok((true, updated))
+        }
+        Err(status) => {
+            drop(visited)
+            Err(status)
+        }
+    }
 }
 
 // === Main ===
@@ -238,8 +291,18 @@ func main() -> i32 {
     let build_file = "Makefile"
     let target = "all"
 
-    let bf = parse_build_file(build_file)
-    let num_rules = count_rules(bf.rules)
+    let (maybe_bf, parse_failed, parse_status) = match parse_build_file(build_file) {
+        Ok(parsed) => (Some(parsed), false, 0),
+        Err(status) => (None, true, status)
+    }
+    if parse_failed {
+        println("mimi-make: map allocation failed with status " + to_string(parse_status))
+        return parse_status
+    }
+    let bf = maybe_bf.unwrap()
+    let rules = bf.rules
+    let num_rules = count_rules(rules)
+    drop(bf.variables)
     println("mimi-make: found " + to_string(num_rules) + " rules in " + build_file)
 
     if num_rules == 0 {
@@ -248,15 +311,24 @@ func main() -> i32 {
 
     println("mimi-make: building '" + target + "'")
 
-    let visited = map_new()
-    let ok = build_target(target, bf, visited)
-
-    let mut exit_code = 0
-    if ok {
-        println("mimi-make: done")
-    } else {
-        println("mimi-make: failed")
-        exit_code = 1
+    let build_result = match map_new() {
+        Ok(visited) => build_target(target, rules, visited),
+        Err(status) => Err(status)
     }
-    exit_code
+    match build_result {
+        Ok((ok, visited_after_build)) => {
+            drop(visited_after_build)
+            if ok {
+                println("mimi-make: done")
+                0
+            } else {
+                println("mimi-make: failed")
+                1
+            }
+        }
+        Err(status) => {
+            println("mimi-make: visited-map update failed with status " + to_string(status))
+            status
+        }
+    }
 }

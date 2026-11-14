@@ -781,6 +781,7 @@ def _write_receipt_paths(gate_dir: Path, executable: Path, executable_hash: str)
 def create_receipt(
     *, artifact_root: Path, gate_dir: Path, target_dir: Path, host_target: str,
     root: Path, receipt_path: Path,
+    stdlib_matrix_generated_root: Path | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     issues: list[str] = []
     artifact_root = artifact_root.resolve(strict=True)
@@ -874,6 +875,12 @@ def create_receipt(
             "--output", str(evidence_paths["cargo_config_after"]),
         ],
     }
+    if stdlib_matrix_generated_root is not None:
+        matrix_root_arg = str(stdlib_matrix_generated_root.resolve(strict=True))
+        for capture_name in ("source_before_capture", "source_after_capture"):
+            capture_specs[capture_name][capture_specs[capture_name].index("--output"):capture_specs[capture_name].index("--output")] = [
+                "--stdlib-matrix-generated-root", matrix_root_arg,
+            ]
     for prefix, expected_suffix in capture_specs.items():
         evidence_prefix = prefix.replace("_", "-")
         try:
@@ -1460,7 +1467,9 @@ def validate_receipt(
     return sorted(set(issues))
 
 
-def capture_collector_snapshot(root: Path, output: Path) -> dict[str, Any]:
+def capture_collector_snapshot(
+    root: Path, output: Path, stdlib_matrix_generated_root: Path | None = None
+) -> dict[str, Any]:
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
@@ -1469,7 +1478,9 @@ def capture_collector_snapshot(root: Path, output: Path) -> dict[str, Any]:
     resolved_root = root.resolve(strict=True)
     tracked_paths, _tracked_inventory = full_route_census.tracked_mimi_paths(resolved_root)
     sources, _scope_exclusions, _source_scope = full_route_census.enumerate_source_scope(
-        resolved_root, tracked_paths
+        resolved_root,
+        tracked_paths,
+        stdlib_matrix_generated_root,
     )
     snapshot = full_route_census.source_snapshot(resolved_root, sources)
     snapshot_issues, _files = validate_source_snapshot(snapshot, label="captured collector")
@@ -1486,6 +1497,7 @@ def _cli() -> int:
     environment_parser.add_argument("--output", required=True, type=Path)
     snapshot_parser = subparsers.add_parser("capture-source-snapshot")
     snapshot_parser.add_argument("--root", required=True, type=Path)
+    snapshot_parser.add_argument("--stdlib-matrix-generated-root", type=Path)
     snapshot_parser.add_argument("--output", required=True, type=Path)
     cargo_identity_parser = subparsers.add_parser("capture-cargo-identity")
     cargo_identity_parser.add_argument("--root", required=True, type=Path)
@@ -1500,6 +1512,7 @@ def _cli() -> int:
     create_parser.add_argument("--target-dir", required=True, type=Path)
     create_parser.add_argument("--host-target", required=True)
     create_parser.add_argument("--root", required=True, type=Path)
+    create_parser.add_argument("--stdlib-matrix-generated-root", type=Path)
     create_parser.add_argument("--receipt", required=True, type=Path)
     args = parser.parse_args()
     try:
@@ -1507,7 +1520,9 @@ def _cli() -> int:
             _write_json_exclusive(args.output, environment_document(os.environ))
             return 0
         if args.command == "capture-source-snapshot":
-            capture_collector_snapshot(args.root, args.output)
+            capture_collector_snapshot(
+                args.root, args.output, args.stdlib_matrix_generated_root
+            )
             return 0
         if args.command == "capture-cargo-identity":
             capture_cargo_identity(args.root, args.cargo, args.output)
@@ -1522,6 +1537,7 @@ def _cli() -> int:
             host_target=args.host_target,
             root=args.root,
             receipt_path=args.receipt,
+            stdlib_matrix_generated_root=args.stdlib_matrix_generated_root,
         )
         print(f"receipt_status={receipt['status']}")
         for issue in issues:

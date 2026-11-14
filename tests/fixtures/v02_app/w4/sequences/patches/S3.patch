@@ -1,0 +1,167 @@
+--- /dev/null
++++ b/baseline/native/w4_endpoint_scope.c
+@@ -0,0 +1,43 @@
++#include <stdint.h>
++
++extern int64_t w4_open_listener(int32_t scope, int32_t port, int32_t backlog);
++extern int64_t w4_connect_loopback(int32_t scope, int32_t port);
++
++enum {
++    W4_SCOPE_LOOPBACK = 1,
++    W4_ERR_SCOPE = -1001,
++    W4_ERR_PORT = -1002,
++    W4_ERR_BIND = -1004,
++};
++
++/* Enforce the scope before any system call. Port zero selects only from the
++ * fixed loopback range; a direct nonzero request must already be in range. */
++int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (backlog < 1 || backlog > 64 || port < 0 || port > 65535 ||
++        (port != 0 && (port < 24000 || port > 24100))) {
++        return W4_ERR_PORT;
++    }
++    if (port != 0) {
++        return w4_open_listener(scope, port, backlog);
++    }
++    for (int32_t candidate = 24000; candidate <= 24100; ++candidate) {
++        int64_t fd = w4_open_listener(scope, candidate, backlog);
++        if (fd >= 0 || fd != W4_ERR_BIND) {
++            return fd;
++        }
++    }
++    return W4_ERR_BIND;
++}
++
++int64_t w4_connect_loopback_s3(int32_t scope, int32_t port) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (port < 24000 || port > 24100) {
++        return W4_ERR_PORT;
++    }
++    return w4_connect_loopback(scope, port);
++}
+--- /dev/null
++++ b/baseline/native/w4_endpoint_scope_oracle.c
+@@ -0,0 +1,58 @@
++#define _POSIX_C_SOURCE 200809L
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++extern int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog);
++extern int64_t w4_connect_loopback_s3(int32_t scope, int32_t port);
++extern int32_t w4_listener_port(int64_t fd);
++
++static int socket_calls;
++static int bind_calls;
++static int listen_calls;
++static int connect_calls;
++int __real_socket(int domain, int type, int protocol);
++int __real_bind(int fd, const struct sockaddr *address, socklen_t length);
++int __real_listen(int fd, int backlog);
++int __real_connect(int fd, const struct sockaddr *address, socklen_t length);
++int __wrap_socket(int domain, int type, int protocol) {
++    ++socket_calls;
++    return __real_socket(domain, type, protocol);
++}
++int __wrap_bind(int fd, const struct sockaddr *address, socklen_t length) {
++    ++bind_calls;
++    return __real_bind(fd, address, length);
++}
++int __wrap_listen(int fd, int backlog) {
++    ++listen_calls;
++    return __real_listen(fd, backlog);
++}
++int __wrap_connect(int fd, const struct sockaddr *address, socklen_t length) {
++    ++connect_calls;
++    return __real_connect(fd, address, length);
++}
++
++int main(void) {
++    assert(w4_open_listener_s3(0, 0, 8) == -1001);
++    assert(w4_open_listener_s3(1, 23999, 8) == -1002);
++    assert(w4_open_listener_s3(1, 24101, 8) == -1002);
++    assert(w4_connect_loopback_s3(0, 24000) == -1001);
++    assert(w4_connect_loopback_s3(1, 23999) == -1002);
++    assert(w4_connect_loopback_s3(1, 24101) == -1002);
++    assert(socket_calls == 0 && bind_calls == 0 && listen_calls == 0 && connect_calls == 0);
++
++    int64_t listener = w4_open_listener_s3(1, 0, 8);
++    assert(listener >= 0);
++    int32_t port = w4_listener_port(listener);
++    assert(port >= 24000 && port <= 24100);
++    int64_t client = w4_connect_loopback_s3(1, port);
++    assert(client >= 0);
++    assert(socket_calls > 0 && bind_calls > 0 && listen_calls > 0 && connect_calls == 1);
++    (void)close((int)client);
++    (void)close((int)listener);
++    puts("S3_SCOPE_ORACLE_OK");
++    return 0;
++}
+--- a/baseline/src/main.mimi
++++ b/baseline/src/main.mimi
+@@ -7,7 +7,7 @@
+ const EVENT_READY: i32 = 1
+ 
+ func main() -> i32 {
+-    let opened = open_loopback_listener(0, 8)
++    let opened = open_loopback_listener(1, 0, 8)
+     if opened.is_err() {
+         println("W4_LISTENER_FAILED")
+         return 1
+--- a/baseline/src/protocol.mimi
++++ b/baseline/src/protocol.mimi
+@@ -20,7 +20,8 @@
+ 
+ extern "C" {
+     // C contract is recorded in ../../oracle/w4_ffi_contract.json.
+-    func w4_open_listener(scope: i32, port: i32, backlog: i32) -> i64;
++    func w4_open_listener_s3(scope: i32, port: i32, backlog: i32) -> i64;
++    func w4_connect_loopback_s3(scope: i32, port: i32) -> i64;
+     func w4_listener_port(fd: i64) -> i32;
+     func w4_checksum(value: i32) -> i32;
+     func w4_trace(code: i32, detail: i32) -> i32;
+@@ -30,11 +31,12 @@
+     let _ = w4_trace(code, detail)
+ }
+ 
+-pub func open_loopback_listener(port: i32, backlog: i32) -> Result<i64, string> {
+-    if port < 0 || port > 65535 || backlog < 1 || backlog > 64 {
++pub func open_loopback_listener(scope: i32, port: i32, backlog: i32) -> Result<i64, string> {
++    if scope != 1 || backlog < 1 || backlog > 64 ||
++       (port != 0 && (port < 24000 || port > 24100)) {
+         return Err("EndpointDenied")
+     }
+-    let fd = w4_open_listener(1, port, backlog)
++    let fd = w4_open_listener_s3(scope, port, backlog)
+     if fd == -1001 {
+         return Err("EndpointDenied")
+     }
+@@ -45,6 +47,20 @@
+         return Err("BindFailed")
+     }
+     Ok(fd)
++}
++
++pub func connect_loopback(scope: i32, port: i32) -> Result<i64, string> {
++    if scope != 1 || port < 24000 || port > 24100 {
++        return Err("EndpointDenied")
++    }
++    let fd = w4_connect_loopback_s3(scope, port)
++    if fd == -1001 || fd == -1002 {
++        Err("EndpointDenied")
++    } else if fd < 0 {
++        Err("ConnectFailed")
++    } else {
++        Ok(fd)
++    }
+ }
+ 
+ pub func bound_loopback_port(fd: i64) -> Result<i32, string> {

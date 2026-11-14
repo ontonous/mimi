@@ -379,53 +379,67 @@ func compute_stats(entries: List<LogEntry>) -> LogStats {
     }
 }
 
-func count_status_codes(entries: List<LogEntry>) -> Record {
-    let mut counts = map_new()
-    for e in entries {
-        let key = to_string(e.status)
-        let (_, v) = map_get(counts, key)
-        counts = map_set(counts, key, to_int(v) + 1)
+func increment_count(counts: Result<Record, i32>, key: string) -> Result<Record, i32> {
+    match counts {
+        Ok(root) => {
+            let (_, value) = map_get(root, key)
+            match map_set(root, key, to_int(value) + 1) {
+                Ok(updated) => {
+                    drop(root)
+                    Ok(updated)
+                }
+                Err(status) => {
+                    drop(root)
+                    Err(status)
+                }
+            }
+        }
+        Err(status) => Err(status)
     }
+}
+
+func count_status_codes(entries: List<LogEntry>) -> Result<Record, i32> {
+    let mut counts = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
+    for e in entries { counts = increment_count(counts, to_string(e.status)) }
     counts
 }
 
-func count_by_source(entries: List<LogEntry>) -> Record {
-    let mut counts = map_new()
-    for e in entries {
-        let key = e.source
-        let (_, v) = map_get(counts, key)
-        counts = map_set(counts, key, to_int(v) + 1)
+func count_by_source(entries: List<LogEntry>) -> Result<Record, i32> {
+    let mut counts = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
     }
+    for e in entries { counts = increment_count(counts, e.source) }
     counts
 }
 
-func count_by_method(entries: List<LogEntry>) -> Record {
-    let mut counts = map_new()
-    for e in entries {
-        let key = e.method
-        let (_, v) = map_get(counts, key)
-        counts = map_set(counts, key, to_int(v) + 1)
+func count_by_method(entries: List<LogEntry>) -> Result<Record, i32> {
+    let mut counts = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
     }
+    for e in entries { counts = increment_count(counts, e.method) }
     counts
 }
 
-func count_by_path(entries: List<LogEntry>) -> Record {
-    let mut counts = map_new()
-    for e in entries {
-        let key = e.path
-        let (_, v) = map_get(counts, key)
-        counts = map_set(counts, key, to_int(v) + 1)
+func count_by_path(entries: List<LogEntry>) -> Result<Record, i32> {
+    let mut counts = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
     }
+    for e in entries { counts = increment_count(counts, e.path) }
     counts
 }
 
-func count_by_format(entries: List<LogEntry>) -> Record {
-    let mut counts = map_new()
-    for e in entries {
-        let key = e.format
-        let (_, v) = map_get(counts, key)
-        counts = map_set(counts, key, to_int(v) + 1)
+func count_by_format(entries: List<LogEntry>) -> Result<Record, i32> {
+    let mut counts = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
     }
+    for e in entries { counts = increment_count(counts, e.format) }
     counts
 }
 
@@ -523,6 +537,7 @@ func print_record_map(title: string, counts: Record) {
         println("  " + to_string(k[i]) + ": " + to_string(v[i]))
         i += 1
     }
+    drop(counts)
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -695,6 +710,7 @@ func main() -> i32 {
     else if status_max > 0 { filtered = filter_by_status(filtered, 100, status_max) }
 
     // Output
+    let mut exit_code = 0
     if show_stats {
         let stats = compute_stats(filtered)
         if output_fmt == "json" {
@@ -711,11 +727,36 @@ func main() -> i32 {
         } else {
             print_stats_text(stats, file_path)
             print_status_distribution(filtered)
-            if group_by_source { print_record_map("By source", count_by_source(filtered)) }
-            if group_by_method { print_record_map("By method", count_by_method(filtered)) }
-            if group_by_path { print_record_map("By path", count_by_path(filtered)) }
-            if group_by_status { print_record_map("By status", count_status_codes(filtered)) }
-            if group_by_format { print_record_map("By format", count_by_format(filtered)) }
+            if group_by_source {
+                match count_by_source(filtered) {
+                    Ok(counts) => print_record_map("By source", counts),
+                    Err(status) => { println("By source map failed with status " + to_string(status)); if exit_code == 0 { exit_code = status } }
+                }
+            }
+            if group_by_method {
+                match count_by_method(filtered) {
+                    Ok(counts) => print_record_map("By method", counts),
+                    Err(status) => { println("By method map failed with status " + to_string(status)); if exit_code == 0 { exit_code = status } }
+                }
+            }
+            if group_by_path {
+                match count_by_path(filtered) {
+                    Ok(counts) => print_record_map("By path", counts),
+                    Err(status) => { println("By path map failed with status " + to_string(status)); if exit_code == 0 { exit_code = status } }
+                }
+            }
+            if group_by_status {
+                match count_status_codes(filtered) {
+                    Ok(counts) => print_record_map("By status", counts),
+                    Err(status) => { println("By status map failed with status " + to_string(status)); if exit_code == 0 { exit_code = status } }
+                }
+            }
+            if group_by_format {
+                match count_by_format(filtered) {
+                    Ok(counts) => print_record_map("By format", counts),
+                    Err(status) => { println("By format map failed with status " + to_string(status)); if exit_code == 0 { exit_code = status } }
+                }
+            }
         }
     } else if output_fmt == "csv" {
         println(entries_to_csv(filtered))
@@ -751,5 +792,5 @@ func main() -> i32 {
         }
     }
 
-    0
+    exit_code
 }

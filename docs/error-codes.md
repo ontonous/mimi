@@ -181,6 +181,11 @@
 | E0443 | bare Flow record cannot cross Channel/FFI/mailbox; pack TransitionEpoch with `flow_pack` |
 | E0444 | session protocol payload must be an integer scalar (i32/i64) — endpoint runtime transports values in i64 handle slots |
 | E0445 | inline `module` blocks are not supported (rejected at parse level since 0.39.139; `module` is an ordinary identifier) — the only module form is a file merged by `use` (spec language-spec.md §6.14) |
+| E0446 | multi-target union target violates the promoted tagged-union contract (R6-1039 fail-close ruling) |
+| E0447 | executable `main` has no Mimi parameters or generics and returns only unit, bool, i32, or i64; handle Result, Option, and aggregates inside `main` |
+| E0448 | Actor methods cannot write Actor instance fields; persistent business-state changes belong in Flow transitions |
+| E0449 | raw reference/pointer types and operators (`&T`, `&mut T`, `&[T]`, `*T`, `*mut T`, `&`, `&mut`, `*`) are rejected in ordinary safe source; lexical `unsafe` blocks and explicit `extern "C" func` wrapper signatures/bodies are admitted, while `extern "C" { ... }` declarations do not grant an exception |
+| E0450 | an implicit Actor Flow root state may contain only `i32` payload fields (zero initialized); initialize other payloads through a Flow transition |
 | E0500 | cannot modify $-locked fragment |
 | E0501 | strict mode: contract modifications not allowed |
 | E0502 | contract on function with shared parameter is not verifiable by Z3 |

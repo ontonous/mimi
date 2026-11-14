@@ -1,0 +1,158 @@
+// SEQ-W2/D1: undo stores edits, not a full Revision per step. A user-facing
+// snapshot is materialized on demand; the immutable S1 value remains unchanged
+// after B is appended and then undone. The base tree has a real node store and
+// stable store/slot/generation IDs.
+
+type NodeId { store_id: i32, slot: i32, generation: i32 }
+type DocumentNode { id: NodeId, parent_slot: i32, kind: string, text: string, alive: bool }
+type Revision { document_id: i32, revision_id: i32, parent_revision: i32, nodes: List<DocumentNode> }
+type EditDelta {
+    node_id: NodeId,
+    before_text: string,
+    after_text: string,
+    from_revision: i32,
+    to_revision: i32,
+}
+type DeltaDocument {
+    base: Revision,
+    deltas: List<EditDelta>,
+    cursor: i32,
+    next_revision_id: i32,
+    current_revision_id: i32,
+}
+
+func same_node_id(left: NodeId, right: NodeId) -> bool {
+    left.store_id == right.store_id && left.slot == right.slot && left.generation == right.generation
+}
+
+func read_text(revision: Revision, wanted: NodeId) -> Result<string, string> {
+    for node in revision.nodes {
+        if same_node_id(node.id, wanted) && node.alive { return Ok(node.text) }
+    }
+    Err("StaleNodeId")
+}
+
+func apply_edit(revision: Revision, edit: EditDelta) -> Result<Revision, string> {
+    let mut nodes: List<DocumentNode> = []
+    let mut found = false
+    for node in revision.nodes {
+        if same_node_id(node.id, edit.node_id) && node.alive {
+            push(nodes, DocumentNode {
+                id: node.id,
+                parent_slot: node.parent_slot,
+                kind: node.kind,
+                text: edit.after_text,
+                alive: true,
+            })
+            found = true
+        } else {
+            push(nodes, node)
+        }
+    }
+    if !found { return Err("StaleNodeId") }
+    Ok(Revision {
+        document_id: revision.document_id,
+        revision_id: edit.to_revision,
+        parent_revision: edit.from_revision,
+        nodes: nodes,
+    })
+}
+
+func materialize(document: DeltaDocument) -> Result<Revision, string> {
+    let mut revision = document.base
+    let mut index = 0
+    while index < document.cursor {
+        let next = apply_edit(revision, document.deltas[index])?
+        revision = next
+        index = index + 1
+    }
+    Ok(Revision {
+        document_id: revision.document_id,
+        revision_id: document.current_revision_id,
+        parent_revision: revision.parent_revision,
+        nodes: revision.nodes,
+    })
+}
+
+func edit_delta(document: DeltaDocument, node_id: NodeId, after_text: string) -> Result<DeltaDocument, string> {
+    let current = materialize(document)?
+    let before_text = read_text(current, node_id)?
+    // Truncate only the redo tail when editing after undo. The committed edit
+    // history remains O(number of edits); no earlier node tree is copied.
+    let mut active_deltas: List<EditDelta> = []
+    let mut index = 0
+    while index < document.cursor {
+        push(active_deltas, document.deltas[index])
+        index = index + 1
+    }
+    let next_id = document.next_revision_id
+    push(active_deltas, EditDelta {
+        node_id: node_id,
+        before_text: before_text,
+        after_text: after_text,
+        from_revision: document.current_revision_id,
+        to_revision: next_id,
+    })
+    Ok(DeltaDocument {
+        base: document.base,
+        deltas: active_deltas,
+        cursor: document.cursor + 1,
+        next_revision_id: next_id + 1,
+        current_revision_id: next_id,
+    })
+}
+
+func undo_delta(document: DeltaDocument) -> Result<DeltaDocument, string> {
+    if document.cursor == 0 { return Err("NothingToUndo") }
+    let next_cursor = document.cursor - 1
+    let restored_id = if next_cursor == 0 { document.base.revision_id } else { document.deltas[next_cursor - 1].to_revision }
+    Ok(DeltaDocument {
+        base: document.base,
+        deltas: document.deltas,
+        cursor: next_cursor,
+        next_revision_id: document.next_revision_id,
+        current_revision_id: restored_id,
+    })
+}
+
+func main() -> i32 {
+    let document_id = 7
+    let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+    let body_id = NodeId { store_id: document_id, slot: 1, generation: 1 }
+    let base = Revision {
+        document_id: document_id,
+        revision_id: 0,
+        parent_revision: -1,
+        nodes: [
+            DocumentNode { id: title_id, parent_slot: -1, kind: "title", text: "Meeting notes", alive: true },
+            DocumentNode { id: body_id, parent_slot: 0, kind: "paragraph", text: "Draft", alive: true },
+        ],
+    }
+    let start = DeltaDocument { base: base, deltas: [], cursor: 0, next_revision_id: 1, current_revision_id: 0 }
+    let after_a_result = edit_delta(start, body_id, "A")
+    let after_a = match after_a_result { Ok(doc) => doc, Err(_) => start }
+    let snapshot_s1_result = materialize(after_a)
+    let snapshot_s1 = match snapshot_s1_result { Ok(revision) => revision, Err(_) => base }
+    let after_b_result = edit_delta(after_a, body_id, "B")
+    let after_b = match after_b_result { Ok(doc) => doc, Err(_) => after_a }
+    let b_snapshot_result = materialize(after_b)
+    let b_snapshot = match b_snapshot_result { Ok(revision) => revision, Err(_) => base }
+    let restored_result = undo_delta(after_b)
+    let restored = match restored_result { Ok(doc) => doc, Err(_) => after_b }
+    let restored_snapshot_result = materialize(restored)
+    let restored_snapshot = match restored_snapshot_result { Ok(revision) => revision, Err(_) => base }
+
+    let b_is_visible = read_text(b_snapshot, body_id) == Ok("B")
+    let s1_isolated = read_text(snapshot_s1, body_id) == Ok("A")
+    let undo_restored_a = read_text(restored_snapshot, body_id) == Ok("A")
+    let revision_identity_restored = restored_snapshot.revision_id == snapshot_s1.revision_id
+    if b_is_visible && s1_isolated && undo_restored_a && revision_identity_restored &&
+        after_a_result != Err("StaleNodeId") && after_b_result != Err("StaleNodeId") {
+        println(20)
+        println(10)
+        println(7)
+        0
+    } else {
+        1
+    }
+}

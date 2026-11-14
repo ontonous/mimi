@@ -1,20 +1,22 @@
-// Test ? operator with user-defined Result-like types
+// Test ? operator with the built-in Result type.
 
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func safe_div(a: i32, b: i32) -> Res {
+func safe_div(a: i32, b: i32) -> Result<i32, string> {
     if b == 0 {
         return Err("division by zero");
     }
     return Ok(a / b);
 }
 
-func main() -> i32 {
+func run_division() -> Result<i32, string> {
     // Test with ? - success path
     let result = safe_div(10, 2)?;
     println(result);
-    result
+    Ok(result)
+}
+
+func main() -> i32 {
+    match run_division() {
+        Ok(result) => result,
+        Err(_) => 1,
+    }
 }

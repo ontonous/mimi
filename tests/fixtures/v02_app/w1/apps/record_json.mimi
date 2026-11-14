@@ -1,0 +1,217 @@
+// Per-file JSON parser. Its public name intentionally matches the config
+// parser's parse; callers retain source identity through the import alias.
+
+pub func record_whitespace(ch: string) -> bool {
+    ch == " " || ch == "\n" || ch == "\r" || ch == "\t"
+}
+
+pub func record_has_unicode_nul(raw: string) -> bool {
+    let mut in_string = false
+    let mut escaped = false
+    let mut found = false
+    let mut i = 0
+    while i < len(raw) && !found {
+        let ch = char_at(raw, i)
+        if in_string {
+            if escaped {
+                if ch == "u"
+                    && i + 4 < len(raw)
+                    && char_at(raw, i + 1) == "0"
+                    && char_at(raw, i + 2) == "0"
+                    && char_at(raw, i + 3) == "0"
+                    && char_at(raw, i + 4) == "0" {
+                    found = true
+                }
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                in_string = false
+            }
+        } else if ch == "\"" {
+            in_string = true
+        }
+        i = i + 1
+    }
+    found
+}
+
+pub func record_duplicate_top_level_key(raw: string) -> string {
+    let mut seen: List<string> = []
+    let mut duplicate = ""
+    let mut depth = 0
+    let mut in_string = false
+    let mut escaped = false
+    let mut string_start = 0
+    let mut i = 0
+    while i < len(raw) && duplicate == "" {
+        let ch = char_at(raw, i)
+        if in_string {
+            if escaped {
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                in_string = false
+                if depth == 1 {
+                    let mut next = i + 1
+                    while next < len(raw) && record_whitespace(char_at(raw, next)) {
+                        next = next + 1
+                    }
+                    if next < len(raw) && char_at(raw, next) == ":" {
+                        let key_json = "\"" + str_substring(raw, string_start + 1, i) + "\""
+                        let key = from_json::<string>(key_json)
+                        let mut repeated = false
+                        for earlier in seen {
+                            if earlier == key { repeated = true }
+                        }
+                        if repeated {
+                            duplicate = key
+                        } else {
+                            push(seen, key)
+                        }
+                    }
+                }
+            }
+        } else if ch == "\"" {
+            in_string = true
+            string_start = i
+        } else if ch == "{" {
+            depth = depth + 1
+        } else if ch == "}" {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    duplicate
+}
+
+pub func record_field_raw_value(raw: string, target: string) -> string {
+    let mut depth = 0
+    let mut in_string = false
+    let mut escaped = false
+    let mut string_start = 0
+    let mut i = 0
+    let mut result = ""
+    while i < len(raw) && result == "" {
+        let ch = char_at(raw, i)
+        if in_string {
+            if escaped {
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                in_string = false
+                if depth == 1 {
+                    let mut next = i + 1
+                    while next < len(raw) && record_whitespace(char_at(raw, next)) {
+                        next = next + 1
+                    }
+                    if next < len(raw) && char_at(raw, next) == ":" {
+                        let key_json = "\"" + str_substring(raw, string_start + 1, i) + "\""
+                        let key = from_json::<string>(key_json)
+                        if key == target {
+                            let mut value_start = next + 1
+                            while value_start < len(raw)
+                                && record_whitespace(char_at(raw, value_start)) {
+                                value_start = value_start + 1
+                            }
+                            if value_start < len(raw) && char_at(raw, value_start) == "\"" {
+                                let mut value_end = value_start + 1
+                                let mut value_escaped = false
+                                let mut closed = false
+                                while value_end < len(raw) && !closed {
+                                    let value_ch = char_at(raw, value_end)
+                                    if value_escaped {
+                                        value_escaped = false
+                                    } else if value_ch == "\\" {
+                                        value_escaped = true
+                                    } else if value_ch == "\"" {
+                                        closed = true
+                                    }
+                                    if !closed { value_end = value_end + 1 }
+                                }
+                                if closed {
+                                    result = str_substring(raw, value_start, value_end + 1)
+                                }
+                            } else if value_start < len(raw)
+                                && (char_at(raw, value_start) == "["
+                                    || char_at(raw, value_start) == "{") {
+                                let mut value_end = value_start
+                                let mut value_depth = 0
+                                let mut value_in_string = false
+                                let mut value_escaped = false
+                                let mut closed = false
+                                while value_end < len(raw) && !closed {
+                                    let value_ch = char_at(raw, value_end)
+                                    if value_in_string {
+                                        if value_escaped {
+                                            value_escaped = false
+                                        } else if value_ch == "\\" {
+                                            value_escaped = true
+                                        } else if value_ch == "\"" {
+                                            value_in_string = false
+                                        }
+                                    } else if value_ch == "\"" {
+                                        value_in_string = true
+                                    } else if value_ch == "[" || value_ch == "{" {
+                                        value_depth = value_depth + 1
+                                    } else if value_ch == "]" || value_ch == "}" {
+                                        value_depth = value_depth - 1
+                                        if value_depth == 0 { closed = true }
+                                    }
+                                    value_end = value_end + 1
+                                }
+                                if closed {
+                                    result = str_substring(raw, value_start, value_end)
+                                }
+                            } else if value_start < len(raw) {
+                                let mut value_end = value_start
+                                while value_end < len(raw)
+                                    && char_at(raw, value_end) != ","
+                                    && char_at(raw, value_end) != "}" {
+                                    value_end = value_end + 1
+                                }
+                                result = str_trim(str_substring(raw, value_start, value_end))
+                            }
+                        }
+                    }
+                }
+            }
+        } else if ch == "\"" {
+            in_string = true
+            string_start = i
+        } else if ch == "{" {
+            depth = depth + 1
+        } else if ch == "}" {
+            depth = depth - 1
+        }
+        i = i + 1
+    }
+    result
+}
+
+pub func parse(raw: string) -> Result<(string, i64), string> {
+    if !json_is_valid(raw) { return Err("InvalidJson") }
+    if record_has_unicode_nul(raw) { return Err("InvalidUnicodeNul") }
+    let duplicate = record_duplicate_top_level_key(raw)
+    if duplicate != "" { return Err("DuplicateKey:" + duplicate) }
+    if !json_has_key(raw, "source") { return Err("MissingField:source") }
+    if !json_has_key(raw, "amount") { return Err("MissingField:amount") }
+
+    let source_json = record_field_raw_value(raw, "source")
+    if len(source_json) < 2
+        || char_at(source_json, 0) != "\""
+        || char_at(source_json, len(source_json) - 1) != "\"" {
+        return Err("InvalidField:source")
+    }
+    let source = from_json::<string>(source_json)
+    if len(source) == 0 { return Err("InvalidField:source") }
+
+    let amount_text = record_field_raw_value(raw, "amount")
+    let parsed_amount = str_parse_int(amount_text)
+    if !parsed_amount.0 { return Err("InvalidField:amount") }
+    let amount = parsed_amount.1
+    if amount < 0 || amount > 1000000 { return Err("InvalidField:amount") }
+    Ok((source, amount))
+}

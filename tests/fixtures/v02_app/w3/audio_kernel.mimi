@@ -1,0 +1,96 @@
+// V0.2 W3 baseline: a real pre-built List<i32> sample store with a logical
+// sample count. `storage` is allocated and populated before the hot call.
+// The active prefix can be shorter than the allocated slots; the suffix is
+// guard data and must remain unchanged.
+//
+// D-10 intended no_alloc region (source boundary until the language has the
+// cost-contract syntax): entry immediately before process_in_place(...), exit
+// on its return. Its complete call graph includes process_in_place -> len,
+// gain_clip -> clip_i64, and the final len query. It includes the
+// invalid-length return path and implicit cleanup.
+// List construction, oracle checks, printing, and VM/runtime bookkeeping are
+// outside this region. Static `no_alloc` checking and native capacity/allocation
+// receipts are not expressible in the current surface language.
+
+func clip_i64(value: i64) -> i32 {
+    if value < -1000 {
+        -1000
+    } else if value > 1000 {
+        1000
+    } else {
+        value as i32
+    }
+}
+
+func gain_clip(sample: i32) -> i32 {
+    clip_i64((sample as i64) * 2)
+}
+
+// The input list is uniquely owned by the caller for this exclusive borrow.
+// This loop changes each active sample in its existing slot and never pushes,
+// pops, replaces, copies, or resizes the backing List.
+func process_in_place(samples: mutate List<i32>, active_len: i32) -> i32 {
+    let storage_slots = len(samples)
+    if active_len < 0 || active_len > storage_slots {
+        return -1
+    }
+
+    let mut index = 0
+    while index < active_len {
+        samples[index] = gain_clip(samples[index])
+        index += 1
+    }
+
+    if len(samples) != storage_slots { return -2 }
+    0
+}
+
+func print_prefix(samples: view List<i32>, active_len: i32) -> i32 {
+    let mut index = 0
+    while index < active_len {
+        println(samples[index])
+        index += 1
+    }
+    0
+}
+
+func main() -> i32 {
+    // Five required extreme-value inputs in a six-slot pre-built buffer.
+    let mut extremes: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let slots_before = len(extremes)
+    if process_in_place(extremes, 5) != 0 { return 1 }
+    if len(extremes) != slots_before { return 2 }
+    if extremes[0] != -1000 || extremes[1] != -1000 || extremes[2] != 0 { return 3 }
+    if extremes[3] != 1000 || extremes[4] != 1000 || extremes[5] != 777 { return 4 }
+    print_prefix(extremes, 5)
+
+    // A genuinely empty List remains empty and has no active samples.
+    let mut empty: List<i32> = []
+    if process_in_place(empty, 0) != 0 { return 5 }
+    if len(empty) != 0 { return 6 }
+
+    // The logical length is three even though the prepared storage has five
+    // slots. Inactive tail values must survive the hot call.
+    let mut short: List<i32> = [-501, 0, 501, 700, 701]
+    let short_slots_before = len(short)
+    if process_in_place(short, 3) != 0 { return 7 }
+    if len(short) != short_slots_before { return 8 }
+    if short[0] != -1000 || short[1] != 0 || short[2] != 1000 { return 9 }
+    if short[3] != 700 || short[4] != 701 { return 10 }
+
+    // Repeating the same prepared input in another buffer must produce the
+    // same vector, independent of the prior run.
+    let mut repeat: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    if process_in_place(repeat, 5) != 0 { return 11 }
+    if repeat[0] != -1000 || repeat[1] != -1000 || repeat[2] != 0 { return 12 }
+    if repeat[3] != 1000 || repeat[4] != 1000 || repeat[5] != 777 { return 13 }
+
+    // Invalid length is rejected before any sample write. This error edge is
+    // inside the D-10 region and is expected to have the same no-allocation
+    // contract as the successful edge.
+    let mut invalid: List<i32> = [11, 22, 33]
+    if process_in_place(invalid, 4) != -1 { return 14 }
+    if invalid[0] != 11 || invalid[1] != 22 || invalid[2] != 33 { return 15 }
+
+    0
+}

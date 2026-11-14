@@ -8,14 +8,20 @@ use super::run_program;
 fn actor_spawn_source(n: usize) -> String {
     format!(
         r#"
-actor Worker {{
-    value: i32
-    func set(v: i32) {{ self.value = v }}
-    func get() -> i32 {{ self.value }}
+flow WorkerFlow {{
+    state Active {{ value: i32 }}
+    transition set(Active, v: i32) -> Active {{
+        return Active {{ value: v }}
+    }}
+    transition get(Active) -> Active {{
+        return Active {{ value: self.value }}
+    }}
 }}
+actor Worker runs WorkerFlow {{}}
 func task(w: Worker, v: i32) -> i32 {{
     w.set(v)
-    w.get()
+    let state = w.get()
+    state.value
 }}
 func main() -> i32 {{
     let w = Worker.spawn()

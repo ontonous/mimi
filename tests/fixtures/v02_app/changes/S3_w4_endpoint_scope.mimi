@@ -1,0 +1,10 @@
+// S3: endpoint scope rejects the disallowed port before connecting.
+use std::net
+func main() -> i32 {
+    let requested = -1
+    if requested < 0 { println("EndpointDenied"); return 0 }
+    let listener = tcp_listen(requested, 1)
+    if listener.is_err() { println("BindFailed"); return 2 }
+    close_fd(listener.unwrap())
+    0
+}

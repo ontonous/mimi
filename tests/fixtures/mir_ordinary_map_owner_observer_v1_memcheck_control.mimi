@@ -1,0 +1,9 @@
+// Memory baseline for the Map observer Memcheck gate: same two lines and
+// String println calls, with no Map value, root, or observer operation.
+func main() -> i32 {
+    let snapshot = "{\"a-number\":42,\"z-label\":\"persistent observer\"}"
+    println(snapshot)
+    println(snapshot)
+    drop(snapshot)
+    0
+}

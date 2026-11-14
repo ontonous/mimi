@@ -4,25 +4,52 @@ func main() -> i32 {
     ensures: result == 0
     let original = Label { text: "original payload" }
     let added = Label { text: "updated payload" }
-    let empty = map_new()
-    let stored = map_set(empty, "first", original)
-    let copied = stored
-    let updated = map_set(stored, "second", added)
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "first", original) {
+                Ok(stored) => {
+                    let copied = stored
+                    match map_set(stored, "second", added) {
+                        Ok(updated) => {
+                            let old_pair = map_get(copied, "first")
+                            let old_label = old_pair.1 as Label
+                            let new_pair = map_get(updated, "second")
+                            let new_label = new_pair.1 as Label
+                            println(old_label.text == "original payload")
+                            println(new_label.text == "updated payload")
 
-    let old_pair = map_get(copied, "first")
-    let old_label = old_pair.1 as Label
-    let new_pair = map_get(updated, "second")
-    let new_label = new_pair.1 as Label
-    println(old_label.text == "original payload")
-    println(new_label.text == "updated payload")
-
-    drop(old_pair)
-    drop(new_pair)
-    drop(empty)
-    drop(stored)
-    drop(copied)
-    drop(updated)
-    drop(original)
-    drop(added)
-    0
+                            drop(old_pair)
+                            drop(new_pair)
+                            drop(empty)
+                            drop(stored)
+                            drop(copied)
+                            drop(updated)
+                            drop(original)
+                            drop(added)
+                            0
+                        },
+                        Err(status) => {
+                            drop(empty)
+                            drop(stored)
+                            drop(copied)
+                            drop(original)
+                            drop(added)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(original)
+                    drop(added)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            drop(original)
+            drop(added)
+            status
+        },
+    }
 }

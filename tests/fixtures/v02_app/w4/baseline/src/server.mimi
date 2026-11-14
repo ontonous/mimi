@@ -1,0 +1,125 @@
+use std::net
+use protocol::next_line
+use protocol::checksum_response
+use protocol::send_line
+use protocol::note
+use protocol::valid_stop
+
+const EVENT_HANDOFF: i32 = 2
+const EVENT_RESPONSE: i32 = 4
+const EVENT_STOP_ACCEPTED: i32 = 7
+const EVENT_WORKER_DONE: i32 = 8
+const EVENT_DRAINED: i32 = 9
+
+func serve_connection(client: i64, slot: i32, start_gate: Channel<i64>) -> i32 {
+    let _ = channel_recv(start_gate)
+    let mut pending = ""
+    let mut handled = 0
+    while handled < 256 {
+        let (status, raw, rest) = next_line(client, pending)
+        pending = rest
+        if status == 0 {
+            close_fd(client)
+            note(EVENT_WORKER_DONE, slot)
+            return 0
+        }
+        if status < 0 {
+            let _ = send_line(client, "{\"error\":\"BadFrame\"}")
+            close_fd(client)
+            note(EVENT_WORKER_DONE, slot)
+            return 1
+        }
+
+        let response = checksum_response(raw, slot)
+        if !send_line(client, response) {
+            close_fd(client)
+            note(EVENT_WORKER_DONE, slot)
+            return 2
+        }
+        if json_is_valid(raw) && json_has_key(raw, "request_id") {
+            note(EVENT_RESPONSE, json_get_int(raw, "request_id"))
+        }
+        handled = handled + 1
+    }
+    let _ = send_line(client, "{\"error\":\"RequestLimit\"}")
+    close_fd(client)
+    note(EVENT_WORKER_DONE, slot)
+    3
+}
+
+pub func run_service(listener: i64) -> i32 {
+    // Exactly two client sockets are handed to concurrent worker tasks. The
+    // coordinator keeps both futures and owns their terminal join obligation.
+    let first = tcp_accept(listener)
+    if first.is_err() {
+        close_fd(listener)
+        return 10
+    }
+    let first_fd = first.unwrap()
+    let first_gate = channel_new()
+    let first_task = spawn serve_connection(first_fd, 1, first_gate)
+    note(EVENT_HANDOFF, 1)
+    channel_send(first_gate, 1 as i64)
+
+    let second = tcp_accept(listener)
+    if second.is_err() {
+        close_fd(listener)
+        let _ = await first_task
+        channel_drop(first_gate)
+        return 11
+    }
+    let second_fd = second.unwrap()
+    let second_gate = channel_new()
+    let second_task = spawn serve_connection(second_fd, 2, second_gate)
+    note(EVENT_HANDOFF, 2)
+    channel_send(second_gate, 2 as i64)
+
+    // The stop connection is accepted on the same restricted loopback
+    // listener. Invalid stop requests fail locally and do not discard workers.
+    let mut stopped = false
+    let mut stop_attempts = 0
+    while !stopped && stop_attempts < 16 {
+        let candidate = tcp_accept(listener)
+        if candidate.is_err() {
+            close_fd(listener)
+            let _ = await first_task
+            let _ = await second_task
+            channel_drop(first_gate)
+            channel_drop(second_gate)
+            return 12
+        }
+        let stop_fd = candidate.unwrap()
+        let (status, line, _) = next_line(stop_fd, "")
+        if status != 1 || !valid_stop(line) {
+            let _ = send_line(stop_fd, "{\"error\":\"StopDenied\"}")
+            close_fd(stop_fd)
+            stop_attempts = stop_attempts + 1
+        } else {
+            let request_id = json_get_int(line, "request_id")
+            note(EVENT_STOP_ACCEPTED, request_id)
+            let _ = send_line(stop_fd, "{\"id\":" + to_string(request_id) + ",\"stopping\":true}")
+            close_fd(stop_fd)
+            stopped = true
+        }
+    }
+
+    close_fd(listener)
+    if !stopped {
+        let _ = await first_task
+        let _ = await second_task
+        channel_drop(first_gate)
+        channel_drop(second_gate)
+        return 13
+    }
+
+    let first_result = await first_task
+    let second_result = await second_task
+    channel_drop(first_gate)
+    channel_drop(second_gate)
+    note(EVENT_DRAINED, 0)
+    if first_result != 0 || second_result != 0 {
+        return 14
+    }
+    println("W4_SERVICE_DRAINED")
+    0
+}

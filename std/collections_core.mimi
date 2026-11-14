@@ -1,0 +1,21 @@
+// collections_core.mimi — canonical MIR collection facades
+//
+// This module intentionally exposes only the List operations with a closed
+// checker/TypeDesc/MIR contract.  The broader std::collections facade remains
+// available on its compatibility route until each higher-order operation has
+// its own canonical closure and ownership receipt.
+
+// list_len takes a List<T> by value and returns its element count.
+pub func list_len<T>(xs: List<T>) -> i32 {
+    len(xs)
+}
+
+// list_reverse consumes its List<T> receiver and returns the reversed List<T>.
+pub func list_reverse<T>(xs: List<T>) -> List<T> {
+    reverse(xs)
+}
+
+// list_concat consumes both Lists and returns their concatenation.
+pub func list_concat<T>(xs: List<T>, ys: List<T>) -> List<T> {
+    xs.concat(ys)
+}

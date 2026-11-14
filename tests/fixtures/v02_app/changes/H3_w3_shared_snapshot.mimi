@@ -1,0 +1,10 @@
+// H3: take a scalar snapshot, then perform an exclusive update.
+type Buffer { left: i32, right: i32 }
+func main() -> i32 {
+    let before = Buffer { left: 10, right: 20 }
+    let snapshot = before
+    let after = Buffer { left: before.left + 1, right: before.right + 1 }
+    println(snapshot.left + snapshot.right)
+    println(after.left + after.right)
+    0
+}

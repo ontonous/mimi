@@ -11,14 +11,18 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATOR_PATH = ROOT / "scripts" / "generate_route_census_authority.py"
-COLLECTOR_PATH = ROOT / "scripts" / "full_route_census.py"
+SCRIPTS_DIR = ROOT / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+GENERATOR_PATH = SCRIPTS_DIR / "generate_route_census_authority.py"
+COLLECTOR_PATH = SCRIPTS_DIR / "full_route_census.py"
 
 
 def load_module(path: Path, name: str):
@@ -43,14 +47,6 @@ class RouteAuthorityGeneratorTests(unittest.TestCase):
         fixture_collector = self.root / "scripts" / "full_route_census.py"
         shutil.copy2(COLLECTOR_PATH, fixture_collector)
         shutil.copy2(GENERATOR_PATH, self.root / "scripts" / "generate_route_census_authority.py")
-        fixture_collector_text = fixture_collector.read_text(encoding="utf-8")
-        fixture_collector.write_text(
-            fixture_collector_text.replace(
-                'SCHEMA_VERSION = "0.1.11-full-route-census-v6"',
-                'SCHEMA_VERSION = "0.1.11-full-route-census-v7"',
-            ),
-            encoding="utf-8",
-        )
         self.census = load_module(
             fixture_collector, "route_authority_census_fixture"
         )
@@ -295,6 +291,7 @@ required-features = ["route-census-authorities"]
         path = str(source["path"])
         fixture = self.root / path
         stderr_text = (
+            f"{fixture} has 1 type error(s):\n"
             f"error[E0432] {fixture}:2:3-8 unknown name 'absent'\n"
             "error: type checking failed\n"
         )
@@ -845,14 +842,14 @@ required-features = ["route-census-authorities"]
                 self.assertEqual(manifest["outcomes"]["unmapped"], 1)
                 self.assertEqual(row["bootstrap_blocker"]["category"], case if case == "unstable" else "unobserved")
 
-    def test_generates_schema_v4_and_one_direct_authority_per_row(self) -> None:
+    def test_generates_route_expectation_schema_v5_and_one_direct_authority_per_row(self) -> None:
         manifest = self.run_generator()
         self.assertEqual(manifest["status"], "generated_not_executed")
         rust_path = self.output_dir / generator.EXPECTED_TEST_PATH
         expectation_path = self.output_dir / generator.EXPECTATIONS_FILENAME
         rust = rust_path.read_text(encoding="utf-8")
         expectations = json.loads(expectation_path.read_text(encoding="utf-8"))
-        self.assertEqual(expectations["schema_version"], 4)
+        self.assertEqual(expectations["schema_version"], 5)
         self.assertEqual(len(expectations["inputs"]), 2)
         self.assertEqual(rust.count("#[test]"), 2)
         self.assertNotIn("for ", rust)
@@ -869,7 +866,13 @@ required-features = ["route-census-authorities"]
             self.assertEqual(item["authority"]["assertion"]["sha256"], self.digest(rust.encode()))
         self.assertEqual(
             manifest["outcomes"],
-            {"canonical": 1, "expected_build_rejection": 1, "expected_source_diagnostic": 0},
+            {
+                "canonical": 1,
+                "expected_build_rejection": 1,
+                "expected_source_diagnostic": 0,
+                "expected_tool_diagnostic": 0,
+                "canonical_mir_input_rejection": 0,
+            },
         )
         self.assertEqual(
             manifest["artifacts"][generator.EXPECTED_TEST_PATH]["sha256"], self.digest(rust.encode())
@@ -926,7 +929,13 @@ required-features = ["route-census-authorities"]
         self.assertEqual(row["candidate_classification"], "source_diagnostic")
         self.assertEqual(
             manifest["outcomes"],
-            {"canonical": 1, "expected_build_rejection": 0, "expected_source_diagnostic": 1},
+            {
+                "canonical": 1,
+                "expected_build_rejection": 0,
+                "expected_source_diagnostic": 1,
+                "expected_tool_diagnostic": 0,
+                "canonical_mir_input_rejection": 0,
+            },
         )
         source_test = rust[rust.index(f"fn {row['test_id']}()") :]
         self.assertIn("::std::assert!(!output.status.success());", source_test)
@@ -938,6 +947,54 @@ required-features = ["route-census-authorities"]
         self.assertIn("output_path.symlink_metadata()", source_test)
         self.assertIn('::std::assert!(!stderr.contains("canonical route disposition:"));', source_test)
         self.assertNotIn("fn route_census_run_", rust)
+
+    def test_raw_source_diagnostic_parser_accepts_complete_build_summaries_only(self) -> None:
+        fixture = self.root / "fixtures" / "source-error.mimi"
+        fixture.write_text("func main() { }\n", encoding="utf-8")
+        absolute_source = str(fixture.resolve())
+        type_stderr = (
+            f"{absolute_source} has 2 type error(s):\n"
+            f"error[E0432] {absolute_source}:1:1-2 first error\n"
+            f"error[E0432] {absolute_source}:1:3-4 second error\n"
+            "error: type checking failed\n"
+        )
+        parse_stderr = (
+            f"error {absolute_source}:1:1-2 unexpected token\n"
+            "error: 1 parse error(s) found\n"
+        )
+
+        type_result = generator._source_diagnostic_from_raw_logs(
+            type_stderr.encode("utf-8"),
+            source_path="fixtures/source-error.mimi",
+            root=self.root,
+        )
+        parse_result = generator._source_diagnostic_from_raw_logs(
+            parse_stderr.encode("utf-8"),
+            source_path="fixtures/source-error.mimi",
+            root=self.root,
+        )
+        self.assertEqual(len(type_result["lines"]), 2)
+        self.assertEqual(type_result["codes"], ["E0432"])
+        self.assertEqual(len(parse_result["lines"]), 1)
+        self.assertEqual(parse_result["codes"], [])
+
+        invalid_outputs = (
+            type_stderr.replace("has 2 type error(s)", "has 3 type error(s)"),
+            parse_stderr.replace("parse error(s) found", "parse error(s)"),
+            type_stderr.replace(absolute_source, str(self.root / "fixtures" / "other.mimi"), 1),
+            type_stderr.replace("type checking failed", "type checking failed\nextra"),
+        )
+        for invalid in invalid_outputs:
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    generator.GenerationError,
+                    "raw stderr contains an unknown, extra or unbound diagnostic",
+                ):
+                    generator._source_diagnostic_from_raw_logs(
+                        invalid.encode("utf-8"),
+                        source_path="fixtures/source-error.mimi",
+                        root=self.root,
+                    )
 
     def test_source_diagnostic_generation_rejects_extra_or_unknown_raw_diagnostics(self) -> None:
         self.report = self.make_report()
@@ -1164,10 +1221,10 @@ required-features = ["route-census-authorities"]
             self.run_generator()
         self.assertFalse(self.output_dir.exists())
 
-    def test_schema_v6_report_is_refused_without_output(self) -> None:
-        self.report["schema_version"] = "0.1.11-full-route-census-v6"
+    def test_previous_schema_v8_report_is_refused_without_output(self) -> None:
+        self.report["schema_version"] = "0.1.11-full-route-census-v8"
         self.write_report()
-        with self.assertRaisesRegex(generator.GenerationError, "schema_version must be .*v7"):
+        with self.assertRaisesRegex(generator.GenerationError, "schema_version must be .*v9"):
             self.run_generator()
         self.assertFalse(self.output_dir.exists())
 

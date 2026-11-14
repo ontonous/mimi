@@ -8,10 +8,17 @@ impl Marker<i64> for List<i64> {
     func read() -> i32 { 22 }
 }
 
+impl Marker<string> for List<string> {
+    func read() -> i32 { 33 }
+}
+
 func main() -> i32 {
     let numbers: List<i32> = [1]
     let wide: List<i64> = [2]
+    let words: List<string> = ["x"]
+    println(words.read())
     println(wide.read())
     println(numbers.read())
+    drop(words)
     0
 }

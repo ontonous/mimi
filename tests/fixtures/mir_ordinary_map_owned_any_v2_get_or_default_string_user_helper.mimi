@@ -1,0 +1,31 @@
+// A same-spelled user helper must not receive stdlib route authority.
+func get_or_default<T>(m: Record, key: string, default: T) -> T {
+    drop(m)
+    default
+}
+
+func main() -> i32 {
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", "stored")
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", "user helper")
+                    println(observed)
+                    drop(observed)
+                    drop(empty)
+                    println(0)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            status
+        },
+    }
+}

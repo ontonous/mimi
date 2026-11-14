@@ -1,0 +1,44 @@
+{
+  "schema": "mimi-v02-w4-ffi-contract-v1",
+  "imports": [
+    {
+      "symbol": "w4_open_listener",
+      "c_signature": "int64_t(int32_t scope, int32_t port, int32_t backlog)",
+      "effect": ["net", "blocking"],
+      "success_ownership": "fd transfers to Mimi; close exactly once",
+      "errors": {"-1001": "scope denied", "-1002": "port/backlog denied", "-1003": "socket failed", "-1004": "bind failed", "-1005": "listen failed"}
+    },
+    {
+      "symbol": "w4_checksum",
+      "c_signature": "int32_t(int32_t value)",
+      "effect": ["pure", "deterministic"],
+      "ownership": "scalar only; no allocation or pointer transfer",
+      "errors": {"-2": "value outside 0..999"}
+    },
+    {
+      "symbol": "w4_trace",
+      "c_signature": "int32_t(int32_t code, int32_t detail)",
+      "effect": ["diagnostic-io"],
+      "ownership": "scalar only; no allocation or pointer transfer"
+    }
+  ],
+  "negative_cases": [
+    {
+      "fixture": "negative/wrong_scalar_argument.mimi",
+      "condition": "the import is declared as i32 but its source call passes string",
+      "expected": "compile/check rejection before execution"
+    },
+    {
+      "fixture": "negative/wrong_external_abi_declaration.mimi",
+      "condition": "Mimi declares w4_checksum(i64)->i64 while C exports i32(i32)",
+      "expected": "must reject before execution",
+      "current_status": "C prototype/header comparison is not part of the extern surface; unresolved capability gap, do not execute"
+    },
+    {
+      "fixture": "negative/borrowed_c_string_as_owned.mimi",
+      "condition": "Mimi declares a C static const char* result as a Mimi string result",
+      "expected": "reject unless ownership and destructor are explicitly compatible",
+      "current_status": "not expressible in current extern declaration surface; unresolved capability gap, do not execute"
+    }
+  ]
+}

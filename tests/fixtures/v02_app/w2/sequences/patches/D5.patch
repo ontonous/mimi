@@ -1,0 +1,184 @@
+--- w2_document_core.mimi
++++ w2_document_core.mimi
+@@ -408,6 +408,140 @@
+     injected && mismatch_classified && old_write_error_preserved
+ }
+ 
++
++// D5: each worker has an independent Flow and file pair, and returns one
++// typed terminal receipt before the parent joins both tasks.
++type D5Receipt { task_id: i32, document_id: i32, revision_id: i32, destination: string, contents: string, temporary_path: string, published: bool, cleanup_error: string, cleanup_owner: string }
++type D5Failure { task_id: i32, temporary_path: string, destination: string, destination_may_exist: bool, cleanup_owner: string, error: string }
++type D5Outcome { D5Published(D5Receipt) | D5Failed(D5Failure) }
++
++flow D5ExportTask {
++    state D5Pending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
++    state D5Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
++    state D5Settled { task_id: i32, outcome: D5Outcome }
++
++    transition begin(D5Pending) -> D5Writing {
++        return D5Writing {
++            task_id: self.task_id,
++            snapshot: self.snapshot,
++            temporary_path: self.temporary_path,
++            destination: self.destination,
++        }
++    }
++    transition settle(D5Writing, outcome: D5Outcome) -> D5Settled {
++        return D5Settled { task_id: self.task_id, outcome: outcome }
++    }
++}
++
++func d5_remove_if_present(path: string) -> bool {
++    if file_exists(path) { remove_file(path) } else { true }
++}
++
++func d5_export_worker(task_id: i32, snapshot: Revision, temporary_path: string, destination: string) -> D5Outcome {
++    d5_remove_if_present(temporary_path)
++    d5_remove_if_present(destination)
++    let writing = D5ExportTask::begin(D5Pending {
++        task_id: task_id,
++        snapshot: snapshot,
++        temporary_path: temporary_path,
++        destination: destination,
++    })
++    let outcome = match export_revision(snapshot, temporary_path, destination) {
++        Ok(receipt) => {
++            let exact_output = match read_file(receipt.path) {
++                Ok(contents) => contents == serialize_revision(snapshot),
++                Err(_) => false,
++            }
++            if receipt.document_id == snapshot.document_id && receipt.revision_id == snapshot.revision_id &&
++                receipt.published && exact_output && receipt.cleanup_error == "" &&
++                receipt.temporary_removed && !file_exists(receipt.temporary_path) {
++                D5Published(D5Receipt {
++                    task_id: task_id,
++                    document_id: receipt.document_id,
++                    revision_id: receipt.revision_id,
++                    destination: receipt.path,
++                    contents: serialize_revision(snapshot),
++                    temporary_path: receipt.temporary_path,
++                    published: true,
++                    cleanup_error: "",
++                    cleanup_owner: "",
++                })
++            } else {
++                let temp_removed = d5_remove_if_present(receipt.temporary_path)
++                let owner = if temp_removed { receipt.cleanup_owner } else { "D5 worker" }
++                D5Failed(D5Failure {
++                    task_id: task_id,
++                    temporary_path: receipt.temporary_path,
++                    destination: receipt.path,
++                    destination_may_exist: receipt.published,
++                    cleanup_owner: owner,
++                    error: "published receipt did not match its snapshot or cleanup contract",
++                })
++            }
++        },
++        Err(failure) => {
++            let temp_removed = d5_remove_if_present(temporary_path)
++            let destination_removed = if failure.destination_may_exist {
++                d5_remove_if_present(destination)
++            } else {
++                true
++            }
++            let owner = if temp_removed && destination_removed { "" } else { "D5 worker" }
++            D5Failed(D5Failure {
++                task_id: task_id,
++                temporary_path: temporary_path,
++                destination: destination,
++                destination_may_exist: failure.destination_may_exist,
++                cleanup_owner: owner,
++                error: "export module returned a failure",
++            })
++        },
++    }
++    let settled = D5ExportTask::settle(writing, outcome)
++    settled.outcome
++}
++
++func d5_published_revision(outcome: D5Outcome, task_id: i32, document_id: i32, revision_id: i32, expected_contents: string) -> i32 {
++    match outcome {
++        D5Published(receipt) => {
++            let contents = match read_file(receipt.destination) {
++                Ok(text) => text,
++                Err(_) => "",
++            }
++            if receipt.task_id == task_id && receipt.document_id == document_id &&
++                receipt.revision_id == revision_id && receipt.published &&
++                receipt.cleanup_error == "" && receipt.cleanup_owner == "" &&
++                receipt.contents == expected_contents && contents == expected_contents &&
++                !file_exists(receipt.temporary_path) {
++                receipt.revision_id
++            } else {
++                -1
++            }
++        },
++        D5Failed(_) => -1,
++    }
++}
++
++func d5_two_exports_join(snapshot_a: Revision, snapshot_b: Revision) -> bool {
++    let temporary_a = "/tmp/mimi-v02-w2-seq-d5-a.tmp"
++    let destination_a = "/tmp/mimi-v02-w2-seq-d5-a.txt"
++    let temporary_b = "/tmp/mimi-v02-w2-seq-d5-b.tmp"
++    let destination_b = "/tmp/mimi-v02-w2-seq-d5-b.txt"
++    let task_a = spawn d5_export_worker(201, snapshot_a, temporary_a, destination_a)
++    let task_b = spawn d5_export_worker(202, snapshot_b, temporary_b, destination_b)
++    let outcome_a = await task_a
++    let outcome_b = await task_b
++    let revision_a = d5_published_revision(outcome_a, 201, snapshot_a.document_id, snapshot_a.revision_id, serialize_revision(snapshot_a))
++    let revision_b = d5_published_revision(outcome_b, 202, snapshot_b.document_id, snapshot_b.revision_id, serialize_revision(snapshot_b))
++    let independent_paths = temporary_a != temporary_b && destination_a != destination_b
++    let results_ok = revision_a == snapshot_a.revision_id && revision_b == snapshot_b.revision_id && revision_a + revision_b == 50
++    d5_remove_if_present(temporary_a)
++    d5_remove_if_present(temporary_b)
++    d5_remove_if_present(destination_a)
++    d5_remove_if_present(destination_b)
++    independent_paths && results_ok
++}
++
+ func main() -> i32 {
+     let document_id = 7
+     let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+@@ -520,6 +654,31 @@
+     let closed = DocumentSession::close(session_after_undo)
+     let d2_cancel_retry_ok = d2_cancel_and_retry(snapshot_s1)
+     let d3_errors_ok = d3_error_variant_check()
++    let d5_revision_a = Revision {
++        document_id: 7,
++        revision_id: 20,
++        parent_revision: 19,
++        nodes: [DocumentNode {
++            id: NodeId { store_id: 7, slot: 1, generation: 1 },
++            parent_slot: 0,
++            kind: "paragraph",
++            text: "S1 A",
++            alive: true,
++        }],
++    }
++    let d5_revision_b = Revision {
++        document_id: 8,
++        revision_id: 30,
++        parent_revision: 29,
++        nodes: [DocumentNode {
++            id: NodeId { store_id: 8, slot: 1, generation: 1 },
++            parent_slot: 0,
++            kind: "paragraph",
++            text: "S1 B",
++            alive: true,
++        }],
++    }
++    let d5_tasks_joined = d5_two_exports_join(d5_revision_a, d5_revision_b)
+     let closed_revision = closed.final_revision
+ 
+     // There is deliberately no DocumentSession transition accepting Closed
+@@ -534,7 +693,7 @@
+     }
+     let delta_undo_ok = session_b_delta_count == 2 && len(session_after_undo.undo) == 1 &&
+         session_after_undo.current.revision_id == revision_a.revision_id
+-    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok && d2_cancel_retry_ok && d3_errors_ok &&
++    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok && d2_cancel_retry_ok && d3_errors_ok && d5_tasks_joined &&
+         closed.document_id == document_id &&
+         node_text(closed_revision, body_id) == Ok("A") &&
+         revision_a_ok && revision_b_ok && output_ok && snapshot_ok && edited_b_ok && autosave_ok && export_ok

@@ -1,0 +1,165 @@
+--- w2_document_core.mimi
++++ w2_document_core.mimi
+@@ -296,6 +296,145 @@
+     }
+ }
+ 
++
++// D2: a cancelled in-flight writer keeps the immutable revision and the
++// partial temporary file under an explicit cleanup owner until stop is acked.
++type D2CancelReceipt { task_id: i32, snapshot: Revision, retry_owner: string, temporary_path: string }
++type D2CleanupFailure { task_id: i32, cleanup_owner: string, temporary_path: string, error: string }
++type D2CancelTerminal { D2Cancelled(D2CancelReceipt) | D2CancelFailed(D2CleanupFailure) }
++
++flow D2WriteTask {
++    state D2Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, completed_chunks: i32, total_chunks: i32 }
++    state D2CancelRequested { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, completed_chunks: i32, total_chunks: i32, requester: string }
++    state D2CleanupPending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, cleanup_owner: string }
++    state D2CleanupReady { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, cleanup_owner: string }
++    state D2Settled { terminal: D2CancelTerminal }
++
++    transition request_cancel(D2Writing, requester: string) -> D2CancelRequested {
++        return D2CancelRequested {
++            task_id: self.task_id,
++            snapshot: self.snapshot,
++            temporary_path: self.temporary_path,
++            destination: self.destination,
++            completed_chunks: self.completed_chunks,
++            total_chunks: self.total_chunks,
++            requester: requester,
++        }
++    }
++    transition handoff(D2CancelRequested, cleanup_owner: string) -> D2CleanupPending {
++        return D2CleanupPending {
++            task_id: self.task_id,
++            snapshot: self.snapshot,
++            temporary_path: self.temporary_path,
++            destination: self.destination,
++            cleanup_owner: cleanup_owner,
++        }
++    }
++    transition acknowledge_stop(D2CleanupPending) -> D2CleanupReady {
++        return D2CleanupReady {
++            task_id: self.task_id,
++            snapshot: self.snapshot,
++            temporary_path: self.temporary_path,
++            destination: self.destination,
++            cleanup_owner: self.cleanup_owner,
++        }
++    }
++    transition settle_cleanup(D2CleanupReady, removed: bool) -> D2Settled {
++        if removed {
++            return D2Settled {
++                terminal: D2Cancelled(D2CancelReceipt {
++                    task_id: self.task_id,
++                    snapshot: self.snapshot,
++                    retry_owner: self.cleanup_owner,
++                    temporary_path: self.temporary_path,
++                }),
++            }
++        }
++        return D2Settled {
++            terminal: D2CancelFailed(D2CleanupFailure {
++                task_id: self.task_id,
++                cleanup_owner: self.cleanup_owner,
++                temporary_path: self.temporary_path,
++                error: "temporary output could not be removed",
++            }),
++        }
++    }
++}
++
++func d2_retry_export(snapshot: Revision, temporary_path: string, destination: string) -> bool {
++    let contents = serialize_revision(snapshot)
++    let staged = match write_file(temporary_path, contents) {
++        Ok(_) => true,
++        Err(_) => false,
++    }
++    if !staged { return false }
++    let readback = match read_file(temporary_path) {
++        Ok(text) => text,
++        Err(_) => {
++            remove_file(temporary_path)
++            return false
++        },
++    }
++    if readback != contents {
++        remove_file(temporary_path)
++        return false
++    }
++    let published = match write_file(destination, readback) {
++        Ok(_) => true,
++        Err(_) => false,
++    }
++    let removed = remove_file(temporary_path)
++    published && removed && !file_exists(temporary_path)
++}
++
++func d2_cancel_and_retry(snapshot: Revision) -> bool {
++    let partial_path = "/tmp/mimi-v02-w2-seq-d2-partial.tmp"
++    let cancelled_destination = "/tmp/mimi-v02-w2-seq-d2-cancelled.txt"
++    let retry_path = "/tmp/mimi-v02-w2-seq-d2-retry.tmp"
++    let retry_destination = "/tmp/mimi-v02-w2-seq-d2-retry.txt"
++    remove_file(partial_path)
++    remove_file(cancelled_destination)
++    remove_file(retry_path)
++    remove_file(retry_destination)
++    let first_chunk = match write_file(partial_path, "header; revision=" + to_string(snapshot.revision_id) + "\n") {
++        Ok(_) => true,
++        Err(_) => false,
++    }
++    if !first_chunk { return false }
++
++    let writing = D2Writing {
++        task_id: 301,
++        snapshot: snapshot,
++        temporary_path: partial_path,
++        destination: cancelled_destination,
++        completed_chunks: 1,
++        total_chunks: 2,
++    }
++    let requested = D2WriteTask::request_cancel(writing, "user")
++    let pending_cleanup = D2WriteTask::handoff(requested, "RetryOwner")
++    let partial_still_owned = file_exists(pending_cleanup.temporary_path)
++    let cleanup_ready = D2WriteTask::acknowledge_stop(pending_cleanup)
++    let removed = remove_file(cleanup_ready.temporary_path)
++    let settled = D2WriteTask::settle_cleanup(cleanup_ready, removed)
++    let no_partial_publication = !file_exists(cancelled_destination)
++    let retry_ok = match settled.terminal {
++        D2Cancelled(receipt) => {
++            let ownership_ok = receipt.task_id == 301 && receipt.retry_owner == "RetryOwner" &&
++                receipt.temporary_path == partial_path && partial_still_owned
++            let published = d2_retry_export(receipt.snapshot, retry_path, retry_destination)
++            let content_ok = match read_file(retry_destination) {
++                Ok(contents) => contents == serialize_revision(snapshot),
++                Err(_) => false,
++            }
++            ownership_ok && published && content_ok && !file_exists(retry_path)
++        },
++        D2CancelFailed(_) => false,
++    }
++    remove_file(retry_destination)
++    remove_file(retry_path)
++    no_partial_publication && retry_ok
++}
++
+ func main() -> i32 {
+     let document_id = 7
+     let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+@@ -406,6 +545,7 @@
+         Err(_) => false,
+     }
+     let closed = DocumentSession::close(session_after_undo)
++    let d2_cancel_retry_ok = d2_cancel_and_retry(snapshot_s1)
+     let closed_revision = closed.final_revision
+ 
+     // There is deliberately no DocumentSession transition accepting Closed
+@@ -420,7 +560,7 @@
+     }
+     let delta_undo_ok = session_b_delta_count == 2 && len(session_after_undo.undo) == 1 &&
+         session_after_undo.current.revision_id == revision_a.revision_id
+-    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok &&
++    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok && d2_cancel_retry_ok &&
+         closed.document_id == document_id &&
+         node_text(closed_revision, body_id) == Ok("A") &&
+         revision_a_ok && revision_b_ok && output_ok && snapshot_ok && edited_b_ok && autosave_ok && export_ok

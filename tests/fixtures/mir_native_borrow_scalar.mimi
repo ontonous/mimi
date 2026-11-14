@@ -1,4 +1,8 @@
 func main() -> i32 {
     let value = 41;
-    if *(&value) == 41 { 42 } else { 0 }
+    let mut result = 0;
+    unsafe {
+        if *(&value) == 41 { result = 42 } else { result = 0 }
+    }
+    result
 }

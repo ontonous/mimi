@@ -13,8 +13,9 @@ actor Counter runs Counter {
 }
 
 flow BankAccount {
+    state Uninitialized {}
     state Ready { balance: i32, owner: string }
-    transition init(Ready, name: string, initial: i32) -> Ready {
+    transition init(Uninitialized, name: string, initial: i32) -> Ready {
         return Ready { balance: initial, owner: name }
     }
     transition deposit(Ready, amount: i32) -> Ready {
@@ -67,7 +68,7 @@ func demo_bank() {
     let before2 = acc.get_balance().balance
     acc.withdraw(2000)
     let after2 = acc.get_balance().balance
-    println("  withdraw 2000:", if after2 == before2 { "FAIL (insufficient)" } else { "OK" })
+    println("  withdraw 2000:", if after2 == before2 { "OK (insufficient withdrawal preserved balance)" } else { "FAIL (insufficient withdrawal changed balance)" })
     println("  final balance:", after2)
 }
 

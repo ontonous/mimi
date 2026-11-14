@@ -1,0 +1,23 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "answer", 42) {
+            Ok(root) => {
+        let pair = map_get(root, "answer")
+        drop(empty)
+        drop(root)
+        println(pair.1)
+        drop(pair)
+        0
+            },
+            Err(status) => {
+            drop(empty)
+            status
+            },
+        }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

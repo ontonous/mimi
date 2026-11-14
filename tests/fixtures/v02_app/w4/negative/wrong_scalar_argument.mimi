@@ -1,0 +1,10 @@
+// Compile-negative fixture: the import is declared as i32 and the call site
+// supplies string. Mimi must reject the source-level ABI argument mismatch.
+extern "C" {
+    func w4_checksum(value: i32) -> i32;
+}
+
+func main() -> i32 {
+    w4_checksum("20")
+    0
+}

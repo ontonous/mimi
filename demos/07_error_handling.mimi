@@ -1,20 +1,15 @@
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func divide(a: i32, b: i32) -> Res {
+func divide(a: i32, b: i32) -> Result<i32, string> {
     if b == 0 { Err("division by zero") }
     else { Ok(a / b) }
 }
 
-func process(pa: i32, pb: i32) -> Res {
+func process(pa: i32, pb: i32) -> Result<i32, string> {
     let x = divide(pa, pb)?
     let y = divide(x, 2)?
     Ok(y + 10)
 }
 
-func multi_step() -> Res {
+func multi_step() -> Result<i32, string> {
     on failure { println("  cleanup: global") }
     println("  step1: divide(10, 2)")
     let a1 = divide(10, 2)?
@@ -25,7 +20,7 @@ func multi_step() -> Res {
     Ok(a1 + b1)
 }
 
-func multi_step_fail() -> Res {
+func multi_step_fail() -> Result<i32, string> {
     on failure { println("  cleanup: rollback") }
     println("  step1: divide(10, 2)")
     let a2 = divide(10, 2)?

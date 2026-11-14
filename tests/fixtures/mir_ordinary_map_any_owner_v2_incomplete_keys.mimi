@@ -1,0 +1,27 @@
+type Label { text: string }
+
+func main() -> i32 {
+    let label = Label { text: "payload" }
+    match map_new() {
+        Ok(root) => {
+    match map_set(root, "label", label) {
+        Ok(populated) => {
+            let all_keys = keys(populated)
+            let count = all_keys.len()
+            drop(all_keys)
+            drop(root)
+            drop(populated)
+            drop(label)
+            count
+        },
+        Err(status) => {
+        drop(root)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

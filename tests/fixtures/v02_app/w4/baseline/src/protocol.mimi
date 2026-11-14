@@ -1,0 +1,159 @@
+use std::net
+use std::strings
+use std::time
+
+const MAX_REQUEST_BYTES: i32 = 2048
+const MAX_HOLD_MS: i32 = 2000
+
+const EVENT_READY: i32 = 1
+const EVENT_HANDOFF: i32 = 2
+const EVENT_IN_FLIGHT: i32 = 3
+const EVENT_RESPONSE: i32 = 4
+const EVENT_BAD_JSON: i32 = 5
+const EVENT_FFI_ERROR: i32 = 6
+const EVENT_STOP_ACCEPTED: i32 = 7
+const EVENT_WORKER_DONE: i32 = 8
+const EVENT_DRAINED: i32 = 9
+
+extern "C" {
+    // C contract is recorded in ../../oracle/w4_ffi_contract.json.
+    func w4_open_listener(scope: i32, port: i32, backlog: i32) -> i64;
+    func w4_listener_port(fd: i64) -> i32;
+    func w4_checksum(value: i32) -> i32;
+    func w4_trace(code: i32, detail: i32) -> i32;
+}
+
+pub func note(code: i32, detail: i32) {
+    let _ = w4_trace(code, detail)
+}
+
+pub func open_loopback_listener(port: i32, backlog: i32) -> Result<i64, string> {
+    if port < 0 || port > 65535 || backlog < 1 || backlog > 64 {
+        return Err("EndpointDenied")
+    }
+    let fd = w4_open_listener(1, port, backlog)
+    if fd == -1001 {
+        return Err("EndpointDenied")
+    }
+    if fd == -1002 {
+        return Err("PortDenied")
+    }
+    if fd < 0 {
+        return Err("BindFailed")
+    }
+    Ok(fd)
+}
+
+pub func bound_loopback_port(fd: i64) -> Result<i32, string> {
+    let port = w4_listener_port(fd)
+    if port < 1 || port > 65535 {
+        Err("EndpointIdentityFailed")
+    } else {
+        Ok(port)
+    }
+}
+
+pub func c_checksum(value: i32) -> Result<i32, string> {
+    let result = w4_checksum(value)
+    if result < 0 {
+        Err("ChecksumRange")
+    } else {
+        Ok(result)
+    }
+}
+
+// Read one newline-delimited frame while preserving any bytes after it for the
+// next call. Status is 1 for a line, 0 for clean EOF, -1 for receive failure,
+// and -2 for a truncated or oversized frame.
+pub func next_line(fd: i64, pending: string) -> (i32, string, string) {
+    let mut buffer = pending
+    while !contains(buffer, "\n") {
+        let received = tcp_recv(fd, MAX_REQUEST_BYTES)
+        if received.is_err() {
+            return (-1, "", buffer)
+        }
+        let chunk = received.unwrap()
+        if chunk == "" {
+            if buffer == "" {
+                return (0, "", "")
+            }
+            return (-2, "", buffer)
+        }
+        buffer = buffer + chunk
+        if buffer.len() > MAX_REQUEST_BYTES {
+            return (-2, "", buffer)
+        }
+    }
+
+    let parts = split(buffer, "\n")
+    if parts.len() == 0 {
+        return (-2, "", "")
+    }
+    let mut rest = ""
+    for index in range(1, parts.len()) {
+        if index > 1 {
+            rest = rest + "\n"
+        }
+        rest = rest + parts[index]
+    }
+    (1, parts[0], rest)
+}
+
+pub func send_line(fd: i64, line: string) -> bool {
+    let framed = line + "\n"
+    let mut offset = 0
+    while offset < framed.len() {
+        let sent = tcp_send(fd, substring(framed, offset, framed.len()))
+        if sent.is_err() {
+            return false
+        }
+        let amount = sent.unwrap()
+        if amount <= 0 {
+            return false
+        }
+        offset = offset + (amount as i32)
+    }
+    true
+}
+
+pub func checksum_response(raw: string, slot: i32) -> string {
+    if !json_is_valid(raw) {
+        note(EVENT_BAD_JSON, slot)
+        return "{\"error\":\"BadJson\"}"
+    }
+    if !json_has_key(raw, "op") || !json_has_key(raw, "request_id") {
+        return "{\"error\":\"BadSchema\"}"
+    }
+
+    let operation = json_get_string(raw, "op")
+    let request_id = json_get_int(raw, "request_id")
+    if operation != "checksum" {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadOperation\"}"
+    }
+    if !json_has_key(raw, "value") || !json_has_key(raw, "hold_ms") {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadSchema\"}"
+    }
+
+    let value = json_get_int(raw, "value")
+    let hold_ms = json_get_int(raw, "hold_ms")
+    if hold_ms < 0 || hold_ms > MAX_HOLD_MS {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"HoldLimit\"}"
+    }
+    if hold_ms > 0 {
+        note(EVENT_IN_FLIGHT, request_id)
+        sleep_ms(hold_ms)
+    }
+
+    let checked = c_checksum(value)
+    match checked {
+        Ok(checksum) => "{\"id\":" + to_string(request_id) + ",\"checksum\":" + to_string(checksum) + "}",
+        Err(_) => {
+            note(EVENT_FFI_ERROR, request_id)
+            "{\"id\":" + to_string(request_id) + ",\"error\":\"ChecksumRange\"}"
+        },
+    }
+}
+
+pub func valid_stop(raw: string) -> bool {
+    json_is_valid(raw) && json_has_key(raw, "op") && json_has_key(raw, "request_id") && json_get_string(raw, "op") == "stop"
+}

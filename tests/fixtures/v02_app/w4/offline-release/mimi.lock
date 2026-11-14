@@ -1,0 +1,6 @@
+[[package]]
+name = "w4_transport"
+version = "0.2.0"
+constraint = "=0.2.0"
+source = "registry"
+checksum = "f078851f1ba75fe4d2d0cc82cef54b312816aea5f37a974a3caeac984dabef22"

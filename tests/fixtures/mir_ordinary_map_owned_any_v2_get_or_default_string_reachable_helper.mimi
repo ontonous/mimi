@@ -1,0 +1,46 @@
+use std::maps;
+
+func lookup() -> Result<string, i32> {
+    let payload = "helper hit"
+    let fallback = "unused helper default"
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", payload)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", fallback)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    Ok(observed)
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    drop(fallback)
+                    Err(status)
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            drop(fallback)
+            Err(status)
+        },
+    }
+}
+
+func main() -> i32 {
+    let observed_result = lookup()
+    match observed_result {
+        Ok(observed) => {
+            println(observed)
+            drop(observed)
+            0
+        },
+        Err(status) => {
+            status
+        },
+    }
+}

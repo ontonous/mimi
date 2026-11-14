@@ -1,0 +1,35 @@
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "text", "owned\0 payload λ") {
+            Ok(root) => {
+        let hit_pair = map_get(root, "text")
+        let miss_pair = map_get(root, "absent")
+
+        drop(empty)
+        drop(root)
+
+        let hit_found = hit_pair.0
+        let hit_payload = unpack_string(hit_pair.1)
+        let miss_found = miss_pair.0
+        let miss_payload = unpack_i32(miss_pair.1)
+        drop(hit_pair)
+        drop(miss_pair)
+
+        let hit_text_matches = hit_payload == "owned\0 payload λ"
+        let miss_is_zero = miss_payload == 0
+        drop(hit_payload)
+        let outcome = (hit_found != miss_found) && hit_text_matches && miss_is_zero
+        outcome
+            },
+            Err(status) => {
+            drop(empty)
+            false
+            },
+        }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}

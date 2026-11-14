@@ -1,0 +1,29 @@
+// V0.2 P6 W4: loopback request/FFI/concurrency probe.
+//
+// The C helper is a trusted deterministic checksum.  This sequential request
+// path is deliberately separate from `w4_concurrency_probe.mimi`: keeping the
+// FFI ABI receipt scalar makes the default native route independently
+// testable, while the companion probe exercises the actual Channel/spawn/join
+// implementation.  Binding an ephemeral loopback socket is kept in a third
+// `w4_network_probe.mimi` fixture because a descriptor is not portable in a
+// pure reference oracle.
+
+extern "C" {
+    func v02_checksum(x: i32) -> i32;
+}
+
+extern "C" func v02_status(x: i32) -> i32 {
+    x + 1
+}
+
+func handle_request(request: i32) -> i32 {
+    v02_checksum(request)
+}
+
+func main() -> i32 {
+    let first = handle_request(20)
+    let second = handle_request(21)
+    let response = v02_status(first + second)
+    println(response)
+    0
+}

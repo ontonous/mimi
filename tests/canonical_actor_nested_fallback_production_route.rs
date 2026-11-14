@@ -9,15 +9,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const CAPTURE_PATH: &str = "tests/real_world/actor_nested_func_capture.mimi";
-const CAPTURE_SHA256: &str = "81dca400a724bebdcdb3c89e0be8399fe5a44cf81bac021021750242cafa394e";
+const CAPTURE_SHA256: &str = "12ad7930f779d1454cd90919c55d76e9a126c5dc8cabfdf748b5c99992f2483f";
 const SHADOW_PATH: &str = "tests/real_world/actor_nested_func_shadow.mimi";
-const SHADOW_SHA256: &str = "7be9f2463ab0c593c29e3d456be636ff15d455a3a2a91e3a5d82757f0bba32ac";
+const SHADOW_SHA256: &str = "28144bad3ccf5018250ebf3ebaf8f5ad88006ba18cfbad5388fbd515a3fa0f7e";
 const PROFILE: &str = mir::SCALAR_ACTOR_ISLAND;
 
 struct Fixture {
     path: &'static str,
     sha256: &'static str,
     stdout: &'static [u8],
+    actor: &'static str,
+    mailbox_method: &'static str,
+    nested_helper: &'static str,
+    flow: &'static str,
+    transition: &'static str,
 }
 
 const FIXTURES: [Fixture; 2] = [
@@ -25,11 +30,21 @@ const FIXTURES: [Fixture; 2] = [
         path: CAPTURE_PATH,
         sha256: CAPTURE_SHA256,
         stdout: b"15\n",
+        actor: "Counter",
+        mailbox_method: "bump",
+        nested_helper: "scaled",
+        flow: "CounterFlow",
+        transition: "record",
     },
     Fixture {
         path: SHADOW_PATH,
         sha256: SHADOW_SHA256,
         stdout: b"42\n101\n",
+        actor: "Shadower",
+        mailbox_method: "touch",
+        nested_helper: "helper",
+        flow: "ShadowerFlow",
+        transition: "record",
     },
 ];
 
@@ -196,6 +211,108 @@ fn original_nested_actor_capture_and_shadow_use_shared_canonical_production_rout
             mir::CanonicalMirRouteProfile::ScalarActor.is_materialized(&route),
             "the shared route must include the ScalarActor canonical profile"
         );
+        let actor_id = NodeId(format!("actor:{}", fixture.actor));
+        let contract = route
+            .program
+            .actors()
+            .get(&actor_id)
+            .expect("checker-owned runs-Flow Actor contract");
+        let method_owner = NodeId(format!(
+            "function:{}::{}",
+            fixture.actor, fixture.mailbox_method
+        ));
+        let method = contract
+            .methods
+            .iter()
+            .find(|method| method.owner == method_owner)
+            .expect("explicit nested-helper mailbox method");
+        assert_eq!(
+            method.body_owner, method_owner,
+            "the fallback-origin shape stays owned by its explicit Actor method"
+        );
+        assert!(
+            method.flow_transition.is_none(),
+            "the nested helper owner must not be silently replaced with a Flow transition"
+        );
+        let transition = contract
+            .methods
+            .iter()
+            .find_map(|method| {
+                method
+                    .flow_transition
+                    .as_ref()
+                    .filter(|transition| transition.transition.event == fixture.transition)
+            })
+            .expect("Checker-owned Flow transition declaration metadata");
+        assert_eq!(transition.transition.flow.0, fixture.flow);
+        assert_eq!(
+            transition.body_owner,
+            mir::transition_owner_from_id(&transition.transition),
+            "transition body identity must come from the checker TransitionId"
+        );
+        assert!(route
+            .program
+            .functions()
+            .contains_key(&transition.body_owner));
+        let main = route
+            .program
+            .functions()
+            .get(&NodeId("function:main".into()))
+            .expect("fixture main MIR body");
+        let invoked_mailbox_methods = main
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match &instruction.kind {
+                mir::MirInstructionKind::Actor {
+                    operation: mir::MirActorOperation::Call { method, .. },
+                } => Some(method.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            invoked_mailbox_methods,
+            vec![method_owner.clone()],
+            "the Flow transition is declaration metadata here; main invokes only the explicit nested-helper Actor method"
+        );
+        let helper_receipts = route
+            .program
+            .actor_environments()
+            .values()
+            .filter(|receipt| receipt.parent == method.body_owner)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            helper_receipts.len(),
+            1,
+            "one exact lexical receipt per method"
+        );
+        let helper_receipt = helper_receipts[0];
+        assert!(
+            helper_receipt
+                .callee
+                .0
+                .contains(&format!("/function:{}:", fixture.nested_helper)),
+            "the nested helper identity must remain under the explicit Actor method: {:?}",
+            helper_receipt
+        );
+        assert_eq!(helper_receipt.parent, method.body_owner);
+        route
+            .program
+            .validate_actor_contracts()
+            .expect("Checker environment and native MIR capture-call receipt are exact");
+        assert!(
+            !route.program.functions().values().any(|function| function
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions)
+                .any(|instruction| matches!(
+                    &instruction.kind,
+                    mir::MirInstructionKind::Actor {
+                        operation: mir::MirActorOperation::FieldStore { .. }
+                    }
+                ))),
+            "the route must update business state through Flow payloads, never Actor fields"
+        );
         let receipt = route.program.route_receipt(PROFILE);
         assert_eq!(receipt.profile, PROFILE);
         assert_eq!(
@@ -356,10 +473,10 @@ fn original_nested_actor_capture_and_shadow_use_shared_canonical_production_rout
                 }
             }
         }
-        for command_index in 0..3 {
+        for identity_pair in &route_identities {
             assert_eq!(
-                route_identities[command_index][0].as_deref(),
-                route_identities[command_index][1].as_deref(),
+                identity_pair[0].as_deref(),
+                identity_pair[1].as_deref(),
                 "default and explicit --mir command must share one exact route receipt"
             );
         }

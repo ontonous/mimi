@@ -1,0 +1,2934 @@
+{
+  "schema": "mimi-v02-app-manifest-v2",
+  "contract": {
+    "documents": [
+      {
+        "path": "devdocs/V0.2/README.md",
+        "sha256": "89f80471cacad7fa558361514a02a64df6385e9008bbc0070028604c5fb5defc"
+      },
+      {
+        "path": "devdocs/V0.2/plan.toml",
+        "sha256": "f77f84a67c379ffff3f11fd5d3b3578d74feb3caf7f3583b50f588d1bbecfee0"
+      },
+      {
+        "path": "devdocs/V0.2/02-阶段与任务.md",
+        "sha256": "b7b28d68bc5c4414473c18766dcc21b6d1c7d3f85927426d70b3dbeb5e6f412b"
+      },
+      {
+        "path": "devdocs/V0.2/03-验收程序与评测.md",
+        "sha256": "138d32fb73b1d6deee9047b67f0c1e9736ba938bb2fd90f9cf663e6a93977b99"
+      },
+      {
+        "path": "devdocs/V0.2/08-执行与证据合同.md",
+        "sha256": "13e4fa2ca602c3c78046f17f139f06c04ec74995ce88ccf8485f2b55543972e4"
+      }
+    ],
+    "accepted": false,
+    "release_status": "not_accepted",
+    "statement": "Fixture structure and hand-derived oracle data are not compiler/runtime evidence. Unsupported semantics remain blockers; legacy probes, anchors, absent tests, and empty sequence targets cannot be accepted."
+  },
+  "artifacts": {
+    "changes/C1_w1_parser_replacement.mimi": {
+      "sha256": "39809b090d189e1eea2a0b6399bfefd9d403adb2deec412733c5b2660ce924c3",
+      "role": "legacy_change_anchor"
+    },
+    "changes/C2_w1_source_field.mimi": {
+      "sha256": "96ac18253c42622d492244123557db2b69d22b83ce99b414f01e783e910f8fff",
+      "role": "legacy_change_anchor"
+    },
+    "changes/C3_w1_permission_scope.mimi": {
+      "sha256": "163e8884cc0cd791bb694c51ef1e6b9aaeab0b6a902ad2ee1805a469209e27ec",
+      "role": "legacy_change_anchor"
+    },
+    "changes/C4_w1_read_only_preview.mimi": {
+      "sha256": "343eeb2ac4134759bf1e0627c3019af7386e554adcb049dad666957fe39394a2",
+      "role": "legacy_change_anchor"
+    },
+    "changes/D1_w2_delta_snapshot.mimi": {
+      "sha256": "977971ca0f3c1c685ffe3f77221df30505f8fcb24c7ecd2104042c6f68624c07",
+      "role": "legacy_change_anchor"
+    },
+    "changes/D2_w2_cancel_during_write.mimi": {
+      "sha256": "48c9321272cdfa17a267e069872394a1565d041358cd90ded62f665c8d27a3b3",
+      "role": "legacy_change_anchor"
+    },
+    "changes/D3_w2_error_variant.mimi": {
+      "sha256": "5d50d3a86817b3ed609c01fdec1e574fec4009edb469cac6982739879fc70717",
+      "role": "legacy_change_anchor"
+    },
+    "changes/D4_w2_export_module_boundary.mimi": {
+      "sha256": "85464cf26290cec6700ffccf1a362591cba4ba388fc9ca033048cf4ff2c5b7b8",
+      "role": "legacy_change_anchor"
+    },
+    "changes/D5_w2_two_background_tasks.mimi": {
+      "sha256": "aa847e19456bfe32378da2a429b1242440a43b8443a55e915808d65dabdaf551",
+      "role": "legacy_change_anchor"
+    },
+    "changes/H1_w3_gain_algorithm.mimi": {
+      "sha256": "81d2a88e920a4e943ccdaed41dd65e6e89de7fd5be7336c8bfdb461073823e3d",
+      "role": "legacy_change_anchor"
+    },
+    "changes/H2_w3_optional_filter.mimi": {
+      "sha256": "ca37dde7f10903d9b6369f0dea9123b9e94ee5cca9af9fe1dfab7d821e0a502c",
+      "role": "legacy_change_anchor"
+    },
+    "changes/H3_w3_shared_snapshot.mimi": {
+      "sha256": "76e6508f02f37f85197653be70cbd0ad1b6063f07611dadc824ceb610509bd1c",
+      "role": "legacy_change_anchor"
+    },
+    "changes/S1_w4_ffi_replacement.mimi": {
+      "sha256": "3d87e2ad24af69e2ab997c92b8c61af5bfb14152599d46e65ca4c440c9a5ee8b",
+      "role": "legacy_change_anchor"
+    },
+    "changes/S2_w4_timeout_handoff.mimi": {
+      "sha256": "b90baa2b1415abca39b321994752bbcb7c0e61ad78afc19e487c4dfa7949c6b3",
+      "role": "legacy_change_anchor"
+    },
+    "changes/S3_w4_endpoint_scope.mimi": {
+      "sha256": "5d913871d9aa45c1b26e676494ea32773a8469ef8b1ea8bc603a4cbd57d73502",
+      "role": "legacy_change_anchor"
+    },
+    "changes/S4_w4_transport_split.mimi": {
+      "sha256": "2d4966df7bb637623e2f671d177f8b0ff6990148cdaa3afd88857df13ad4cd8b",
+      "role": "legacy_change_anchor"
+    },
+    "oracle/README.md": {
+      "sha256": "f81b71bb1c63746af72c262ca311da301f0fbde548b31aef2d21ba9b9a1b118a",
+      "role": "legacy_oracle_or_support"
+    },
+    "oracle/native_fault_control.c": {
+      "sha256": "4dde62ede7ac08b1d6cd1b38f60227b296d14a290d134f1b07fe3c20c998655b",
+      "role": "legacy_oracle_or_support"
+    },
+    "oracle/v02_expected.json": {
+      "sha256": "12952743fd3dc7597198052f1958662736cc5539d583e6b2b3fa02e33fc8ad73",
+      "role": "legacy_oracle_or_support"
+    },
+    "oracle/v02_ffi.c": {
+      "sha256": "4e5d40c31300289ae3e0756b8bb45a4df0caff019a7620e977c13f9dcf25499e",
+      "role": "legacy_oracle_or_support"
+    },
+    "oracle/w1_expected.json": {
+      "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+      "role": "independent_app_oracle"
+    },
+    "oracle/w2_expected.json": {
+      "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+      "role": "independent_app_oracle"
+    },
+    "oracle/w3_expected.json": {
+      "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+      "role": "independent_app_oracle"
+    },
+    "oracle/w4_changes_expected.json": {
+      "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+      "role": "independent_app_oracle"
+    },
+    "w1/apps/config_json.mimi": {
+      "sha256": "1abcb6747fa9e4de69eaad0cddb3ccaa718de27d96c80cb9085d151e2e5dc8a1",
+      "role": "mimi_app_or_change_source"
+    },
+    "w1/apps/record_json.mimi": {
+      "sha256": "f3dfe756b697720d778b48d90d0003befb419b771a4ece26de16f01aed9817b4",
+      "role": "mimi_app_or_change_source"
+    },
+    "w1/main.mimi": {
+      "sha256": "0f1b28d3e8b4fd063409c7b48e375d9f330d4037bbe92f1a7bc9ab9b48587b39",
+      "role": "mimi_app_or_change_source"
+    },
+    "w1/mimi.toml": {
+      "sha256": "9727aa80df05021e7a3dd9ed20293407ac35e2f82db8fafa2ec781da9cbc90f4",
+      "role": "package_or_lock_input"
+    },
+    "w1/sample/cases/config_duplicate.json": {
+      "sha256": "8a56f12f80e6d75b6c37622eb4047a3d164d3da32dfd6c46d1263e4192d3c5b5",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_duplicate_escaped_key.json": {
+      "sha256": "8d56daa8dd15511fef5cbb0c0a024fafd7cb713134ee3fcde8d9ae13adaa2910",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_empty.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_empty_files.json": {
+      "sha256": "9aed23c38cee74609a771cadf0661eceb81dff898d40029874c0bdbacf196d2f",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_malformed.json": {
+      "sha256": "97f6c77f1412b754de77627eb45673ade96758dc4e8f7dbcd41ea2da9c2a7c72",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_missing_record.json": {
+      "sha256": "e28b4a59d353b788cbb12a1f8e2948bf6fea6392ce19e779e2489e0bbcf88461",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_path_escape.json": {
+      "sha256": "3b757b0ec7385edd856f72dded83ca44f245e2635b8c14f8c7ae8ae393fc2be1",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_record_duplicate.json": {
+      "sha256": "d8816c927a1eede3c49e9e0cdb968fd4b6542b44d3a399df22268f4aa0ce97e5",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_record_empty.json": {
+      "sha256": "aee43be71d53dc29f5f12517b389d0d02ec9851b47e700c8bd7490d2f71bde5b",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_record_malformed.json": {
+      "sha256": "8127cfdf32af88c4377a691b0ef05f665e2e7dabbddcde8834ffeaa8265bd00e",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_record_quoted_amount.json": {
+      "sha256": "57277af5507610e0ae2ac93b904db79caf0e0d72b4cbf023f014528c9e7f2541",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_record_unicode_nul.json": {
+      "sha256": "f3ab3796e106f0b16b80324d96d4b0149ba68bb0f73b242b0b86bbbd3047591d",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/config_unicode_nul.json": {
+      "sha256": "bcf7fd6e64c4f1ae5528b0cd028f5824ce984b6ca7dfaeaa81f38559af3764e2",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/record_duplicate.json": {
+      "sha256": "c800040bbc4a270f0b0f130569b0ae4f6ed740c6fc71b5e67338768d82c2712f",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/record_empty.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/record_malformed.json": {
+      "sha256": "80e229f1991d8e9f123f1a302ffec6a92e67cfd812dcc132fa166a33fab102f8",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/record_quoted_amount.json": {
+      "sha256": "c03105bdf4356cc109f78d78f21f7fd968bdb4aea1c491911acb2cbedcd3ef6a",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/cases/record_unicode_nul.json": {
+      "sha256": "3bcb8d1f6752e764abd41cf9f7989fe33c9c444c70d354a38d0421a069865258",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/config/config.json": {
+      "sha256": "1651971fce60b68930b169acc5b3052a8a5fbebaf5d7ac71f67837bb0fc19f4c",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/output/.gitkeep": {
+      "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/outside/secret.json": {
+      "sha256": "2d89aedffb0fb463e52d6a037c875c7e6e2586206f553711d1fb982130b24d21",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/records/alpha.json": {
+      "sha256": "11327d3d3927216f713be1d7870cbef86bf6aa2a056d544e906b4ea53260e176",
+      "role": "w1_fixed_input"
+    },
+    "w1/sample/records/beta.json": {
+      "sha256": "1d2a4ecc690cb52b59a41fd4f7d7af20f9ed57be5170c45acba097156dc30246",
+      "role": "w1_fixed_input"
+    },
+    "w1_config_tool.mimi": {
+      "sha256": "e06973b563f8c399374de98d1f3beb016d13259927b489977afbe5b64681fb17",
+      "role": "legacy_probe"
+    },
+    "w2/changes/D1_w2_delta_snapshot.mimi": {
+      "sha256": "3d3f421c2c70a8e25582662e1098fdc3c68a77979ddebce45031f6b670885530",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/changes/D2_w2_cancel_during_write.mimi": {
+      "sha256": "08c65c09df8accbee17dc9ab5f6c0d60c68b4959e3c8be9c36e5a02ac354f18b",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/changes/D3_w2_error_variant.mimi": {
+      "sha256": "978e9639f8b46c20f10fca2f4559333c85110643cbead4dbb6d6fe34d7e019dc",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/changes/D4_w2_export_module_boundary.mimi": {
+      "sha256": "3c9d5f45d02e888327b704278f591971e7f84c3225bcb603f772272127067dd4",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/changes/D5_w2_two_background_tasks.mimi": {
+      "sha256": "88e6c4610603235f51e97a5e8ca7ee7fb8dbd2791f5ba994502eb595c471d1d7",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/changes/w2_export_io.mimi": {
+      "sha256": "a38b7d75df96253130af7787d75fa0a2aa652317db959fd6d46a659098578326",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/sequences/patches/D1.patch": {
+      "sha256": "2d5f71e69f9a07120449568720a0b21ea2f9aed0de37568c1e23a7b89ab7fae4",
+      "role": "cumulative_unified_patch"
+    },
+    "w2/sequences/patches/D2.patch": {
+      "sha256": "20ef5e89ac2b93b97d6840c6bd3410462ebaeee71baecf394257a83092ecc331",
+      "role": "cumulative_unified_patch"
+    },
+    "w2/sequences/patches/D3.patch": {
+      "sha256": "ed7763cdd44f2635df1cef3299211db440d3db2cd20156bd4c597b3fd1dec4c3",
+      "role": "cumulative_unified_patch"
+    },
+    "w2/sequences/patches/D4.patch": {
+      "sha256": "11f68dd71f85d77d80e00ac18d783b4a213090f7ce8942cc43daf1dbe930b227",
+      "role": "cumulative_unified_patch"
+    },
+    "w2/sequences/patches/D5.patch": {
+      "sha256": "97ffe083d18ab3c365e9d0b84ccace0e244a6d7ff5d212e6ec8d1552ad9d2b0c",
+      "role": "cumulative_unified_patch"
+    },
+    "w2/w2_closed_edit_rejected.mimi": {
+      "sha256": "1d1939e69c7abb7a3baeecdc0664875882e60daedafcdd1524803bea2695bf38",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/w2_document_core.mimi": {
+      "sha256": "aa29c9dd91e31b13c6c11edb7e888dfd0eb556b0f1e2d20d36f77d0653ec79d9",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/w2_flow_protocol.mimi": {
+      "sha256": "f0b1018d8e243b44db805868fa5f26cac3ff17511ab0345362560803d5a94609",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2/w2_unresponsive_handoff.mimi": {
+      "sha256": "2af6f83cb145040d20a3645d09c57dcc8fb5bc9c0804cba40bfd588f1212bfc4",
+      "role": "mimi_app_or_change_source"
+    },
+    "w2_flow_probe.mimi": {
+      "sha256": "a2439e8353bbc3452b042b8d38fb0cd5c45018bbd8872d917c7a884f53746a6c",
+      "role": "legacy_probe"
+    },
+    "w3/H1_gain_algorithm.mimi": {
+      "sha256": "e4b17703fff91d804202d8576fb9b9a0e127a5ff639d6b8a44127a30c32a00dc",
+      "role": "mimi_app_or_change_source"
+    },
+    "w3/H2_optional_filter.mimi": {
+      "sha256": "c2444701650991ba48128f85bcd0d9aefd6625c434cd8cb00756caee38d8628b",
+      "role": "mimi_app_or_change_source"
+    },
+    "w3/H3_shared_snapshot.mimi": {
+      "sha256": "e3d0c7fc586012c771145445ea60874c9c6fe39f7070d32adfc06f00ce93c70f",
+      "role": "mimi_app_or_change_source"
+    },
+    "w3/audio_kernel.mimi": {
+      "sha256": "d972b3d38480440c069400471420185015e1156a27d53bedd1e1d753edc22eb9",
+      "role": "mimi_app_or_change_source"
+    },
+    "w3/oracle_vectors.mimi": {
+      "sha256": "071cff38baec808dbb0e06bdfd8566cca7bb6f8d57871cbae7c39b424e937dec",
+      "role": "mimi_app_or_change_source"
+    },
+    "w3_audio_kernel.mimi": {
+      "sha256": "f7cc34534361b361af9f13c1cbb67c1f2bc488bc4623f4438b412f621cfad892",
+      "role": "legacy_probe"
+    },
+    "w4/README.md": {
+      "sha256": "9741626ec37417405c130dcee4bb68eb2df30d3d74b15e0a47b01e69b24a8da7",
+      "role": "fixture_documentation"
+    },
+    "w4/baseline/mimi.toml": {
+      "sha256": "ef64510cce4d98fe30db7e32f6acfa21d57561d5ce0128a80d42fe39b5472584",
+      "role": "package_or_lock_input"
+    },
+    "w4/baseline/native/w4_trusted.c": {
+      "sha256": "ea41316fc60d947feab497b4880dd7e838df662c6e43131b2e47c49253c6275d",
+      "role": "native_app_or_oracle_source"
+    },
+    "w4/baseline/src/exports.mimi": {
+      "sha256": "22aee6227ec5a22dc17d74d2481fa5e8eb6157c39979303a729c9ee39c1eb39a",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/baseline/src/main.mimi": {
+      "sha256": "2659846667b6f3894aec4228be8dcf3cd44380b828534dc2495219ba31f342f8",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/baseline/src/protocol.mimi": {
+      "sha256": "4620f5624fa19202b196b9eb79e9cee45706b6e353d2fd03178a4ab5dcc65254",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/baseline/src/server.mimi": {
+      "sha256": "b72257361d92e5f45b34c9dbae46cb709158aa5a3bf3516a3b080428e4473550",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/changes/S1/README.md": {
+      "sha256": "e3c58a035b52c0ff17996389c7e0d27c6072da76ba30c76426386667eb896879",
+      "role": "fixture_documentation"
+    },
+    "w4/changes/S1/vectors.json": {
+      "sha256": "df31b35d34e5119443223945e1ed57397b5f668d9306483276a5b2e628b1a459",
+      "role": "fixed_json_input"
+    },
+    "w4/changes/S1/w4_trusted_s1.c": {
+      "sha256": "a60d81800f503c34db031c68be00a85c5cf0057cdc3157030f36630ab21c91b0",
+      "role": "w4_trusted_native_fixture"
+    },
+    "w4/changes/S2/README.md": {
+      "sha256": "1b70c2f126af076cff94a0fc0aa8c49eab05044b97b00c926b4b02c1265b2afb",
+      "role": "fixture_documentation"
+    },
+    "w4/changes/S2/timeout_handoff.mimi": {
+      "sha256": "c8ac587b54d71e75b13ff05d40bd97231792559bb3ee02bf89e6a2ff5fc132bd",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/changes/S3/README.md": {
+      "sha256": "4268d14da7dc24fa3b6d70ce15b8684d454ddfa674db970dce93b1846b15494b",
+      "role": "fixture_documentation"
+    },
+    "w4/changes/S3/endpoint_scope.mimi": {
+      "sha256": "e36626b4e49dfc67ba758ad3208b1eec3a37a1e2b122f2838a441eb7717497b7",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/changes/S3/endpoint_scope_oracle.c": {
+      "sha256": "b3b1127d6e0cb8e0192ed35778ff7c4c404db9033dde69a6b06e7b8b89f3e18f",
+      "role": "w4_trusted_native_fixture"
+    },
+    "w4/changes/S3/w4_endpoint_scope_s3.c": {
+      "sha256": "2461ab6a664356bf4a5efc12c716a32e324e8dd97d032133179ed7bb29d4bb4c",
+      "role": "w4_trusted_native_fixture"
+    },
+    "w4/changes/S4/README.md": {
+      "sha256": "870e48ecd168db59b46d1d1edcc0db32b4bdfb65b99944707c1c79dcdcaf9c5f",
+      "role": "fixture_documentation"
+    },
+    "w4/negative/borrowed_c_string_as_owned.mimi": {
+      "sha256": "7c4acf67c0d62ef9dd843f2472d661ba311ed43adef1dad525a7bfba421146d1",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/negative/wrong_external_abi_declaration.mimi": {
+      "sha256": "7659faf29c1afa224340411a5bfb9ab58030f9881149b3b9d1d1310d90dfa62c",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/negative/wrong_scalar_argument.mimi": {
+      "sha256": "f37c0e26648fc6af34a49706e76bce6023932153318eb76d585a723006ad8aff",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/offline-release/.mimi/deps/w4_transport/mimi.toml": {
+      "sha256": "f819f633d7626b025ebad0ac959c2a03eeec7457035bf31fdc84500cfff6a630",
+      "role": "package_or_lock_input"
+    },
+    "w4/offline-release/.mimi/deps/w4_transport/transport.mimi": {
+      "sha256": "5025bbddab4a0e9c9ac9249aa1dd61d6edb43c7d6f1f967ff188b2d60442846d",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/offline-release/README.md": {
+      "sha256": "9e832df2d89e1100990090a586024c5704ebfb3147b1e6d4c7da2ce309ec514c",
+      "role": "fixture_documentation"
+    },
+    "w4/offline-release/mimi.lock": {
+      "sha256": "2ab62f26c670b82c5a1863710bbbc41551294d49a37c627bec4b9002cedf3407",
+      "role": "package_or_lock_input"
+    },
+    "w4/offline-release/mimi.toml": {
+      "sha256": "dddecbdc6c8ae03b42f2e85cbc03c05a1829ec532a1fd56554317f9b5a3c9dba",
+      "role": "package_or_lock_input"
+    },
+    "w4/offline-release/src/exports.mimi": {
+      "sha256": "22aee6227ec5a22dc17d74d2481fa5e8eb6157c39979303a729c9ee39c1eb39a",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/offline-release/src/main.mimi": {
+      "sha256": "d36369510840f8a453842674dff546f2c0803aea4bee4ae8ba00c64e1060262f",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/offline-release/src/protocol.mimi": {
+      "sha256": "66566dd951b578a774917785e20b2a8042b7fb8000207677d310f8eeb739b74e",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/offline-release/src/server.mimi": {
+      "sha256": "b4f6758ed803cb67f1513d4f356ddf5f1a3031cabe4b2f4ec1ce7dc69551a0d8",
+      "role": "mimi_app_or_change_source"
+    },
+    "w4/oracle/w4_expected.json": {
+      "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+      "role": "independent_app_oracle"
+    },
+    "w4/oracle/w4_ffi_contract.json": {
+      "sha256": "27fc57be020f266db5d26c1bc241a7e33d6d0a655bc96510d0276be1c19ba744",
+      "role": "independent_app_oracle"
+    },
+    "w4/oracle/w4_host_driver.c": {
+      "sha256": "8174da3fcca643454405a284b7ccb943d4545610e4bd307b2f7493a671211117",
+      "role": "native_app_or_oracle_source"
+    },
+    "w4/oracle/w4_trusted.c": {
+      "sha256": "ea41316fc60d947feab497b4880dd7e838df662c6e43131b2e47c49253c6275d",
+      "role": "native_app_or_oracle_source"
+    },
+    "w4/sequences/patches/S1.patch": {
+      "sha256": "83e07e9cce1da80aa8bb0ed7e0ae64ffce96772aa2a78af4d63f2d9b23691e20",
+      "role": "cumulative_unified_patch"
+    },
+    "w4/sequences/patches/S2.patch": {
+      "sha256": "d0c76efe5f41c4cac8e8aff4fe3e1b80bb37fbeeb628bb577c8c585b7999faba",
+      "role": "cumulative_unified_patch"
+    },
+    "w4/sequences/patches/S3.patch": {
+      "sha256": "cc15ae15006d1742278328df91b28bedbed55d09336ff8e2e13f176c4cf548b7",
+      "role": "cumulative_unified_patch"
+    },
+    "w4/sequences/patches/S4.patch": {
+      "sha256": "95faae89ac0cc26efa6e766d5e690c0c010679a1fea8ffc5819d81404915a14d",
+      "role": "cumulative_unified_patch"
+    },
+    "w4_concurrency_probe.mimi": {
+      "sha256": "b452c4ed63c22ed55544aa475d7ccff1c8c01fafacabc869fe23ed9d5f19afca",
+      "role": "legacy_probe"
+    },
+    "w4_fault_probe.mimi": {
+      "sha256": "3ad4ab7d03ff45092d8ba4217be17a20247b187226b2c26a585f6d5d1e63e608",
+      "role": "legacy_probe"
+    },
+    "w4_loopback_service.mimi": {
+      "sha256": "0a27195977fa3d01514680eb63cef2320d9b46600dfebd38e28e8c12948a9bec",
+      "role": "legacy_probe"
+    },
+    "w4_network_probe.mimi": {
+      "sha256": "817064a7cd19e2aad9dcee04e193f579d1310d87bd9e62931b906fcf15c7259c",
+      "role": "legacy_probe"
+    }
+  },
+  "apps": [
+    {
+      "id": "W1",
+      "root": "w1",
+      "entrypoint": "main.mimi",
+      "source": "w1/main.mimi",
+      "sources": [
+        "w1/main.mimi",
+        "w1/apps/config_json.mimi",
+        "w1/apps/record_json.mimi"
+      ],
+      "source_inputs": [
+        "w1/sample/cases/config_duplicate.json",
+        "w1/sample/cases/config_duplicate_escaped_key.json",
+        "w1/sample/cases/config_empty.json",
+        "w1/sample/cases/config_empty_files.json",
+        "w1/sample/cases/config_malformed.json",
+        "w1/sample/cases/config_missing_record.json",
+        "w1/sample/cases/config_path_escape.json",
+        "w1/sample/cases/config_record_duplicate.json",
+        "w1/sample/cases/config_record_empty.json",
+        "w1/sample/cases/config_record_malformed.json",
+        "w1/sample/cases/config_record_quoted_amount.json",
+        "w1/sample/cases/config_record_unicode_nul.json",
+        "w1/sample/cases/config_unicode_nul.json",
+        "w1/sample/cases/record_duplicate.json",
+        "w1/sample/cases/record_empty.json",
+        "w1/sample/cases/record_malformed.json",
+        "w1/sample/cases/record_quoted_amount.json",
+        "w1/sample/cases/record_unicode_nul.json",
+        "w1/sample/config/config.json",
+        "w1/sample/output/.gitkeep",
+        "w1/sample/outside/secret.json",
+        "w1/sample/records/alpha.json",
+        "w1/sample/records/beta.json",
+        "w1/mimi.toml"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Ordinary mimi run cannot inject host-issued scoped SystemToken grants; main intentionally returns HostCapabilitiesRequired/78.",
+        "Runtime path-scope denial traps as InterpError instead of the required catchable permission Result.",
+        "Guarded output failure requires a deterministic host grant adapter; no CLI/compiler observation is claimed."
+      ],
+      "requirement_ids": [
+        "G1",
+        "A-01",
+        "M-06",
+        "M-07",
+        "M-08",
+        "C-01",
+        "C-02",
+        "C-03"
+      ],
+      "negative_ids": [
+        "W1_CONFIG_DUPLICATE",
+        "W1_CONFIG_DUPLICATE_ESCAPED",
+        "W1_CONFIG_EMPTY",
+        "W1_CONFIG_MALFORMED",
+        "W1_CONFIG_NUL",
+        "W1_RECORD_DUPLICATE",
+        "W1_RECORD_EMPTY",
+        "W1_RECORD_MALFORMED",
+        "W1_RECORD_QUOTED_AMOUNT",
+        "W1_RECORD_NUL",
+        "W1_MISSING_RECORD",
+        "W1_CONFIG_READ_MISSING",
+        "W1_PATH_ESCAPE",
+        "W1_WRITE_FAILURE",
+        "W1_PREVIEW_CUMULATIVE"
+      ]
+    },
+    {
+      "id": "W2",
+      "root": "w2",
+      "entrypoint": "w2_document_core.mimi",
+      "source": "w2/w2_document_core.mimi",
+      "sources": [
+        "w2/w2_document_core.mimi"
+      ],
+      "source_inputs": [],
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "baseline",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "No Mimi check/run/native execution was performed for this manifest task.",
+        "The separate Flow protocol target currently encounters E0423 path-sensitive ownership rejection and is not a pass.",
+        "Cumulative patches have no executable historical regression targets."
+      ],
+      "requirement_ids": [
+        "G1",
+        "G2",
+        "G3",
+        "A-02",
+        "V-06",
+        "V-10",
+        "F-07",
+        "F-08",
+        "F-09"
+      ],
+      "negative_ids": [
+        "W2_CLOSED_EDIT",
+        "W2_UNRESPONSIVE_HANDOFF",
+        "W2_FLOW_PROTOCOL"
+      ]
+    },
+    {
+      "id": "W3",
+      "root": "w3",
+      "entrypoint": "audio_kernel.mimi",
+      "source": "w3/audio_kernel.mimi",
+      "sources": [
+        "w3/audio_kernel.mimi"
+      ],
+      "source_inputs": [
+        "w3/oracle_vectors.mimi"
+      ],
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w3_expected.json",
+        "key": "baseline",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Current surface cannot express/prove the required transitive no_alloc contract.",
+        "Native allocator/capacity harness has not supplied a zero-allocation receipt; VM framework costs remain separate.",
+        "No Mimi execution or performance measurement was performed."
+      ],
+      "requirement_ids": [
+        "G1",
+        "G5",
+        "A-03",
+        "K-02",
+        "K-03",
+        "K-05",
+        "V-12"
+      ],
+      "negative_ids": [
+        "W3_NOALLOC_GROWTH",
+        "W3_NOALLOC_TRANSFORM",
+        "W3_NOALLOC_LIVE_SNAPSHOT",
+        "W3_NOALLOC_UNKNOWN_EFFECT",
+        "W3_NOALLOC_ERROR_BOUNDS"
+      ]
+    },
+    {
+      "id": "W4",
+      "root": "w4/baseline",
+      "entrypoint": "src/main.mimi",
+      "source": "w4/baseline/src/main.mimi",
+      "sources": [
+        "w4/baseline/src/main.mimi",
+        "w4/baseline/src/protocol.mimi",
+        "w4/baseline/src/server.mimi",
+        "w4/baseline/src/exports.mimi",
+        "w4/baseline/native/w4_trusted.c"
+      ],
+      "source_inputs": [
+        "w4/baseline/mimi.toml",
+        "w4/oracle/w4_expected.json",
+        "w4/oracle/w4_ffi_contract.json"
+      ],
+      "oracle": {
+        "mode": "w4_host_driver",
+        "file": "w4/oracle/w4_expected.json",
+        "key": "$",
+        "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+        "support_files": [
+          "w4/oracle/w4_host_driver.c",
+          "w4/oracle/w4_trusted.c"
+        ]
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Mimi does not statically enforce endpoint capability or linear i64-fd ownership; trusted C is an explicit runtime TCB.",
+        "C prototype/header comparison and borrowed-versus-owned string ABI contracts remain unresolved; unsafe negative fixtures must not be executed.",
+        "Host-driver, VM/native service, export ABI, soak, and offline-install checks were not run."
+      ],
+      "requirement_ids": [
+        "G1",
+        "G4",
+        "G7",
+        "A-09",
+        "M-08",
+        "M-09",
+        "E-03",
+        "C-03",
+        "F-08"
+      ],
+      "negative_ids": [
+        "W4_WRONG_SCALAR_ARGUMENT",
+        "W4_WRONG_EXTERNAL_ABI",
+        "W4_BORROWED_STRING_OWNERSHIP",
+        "W4_S3_DENIED_ENDPOINTS"
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "id": "C1",
+      "app": "W1",
+      "root": null,
+      "entrypoint": null,
+      "source": null,
+      "sources": [],
+      "anchor": "changes/C1_w1_parser_replacement.mimi",
+      "source_kind": "legacy_probe_anchor_only",
+      "status": "not_materialized",
+      "accepted": false,
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "requirements/C1",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "requirement_ids": [
+        "C1"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "No complete app-level cumulative variant exists; the root-level Mimi file is an isolated legacy probe anchor and cannot substitute for this change."
+      ]
+    },
+    {
+      "id": "C2",
+      "app": "W1",
+      "root": null,
+      "entrypoint": null,
+      "source": null,
+      "sources": [],
+      "anchor": "changes/C2_w1_source_field.mimi",
+      "source_kind": "legacy_probe_anchor_only",
+      "status": "not_materialized",
+      "accepted": false,
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "requirements/C2",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "requirement_ids": [
+        "C2"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "No complete app-level cumulative variant exists; the root-level Mimi file is an isolated legacy probe anchor and cannot substitute for this change."
+      ]
+    },
+    {
+      "id": "C3",
+      "app": "W1",
+      "root": null,
+      "entrypoint": null,
+      "source": null,
+      "sources": [],
+      "anchor": "changes/C3_w1_permission_scope.mimi",
+      "source_kind": "legacy_probe_anchor_only",
+      "status": "not_materialized",
+      "accepted": false,
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "requirements/C3",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "requirement_ids": [
+        "C3"
+      ],
+      "negative_ids": [
+        "W1_PATH_ESCAPE"
+      ],
+      "blockers": [
+        "No complete app-level cumulative variant exists; the root-level Mimi file is an isolated legacy probe anchor and cannot substitute for this change."
+      ]
+    },
+    {
+      "id": "C4",
+      "app": "W1",
+      "root": null,
+      "entrypoint": null,
+      "source": null,
+      "sources": [],
+      "anchor": "changes/C4_w1_read_only_preview.mimi",
+      "source_kind": "legacy_probe_anchor_only",
+      "status": "not_materialized",
+      "accepted": false,
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "requirements/C4",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "requirement_ids": [
+        "C4"
+      ],
+      "negative_ids": [
+        "W1_PREVIEW_CUMULATIVE"
+      ],
+      "blockers": [
+        "No complete app-level cumulative variant exists; the root-level Mimi file is an isolated legacy probe anchor and cannot substitute for this change."
+      ]
+    },
+    {
+      "id": "D1",
+      "app": "W2",
+      "root": "w2",
+      "entrypoint": "changes/D1_w2_delta_snapshot.mimi",
+      "source": "w2/changes/D1_w2_delta_snapshot.mimi",
+      "sources": [
+        "w2/changes/D1_w2_delta_snapshot.mimi"
+      ],
+      "anchor": "w2/changes/D1_w2_delta_snapshot.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "changes/D1",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "D1"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Isolated change anchor is not the cumulative SEQ-W2 source and has not been executed."
+      ]
+    },
+    {
+      "id": "D2",
+      "app": "W2",
+      "root": "w2",
+      "entrypoint": "changes/D2_w2_cancel_during_write.mimi",
+      "source": "w2/changes/D2_w2_cancel_during_write.mimi",
+      "sources": [
+        "w2/changes/D2_w2_cancel_during_write.mimi"
+      ],
+      "anchor": "w2/changes/D2_w2_cancel_during_write.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "changes/D2",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "D2"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Isolated change anchor is not the cumulative SEQ-W2 source and has not been executed."
+      ]
+    },
+    {
+      "id": "D3",
+      "app": "W2",
+      "root": "w2",
+      "entrypoint": "changes/D3_w2_error_variant.mimi",
+      "source": "w2/changes/D3_w2_error_variant.mimi",
+      "sources": [
+        "w2/changes/D3_w2_error_variant.mimi"
+      ],
+      "anchor": "w2/changes/D3_w2_error_variant.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "changes/D3",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "D3"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Isolated change anchor is not the cumulative SEQ-W2 source and has not been executed."
+      ]
+    },
+    {
+      "id": "D4",
+      "app": "W2",
+      "root": "w2",
+      "entrypoint": "changes/D4_w2_export_module_boundary.mimi",
+      "source": "w2/changes/D4_w2_export_module_boundary.mimi",
+      "sources": [
+        "w2/changes/D4_w2_export_module_boundary.mimi",
+        "w2/changes/w2_export_io.mimi"
+      ],
+      "anchor": "w2/changes/D4_w2_export_module_boundary.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "blocked",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "changes/D4",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "D4"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Separate-file module exists, but checked public effect ceilings are not expressible/enforced in current Mimi."
+      ]
+    },
+    {
+      "id": "D5",
+      "app": "W2",
+      "root": "w2",
+      "entrypoint": "changes/D5_w2_two_background_tasks.mimi",
+      "source": "w2/changes/D5_w2_two_background_tasks.mimi",
+      "sources": [
+        "w2/changes/D5_w2_two_background_tasks.mimi"
+      ],
+      "anchor": "w2/changes/D5_w2_two_background_tasks.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "changes/D5",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "D5"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Isolated change anchor is not the cumulative SEQ-W2 source and has not been executed."
+      ]
+    },
+    {
+      "id": "H1",
+      "app": "W3",
+      "root": "w3",
+      "entrypoint": "H1_gain_algorithm.mimi",
+      "source": "w3/H1_gain_algorithm.mimi",
+      "sources": [
+        "w3/H1_gain_algorithm.mimi"
+      ],
+      "anchor": "w3/H1_gain_algorithm.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w3_expected.json",
+        "key": "changes/H1",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "H1"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Hand-calculated vector is frozen, but no_alloc static proof/native physical allocation receipt is unavailable."
+      ]
+    },
+    {
+      "id": "H2",
+      "app": "W3",
+      "root": "w3",
+      "entrypoint": "H2_optional_filter.mimi",
+      "source": "w3/H2_optional_filter.mimi",
+      "sources": [
+        "w3/H2_optional_filter.mimi"
+      ],
+      "anchor": "w3/H2_optional_filter.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w3_expected.json",
+        "key": "changes/H2",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "H2"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Hand-calculated vector is frozen, but no_alloc static proof/native physical allocation receipt is unavailable."
+      ]
+    },
+    {
+      "id": "H3",
+      "app": "W3",
+      "root": "w3",
+      "entrypoint": "H3_shared_snapshot.mimi",
+      "source": "w3/H3_shared_snapshot.mimi",
+      "sources": [
+        "w3/H3_shared_snapshot.mimi"
+      ],
+      "anchor": "w3/H3_shared_snapshot.mimi",
+      "source_kind": "isolated_change_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w3_expected.json",
+        "key": "changes/H3",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "H3"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Hand-calculated vector is frozen, but no_alloc static proof/native physical allocation receipt is unavailable."
+      ]
+    },
+    {
+      "id": "S1",
+      "app": "W4",
+      "root": null,
+      "entrypoint": null,
+      "source": "w4/changes/S1/w4_trusted_s1.c",
+      "sources": [
+        "w4/baseline/src/main.mimi",
+        "w4/baseline/src/protocol.mimi",
+        "w4/baseline/src/server.mimi",
+        "w4/baseline/src/exports.mimi",
+        "w4/baseline/native/w4_trusted.c",
+        "w4/changes/S1/w4_trusted_s1.c"
+      ],
+      "anchor": "w4/changes/S1/README.md",
+      "source_kind": "trusted_c_library_replacement",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "w4_host_driver",
+        "file": "w4/oracle/w4_expected.json",
+        "key": "$",
+        "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+        "support_files": [
+          "w4/oracle/w4_host_driver.c",
+          "w4/oracle/w4_trusted.c",
+          "w4/changes/S1/w4_trusted_s1.c"
+        ]
+      },
+      "requirement_ids": [
+        "S1"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Replacement C implementation/fixed vectors are artifacts only; host driver and full app regression have not run."
+      ]
+    },
+    {
+      "id": "S2",
+      "app": "W4",
+      "root": "w4/changes/S2",
+      "entrypoint": "timeout_handoff.mimi",
+      "source": "w4/changes/S2/timeout_handoff.mimi",
+      "sources": [
+        "w4/changes/S2/timeout_handoff.mimi"
+      ],
+      "anchor": "w4/changes/S2/README.md",
+      "source_kind": "isolated_policy_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "S2",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": []
+      },
+      "requirement_ids": [
+        "S2"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Cooperative work-boundary deadline anchor does not interrupt blocking tcp_recv or prove cancellation; not run."
+      ]
+    },
+    {
+      "id": "S3",
+      "app": "W4",
+      "root": "w4/changes/S3",
+      "entrypoint": "endpoint_scope.mimi",
+      "source": "w4/changes/S3/endpoint_scope.mimi",
+      "sources": [
+        "w4/changes/S3/endpoint_scope.mimi",
+        "w4/changes/S3/w4_endpoint_scope_s3.c",
+        "w4/changes/S3/endpoint_scope_oracle.c"
+      ],
+      "anchor": "w4/changes/S3/README.md",
+      "source_kind": "isolated_scope_anchor",
+      "status": "anchor_only",
+      "accepted": false,
+      "oracle": {
+        "mode": "w4_endpoint_scope",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "S3/endpoint_scope",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": [
+          "w4/oracle/w4_trusted.c",
+          "w4/changes/S3/w4_endpoint_scope_s3.c",
+          "w4/changes/S3/endpoint_scope_oracle.c"
+        ],
+        "paired_mimi": {
+          "mode": "mimi_stdout",
+          "file": "oracle/w4_changes_expected.json",
+          "key": "S3/mimi",
+          "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+          "support_files": []
+        }
+      },
+      "requirement_ids": [
+        "S3"
+      ],
+      "negative_ids": [
+        "W4_S3_DENIED_ENDPOINTS"
+      ],
+      "blockers": [
+        "C syscall-count and Mimi output are separate unexecuted targets; adapter is not compiler-proved capability enforcement."
+      ]
+    },
+    {
+      "id": "S4",
+      "app": "W4",
+      "root": "w4/offline-release",
+      "entrypoint": "src/main.mimi",
+      "source": "w4/offline-release/src/main.mimi",
+      "sources": [
+        "w4/offline-release/src/main.mimi",
+        "w4/offline-release/src/protocol.mimi",
+        "w4/offline-release/src/server.mimi",
+        "w4/offline-release/src/exports.mimi",
+        "w4/offline-release/.mimi/deps/w4_transport/transport.mimi"
+      ],
+      "anchor": "w4/changes/S4/README.md",
+      "source_kind": "offline_deployment_anchor",
+      "status": "blocked",
+      "accepted": false,
+      "oracle": {
+        "mode": "w4_host_driver",
+        "file": "w4/oracle/w4_expected.json",
+        "key": "$",
+        "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+        "support_files": [
+          "w4/oracle/w4_host_driver.c",
+          "w4/oracle/w4_trusted.c"
+        ]
+      },
+      "requirement_ids": [
+        "S4"
+      ],
+      "negative_ids": [],
+      "blockers": [
+        "Offline frozen install, out-of-source launch, cache invalidation, full host transcript, and L1/L2/L3 remain unverified."
+      ],
+      "source_inputs": [
+        "w4/offline-release/mimi.toml",
+        "w4/offline-release/mimi.lock",
+        "w4/offline-release/.mimi/deps/w4_transport/mimi.toml"
+      ]
+    }
+  ],
+  "negatives": [
+    {
+      "id": "W1_CONFIG_DUPLICATE",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_duplicate.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_duplicate",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "config_duplicate"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_CONFIG_DUPLICATE_ESCAPED",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_duplicate_escaped_key.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_duplicate_escaped_key",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "config_duplicate_escaped_key"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_CONFIG_EMPTY",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_empty.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_empty",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "config_empty"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_CONFIG_MALFORMED",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_malformed.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_malformed",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "config_malformed"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_CONFIG_NUL",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_unicode_nul.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_unicode_nul",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "config_unicode_nul"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_RECORD_DUPLICATE",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_record_duplicate.json",
+        "w1/sample/cases/record_duplicate.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_duplicate",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_duplicate"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_RECORD_EMPTY",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_record_empty.json",
+        "w1/sample/cases/record_empty.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_empty",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_empty"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_RECORD_MALFORMED",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_record_malformed.json",
+        "w1/sample/cases/record_malformed.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_malformed",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_malformed"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_RECORD_QUOTED_AMOUNT",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_record_quoted_amount.json",
+        "w1/sample/cases/record_quoted_amount.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_quoted_amount",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_quoted_amount"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_RECORD_NUL",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_record_unicode_nul.json",
+        "w1/sample/cases/record_unicode_nul.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_unicode_nul",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_unicode_nul"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_MISSING_RECORD",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_missing_record.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/record_missing",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "oracle_case": "record_missing"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_CONFIG_READ_MISSING",
+      "app": "W1",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/config_read_missing",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "exit_code": 2,
+        "error_prefix": "ConfigReadFailed:",
+        "input_absent": "sample/cases/absent-config.json"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_PATH_ESCAPE",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/cases/config_path_escape.json",
+        "w1/sample/outside/secret.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/path_escape",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "reject_before_open": "../outside/secret.json",
+        "caught_error": false
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Runtime scope denial currently traps instead of returning catchable permission error."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_WRITE_FAILURE",
+      "app": "W1",
+      "source": null,
+      "input_files": [
+        "w1/sample/config/config.json",
+        "w1/sample/records/alpha.json",
+        "w1/sample/records/beta.json"
+      ],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/write_failure",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "exit_code": 6,
+        "error_prefix": "WriteFailed:",
+        "target": "sample/records"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Scoped host grants unavailable to ordinary mimi run; expected contract is not executable here."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W1_PREVIEW_CUMULATIVE",
+      "app": "W1",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "w1_scoped_cli",
+        "file": "oracle/w1_expected.json",
+        "key": "cases/preview",
+        "sha256": "3de277bfc8dfc6e4baf843d2ae479b901137ded73dca9098a88c1c93cb10fafa",
+        "support_files": [
+          "w1/sample/cases/config_duplicate.json",
+          "w1/sample/cases/config_duplicate_escaped_key.json",
+          "w1/sample/cases/config_empty.json",
+          "w1/sample/cases/config_empty_files.json",
+          "w1/sample/cases/config_malformed.json",
+          "w1/sample/cases/config_missing_record.json",
+          "w1/sample/cases/config_path_escape.json",
+          "w1/sample/cases/config_record_duplicate.json",
+          "w1/sample/cases/config_record_empty.json",
+          "w1/sample/cases/config_record_malformed.json",
+          "w1/sample/cases/config_record_quoted_amount.json",
+          "w1/sample/cases/config_record_unicode_nul.json",
+          "w1/sample/cases/config_unicode_nul.json",
+          "w1/sample/cases/record_duplicate.json",
+          "w1/sample/cases/record_empty.json",
+          "w1/sample/cases/record_malformed.json",
+          "w1/sample/cases/record_quoted_amount.json",
+          "w1/sample/cases/record_unicode_nul.json",
+          "w1/sample/config/config.json",
+          "w1/sample/output/.gitkeep",
+          "w1/sample/outside/secret.json",
+          "w1/sample/records/alpha.json",
+          "w1/sample/records/beta.json"
+        ]
+      },
+      "expected": {
+        "same_report_as": "dry_run",
+        "write_count": 0,
+        "status": "not_in_baseline"
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "--preview is C4 cumulative behavior and absent from W1 baseline."
+      ],
+      "requirement_ids": [
+        "A-01"
+      ]
+    },
+    {
+      "id": "W2_CLOSED_EDIT",
+      "app": "W2",
+      "source": "w2/w2_closed_edit_rejected.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "mimi_check_reject",
+        "file": "oracle/w2_expected.json",
+        "key": "negative/closed_session_edit_rejected",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "expected": {
+        "must_reject_before_execution": "edit on Closed document state"
+      },
+      "status": "unverified",
+      "accepted": false,
+      "blockers": [
+        "No Mimi checker run was performed; checker negative remains unverified."
+      ],
+      "requirement_ids": [
+        "A-02"
+      ]
+    },
+    {
+      "id": "W2_UNRESPONSIVE_HANDOFF",
+      "app": "W2",
+      "source": "w2/w2_unresponsive_handoff.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "negative/unresponsive_handoff",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "expected": {
+        "stdout": "RetryOwner\nCleanupPending\n",
+        "must_not_claim_cancelled_without_ack": true
+      },
+      "status": "unverified",
+      "accepted": false,
+      "blockers": [
+        "No Mimi execution was performed; durable responsibility remains unverified."
+      ],
+      "requirement_ids": [
+        "A-02"
+      ]
+    },
+    {
+      "id": "W2_FLOW_PROTOCOL",
+      "app": "W2",
+      "source": "w2/w2_flow_protocol.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "mimi_stdout",
+        "file": "oracle/w2_expected.json",
+        "key": "negative/flow_protocol",
+        "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+        "support_files": []
+      },
+      "expected": {
+        "stdout": "5\n",
+        "required_terminals": [
+          "Completed",
+          "Failed",
+          "Cancelled"
+        ]
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Current checker reports E0423 for mutually exclusive Flow/ownership branches; not a passing app."
+      ],
+      "requirement_ids": [
+        "A-02"
+      ]
+    },
+    {
+      "id": "W3_NOALLOC_GROWTH",
+      "app": "W3",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w3_expected.json",
+        "key": "no_alloc_negative_requirements/push_pop_growth",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "expected": {
+        "status": "not_materialized",
+        "expected": "Reject push/pop/resize/replacement and any possible backing-store growth in the hot call graph."
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "No dedicated negative source/no_alloc checker exists; explicit not-materialized requirement."
+      ],
+      "requirement_ids": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "W3_NOALLOC_TRANSFORM",
+      "app": "W3",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w3_expected.json",
+        "key": "no_alloc_negative_requirements/transform_collection",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "expected": {
+        "status": "not_materialized",
+        "expected": "Reject concat/reverse/map/filter or scratch-list transformation in the hot call graph."
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "No dedicated negative source/no_alloc checker exists; explicit not-materialized requirement."
+      ],
+      "requirement_ids": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "W3_NOALLOC_LIVE_SNAPSHOT",
+      "app": "W3",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w3_expected.json",
+        "key": "no_alloc_negative_requirements/live_snapshot_cow",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "expected": {
+        "status": "not_materialized",
+        "expected": "Reject a potentially detaching mutation while an observable snapshot remains live."
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "No dedicated negative source/no_alloc checker exists; explicit not-materialized requirement."
+      ],
+      "requirement_ids": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "W3_NOALLOC_UNKNOWN_EFFECT",
+      "app": "W3",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w3_expected.json",
+        "key": "no_alloc_negative_requirements/unknown_callback_or_ffi",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "expected": {
+        "status": "not_materialized",
+        "expected": "Reject an unknown-effect callback, allocating destructor/defer, or unannotated FFI call reachable from the hot region."
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "No dedicated negative source/no_alloc checker exists; explicit not-materialized requirement."
+      ],
+      "requirement_ids": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "W3_NOALLOC_ERROR_BOUNDS",
+      "app": "W3",
+      "source": null,
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w3_expected.json",
+        "key": "no_alloc_negative_requirements/error_and_bounds_paths",
+        "sha256": "0452987012020887ab0e0cf80ca3d3935dd981329d3b574d97d69b2b5c4abe9f",
+        "support_files": []
+      },
+      "expected": {
+        "status": "not_materialized",
+        "expected": "Bounds and early-error paths are included in the cost region; reject or prove every path without hiding allocation."
+      },
+      "status": "not_materialized",
+      "accepted": false,
+      "blockers": [
+        "No dedicated negative source/no_alloc checker exists; explicit not-materialized requirement."
+      ],
+      "requirement_ids": [
+        "A-03"
+      ]
+    },
+    {
+      "id": "W4_WRONG_SCALAR_ARGUMENT",
+      "app": "W4",
+      "source": "w4/negative/wrong_scalar_argument.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "mimi_check_reject",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "negatives/wrong_scalar_argument",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": []
+      },
+      "expected": {
+        "must_reject_before_execution": "string passed to i32 checksum import"
+      },
+      "status": "unverified",
+      "accepted": false,
+      "blockers": [
+        "Exact checker outcome/diagnostic not captured."
+      ],
+      "requirement_ids": [
+        "A-09"
+      ]
+    },
+    {
+      "id": "W4_WRONG_EXTERNAL_ABI",
+      "app": "W4",
+      "source": "w4/negative/wrong_external_abi_declaration.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "negatives/wrong_external_abi",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": []
+      },
+      "expected": {
+        "must_reject": "Mimi i64(i64) does not match C i32(i32)"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Extern declarations are not compared against C prototype/header."
+      ],
+      "requirement_ids": [
+        "A-09"
+      ]
+    },
+    {
+      "id": "W4_BORROWED_STRING_OWNERSHIP",
+      "app": "W4",
+      "source": "w4/negative/borrowed_c_string_as_owned.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "blocked_static_negative",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "negatives/borrowed_string_ownership",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": []
+      },
+      "expected": {
+        "must_reject": "borrowed static C string misdeclared owned without compatible ownership/destructor"
+      },
+      "status": "blocked",
+      "accepted": false,
+      "blockers": [
+        "Extern surface has no view/owned/destructor clause."
+      ],
+      "requirement_ids": [
+        "A-09"
+      ]
+    },
+    {
+      "id": "W4_S3_DENIED_ENDPOINTS",
+      "app": "W4",
+      "source": "w4/changes/S3/endpoint_scope.mimi",
+      "input_files": [],
+      "oracle": {
+        "mode": "w4_endpoint_scope",
+        "file": "oracle/w4_changes_expected.json",
+        "key": "S3/endpoint_scope",
+        "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+        "support_files": [
+          "w4/oracle/w4_trusted.c",
+          "w4/changes/S3/w4_endpoint_scope_s3.c",
+          "w4/changes/S3/endpoint_scope_oracle.c"
+        ],
+        "paired_mimi": {
+          "mode": "mimi_stdout",
+          "file": "oracle/w4_changes_expected.json",
+          "key": "S3/mimi",
+          "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+          "support_files": []
+        }
+      },
+      "expected": {
+        "denied_syscalls": {
+          "socket": 0,
+          "bind": 0,
+          "connect": 0,
+          "listen": 0
+        },
+        "allowed_listener_syscalls": {
+          "socket": 1,
+          "bind": 1,
+          "connect": 0,
+          "listen": 1
+        }
+      },
+      "status": "unverified",
+      "accepted": false,
+      "blockers": [
+        "C syscall-count and Mimi wrapper are not executed; C adapter does not prove static capability enforcement."
+      ],
+      "requirement_ids": [
+        "A-09"
+      ]
+    }
+  ],
+  "sequences": [
+    {
+      "id": "SEQ-W2",
+      "execution": "cumulative_patch_chain",
+      "status": "blocked",
+      "accepted": false,
+      "baseline": {
+        "fixture": "W2",
+        "root": "w2",
+        "entrypoint": "w2_document_core.mimi",
+        "status": "ready",
+        "accepted": false,
+        "source_manifest": [
+          {
+            "path": "w2_document_core.mimi",
+            "sha256": "aa29c9dd91e31b13c6c11edb7e888dfd0eb556b0f1e2d20d36f77d0653ec79d9",
+            "role": "mimi_app_or_change_source"
+          }
+        ],
+        "cumulative_regressions": [
+          "W2"
+        ],
+        "regression_targets": [],
+        "acceptance_status": "blocked",
+        "blockers": [
+          "Independent baseline oracle exists, but no runnable cumulative baseline target is wired."
+        ]
+      },
+      "steps": [
+        {
+          "fixture": "D1",
+          "entrypoint": "w2_document_core.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w2/sequences/patches/D1.patch",
+          "patch": {
+            "path": "w2/sequences/patches/D1.patch",
+            "sha256": "2d5f71e69f9a07120449568720a0b21ea2f9aed0de37568c1e23a7b89ab7fae4",
+            "format": "unified_diff"
+          },
+          "anchor": "w2/changes/D1_w2_delta_snapshot.mimi",
+          "oracle": {
+            "mode": "mimi_stdout",
+            "file": "oracle/w2_expected.json",
+            "key": "sequence_regressions/D1",
+            "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+            "support_files": []
+          },
+          "cumulative_regressions": [
+            "W2",
+            "D1"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; patches cannot be accepted. D4 checked effect ceiling remains unsupported."
+          ]
+        },
+        {
+          "fixture": "D2",
+          "entrypoint": "w2_document_core.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w2/sequences/patches/D2.patch",
+          "patch": {
+            "path": "w2/sequences/patches/D2.patch",
+            "sha256": "20ef5e89ac2b93b97d6840c6bd3410462ebaeee71baecf394257a83092ecc331",
+            "format": "unified_diff"
+          },
+          "anchor": "w2/changes/D2_w2_cancel_during_write.mimi",
+          "oracle": {
+            "mode": "mimi_stdout",
+            "file": "oracle/w2_expected.json",
+            "key": "sequence_regressions/D2",
+            "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+            "support_files": []
+          },
+          "cumulative_regressions": [
+            "W2",
+            "D1",
+            "D2"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; patches cannot be accepted. D4 checked effect ceiling remains unsupported."
+          ]
+        },
+        {
+          "fixture": "D3",
+          "entrypoint": "w2_document_core.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w2/sequences/patches/D3.patch",
+          "patch": {
+            "path": "w2/sequences/patches/D3.patch",
+            "sha256": "ed7763cdd44f2635df1cef3299211db440d3db2cd20156bd4c597b3fd1dec4c3",
+            "format": "unified_diff"
+          },
+          "anchor": "w2/changes/D3_w2_error_variant.mimi",
+          "oracle": {
+            "mode": "mimi_stdout",
+            "file": "oracle/w2_expected.json",
+            "key": "sequence_regressions/D3",
+            "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+            "support_files": []
+          },
+          "cumulative_regressions": [
+            "W2",
+            "D1",
+            "D2",
+            "D3"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; patches cannot be accepted. D4 checked effect ceiling remains unsupported."
+          ]
+        },
+        {
+          "fixture": "D4",
+          "entrypoint": "w2_document_core.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w2/sequences/patches/D4.patch",
+          "patch": {
+            "path": "w2/sequences/patches/D4.patch",
+            "sha256": "11f68dd71f85d77d80e00ac18d783b4a213090f7ce8942cc43daf1dbe930b227",
+            "format": "unified_diff"
+          },
+          "anchor": "w2/changes/D4_w2_export_module_boundary.mimi",
+          "oracle": {
+            "mode": "mimi_stdout",
+            "file": "oracle/w2_expected.json",
+            "key": "sequence_regressions/D4",
+            "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+            "support_files": []
+          },
+          "cumulative_regressions": [
+            "W2",
+            "D1",
+            "D2",
+            "D3",
+            "D4"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; patches cannot be accepted. D4 checked effect ceiling remains unsupported."
+          ]
+        },
+        {
+          "fixture": "D5",
+          "entrypoint": "w2_document_core.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w2/sequences/patches/D5.patch",
+          "patch": {
+            "path": "w2/sequences/patches/D5.patch",
+            "sha256": "97ffe083d18ab3c365e9d0b84ccace0e244a6d7ff5d212e6ec8d1552ad9d2b0c",
+            "format": "unified_diff"
+          },
+          "anchor": "w2/changes/D5_w2_two_background_tasks.mimi",
+          "oracle": {
+            "mode": "mimi_stdout",
+            "file": "oracle/w2_expected.json",
+            "key": "sequence_regressions/D5",
+            "sha256": "d718d7f8f6ca712c4f6e76b691a9ed8975b1a32c7d770df5a90a5243a1908357",
+            "support_files": []
+          },
+          "cumulative_regressions": [
+            "W2",
+            "D1",
+            "D2",
+            "D3",
+            "D4",
+            "D5"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; patches cannot be accepted. D4 checked effect ceiling remains unsupported."
+          ]
+        }
+      ],
+      "inherits": [
+        "previous source tree",
+        "previous external data",
+        "all historical regressions"
+      ],
+      "blockers": [
+        "Patches are inventoried but no executable target covers each exact historical prefix.",
+        "D4 checked effect ceiling remains unsupported."
+      ]
+    },
+    {
+      "id": "SEQ-W4",
+      "execution": "cumulative_patch_chain",
+      "status": "blocked",
+      "accepted": false,
+      "baseline": {
+        "fixture": "W4",
+        "root": "w4",
+        "entrypoint": "baseline/src/main.mimi",
+        "status": "ready",
+        "accepted": false,
+        "source_manifest": [
+          {
+            "path": "baseline/mimi.toml",
+            "sha256": "ef64510cce4d98fe30db7e32f6acfa21d57561d5ce0128a80d42fe39b5472584",
+            "role": "package_or_lock_input"
+          },
+          {
+            "path": "baseline/native/w4_trusted.c",
+            "sha256": "ea41316fc60d947feab497b4880dd7e838df662c6e43131b2e47c49253c6275d",
+            "role": "native_app_or_oracle_source"
+          },
+          {
+            "path": "baseline/src/exports.mimi",
+            "sha256": "22aee6227ec5a22dc17d74d2481fa5e8eb6157c39979303a729c9ee39c1eb39a",
+            "role": "mimi_app_or_change_source"
+          },
+          {
+            "path": "baseline/src/main.mimi",
+            "sha256": "2659846667b6f3894aec4228be8dcf3cd44380b828534dc2495219ba31f342f8",
+            "role": "mimi_app_or_change_source"
+          },
+          {
+            "path": "baseline/src/protocol.mimi",
+            "sha256": "4620f5624fa19202b196b9eb79e9cee45706b6e353d2fd03178a4ab5dcc65254",
+            "role": "mimi_app_or_change_source"
+          },
+          {
+            "path": "baseline/src/server.mimi",
+            "sha256": "b72257361d92e5f45b34c9dbae46cb709158aa5a3bf3516a3b080428e4473550",
+            "role": "mimi_app_or_change_source"
+          }
+        ],
+        "cumulative_regressions": [
+          "W4"
+        ],
+        "regression_targets": [],
+        "acceptance_status": "blocked",
+        "blockers": [
+          "Independent W4 host oracle exists, but no runnable cumulative baseline target is wired."
+        ]
+      },
+      "steps": [
+        {
+          "fixture": "S1",
+          "entrypoint": "baseline/src/main.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w4/sequences/patches/S1.patch",
+          "patch": {
+            "path": "w4/sequences/patches/S1.patch",
+            "sha256": "83e07e9cce1da80aa8bb0ed7e0ae64ffce96772aa2a78af4d63f2d9b23691e20",
+            "format": "unified_diff"
+          },
+          "anchor": "w4/changes/S1/w4_trusted_s1.c",
+          "oracle": {
+            "mode": "w4_host_driver",
+            "file": "w4/oracle/w4_expected.json",
+            "key": "$",
+            "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+            "support_files": [
+              "w4/oracle/w4_host_driver.c",
+              "w4/oracle/w4_trusted.c"
+            ]
+          },
+          "cumulative_regressions": [
+            "W4",
+            "S1"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; replay is not acceptance. Endpoint capability, linear fd ownership, extern ABI/ownership, and S4 offline deployment remain unresolved/unverified."
+          ]
+        },
+        {
+          "fixture": "S2",
+          "entrypoint": "baseline/src/main.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w4/sequences/patches/S2.patch",
+          "patch": {
+            "path": "w4/sequences/patches/S2.patch",
+            "sha256": "d0c76efe5f41c4cac8e8aff4fe3e1b80bb37fbeeb628bb577c8c585b7999faba",
+            "format": "unified_diff"
+          },
+          "anchor": "w4/changes/S2/timeout_handoff.mimi",
+          "oracle": {
+            "mode": "w4_host_driver",
+            "file": "w4/oracle/w4_expected.json",
+            "key": "$",
+            "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+            "support_files": [
+              "w4/oracle/w4_host_driver.c",
+              "w4/oracle/w4_trusted.c"
+            ]
+          },
+          "cumulative_regressions": [
+            "W4",
+            "S1",
+            "S2"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; replay is not acceptance. Endpoint capability, linear fd ownership, extern ABI/ownership, and S4 offline deployment remain unresolved/unverified."
+          ]
+        },
+        {
+          "fixture": "S3",
+          "entrypoint": "baseline/src/main.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w4/sequences/patches/S3.patch",
+          "patch": {
+            "path": "w4/sequences/patches/S3.patch",
+            "sha256": "cc15ae15006d1742278328df91b28bedbed55d09336ff8e2e13f176c4cf548b7",
+            "format": "unified_diff"
+          },
+          "anchor": "w4/changes/S3/endpoint_scope.mimi",
+          "oracle": {
+            "mode": "w4_endpoint_scope",
+            "file": "oracle/w4_changes_expected.json",
+            "key": "S3/endpoint_scope",
+            "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+            "support_files": [
+              "w4/oracle/w4_trusted.c",
+              "w4/changes/S3/w4_endpoint_scope_s3.c",
+              "w4/changes/S3/endpoint_scope_oracle.c"
+            ],
+            "paired_mimi": {
+              "mode": "mimi_stdout",
+              "file": "oracle/w4_changes_expected.json",
+              "key": "S3/mimi",
+              "sha256": "dc8ab3d9eabc34afe31d12d18b72de53615c5bc2d971bd65cad72ba94e045d4e",
+              "support_files": []
+            }
+          },
+          "cumulative_regressions": [
+            "W4",
+            "S1",
+            "S2",
+            "S3"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; replay is not acceptance. Endpoint capability, linear fd ownership, extern ABI/ownership, and S4 offline deployment remain unresolved/unverified."
+          ]
+        },
+        {
+          "fixture": "S4",
+          "entrypoint": "offline-release/src/main.mimi",
+          "status": "ready",
+          "accepted": false,
+          "patch_path": "w4/sequences/patches/S4.patch",
+          "patch": {
+            "path": "w4/sequences/patches/S4.patch",
+            "sha256": "95faae89ac0cc26efa6e766d5e690c0c010679a1fea8ffc5819d81404915a14d",
+            "format": "unified_diff"
+          },
+          "anchor": "w4/changes/S4/README.md",
+          "oracle": {
+            "mode": "w4_host_driver",
+            "file": "w4/oracle/w4_expected.json",
+            "key": "$",
+            "sha256": "f40e0e541539c3d18620875a46d3aef55a858b16726a9fe7c9ced086a5c70890",
+            "support_files": [
+              "w4/oracle/w4_host_driver.c",
+              "w4/oracle/w4_trusted.c"
+            ]
+          },
+          "cumulative_regressions": [
+            "W4",
+            "S1",
+            "S2",
+            "S3",
+            "S4"
+          ],
+          "regression_targets": [],
+          "acceptance_status": "blocked",
+          "blockers": [
+            "No executable cumulative regression_targets are wired; replay is not acceptance. Endpoint capability, linear fd ownership, extern ABI/ownership, and S4 offline deployment remain unresolved/unverified."
+          ]
+        }
+      ],
+      "inherits": [
+        "previous source tree",
+        "offline lock/cache state",
+        "fixed request/oracle corpus",
+        "all historical regressions"
+      ],
+      "blockers": [
+        "Cumulative patches have no runnable W4/S1/S2/S3/S4 prefix targets.",
+        "Endpoint capability, linear fd ownership, C prototype comparison, and borrowed-string ownership remain unsupported/unverified.",
+        "S4 frozen offline install/out-of-tree launch is unverified."
+      ]
+    }
+  ],
+  "legacy_inputs": [
+    {
+      "path": "changes/C1_w1_parser_replacement.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/C2_w1_source_field.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/C3_w1_permission_scope.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/C4_w1_read_only_preview.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/D1_w2_delta_snapshot.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/D2_w2_cancel_during_write.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/D3_w2_error_variant.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/D4_w2_export_module_boundary.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/D5_w2_two_background_tasks.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/H1_w3_gain_algorithm.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/H2_w3_optional_filter.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/H3_w3_shared_snapshot.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/S1_w4_ffi_replacement.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/S2_w4_timeout_handoff.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/S3_w4_endpoint_scope.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "changes/S4_w4_transport_split.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "oracle/README.md",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "oracle/native_fault_control.c",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "oracle/v02_expected.json",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "oracle/v02_ffi.c",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w1_config_tool.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w2_flow_probe.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w3_audio_kernel.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w4_concurrency_probe.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w4_fault_probe.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w4_loopback_service.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    },
+    {
+      "path": "w4_network_probe.mimi",
+      "accepted": false,
+      "reason": "Prior probe/anchor/oracle support is inventory-only and cannot substitute for complete W1-W4 app evidence."
+    }
+  ]
+}

@@ -411,13 +411,22 @@ actor OrderWorker runs Order {
 Final syntax is determined by formal grammar design, but semantics must satisfy:
 
 - Actor runtime internally holds a unique Flow instance;
+- When an Actor has no explicit Flow-state initializer, its initial state is
+  the first state declared by that Flow. In the canonical scalar Flow-backed
+  Actor profile, each `i32` payload field in that root state starts at zero;
+  this rule does not define implicit initial values for other payload types.
+  If that implicit root contains any non-`i32` payload field, the checker
+  reports E0450 at the field declaration. Use an empty first state such as
+  `Uninitialized {}` and initialize the later business payload through a
+  transition before exposing that state.
 - Mailbox message decodes to Flow event;
 - Each actor turn atomically executes one transition;
 - State-relevant calls initiated within the current turn are statically limited by checker;
 - External async senders can only statically guarantee messages belong to public Protocol; cannot pretend to know the state when the message arrives;
 - Messages can carry expected generation/revision; on mismatch, return typed `StaleGeneration` or `UnexpectedEvent`;
 - Dynamic external message failure is typed boundary error;
-- Ordinary Actor helpers can only perform stateless computation.
+- Actor methods may read per-instance configuration/metadata, but cannot assign to Actor-owned
+  instance fields (E0448); state changes occur only in Flow transitions.
 
 #### `mut` Field Semantics (SD-5 废止于 0.1.8 Phase D)
 
@@ -425,14 +434,16 @@ Final syntax is determined by formal grammar design, but semantics must satisfy:
 （E0402，见 §3.8 与 checker `items.rs`）。Actor 不再持有第二套可任意修改的
 业务字段模型；其业务载荷必须由 Flow 承载。
 
-- 任何 `actor Name { mut field: T }` 都被 E0402 拒绝，并给出「移除 `mut` 或改写为
-  `flow Name { state Ready { field: T } ... }` + `actor Name runs Name`」的改写提示；
+- 任何 `actor Name { mut field: T }` 都被 E0402 拒绝；只读配置/元数据可用非 `mut`
+  字段声明，持久业务状态须改写为 `flow Name { state Ready { field: T } ... }` +
+  `actor Name runs Name`；
 - `actor Name runs FlowName` 同样拒绝 `mut` 业务字段：状态由 Flow 携带，可变字段
   破坏原子 turn 保证；
 - 业务可写状态只有一条通道：Flow 状态转移（state transition as the only
   state-change channel）；
-- 非业务字段（per-instance 元数据、运行时内部状态）可在不写 `mut` 的形态下存在，
-  但不得作为业务状态模型。
+- 非业务字段（例如 spawn 时确定、之后只读的 per-instance 配置/元数据）可在不写
+  `mut` 的形态下存在；Actor 方法不能赋值给 Actor 实例字段（E0448）。持久业务状态
+  必须经由 `runs FlowName` 对应的 Flow transition 携带并更新，不能成为第二套状态。
 
 > 旧文档称 `mut` 为「并发隔离声明标记 / 简单状态逃生舱」——该叙述属于被废止的
 > SD-5，0.1.8 起不再成立。
@@ -502,9 +513,9 @@ Minimum dual-end linear Session is a 1.0 core goal; any unclosed item blocks RC.
 
 ### 3.11 Resources and State `[stable]`
 
-Phased resources should be expressed through typestate or Flow payload, e.g., socket's Unbound/Connected/Closed.
+Phased resources whose lifecycle or permitted operations persist across turns should be expressed through typestate or Flow payload, e.g., a socket carried from Unbound to Connected to Closed.
 
-Local resources created and released within a single synchronous call need not become Flow state; they are managed by linear local variables and `defer` (scope guard). A resource enters Flow payload only when it survives across turns, changes allowed operations, participates in Actor/Session, or needs recovery.
+Local resources created and released within a single synchronous call need not become user-declared Flow state; they are managed by linear local variables and `defer` (scope guard). The implicit `Main/Single` transition also owns a task handle when a task is spawned during `main`'s synchronous call chain and awaited or otherwise settled before `main` returns. A typed Session endpoint opened, used, and closed within one synchronous call is likewise a local linear resource. A resource enters user Flow payload when its live state must survive the owning synchronous call's return boundary or a turn, it forms persistent business state, or a user Flow transition/recovery must manage it. Session use by itself does not require user Flow when the complete typed endpoint lifecycle is local to one synchronous call.
 
 Leaving a state, the checker must prove each linear resource on all paths:
 
@@ -614,6 +625,21 @@ func main() {
 }
 ```
 
+The executable source entry `main` has no Mimi source parameters and no generic
+parameters. Its declared result, after resolving transparent aliases, is one
+of `unit`, `bool`, `i32`, or `i64`; omitting the result annotation means
+`unit`. This restriction applies only to the executable entry, not ordinary
+helper functions. `Result`, `Option`, and aggregate values must be handled
+inside `main` and converted explicitly to one of the admitted results or passed
+to `exit(code)`. They are never implicitly converted into process termination.
+
+The bytecode `mimi run` entry maps `unit` to status 0, `bool` false/true to
+0/1, and `i32`/`i64` to the low eight bits of the signed integer value. On
+native POSIX executables, the host process observes the low eight bits of an
+`i32` `main` result. Mimi does not promise a native process-status mapping for
+`unit`, `bool`, or `i64` until the native entry adapter normalizes those ABI
+results.
+
 The compiler must put its real body into the implicit Flow's startup transition, not just insert a shell Flow and continue the traditional main path.
 
 > v0.34.28: **implemented** — `apply_progressive_typestate` (progressive.rs, v0.29.22)
@@ -625,7 +651,11 @@ The compiler must put its real body into the implicit Flow's startup transition,
 Rules:
 
 - Pure synchronous, no persistent resources, no concurrency: script mode allowed;
-- Once using Actor, spawn, Session, phased resources, or recover: require explicit Flow or provide applicable migration fix-it;
+- A stateless Actor service may omit `runs Flow` when its methods do not persist business state or make behavior depend on prior turns. This includes the Kernel Card's `Greeter.spawn()` message example. An Actor that receives messages and changes business state must carry that state in a Flow;
+- The implicit `Main/Single` transition is a real Flow transition. A task spawned during `main`'s synchronous call chain may be awaited or otherwise settled before `main` returns, without a user-declared Flow; task handles and resources require explicit Flow when they outlive `main` or remain live across the return boundary of a synchronous call or turn, and business state requires explicit Flow when it is persistent;
+- `recover` still requires explicit Flow or an applicable migration fix-it;
+- A typed Session endpoint requires Flow when its live residual is retained across a synchronous call's return boundary or a turn, or when it participates in persistent business state. An endpoint opened, used, and closed within one synchronous call—including ordinary `main`—may remain a linear local resource;
+- A phased resource requires Flow when its lifecycle or permitted operations persist across a synchronous call or turn. This does not make an untyped integer handle from `session_pair()` a typed endpoint; that shape has a separate diagnostic contract;
 - CLI can display lowered Flow;
 - Diagnostics always map back to user source positions.
 
@@ -1067,6 +1097,17 @@ source/IR hash: ...
 10. Flow transition relation;
 11. Concurrent dedicated model checking or rely/guarantee.
 
+### 5.11 Canonical MIR FFI Proof Profile `[experimental]`
+
+Canonical MIR may emit a separate experimental proof for a checked `repr(C)` FFI call. Its artifact is identified as `mimi-mir-ffi-ieee754-experimental-v1`; it is not a `mimi-verified-core-1` proof, does not expand that stable profile, and does not make FFI execution eligible for verifier-only MIR programs.
+
+- FFI `f64` parameters and foreign results range over the complete IEEE-754 binary64 domain, including NaN, positive and negative infinity, and both signed zeros. This differs from the ordinary MIR finite-input float model and must not reuse its artifact.
+- Comparisons use IEEE semantics (including unordered NaN comparisons); unary negation is total and preserves IEEE behavior. Arithmetic continues to generate the existing `E0801`/`E0813` definedness traps. A possible trap is checked on the path to the exact FFI call and cannot be erased by a later divergent path.
+- The verifier binds the declaration, actual MIR call, aggregate layout, checker-authenticated eager argument provenance, and route receipt. It admits only the validated immutable FFI call-path loop profile; arbitrary mutable loop invariants are not assumed, and cutting a validated backedge makes no termination claim.
+- `ProofArtifact.semantics_version` is 3. The artifact carries `proof_profile` and `obligation_scope`; `ffi-requires-only-v1` and `ffi-requires-ensures-v1` have distinct compatibility and cache identities. The CLI displays both fields on proof rows. Older artifacts cannot identify this profile.
+
+An unsupported shape or missing/forged receipt remains fail-closed. The execution entry continues to reject `VerifierOnly` MIR programs.
+
 ---
 
 ## 6. Language Coherence Decisions
@@ -1097,12 +1138,18 @@ func update(x: mutate T)
 func take(x: T)          // by-value consume
 ```
 
-`&T`, `&mut T`, explicit lifetime, and `*ptr` do not enter the stable preferred syntax for ordinary safe business code. They may only exist in:
+Reference/pointer types (`&T`, `&mut T`, `&[T]`, `*T`, `*mut T`) and their expression operators (`&`, `&mut`, `*`) do not enter the stable preferred syntax for ordinary safe business code. They may only occur in:
 
-- `unsafe`;
-- FFI wrapper;
-- Runtime/low-level library;
-- Explicitly feature-gated advanced mode.
+- the lexical body of an explicit `unsafe { ... }` block, including type annotations written inside that block;
+- the signature or body of an explicit `extern "C" func` FFI wrapper.
+
+These are source-level exceptions. The unsafe permission does not flow into a
+nested named function or a deferred closure body; each such callable must put
+its own types and operations inside `unsafe`. An `extern "C" { ... }` import
+declaration is not a wrapper and does not admit reference or pointer types.
+Runtime/low-level placement, file paths, backend selection (including `--mir`),
+and an unmarked “advanced” mode do not grant permission. A future advanced mode
+needs an explicit source marker before the checker can admit it.
 
 #### `mutate` argument place grammar `[stable]`
 
@@ -1127,6 +1174,8 @@ func take(x: T)          // by-value consume
 - `shared` indicates explicit shared object graph;
 - `weak` indicates non-owning reference to shared object;
 - On Fault/drop Flow payload, only drop shared handle; do not assume destroying shared object.
+- A typed Session endpoint whose full residual lifecycle is within one synchronous call may be owned as a linear local; a live residual retained across the call's return boundary or a turn, or carried as persistent business state, belongs in Flow payload.
+- A task handle and its temporary resources may be owned by the implicit `Main/Single` transition while the task is spawned during `main`'s synchronous call chain and awaited or settled before `main` returns; explicit user Flow is needed when the handle/resources outlive `main` or remain live across the return boundary of a synchronous call or turn, or when their state becomes persistent business state.
 
 #### Convergence `[removed]`
 
@@ -1142,11 +1191,19 @@ func take(x: T)          // by-value consume
 - Flow is the sole model for business state and change;
 - Actor is Flow's concurrent runtime container;
 - User-visible `mut` actor fields are **removed** (0.1.8 Phase D, `E0402`): the
-  SD-5 simple-state escape hatch is closed. Non-`mut` per-instance metadata
-  fields remain writable on every backend;
+  SD-5 simple-state escape hatch is closed. Non-`mut` per-instance configuration
+  or metadata may be declared and read; Actor methods cannot assign to
+  Actor-owned fields (`E0448`), and persistent business-state changes must
+  update Flow payloads through a Flow transition;
 - `actor Name runs FlowName` is the supported business-actor shape: state must
   be carried by the Flow's payloads (atomic-turn guarantee);
-- Actor mailboxes and sync methods perform per-instance field access; business
+- Without an explicit initializer, the Flow's first declared state is the
+  Actor instance's root state. The canonical scalar Flow-backed Actor profile
+  initializes that root state's `i32` payload fields to zero; other payload
+  types have no implicit zero-initialization rule and report E0450. An empty
+  first state followed by an initialization transition makes the initial
+  state explicit and provides source values for later payload fields.
+- Actor mailboxes and sync methods may read per-instance metadata; business
   state *change* belongs to Flow transitions (migrate mailbox method calls to
   typed Flow events);
 - Actor runtime holds unique Flow instance.
@@ -1187,12 +1244,15 @@ func take(x: T)          // by-value consume
 Session enters stable set only after:
 
 - `session_pair::<P>()` returns `SessionChan<P>` and `SessionChan<dual P>`;
+- bare `session_pair()` is rejected with E0242; an explicit protocol type argument is required;
 - Endpoint is a linear value;
 - send/recv/close advance residual;
 - Alias, fields, return, closures, and branch merge preserve tracking;
 - Untracked reports error;
 - No bare `List<i64>` or integer handle user API;
 - Interpreter/native runtime behavior consistent.
+
+A typed endpoint opened, used, and closed within one synchronous callable, including ordinary `main`, is a local linear resource and need not be placed in Flow. A live residual retained across that callable's return boundary or a turn, or carried as persistent business state, must be represented in Flow payload. `session_pair` requires the explicit form `session_pair::<P>()`; the untyped form has no legal integer-handle API and reports E0242 before backend selection.
 
 #### Session method surface `[0.1.8 Phase E]`
 

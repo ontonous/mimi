@@ -1,0 +1,34 @@
+func main() -> i32 {
+    let prefix = "nul\0"
+    let suffix = "雪"
+    let key = prefix + suffix + "!"
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, key, 41) {
+        Ok(root) => {
+            let pair = map_get(root, key)
+
+            drop(empty)
+            drop(root)
+
+            let found = pair.0
+            let payload = unpack_i32(pair.1)
+            let _found_observed = found
+            drop(pair)
+            drop(key)
+            drop(suffix)
+            drop(prefix)
+
+            payload - 41
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

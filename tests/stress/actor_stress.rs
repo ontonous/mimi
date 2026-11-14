@@ -3,17 +3,23 @@
 use super::run_program;
 
 const ACTOR_INC_SOURCE: &str = r#"
-actor Counter {
-    count: i32
-    func inc() { self.count = self.count + 1 }
-    func get() -> i32 { self.count }
+flow CounterFlow {
+    state Active { count: i32 }
+    transition inc(Active) -> Active {
+        return Active { count: self.count + 1 }
+    }
+    transition get(Active) -> Active {
+        return Active { count: self.count }
+    }
 }
+actor Counter runs CounterFlow {}
 func main() -> i32 {
     let c = Counter.spawn()
     for i in range(0, 200) {
         c.inc()
     }
-    println(c.get())
+    let state = c.get()
+    println(state.count)
     0
 }
 "#;

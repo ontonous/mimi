@@ -1,10 +1,30 @@
 func main() -> i32 {
-    let empty = map_new()
-    let full = map_set(empty, "text", "owned text")
-    let alias = full
-    drop(full)
-    let snapshot = map_get_string(alias, "text")
-    let count = map_size(alias)
-    drop(snapshot)
-    count - 1
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "text", "owned text") {
+                Ok(full) => {
+                    let alias = full
+                    drop(full)
+                    let snapshot = map_get_string(alias, "text")
+                    match snapshot {
+                        Ok(text) => {
+                            drop(text)
+                            let count = map_size(alias)
+                            drop(alias)
+                            count - 1
+                        },
+                        Err(status) => {
+                            drop(alias)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

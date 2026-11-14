@@ -1,0 +1,25 @@
+// Exact fallible New/Set followed by generic GetAny, i32 unpack, and owner cleanup.
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let changed = map_set(root, "answer", 42)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let pair = map_get(updated, "answer")
+                    let found = pair.0
+                    let payload = unpack_i32(pair.1)
+                    drop(pair)
+                    drop(updated)
+                    if found { payload } else { 0 }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

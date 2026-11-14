@@ -1,0 +1,100 @@
+// W2 unresolved-handoff fixture: the user has requested cancellation, but the
+// external writer has not acknowledged stop. The temp snapshot stays intact;
+// the program writes a durable responsibility record and leaves the Flow in a
+// non-terminal Responsibility state owned by RetryOwner. It never reports
+// completion or confirmed cancellation.
+
+type Revision { document_id: i32, revision_id: i32, content: string }
+
+flow ExportLease {
+    state Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
+    state CancelRequested { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, requester: string }
+    state CleanupPending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, cleanup_owner: string }
+    state Responsibility { task_id: i32, revision_id: i32, temporary_path: string, destination: string, cleanup_owner: string, ledger_path: string, ledger_recorded: bool, externally_acknowledged: bool }
+    state Cancelled { task_id: i32, revision_id: i32, cleanup_owner: string }
+
+    transition request_cancel(Writing, requester: string) -> CancelRequested {
+        return CancelRequested {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            requester: requester,
+        }
+    }
+    transition handoff(CancelRequested, cleanup_owner: string) -> CleanupPending {
+        return CleanupPending {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            cleanup_owner: cleanup_owner,
+        }
+    }
+    transition persist_responsibility(CleanupPending, ledger_path: string, ledger_result: Result<(), string>) -> Responsibility {
+        let recorded = match ledger_result {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+        return Responsibility {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            cleanup_owner: self.cleanup_owner,
+            ledger_path: ledger_path,
+            ledger_recorded: recorded,
+            externally_acknowledged: false,
+        }
+    }
+    transition cancel_confirmed(CleanupPending) -> Cancelled {
+        return Cancelled {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            cleanup_owner: self.cleanup_owner,
+        }
+    }
+}
+
+func main() -> i32 {
+    let snapshot = Revision { document_id: 7, revision_id: 1, content: "snapshot S1" }
+    let temporary_path = "/tmp/mimi-v02-w2-task-401.tmp"
+    let destination = "/tmp/mimi-v02-w2-task-401.txt"
+    let ledger_path = "/tmp/mimi-v02-w2-unresponsive-ledger.txt"
+    remove_file(temporary_path)
+    remove_file(destination)
+    remove_file(ledger_path)
+    let staged_result = write_file(temporary_path, "header written; payload pending")
+    let staged = match staged_result {
+        Ok(_) => true,
+        Err(_) => false,
+    }
+    if !staged { return 1 }
+    let writing = Writing {
+        task_id: 401,
+        snapshot: snapshot,
+        temporary_path: temporary_path,
+        destination: destination,
+    }
+    let requested = ExportLease::request_cancel(writing, "user")
+    let pending = ExportLease::handoff(requested, "RetryOwner")
+
+    // The handoff file is the host-visible queue record. The outstanding temp
+    // remains at its original path until RetryOwner acknowledges and cleans it.
+    let ledger_contents = "task=" + to_string(pending.task_id) +
+        "\nrevision=" + to_string(pending.snapshot.revision_id) +
+        "\ntemp=" + pending.temporary_path +
+        "\ndestination=" + pending.destination +
+        "\nowner=" + pending.cleanup_owner +
+        "\nstatus=CleanupPending\n"
+    let ledger_result = write_file(ledger_path, ledger_contents)
+    let responsibility = ExportLease::persist_responsibility(pending, ledger_path, ledger_result)
+    if responsibility.ledger_recorded && !responsibility.externally_acknowledged &&
+        file_exists(responsibility.temporary_path) && !file_exists(responsibility.destination) {
+        println(responsibility.cleanup_owner)
+        println("CleanupPending")
+        0
+    } else {
+        1
+    }
+}

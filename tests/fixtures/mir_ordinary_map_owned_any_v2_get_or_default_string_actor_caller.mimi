@@ -1,0 +1,37 @@
+use std::maps;
+
+actor Reader {
+    func lookup() -> i32 {
+        let payload = "actor hit"
+        let empty_result = map_new()
+        match empty_result {
+            Ok(empty) => {
+                let root_result = map_set(empty, "hits", payload)
+                match root_result {
+                    Ok(root) => {
+                        let observed = get_or_default::<string>(root, "hits", "fallback")
+                        drop(observed)
+                        drop(empty)
+                        drop(root)
+                        drop(payload)
+                        0
+                    },
+                    Err(status) => {
+                        drop(empty)
+                        drop(payload)
+                        status
+                    },
+                }
+            },
+            Err(status) => {
+                drop(payload)
+                status
+            },
+        }
+    }
+}
+
+func main() -> i32 {
+    let reader = Reader.spawn()
+    reader.lookup()
+}

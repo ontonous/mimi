@@ -1,0 +1,93 @@
+// Independent, frozen W3 vector data. These literals are hand-calculated
+// from the requirements; this file never calls the implementation under test.
+//
+// Gain oracle: g(x) = clamp_i32(2 * (x as i64), -1000, 1000).
+// Filter oracle (H2): y[0] = g(x[0]); for i > 0,
+// y[i] = trunc_toward_zero((y[i-1] + g(x[i])) / 2).
+// Only the active prefix is processed; every storage slot after that prefix
+// is an unchanged sentinel. `storage_slots` is the prepared list's length;
+// actual runtime allocator capacity must be recorded separately by the native
+// cost harness because the current language has no capacity query.
+
+func print_vector(values: view List<i32>) -> i32 {
+    let mut index = 0
+    while index < len(values) {
+        println(values[index])
+        index += 1
+    }
+    0
+}
+
+func main() -> i32 {
+    // Input [-2147483648, -501, 0, 501, 2147483647], active_len=5.
+    // Twice in i64: [-4294967296, -1002, 0, 1002, 4294967294].
+    // After clipping: [-1000, -1000, 0, 1000, 1000].
+    let gain_extremes: List<i32> = [-1000, -1000, 0, 1000, 1000]
+
+    // H2 smoothing of gain_extremes:
+    // [-1000, (-1000-1000)/2, (-1000+0)/2, (-500+1000)/2,
+    //  (250+1000)/2] = [-1000, -1000, -500, 250, 625].
+    let filter_extremes: List<i32> = [-1000, -1000, -500, 250, 625]
+
+    // Input [-501, 0, 501, 700, 701], active_len=3.
+    // Base result [-1000, 0, 1000], H2 result [-1000, -500, 250].
+    let gain_short: List<i32> = [-1000, 0, 1000]
+    let filter_short: List<i32> = [-1000, -500, 250]
+
+    // Input [-501, 0, 501, 700, 701], active_len=5. Gain is
+    // [-1000, 0, 1000, 1000, 1000], so the recurrence gives
+    // [-1000, -500, 250, 625, 812] (integer division truncates 1625/2).
+    let raw_short_source: List<i32> = [-501, 0, 501, 700, 701]
+    let gain_full_short: List<i32> = [-1000, 0, 1000, 1000, 1000]
+    let filter_full_short: List<i32> = [-1000, -500, 250, 625, 812]
+
+    // H1 threshold-algorithm boundary vector: input
+    // [-2147483648, -501, -500, 499, 500, 2147483647].
+    let h1_boundary: List<i32> = [-1000, -1000, -1000, 998, 1000, 1000]
+
+    let empty: List<i32> = []
+    let unchanged_tail: List<i32> = [-1000, -1000, 0, 1000, 1000, 777]
+    let h2_tail: List<i32> = [-1000, -1000, -500, 250, 625, 777]
+
+    println("gain/extremes")
+    print_vector(gain_extremes)
+    println("filter/extremes")
+    print_vector(filter_extremes)
+    println("gain/short-active-3")
+    print_vector(gain_short)
+    println("filter/short-active-3")
+    print_vector(filter_short)
+    println("filter/short-active-5")
+    print_vector(filter_full_short)
+    println("raw/short-active-5")
+    print_vector(raw_short_source)
+    println("gain/short-active-5")
+    print_vector(gain_full_short)
+    println("h1/boundaries")
+    print_vector(h1_boundary)
+    println("empty")
+    print_vector(empty)
+    println("gain/unchanged-tail-6-slots")
+    print_vector(unchanged_tail)
+    println("filter/unchanged-tail-6-slots")
+    print_vector(h2_tail)
+
+    // Keep the raw source explicit as an independent input fixture; its active
+    // prefix is the first three values above.
+    if len(raw_short_source) != 5 { return 1 }
+    if raw_short_source[3] != 700 || raw_short_source[4] != 701 { return 2 }
+    0
+}
+
+// D-10 negative-case suggestions for the frozen checker corpus:
+// 1. Put push(samples, value), pop(samples), concat, reverse, map/filter, or a
+//    replacement list literal in the hot call graph: reject possible growth or
+//    allocation with a call-chain reason.
+// 2. Keep `let snapshot = samples` live while invoking the mutating hot path:
+//    reject a possible COW detach under no_alloc; allow after the snapshot is
+//    released or after an exclusive owned-buffer proof.
+// 3. Add a callback with unknown effect, an allocating destructor/defer, an
+//    allocating error/early-return branch, or an unannotated FFI call: reject.
+// 4. Use a dynamic index that may exceed the active length or process only part
+//    of the buffer then fail: verify bounds are checked before writes and that
+//    all error/cleanup branches stay inside the registered region.

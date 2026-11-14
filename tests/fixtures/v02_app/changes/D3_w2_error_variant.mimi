@@ -1,0 +1,10 @@
+// D3: add a distinct checksum error while preserving the old error path.
+func export_status(checksum_ok: bool) -> Result<i32, string> {
+    if checksum_ok { Ok(1) } else { Err("ChecksumMismatch") }
+}
+func main() -> i32 {
+    match export_status(false) {
+        Err(error) => { println(error); 0 },
+        Ok(_) => 1,
+    }
+}

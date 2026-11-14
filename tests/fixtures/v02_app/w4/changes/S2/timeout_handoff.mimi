@@ -1,0 +1,57 @@
+// S2 policy anchor. A request whose budget expires is sent to one retry owner;
+// the current worker returns a timeout receipt and does not also retry it.
+
+use std::time
+
+extern "C" {
+    func w4_checksum(value: i32) -> i32;
+}
+
+func publish_retry_owner(request_id: i32, value: i32,
+                         retry_owner: Channel<i64>) {
+    // This anchor bounds request ids to nonnegative i32 and checksum inputs to
+    // 0..999; the packed queue item carries both across the responsibility
+    // boundary without borrowing the original worker's locals.
+    channel_send(retry_owner, (request_id as i64) * 1000 + (value as i64))
+}
+
+func timeout_handoff(request_id: i32, value: i32, deadline_ms: i64,
+                     retry_owner: Channel<i64>) -> Result<i32, string> {
+    if deadline_ms < 0 || request_id < 0 || value < 0 || value > 999 {
+        return Err("InvalidDeadline")
+    }
+    // This is a cooperative checkpoint at the request-work boundary. It does
+    // not interrupt a blocked receive or cancel a running operation.
+    if timestamp_ms() > deadline_ms {
+        publish_retry_owner(request_id, value, retry_owner)
+        return Err("Timeout;owner=retry-queue")
+    }
+    Ok(request_id)
+}
+
+func retry_owner_once(retry_owner: Channel<i64>) -> i64 {
+    let packed = channel_recv(retry_owner)
+    let request_id = (packed / 1000) as i32
+    let value = (packed % 1000) as i32
+    let checksum = w4_checksum(value)
+    (request_id as i64) * 1000000 + (checksum as i64)
+}
+
+func main() -> i32 {
+    let retry_owner = channel_new()
+    let retry_task = spawn retry_owner_once(retry_owner)
+    let deadline_ms = timestamp_ms() + 10
+    sleep_ms(25)
+    let timed_out = timeout_handoff(731, 20, deadline_ms, retry_owner)
+    let retry_receipt = await retry_task
+    channel_drop(retry_owner)
+    match timed_out {
+        Err(receipt) => {
+            if retry_receipt != 731000417 { return 1 }
+            println(receipt)
+            println("RetryComplete id=731 checksum=417")
+            0
+        },
+        Ok(_) => 2,
+    }
+}

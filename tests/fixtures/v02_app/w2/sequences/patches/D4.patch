@@ -1,0 +1,293 @@
+--- w2_document_core.mimi
++++ w2_document_core.mimi
+@@ -7,6 +7,13 @@
+ // writes the destination. Mimi currently has no atomic rename primitive, so a
+ // destination write error is recorded as "may be published" rather than being
+ // described as a filesystem rollback.
++// D4 routes publication through w2_export_io.mimi with explicit path inputs.
++use w2_export_io::PublishReceipt
++use w2_export_io::ExportError
++use w2_export_io::ExportFailure
++use w2_export_io::W2SnapshotNode
++use w2_export_io::W2ExportRequest
++use w2_export_io::export_snapshot
+ 
+ type NodeId { store_id: i32, slot: i32, generation: i32 }
+ type DocumentNode {
+@@ -33,31 +40,6 @@
+     to_revision: i32,
+ }
+ type EditorView { cursor: NodeId, layout_epoch: i32 }
+-type PublishReceipt {
+-    document_id: i32,
+-    revision_id: i32,
+-    path: string,
+-    published: bool,
+-    temporary_removed: bool,
+-    cleanup_error: string,
+-    cleanup_owner: string,
+-    temporary_path: string,
+-}
+-type ExportError {
+-    TempWriteFailed(string)
+-    TempReadFailed(string)
+-    DestinationWriteFailed(string)
+-    CleanupFailed(string)
+-    ChecksumMismatch
+-}
+-type ExportFailure {
+-    primary: Option<ExportError>,
+-    cleanup: Option<ExportError>,
+-    destination_may_exist: bool,
+-    destination_path: string,
+-    temporary_path: string,
+-    cleanup_owner: string,
+-}
+ 
+ func same_node_id(left: NodeId, right: NodeId) -> bool {
+     left.store_id == right.store_id &&
+@@ -173,83 +155,25 @@
+     }
+ }
+ 
+-func export_snapshot(revision: Revision, temporary_path: string, destination: string) -> Result<PublishReceipt, ExportFailure> {
+-    let contents = serialize_revision(revision)
+-    match write_file(temporary_path, contents) {
+-        Err(error) => Err(ExportFailure {
+-            primary: Some(TempWriteFailed(error)),
+-            cleanup: None,
+-            destination_may_exist: false,
+-            destination_path: destination,
+-            temporary_path: temporary_path,
+-            cleanup_owner: "local exporter",
+-        }),
+-        Ok(_) => {
+-            match read_file(temporary_path) {
+-                Err(error) => {
+-                    let removed = remove_file(temporary_path)
+-                    let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained")) }
+-                    let cleanup_owner = if removed { "" } else { "local exporter" }
+-                    Err(ExportFailure {
+-                        primary: Some(TempReadFailed(error)),
+-                        cleanup: cleanup_error,
+-                        destination_may_exist: false,
+-                        destination_path: destination,
+-                        temporary_path: temporary_path,
+-                        cleanup_owner: cleanup_owner,
+-                    })
+-                },
+-                Ok(staged) => {
+-                    if staged != contents {
+-                        let removed = remove_file(temporary_path)
+-                        let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained after verification mismatch")) }
+-                        let cleanup_owner = if removed { "" } else { "local exporter" }
+-                        Err(ExportFailure {
+-                            primary: Some(ChecksumMismatch),
+-                            cleanup: cleanup_error,
+-                            destination_may_exist: false,
+-                            destination_path: destination,
+-                            temporary_path: temporary_path,
+-                            cleanup_owner: cleanup_owner,
+-                        })
+-                    } else {
+-                        match write_file(destination, staged) {
+-                            Err(error) => {
+-                                let removed = remove_file(temporary_path)
+-                                let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained after destination failure")) }
+-                                let cleanup_owner = if removed { "" } else { "local exporter" }
+-                                Err(ExportFailure {
+-                                    primary: Some(DestinationWriteFailed(error)),
+-                                    cleanup: cleanup_error,
+-                                    // write_file is not an atomic replace API;
+-                                    // a failing destination write can leave bytes.
+-                                    destination_may_exist: true,
+-                                    destination_path: destination,
+-                                    temporary_path: temporary_path,
+-                                    cleanup_owner: cleanup_owner,
+-                                })
+-                            },
+-                            Ok(_) => {
+-                                let removed = remove_file(temporary_path)
+-                                let cleanup_error = if removed { "" } else { "temporary file retained" }
+-                                let cleanup_owner = if removed { "" } else { "local exporter" }
+-                                Ok(PublishReceipt {
+-                                    document_id: revision.document_id,
+-                                    revision_id: revision.revision_id,
+-                                    path: destination,
+-                                    published: true,
+-                                    temporary_removed: removed,
+-                                    cleanup_error: cleanup_error,
+-                                    cleanup_owner: cleanup_owner,
+-                                    temporary_path: temporary_path,
+-                                })
+-                            },
+-                        }
+-                    }
+-                },
+-            }
+-        },
+-    }
++func export_revision(revision: Revision, temporary_path: string, destination: string) -> Result<PublishReceipt, ExportFailure> {
++    let mut nodes: List<W2SnapshotNode> = []
++    for node in revision.nodes {
++        if node.alive {
++            push(nodes, W2SnapshotNode {
++                slot: node.id.slot,
++                generation: node.id.generation,
++                parent_slot: node.parent_slot,
++                kind: node.kind,
++                text: node.text,
++            })
++        }
++    }
++    let request = W2ExportRequest {
++        document_id: revision.document_id,
++        revision_id: revision.revision_id,
++        nodes: nodes,
++    }
++    export_snapshot(request, temporary_path, destination)
+ }
+ 
+ flow DocumentSession {
+@@ -572,7 +496,7 @@
+             Err(_) => false,
+         },
+     }
+-    let export_result = export_snapshot(
++    let export_result = export_revision(
+         snapshot_s1,
+         "/tmp/mimi-v02-w2-export.tmp",
+         "/tmp/mimi-v02-w2-export.txt"
+--- /dev/null
++++ w2_export_io.mimi
+@@ -0,0 +1,130 @@
++// D4 exporter module boundary. This module receives a typed immutable
++// snapshot request and touches only the explicit temporary/destination paths.
++// Static effect ceiling remains an open compiler blocker: Mimi has no accepted
++// syntax here to declare or prove this upper bound.
++pub type PublishReceipt {
++    document_id: i32,
++    revision_id: i32,
++    path: string,
++    published: bool,
++    temporary_removed: bool,
++    cleanup_error: string,
++    cleanup_owner: string,
++    temporary_path: string,
++}
++pub type ExportError {
++    TempWriteFailed(string)
++    TempReadFailed(string)
++    DestinationWriteFailed(string)
++    CleanupFailed(string)
++    ChecksumMismatch
++}
++pub type ExportFailure {
++    primary: Option<ExportError>,
++    cleanup: Option<ExportError>,
++    destination_may_exist: bool,
++    destination_path: string,
++    temporary_path: string,
++    cleanup_owner: string,
++}
++pub type W2SnapshotNode {
++    slot: i32,
++    generation: i32,
++    parent_slot: i32,
++    kind: string,
++    text: string,
++}
++pub type W2ExportRequest { document_id: i32, revision_id: i32, nodes: List<W2SnapshotNode> }
++
++pub func serialize_w2_request(request: W2ExportRequest) -> string {
++    let mut contents = "document=" + to_string(request.document_id) + "\n"
++    contents = contents + "revision=" + to_string(request.revision_id) + "\n"
++    for node in request.nodes {
++        contents = contents + to_string(node.slot) + ":" + node.kind + ":" + node.text + "\n"
++    }
++    contents
++}
++
++func w2_cleanup_error(removed: bool, message: string) -> Option<ExportError> {
++    if removed { None } else { Some(CleanupFailed(message)) }
++}
++
++pub func export_snapshot(request: W2ExportRequest, temporary_path: string, destination: string) -> Result<PublishReceipt, ExportFailure> {
++    let contents = serialize_w2_request(request)
++    match write_file(temporary_path, contents) {
++        Err(error) => Err(ExportFailure {
++            primary: Some(TempWriteFailed(error)),
++            cleanup: None,
++            destination_may_exist: false,
++            destination_path: destination,
++            temporary_path: temporary_path,
++            // A failed write can leave a partial temporary artifact; retain
++            // responsibility with this module until a caller cleans it.
++            cleanup_owner: "w2_export_io",
++        }),
++        Ok(_) => {
++            match read_file(temporary_path) {
++                Err(error) => {
++                    let removed = remove_file(temporary_path)
++                    let cleanup = w2_cleanup_error(removed, "temporary file retained after staged read failure")
++                    let cleanup_owner = if removed { "" } else { "w2_export_io" }
++                    Err(ExportFailure {
++                        primary: Some(TempReadFailed(error)),
++                        cleanup: cleanup,
++                        destination_may_exist: false,
++                        destination_path: destination,
++                        temporary_path: temporary_path,
++                        cleanup_owner: cleanup_owner,
++                    })
++                },
++                Ok(staged) => {
++                    if staged != contents {
++                        let removed = remove_file(temporary_path)
++                        let cleanup = w2_cleanup_error(removed, "temporary file retained after checksum mismatch")
++                        let cleanup_owner = if removed { "" } else { "w2_export_io" }
++                        Err(ExportFailure {
++                            primary: Some(ChecksumMismatch),
++                            cleanup: cleanup,
++                            destination_may_exist: false,
++                            destination_path: destination,
++                            temporary_path: temporary_path,
++                            cleanup_owner: cleanup_owner,
++                        })
++                    } else {
++                        match write_file(destination, staged) {
++                            Err(error) => {
++                                let removed = remove_file(temporary_path)
++                                let cleanup = w2_cleanup_error(removed, "temporary file retained after destination write failure")
++                                let cleanup_owner = if removed { "" } else { "w2_export_io" }
++                                Err(ExportFailure {
++                                    primary: Some(DestinationWriteFailed(error)),
++                                    cleanup: cleanup,
++                                    // write_file is not atomic; a failed destination write may leave bytes.
++                                    destination_may_exist: true,
++                                    destination_path: destination,
++                                    temporary_path: temporary_path,
++                                    cleanup_owner: cleanup_owner,
++                                })
++                            },
++                            Ok(_) => {
++                                let removed = remove_file(temporary_path)
++                                let cleanup_error = if removed { "" } else { "temporary file retained" }
++                                let cleanup_owner = if removed { "" } else { "w2_export_io" }
++                                Ok(PublishReceipt {
++                                    document_id: request.document_id,
++                                    revision_id: request.revision_id,
++                                    path: destination,
++                                    published: true,
++                                    temporary_removed: removed,
++                                    cleanup_error: cleanup_error,
++                                    cleanup_owner: cleanup_owner,
++                                    temporary_path: temporary_path,
++                                })
++                            },
++                        }
++                    }
++                },
++            }
++        },
++    }
++}

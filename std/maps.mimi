@@ -2,7 +2,8 @@
 // on BOTH backends — they return a new Record and never mutate the input
 // (verified by dual probes; the historical VM-copy-on-write vs native-in-place
 // divergence no longer exists). The stdlib functions below (`set`, `remove`,
-// `merge`, `update`, `omit`) rebind via `m = map_set(m, …)` and are exact.
+// `merge`, `update`, `omit`) rebind the returned map; fallible clone/set
+// operations propagate their Result.
 // Direct callers of the raw builtins must likewise rebind: discarding the
 // result discards the insertion on both backends.
 // Iteration contract (0.39.136): keys()/values() return key-SORTED order,
@@ -13,32 +14,49 @@ pub type MapValuesSnapshot = List<Any>
 
 trait MapExt {
     func get(key: string) -> (bool, Any)
-    func set(key: string, value: Any) -> Record
+    func set(key: string, value: Any) -> Result<Record, i32>
     func has_key(key: string) -> bool
-    func remove(key: string) -> Record
+    func remove(key: string) -> Result<Record, i32>
     func size() -> i32
     func is_empty() -> bool
     func get_or_default(key: string, default: Any) -> Any
-    func merge(other: Record) -> Record
+    func merge(other: Record) -> Result<Record, i32>
     func to_list() -> List<(string, Any)>
-    func filter_keys(pred: func(string) -> bool) -> Record
-    func map_values(f: func(Any) -> Any) -> Record
-    func update(key: string, f: func(Any) -> Any) -> Record
-    func pick(ks: List<string>) -> Record
-    func omit(ks: List<string>) -> Record
+    func filter_keys(pred: func(string) -> bool) -> Result<Record, i32>
+    func map_values(f: func(Any) -> Any) -> Result<Record, i32>
+    func update(key: string, f: func(Any) -> Any) -> Result<Record, i32>
+    func pick(ks: List<string>) -> Result<Record, i32>
+    func omit(ks: List<string>) -> Result<Record, i32>
 }
 
 // MapExt implementation for built-in Record type.
 impl MapExt for Record {
     func get(key: string) -> (bool, Any) { map_get(self, key) }
-    func set(key: string, value: Any) -> Record {
-        let mut result = map_from_list(to_list(self))
-        map_set(result, key, value)
+    func set(key: string, value: Any) -> Result<Record, i32> {
+        match map_clone(self) {
+            Ok(result) => match map_set(result, key, value) {
+                Ok(updated) => {
+                    drop(result)
+                    Ok(updated)
+                },
+                Err(status) => {
+                    drop(result)
+                    Err(status)
+                },
+            },
+            Err(status) => Err(status),
+        }
     }
     func has_key(key: string) -> bool { map_get(self, key).0 }
-    func remove(key: string) -> Record {
-        let mut result = map_from_list(to_list(self))
-        map_remove(result, key)
+    func remove(key: string) -> Result<Record, i32> {
+        match map_clone(self) {
+            Ok(result) => {
+                let updated = map_remove(result, key)
+                drop(result)
+                Ok(updated)
+            },
+            Err(status) => Err(status),
+        }
     }
     func size() -> i32 { map_size(self) }
     func is_empty() -> bool { map_size(self) == 0 }
@@ -46,12 +64,29 @@ impl MapExt for Record {
         let result = map_get(self, key)
         if result.0 { result.1 } else { default }
     }
-    func merge(other: Record) -> Record {
+    func merge(other: Record) -> Result<Record, i32> {
         let b_keys = keys(other)
-        let mut result = map_from_list(to_list(self))
+        let mut result = match map_clone(self) {
+            Ok(root) => Ok(root),
+            Err(status) => Err(status),
+        }
         for bk in b_keys {
-            let bv = map_get(other, bk)
-            result = map_set(result, bk, bv.1)
+            result = match result {
+                Ok(root) => {
+                    let bv = map_get(other, bk)
+                    match map_set(root, bk, bv.1) {
+                        Ok(updated) => {
+                            drop(root)
+                            Ok(updated)
+                        },
+                        Err(status) => {
+                            drop(root)
+                            Err(status)
+                        },
+                    }
+                },
+                Err(status) => Err(status),
+            }
         }
         result
     }
@@ -65,65 +100,147 @@ impl MapExt for Record {
         }
         result
     }
-    func filter_keys(pred: func(string) -> bool) -> Record {
+    func filter_keys(pred: func(string) -> bool) -> Result<Record, i32> {
         let ks = keys(self)
-        let mut result = map_new()
+        let mut result = match map_new() {
+            Ok(root) => Ok(root),
+            Err(status) => Err(status),
+        }
         for fk_k in ks {
-            if pred(fk_k) {
-                let fk_v = map_get(self, fk_k)
-                result = map_set(result, fk_k, fk_v.1)
+            result = match result {
+                Ok(root) => {
+                    if pred(fk_k) {
+                        let fk_v = map_get(self, fk_k)
+                        match map_set(root, fk_k, fk_v.1) {
+                            Ok(updated) => {
+                                drop(root)
+                                Ok(updated)
+                            },
+                            Err(status) => {
+                                drop(root)
+                                Err(status)
+                            },
+                        }
+                    } else {
+                        Ok(root)
+                    }
+                },
+                Err(status) => Err(status),
             }
         }
         result
     }
-    func map_values(f: func(Any) -> Any) -> Record {
+    func map_values(f: func(Any) -> Any) -> Result<Record, i32> {
         let ks = keys(self)
-        let mut result = map_new()
+        let mut result = match map_new() {
+            Ok(root) => Ok(root),
+            Err(status) => Err(status),
+        }
         for mv_k in ks {
-            let mv_v = map_get(self, mv_k)
-            result = map_set(result, mv_k, f(mv_v.1))
+            result = match result {
+                Ok(root) => {
+                    let mv_v = map_get(self, mv_k)
+                    match map_set(root, mv_k, f(mv_v.1)) {
+                        Ok(updated) => {
+                            drop(root)
+                            Ok(updated)
+                        },
+                        Err(status) => {
+                            drop(root)
+                            Err(status)
+                        },
+                    }
+                },
+                Err(status) => Err(status),
+            }
         }
         result
     }
-    func update(key: string, f: func(Any) -> Any) -> Record {
+    func update(key: string, f: func(Any) -> Any) -> Result<Record, i32> {
         let uv = map_get(self, key)
         if uv.0 {
-            let mut result = map_from_list(to_list(self))
-            map_set(result, key, f(uv.1))
+            match map_clone(self) {
+                Ok(result) => match map_set(result, key, f(uv.1)) {
+                    Ok(updated) => {
+                        drop(result)
+                        Ok(updated)
+                    },
+                    Err(status) => {
+                        drop(result)
+                        Err(status)
+                    },
+                },
+                Err(status) => Err(status),
+            }
         } else {
-            self
+            Ok(self)
         }
     }
-    func pick(ks: List<string>) -> Record {
-        let mut result = map_new()
+    func pick(ks: List<string>) -> Result<Record, i32> {
+        let mut result = match map_new() {
+            Ok(root) => Ok(root),
+            Err(status) => Err(status),
+        }
         for pk in ks {
-            let pv = map_get(self, pk)
-            if pv.0 { result = map_set(result, pk, pv.1) }
+            result = match result {
+                Ok(root) => {
+                    let pv = map_get(self, pk)
+                    if pv.0 {
+                        match map_set(root, pk, pv.1) {
+                            Ok(updated) => {
+                                drop(root)
+                                Ok(updated)
+                            },
+                            Err(status) => {
+                                drop(root)
+                                Err(status)
+                            },
+                        }
+                    } else {
+                        Ok(root)
+                    }
+                },
+                Err(status) => Err(status),
+            }
         }
         result
     }
-    func omit(ks: List<string>) -> Record {
+    func omit(ks: List<string>) -> Result<Record, i32> {
         // 0.39.136: membership is spelled inline (not via a bare `contains`)
         // so this body never depends on which module's `contains` wins name
         // resolution after a merge — builtins and stdlib share that name.
         let all_keys = keys(self)
-        let mut result = map_from_list(to_list(self))
+        let mut result = map_clone(self)
         for ok in all_keys {
-            let mut found = false
-            for k2 in ks {
-                if !found && k2 == ok { found = true }
+            result = match result {
+                Ok(root) => {
+                    let mut found = false
+                    for k2 in ks {
+                        if !found && k2 == ok { found = true }
+                    }
+                    if found {
+                        let updated = map_remove(root, ok)
+                        drop(root)
+                        Ok(updated)
+                    } else {
+                        Ok(root)
+                    }
+                },
+                Err(status) => Err(status),
             }
-            if found { result = map_remove(result, ok) }
         }
         result
     }
 }
 
-// Compatibility functions — keep original signatures.
+// Compatibility functions — preserve the raw builtins' fallible Result API.
 
 // new: Creates an empty Record (map).
-pub func new() -> Record {
-    map_new()
+pub func new() -> Result<Record, i32> {
+    match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
 }
 
 // get: Looks up key in map m. Returns (found, value).
@@ -133,9 +250,20 @@ pub func get(m: Record, key: string) -> (bool, Any) {
 
 // set: Sets key to value in map m, returns updated map.
 // Preserves the original map on both VM and native backends by copying first.
-pub func set(m: Record, key: string, value: Any) -> Record {
-    let mut result = map_from_list(to_list(m))
-    map_set(result, key, value)
+pub func set(m: Record, key: string, value: Any) -> Result<Record, i32> {
+    match map_clone(m) {
+        Ok(result) => match map_set(result, key, value) {
+            Ok(updated) => {
+                drop(result)
+                Ok(updated)
+            },
+            Err(status) => {
+                drop(result)
+                Err(status)
+            },
+        },
+        Err(status) => Err(status),
+    }
 }
 
 // has_key: Returns true if key exists in m.
@@ -145,9 +273,15 @@ pub func has_key(m: Record, key: string) -> bool {
 
 // remove: Removes key from map m, returns updated map.
 // Preserves the original map on both VM and native backends by copying first.
-pub func remove(m: Record, key: string) -> Record {
-    let mut result = map_from_list(to_list(m))
-    map_remove(result, key)
+pub func remove(m: Record, key: string) -> Result<Record, i32> {
+    match map_clone(m) {
+        Ok(result) => {
+            let updated = map_remove(result, key)
+            drop(result)
+            Ok(updated)
+        },
+        Err(status) => Err(status),
+    }
 }
 
 // size: Returns the number of entries in map m.
@@ -159,7 +293,6 @@ pub func size(m: Record) -> i32 {
 pub func from_list(pairs: List<(string, Any)>) -> Record {
     map_from_list(pairs)
 }
-
 
 // get_or_default: Looks up key, returns default if not found.
 // 0.39.136: generic over the default's type — `get_or_default(m, k, 0)`
@@ -174,12 +307,29 @@ pub func get_or_default<T>(m: Record, key: string, default: T) -> T {
 }
 
 // merge: Returns a new map with all entries from a and b (b overwrites a).
-pub func merge(a: Record, b: Record) -> Record {
+pub func merge(a: Record, b: Record) -> Result<Record, i32> {
     let b_keys = keys(b)
-    let mut result = map_from_list(to_list(a))
+    let mut result = match map_clone(a) {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
     for bk in b_keys {
-        let bv = map_get(b, bk)
-        result = map_set(result, bk, bv.1)
+        result = match result {
+            Ok(root) => {
+                let bv = map_get(b, bk)
+                match map_set(root, bk, bv.1) {
+                    Ok(updated) => {
+                        drop(root)
+                        Ok(updated)
+                    },
+                    Err(status) => {
+                        drop(root)
+                        Err(status)
+                    },
+                }
+            },
+            Err(status) => Err(status),
+        }
     }
     result
 }
@@ -197,61 +347,143 @@ pub func to_list(m: Record) -> List<(string, Any)> {
 }
 
 // filter_keys: Returns a new map with only keys satisfying pred.
-pub func filter_keys(m: Record, pred: func(string) -> bool) -> Record {
+pub func filter_keys(m: Record, pred: func(string) -> bool) -> Result<Record, i32> {
     let ks = keys(m)
-    let mut result = map_new()
+    let mut result = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
     for fk_k in ks {
-        if pred(fk_k) {
-            let fk_v = map_get(m, fk_k)
-            result = map_set(result, fk_k, fk_v.1)
+        result = match result {
+            Ok(root) => {
+                if pred(fk_k) {
+                    let fk_v = map_get(m, fk_k)
+                    match map_set(root, fk_k, fk_v.1) {
+                        Ok(updated) => {
+                            drop(root)
+                            Ok(updated)
+                        },
+                        Err(status) => {
+                            drop(root)
+                            Err(status)
+                        },
+                    }
+                } else {
+                    Ok(root)
+                }
+            },
+            Err(status) => Err(status),
         }
     }
     result
 }
 
 // map_values: Returns a new map with f applied to each value.
-pub func map_values(m: Record, f: func(Any) -> Any) -> Record {
+pub func map_values(m: Record, f: func(Any) -> Any) -> Result<Record, i32> {
     let ks = keys(m)
-    let mut result = map_new()
+    let mut result = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
     for mv_k in ks {
-        let mv_v = map_get(m, mv_k)
-        result = map_set(result, mv_k, f(mv_v.1))
+        result = match result {
+            Ok(root) => {
+                let mv_v = map_get(m, mv_k)
+                match map_set(root, mv_k, f(mv_v.1)) {
+                    Ok(updated) => {
+                        drop(root)
+                        Ok(updated)
+                    },
+                    Err(status) => {
+                        drop(root)
+                        Err(status)
+                    },
+                }
+            },
+            Err(status) => Err(status),
+        }
     }
     result
 }
 
 // update: Applies f to the value at key, returns updated map.
-pub func update(m: Record, key: string, f: func(Any) -> Any) -> Record {
+pub func update(m: Record, key: string, f: func(Any) -> Any) -> Result<Record, i32> {
     let uv = map_get(m, key)
     if uv.0 {
-        let mut result = map_from_list(to_list(m))
-        map_set(result, key, f(uv.1))
+        match map_clone(m) {
+            Ok(result) => match map_set(result, key, f(uv.1)) {
+                Ok(updated) => {
+                    drop(result)
+                    Ok(updated)
+                },
+                Err(status) => {
+                    drop(result)
+                    Err(status)
+                },
+            },
+            Err(status) => Err(status),
+        }
     } else {
-        m
+        Ok(m)
     }
 }
 
 // pick: Returns a new map with only the specified keys.
-pub func pick(m: Record, ks: List<string>) -> Record {
-    let mut result = map_new()
+pub func pick(m: Record, ks: List<string>) -> Result<Record, i32> {
+    let mut result = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
     for pk in ks {
-        let pv = map_get(m, pk)
-        if pv.0 { result = map_set(result, pk, pv.1) }
+        result = match result {
+            Ok(root) => {
+                let pv = map_get(m, pk)
+                if pv.0 {
+                    match map_set(root, pk, pv.1) {
+                        Ok(updated) => {
+                            drop(root)
+                            Ok(updated)
+                        },
+                        Err(status) => {
+                            drop(root)
+                            Err(status)
+                        },
+                    }
+                } else {
+                    Ok(root)
+                }
+            },
+            Err(status) => Err(status),
+        }
     }
     result
 }
 
 // omit: Returns a new map without the specified keys.
-pub func omit(m: Record, ks: List<string>) -> Record {
+pub func omit(m: Record, ks: List<string>) -> Result<Record, i32> {
     // Same inline-membership rationale as the method form above.
     let all_keys = keys(m)
-    let mut result = map_from_list(to_list(m))
+    let mut result = match map_clone(m) {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status),
+    }
     for ok in all_keys {
-        let mut found = false
-        for k2 in ks {
-            if !found && k2 == ok { found = true }
+        result = match result {
+            Ok(root) => {
+                let mut found = false
+                for k2 in ks {
+                    if !found && k2 == ok { found = true }
+                }
+                if found {
+                    let updated = map_remove(root, ok)
+                    drop(root)
+                    Ok(updated)
+                } else {
+                    Ok(root)
+                }
+            },
+            Err(status) => Err(status),
         }
-        if found { result = map_remove(result, ok) }
     }
     result
 }

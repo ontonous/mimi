@@ -1,0 +1,19 @@
+// V0.2 P6 W2 Flow terminal-state probe.  The exported job consumes Idle
+// exactly once and reaches Done; a separate richer document fixture carries
+// the snapshot/undo data model.
+
+flow ExportJob {
+    state Idle { revision: i32 }
+    state Done { revision: i32 }
+
+    transition finish(Idle) -> Done {
+        return Done { revision: self.revision + 1 }
+    }
+}
+
+func main() -> i32 {
+    let start = Idle { revision: 4 }
+    let finished = ExportJob::finish(start)
+    println(finished.revision)
+    0
+}

@@ -1,0 +1,38 @@
+// Canonical Map owner observer v1: build persistent String/i32 snapshots,
+// retain an owned JSON snapshot, observe the live Map, then drop every Map
+// root before printing the detached JSON value.
+func main() -> i32 {
+    match map_new() {
+        Ok(m0) => {
+        match map_set(m0, "z-label", "persistent observer") {
+            Ok(m1) => {
+            match map_set(m1, "a-number", 42) {
+                Ok(m2) => {
+        let snapshot = to_json(m2)
+
+        println(m2)
+        drop(m0)
+        drop(m1)
+        drop(m2)
+        println(snapshot)
+        drop(snapshot)
+        0
+                },
+                Err(status) => {
+                drop(m1)
+                drop(m0)
+                status
+                },
+            }
+            },
+            Err(status) => {
+            drop(m0)
+            status
+            },
+        }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

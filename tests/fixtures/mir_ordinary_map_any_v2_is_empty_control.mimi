@@ -1,0 +1,30 @@
+type IsEmptyPayload { text: string }
+
+func main() -> i32 {
+    let payload = IsEmptyPayload { text: "another owner payload!!!" }
+    match map_new() {
+        Ok(empty) => {
+        let empty_result = is_empty(empty)
+        println(empty_result)
+
+    match map_set(empty, "payload", payload) {
+        Ok(populated) => {
+            let populated_result = is_empty(populated)
+            println(populated_result)
+
+            drop(empty)
+            drop(populated)
+            drop(payload)
+            0
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

@@ -1,0 +1,50 @@
+// S3 closes both listener and connector creation over one endpoint scope.
+// The C side independently rejects any other scope before socket/connect.
+
+const W4_LOOPBACK_SCOPE: i32 = 1
+
+extern "C" {
+    func w4_open_listener_s3(scope: i32, port: i32, backlog: i32) -> i64;
+    func w4_connect_loopback_s3(scope: i32, port: i32) -> i64;
+    func w4_listener_port(fd: i64) -> i32;
+}
+
+func open_scoped_listener(scope: i32, port: i32) -> Result<i64, string> {
+    if scope != W4_LOOPBACK_SCOPE {
+        return Err("EndpointDenied")
+    }
+    if port != 0 && (port < 24000 || port > 24100) {
+        return Err("PortDenied")
+    }
+    let fd = w4_open_listener_s3(scope, port, 8)
+    if fd < 0 { Err("EndpointDenied") } else { Ok(fd) }
+}
+
+func connect_scoped(scope: i32, port: i32) -> Result<i64, string> {
+    if scope != W4_LOOPBACK_SCOPE {
+        return Err("EndpointDenied")
+    }
+    if port < 24000 || port > 24100 {
+        return Err("PortDenied")
+    }
+    let fd = w4_connect_loopback_s3(scope, port)
+    if fd < 0 { Err("ConnectFailed") } else { Ok(fd) }
+}
+
+func main() -> i32 {
+    let denied_scope = open_scoped_listener(0, 0)
+    let denied_port = open_scoped_listener(W4_LOOPBACK_SCOPE, 23999)
+    if denied_scope.is_ok() || denied_port.is_ok() { return 1 }
+
+    let listener = open_scoped_listener(W4_LOOPBACK_SCOPE, 0)
+    if listener.is_err() { return 2 }
+    let fd = listener.unwrap()
+    let assigned_port = w4_listener_port(fd)
+    if assigned_port < 24000 || assigned_port > 24100 {
+        close_fd(fd)
+        return 3
+    }
+    close_fd(fd)
+    println("S3_SCOPE_DENIED_BEFORE_SOCKET")
+    0
+}

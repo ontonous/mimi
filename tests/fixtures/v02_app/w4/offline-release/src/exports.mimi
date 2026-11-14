@@ -1,0 +1,23 @@
+// Exports-only target. This file intentionally has no main function.
+
+pub extern "C" func w4_factorial(value: i32) -> i32 {
+    if value <= 1 {
+        1
+    } else {
+        value * w4_factorial(value - 1)
+    }
+}
+
+pub extern "C" func w4_status(value: i32) -> i32 {
+    if value < 0 {
+        -1
+    } else {
+        w4_factorial(value) + 1
+    }
+}
+
+// The service calls through this function from Mimi. The host driver calls
+// the C wrappers above from a separately loaded shared object.
+pub func internal_export_probe(value: i32) -> i32 {
+    w4_status(value) + w4_factorial(value - 1)
+}

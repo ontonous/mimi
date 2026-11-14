@@ -23,10 +23,64 @@ func main() -> i32 {
     println(10.fibonacci())
     println(48.gcd(36))
     println((-5).abs())
-    let m = map_new()
-    map_set(m, "k1", 11)
-    map_set(m, "k2", 22)
-    println(map_size(m))
-    println(map_get(m, "k1"))
-    0
+    match map_new() {
+        Ok(m) => {
+            match map_set(m, "k1", 11) {
+                Ok(with_k1) => {
+                    match map_set(with_k1, "k2", 22) {
+                        Ok(with_both) => {
+                            if map_size(m) != 0 {
+                                drop(m)
+                                drop(with_k1)
+                                drop(with_both)
+                                return 18
+                            }
+                            if map_size(with_k1) != 1 {
+                                drop(m)
+                                drop(with_k1)
+                                drop(with_both)
+                                return 19
+                            }
+                            if map_size(with_both) != 2 {
+                                drop(m)
+                                drop(with_k1)
+                                drop(with_both)
+                                return 20
+                            }
+                            let updated_pair = map_get(with_both, "k1")
+                            if !updated_pair.0 || updated_pair.1 != 11 {
+                                drop(updated_pair)
+                                drop(m)
+                                drop(with_k1)
+                                drop(with_both)
+                                return 21
+                            }
+                            drop(updated_pair)
+
+                            // Preserve the original probe's observation of the
+                            // untouched root after Set returned persistent roots.
+                            println(map_size(m))
+                            let original_pair = map_get(m, "k1")
+                            println(original_pair)
+                            drop(original_pair)
+                            drop(with_both)
+                            drop(with_k1)
+                            drop(m)
+                            0
+                        },
+                        Err(status) => {
+                            drop(m)
+                            drop(with_k1)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(m)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }

@@ -1,7 +1,21 @@
 func main() -> i32 {
-    let root = map_new()
-    let key = "answer"
-    let updated = map_set(root, key, 42)
-    drop(updated)
-    0
+    match map_new() {
+        Ok(root) => {
+            let key = "answer"
+            match map_set(root, key, 42) {
+                Ok(updated) => {
+                    drop(root)
+                    drop(updated)
+                    0
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            status
+        },
+    }
 }

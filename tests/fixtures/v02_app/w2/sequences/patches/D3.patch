@@ -1,0 +1,91 @@
+--- w2_document_core.mimi
++++ w2_document_core.mimi
+@@ -48,6 +48,7 @@
+     TempReadFailed(string)
+     DestinationWriteFailed(string)
+     CleanupFailed(string)
++    ChecksumMismatch
+ }
+ type ExportFailure {
+     primary: Option<ExportError>,
+@@ -204,7 +205,7 @@
+                         let cleanup_error: Option<ExportError> = if removed { None } else { Some(CleanupFailed("temporary file retained after verification mismatch")) }
+                         let cleanup_owner = if removed { "" } else { "local exporter" }
+                         Err(ExportFailure {
+-                            primary: Some(TempReadFailed("staged bytes differ from snapshot")),
++                            primary: Some(ChecksumMismatch),
+                             cleanup: cleanup_error,
+                             destination_may_exist: false,
+                             destination_path: destination,
+@@ -435,6 +436,54 @@
+     no_partial_publication && retry_ok
+ }
+ 
++
++func d3_verify_staged(expected: string, actual: string) -> Result<string, ExportError> {
++    if expected == actual { Ok(actual) } else { Err(ChecksumMismatch) }
++}
++
++func d3_preserves_write_error(path: string) -> bool {
++    match write_file(path, "cannot create a child beneath /dev/null") {
++        Err(message) => {
++            let old_error: ExportError = TempWriteFailed(message)
++            match old_error {
++                TempWriteFailed(_) => true,
++                TempReadFailed(_) => false,
++                DestinationWriteFailed(_) => false,
++                CleanupFailed(_) => false,
++                ChecksumMismatch => false,
++            }
++        },
++        Ok(_) => false,
++    }
++}
++
++func d3_error_variant_check() -> bool {
++    let expected = "document=7\nrevision=1\n1:paragraph:A\n"
++    let temporary_path = "/tmp/mimi-v02-w2-seq-d3-corrupt.tmp"
++    remove_file(temporary_path)
++    let injected = match write_file(temporary_path, expected + "corrupt tail") {
++        Ok(_) => true,
++        Err(_) => false,
++    }
++    let actual = match read_file(temporary_path) {
++        Ok(contents) => contents,
++        Err(_) => "read failed",
++    }
++    let mismatch = d3_verify_staged(expected, actual)
++    let mismatch_classified = match mismatch {
++        Err(ChecksumMismatch) => true,
++        Err(TempWriteFailed(_)) => false,
++        Err(TempReadFailed(_)) => false,
++        Err(DestinationWriteFailed(_)) => false,
++        Err(CleanupFailed(_)) => false,
++        Ok(_) => false,
++    }
++    // Exercise the old write error through the real filesystem boundary.
++    let old_write_error_preserved = d3_preserves_write_error("/dev/null/mimi-v02-w2-seq-d3.tmp")
++    remove_file(temporary_path)
++    injected && mismatch_classified && old_write_error_preserved
++}
++
+ func main() -> i32 {
+     let document_id = 7
+     let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+@@ -546,6 +595,7 @@
+     }
+     let closed = DocumentSession::close(session_after_undo)
+     let d2_cancel_retry_ok = d2_cancel_and_retry(snapshot_s1)
++    let d3_errors_ok = d3_error_variant_check()
+     let closed_revision = closed.final_revision
+ 
+     // There is deliberately no DocumentSession transition accepting Closed
+@@ -560,7 +610,7 @@
+     }
+     let delta_undo_ok = session_b_delta_count == 2 && len(session_after_undo.undo) == 1 &&
+         session_after_undo.current.revision_id == revision_a.revision_id
+-    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok && d2_cancel_retry_ok &&
++    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok && d2_cancel_retry_ok && d3_errors_ok &&
+         closed.document_id == document_id &&
+         node_text(closed_revision, body_id) == Ok("A") &&
+         revision_a_ok && revision_b_ok && output_ok && snapshot_ok && edited_b_ok && autosave_ok && export_ok

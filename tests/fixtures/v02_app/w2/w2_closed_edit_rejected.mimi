@@ -1,0 +1,27 @@
+// Negative W2 checker fixture: once the document session is Closed there is
+// no edit transition accepting that state. `mimi check` is expected to reject
+// the call below; keeping the invalid call here makes the static boundary
+// independently reproducible without making the runnable baseline fail.
+
+type Revision { document_id: i32, revision_id: i32 }
+
+flow DocumentSession {
+    state Open { document_id: i32, current: Revision }
+    state Closed { document_id: i32, final_revision: Revision }
+
+    transition edit(Open, next: Revision) -> Open {
+        return Open { document_id: self.document_id, current: next }
+    }
+    transition close(Open) -> Closed {
+        return Closed { document_id: self.document_id, final_revision: self.current }
+    }
+}
+
+func main() -> i32 {
+    let closed = DocumentSession::close(Open {
+        document_id: 7,
+        current: Revision { document_id: 7, revision_id: 1 },
+    })
+    let rejected = DocumentSession::edit(closed, Revision { document_id: 7, revision_id: 2 })
+    0
+}

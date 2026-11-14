@@ -1,0 +1,8 @@
+// H2: optional filtering keeps the hot path allocation-free.
+func gain(x: i32, filter: bool) -> i32 {
+    let value = if filter { (x as i64) * 2 } else { x as i64 }
+    if value < -1000 { -1000 } else if value > 1000 { 1000 } else { value as i32 }
+}
+func main() -> i32 {
+    println(gain(-501, true)); println(gain(501, false)); 0
+}

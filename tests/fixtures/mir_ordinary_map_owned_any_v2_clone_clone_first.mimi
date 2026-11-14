@@ -1,0 +1,58 @@
+func main() -> i32 {
+    let original = "original payload"
+    let replacement = "replacement payload"
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, "same-key", original) {
+        Ok(source) => {
+            let cloned = source
+    match map_set(source, "same-key", replacement) {
+        Ok(updated) => {
+
+                let cloned_pair = map_get(cloned, "same-key")
+                let cloned_payload = unpack_string(cloned_pair.1)
+                let cloned_is_original = cloned_payload == "original payload"
+                drop(cloned_pair)
+                drop(cloned_payload)
+                drop(cloned)
+
+                let source_pair = map_get(source, "same-key")
+                let source_payload = unpack_string(source_pair.1)
+                let source_is_original = source_payload == "original payload"
+                let updated_pair = map_get(updated, "same-key")
+                let updated_payload = unpack_string(updated_pair.1)
+                let updated_is_replacement = updated_payload == "replacement payload"
+
+                drop(source_pair)
+                drop(source_payload)
+                drop(updated_pair)
+                drop(updated_payload)
+                drop(empty)
+                drop(source)
+                drop(updated)
+                drop(original)
+                drop(replacement)
+                println(source_is_original)
+                println(cloned_is_original)
+                println(updated_is_replacement)
+
+                0
+        },
+        Err(status) => {
+        drop(empty)
+        drop(source)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

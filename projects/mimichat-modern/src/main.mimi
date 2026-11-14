@@ -52,28 +52,32 @@ flow ChatSession {
     }
 }
 
+// Room counts, aggregate post totals, and the last registered room live in a
+// value carried through Flow transitions. The Actor below stays stateless;
+// its mailbox reports readiness while callers own and advance this state.
+flow RoomServiceState {
+    state RoomServiceReady { rooms: i64, total: i64, last_room: string }
+
+    transition register(RoomServiceReady, room: string) -> RoomServiceReady {
+        return RoomServiceReady {
+            rooms: self.rooms + 1,
+            total: self.total,
+            last_room: room,
+        }
+    }
+
+    transition post(RoomServiceReady, id: i64) -> RoomServiceReady {
+        return RoomServiceReady {
+            rooms: self.rooms,
+            total: self.total + id,
+            last_room: self.last_room,
+        }
+    }
+}
+
 actor RoomService {
-    total: i64 = 0 as i64
-    rooms: i64 = 0 as i64
-    last_room: string = ""
-
-    func register(room: string) -> i64 {
-        self.rooms = self.rooms + 1
-        self.last_room = room
-        self.rooms
-    }
-
-    func post(id: i64) -> i64 {
-        self.total = self.total + id
-        self.total
-    }
-
-    func room_count() -> i64 {
-        self.rooms
-    }
-
-    func last() -> string {
-        self.last_room
+    func healthy() -> i32 {
+        1
     }
 }
 
@@ -168,13 +172,17 @@ func main() -> i32 {
     let id4 = ChatSession::leave(id3)
     println("left: " + id4.nick)
 
-    // Actor: room service state.
+    // Actor mailbox health plus caller-owned Flow state for room service data.
     let svc = RoomService.spawn()
-    let r1 = svc.register("lobby")
-    let r2 = svc.register("general")
-    let t1 = svc.post(10 as i64)
-    let t2 = svc.post(20 as i64)
-    println("rooms: " + to_string(r2) + " total: " + to_string(t2) + " last: " + svc.last())
+    if svc.healthy() != 1 {
+        return 3
+    }
+    let room0 = RoomServiceReady { rooms: 0, total: 0, last_room: "" }
+    let room1 = RoomServiceState::register(room0, "lobby")
+    let room2 = RoomServiceState::register(room1, "general")
+    let posts1 = RoomServiceState::post(room2, 10 as i64)
+    let posts2 = RoomServiceState::post(posts1, 20 as i64)
+    println("rooms: " + to_string(posts2.rooms) + " total: " + to_string(posts2.total) + " last: " + posts2.last_room)
 
     // Real-thread channel worker: typed Channel<i64> + spawn/await.
     let ch = channel_new()
@@ -234,11 +242,19 @@ func test_flow_join_accept_leave() {
 
 func test_actor_room_service() {
     let svc = RoomService.spawn()
-    let r1 = svc.register("lobby")
-    let r2 = svc.register("general")
-    let t1 = svc.post(5 as i64)
-    let t2 = svc.post(6 as i64)
-    if r1 != 1 || r2 != 2 || t1 != 5 || t2 != 11 {
+    if svc.healthy() != 1 {
+        println("actor failed")
+        return
+    }
+    let room0 = RoomServiceReady { rooms: 0, total: 0, last_room: "" }
+    let room1 = RoomServiceState::register(room0, "lobby")
+    let first_room_count_ok = room1.rooms == 1
+    let room2 = RoomServiceState::register(room1, "general")
+    let second_room_count_ok = room2.rooms == 2
+    let posts1 = RoomServiceState::post(room2, 5 as i64)
+    let first_total_ok = posts1.total == 5
+    let posts2 = RoomServiceState::post(posts1, 6 as i64)
+    if !first_room_count_ok || !second_room_count_ok || !first_total_ok || posts2.rooms != 2 || posts2.total != 11 || posts2.last_room != "general" {
         println("actor failed")
         return
     }

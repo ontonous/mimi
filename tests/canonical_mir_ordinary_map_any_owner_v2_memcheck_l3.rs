@@ -10,11 +10,17 @@ mod memcheck_summary;
 use memcheck_summary::MemcheckSummary;
 
 const ROUTE_PROFILE: &str = "map-any-owner-v2";
-const DIRECT_PRINT_ROUTE_PROFILE: &str = "map-any-owner-v2-direct-print-v1";
+const DIRECT_PRINT_RESULT_ROUTE_PROFILE: &str = "map-any-owner-v2-direct-print-result-v1";
 const COMPUTED_KEY_GET_ROUTE_PROFILE: &str = "map-any-owner-v2-computed-key-get-v1";
+const KEYS_SNAPSHOT_ROUTE_PROFILE: &str = "map-any-owner-v2-keys-snapshot-v1";
+const HETEROGENEOUS_VALUES_ROUTE_PROFILE: &str =
+    "map-any-owner-v2-values-heterogeneous-string-index1-v1";
+const DIRECT_TUPLE_GET_L1_ROUTE_PROFILE: &str =
+    "ordinary-map-owned-any-v2-direct-tuple-get-unpack-l1-core-v1";
 const EXPECTED_STDOUT: &str = "owned label\n";
 const EMPTY_ROOT_EXPECTED_STDOUT: &str = "false\n0\n";
 const POPULATED_VALUES_EXPECTED_STDOUT: &str = "2\n";
+const KEYS_SNAPSHOT_EXPECTED_STDOUT: &str = "answer\n";
 const RECEIPT_FIELDS: &[&str] = &[
     "mir_digest",
     "type_desc_digest",
@@ -69,6 +75,27 @@ fn populated_values_fixture() -> PathBuf {
         .join("tests")
         .join("fixtures")
         .join("mir_ordinary_map_any_owner_v2_values_release.mimi")
+}
+
+fn keys_snapshot_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mir_ordinary_map_any_owner_v2_keys_snapshot.mimi")
+}
+
+fn heterogeneous_values_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mir_ordinary_map_any_owner_v2_values_heterogeneous_string_index1.mimi")
+}
+
+fn direct_tuple_get_l1_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mir_ordinary_map_owned_any_v2_direct_tuple_get_l1.mimi")
 }
 
 fn live_values_trap_fixture() -> PathBuf {
@@ -349,8 +376,60 @@ struct L3RunDirectory {
     _temporary: Option<TemporaryDirectory>,
 }
 
+fn prospective_canonical_l3_path(path: &Path) -> PathBuf {
+    if fs::symlink_metadata(path).is_ok() {
+        return fs::canonicalize(path).unwrap_or_else(|error| {
+            panic!("resolve L3 artifact path {}: {error}", path.display())
+        });
+    }
+
+    let mut missing = Vec::new();
+    let mut ancestor = path.to_path_buf();
+    while fs::symlink_metadata(&ancestor).is_err() {
+        let component = ancestor.file_name().unwrap_or_else(|| {
+            panic!(
+                "L3 artifact path has no existing ancestor: {}",
+                path.display()
+            )
+        });
+        assert_ne!(
+            component,
+            OsStr::new(".."),
+            "L3 artifact paths must be normalized before use: {}",
+            path.display()
+        );
+        missing.push(component.to_os_string());
+        assert!(
+            ancestor.pop(),
+            "L3 artifact path has no parent: {}",
+            path.display()
+        );
+    }
+    let mut canonical = fs::canonicalize(&ancestor).unwrap_or_else(|error| {
+        panic!(
+            "resolve L3 artifact ancestor {}: {error}",
+            ancestor.display()
+        )
+    });
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
+}
+
+fn assert_l3_artifacts_outside_repository(path: &Path) {
+    let repository = fs::canonicalize(env!("CARGO_MANIFEST_DIR"))
+        .expect("resolve repository root for L3 artifact policy");
+    let candidate = prospective_canonical_l3_path(path);
+    assert!(
+        !candidate.starts_with(&repository),
+        "L3 artifacts must be stored outside the repository tree: {}",
+        candidate.display()
+    );
+}
+
 impl L3RunDirectory {
-    fn new_direct_print() -> Self {
+    fn new_direct_print_result() -> Self {
         if let Some(configured) =
             std::env::var_os("MIMI_MAP_V2_L3_ARTIFACT_DIR").filter(|value| !value.is_empty())
         {
@@ -359,12 +438,12 @@ impl L3RunDirectory {
                 configured
             } else {
                 std::env::current_dir()
-                    .expect("resolve current directory for DirectPrint artifacts")
+                    .expect("resolve current directory for DirectPrintResult artifacts")
                     .join(configured)
             };
             assert!(
                 !root.exists() && fs::symlink_metadata(&root).is_err(),
-                "refusing to reuse existing DirectPrint artifact path {}",
+                "refusing to reuse existing DirectPrintResult artifact path {}",
                 root.display()
             );
         }
@@ -383,6 +462,7 @@ impl L3RunDirectory {
                     .expect("resolve current directory for L3 artifacts")
                     .join(configured)
             };
+            assert_l3_artifacts_outside_repository(&root);
             if !root.exists() {
                 if let Some(parent) = root.parent() {
                     fs::create_dir_all(parent).expect("create parent for L3 artifact directory");
@@ -438,7 +518,7 @@ fn retain_mimi_binary_identity(mimi: &Path, source: &str, evidence_root: &Path) 
     assert_success(&output, "sha256sum CARGO_BIN_EXE_mimi");
 
     let hash_output = text(&output.stdout);
-    let line = hash_output.trim_end_matches(|character| matches!(character, '\r' | '\n'));
+    let line = hash_output.trim_end_matches(['\r', '\n']);
     let (digest, hashed_path) = line
         .split_once("  ")
         .expect("sha256sum output contains a digest and path");
@@ -774,34 +854,118 @@ fn assert_strict_memcheck_with_valgrind(
     (output.stdout, summary)
 }
 
-fn assert_direct_print_default_route(stderr: &str, expected_digest: &str, mode: &str) {
-    let route_lines = stderr
+fn assert_direct_print_result_route_census(
+    stderr: &str,
+    expected_mode: &str,
+    mode: &str,
+) -> (String, String) {
+    let admission_rows = stderr
         .lines()
-        .filter(|line| line.contains("canonical route disposition:"))
+        .filter(|line| line.starts_with("MIMI_ROUTE_CENSUS route-admission "))
         .collect::<Vec<_>>();
     assert_eq!(
-        route_lines.len(),
+        admission_rows.len(),
         1,
-        "{mode} must emit only its direct-print route receipt: {stderr}"
+        "{mode} must report one Checker-bound DirectPrintResult admission: {stderr}"
     );
-    let marker = format!(
-        "canonical route disposition: canonical ({DIRECT_PRINT_ROUTE_PROFILE}) mir_digest="
-    );
-    let receipt = route_lines[0];
-    assert!(
-        receipt.contains(&marker),
-        "{mode} selected a route other than {DIRECT_PRINT_ROUTE_PROFILE}: {stderr}"
-    );
-    let digest = receipt
-        .split_once("mir_digest=")
-        .expect("direct-print receipt contains a MIR digest")
-        .1
-        .trim();
+    let admission = admission_rows[0];
     assert_eq!(
-        digest, expected_digest,
-        "{mode} route receipt digest differs"
+        census_field(admission, "mode"),
+        Some(expected_mode),
+        "{mode} route admission mode"
     );
+    assert_eq!(
+        census_field(admission, "checker_profile"),
+        Some(DIRECT_PRINT_RESULT_ROUTE_PROFILE),
+        "{mode} Checker route profile"
+    );
+    assert_eq!(
+        census_field(admission, "build_route_profile"),
+        Some(DIRECT_PRINT_RESULT_ROUTE_PROFILE),
+        "{mode} native build route profile"
+    );
+    let digest = census_field(admission, "mir_digest")
+        .expect("DirectPrintResult admission carries the MIR digest")
+        .to_owned();
+    let receipt_identity = census_field(admission, "receipt_identity_digest")
+        .expect("DirectPrintResult admission carries the Checker receipt identity")
+        .to_owned();
+    for (field, expected) in [
+        ("mir_route_identity_digest", receipt_identity.as_str()),
+        ("build_route_identity_digest", receipt_identity.as_str()),
+    ] {
+        assert_eq!(
+            census_field(admission, field),
+            Some(expected),
+            "{mode} {field} differs from the Checker receipt identity"
+        );
+    }
+    assert!(
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "{mode} has malformed DirectPrintResult MIR digest: {digest}"
+    );
+    assert!(
+        receipt_identity.len() == 64
+            && receipt_identity
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()),
+        "{mode} has malformed DirectPrintResult route identity: {receipt_identity}"
+    );
+
+    let native_rows = stderr
+        .lines()
+        .filter(|line| line.starts_with("MIMI_ROUTE_CENSUS canonical-native-build "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native_rows.len(),
+        1,
+        "{mode} must report one DirectPrintResult native consumer receipt: {stderr}"
+    );
+    let native = native_rows[0];
+    for field in ["route_id", "profile", "build_route_profile"] {
+        assert_eq!(
+            census_field(native, field),
+            Some(DIRECT_PRINT_RESULT_ROUTE_PROFILE),
+            "{mode} native consumer {field}"
+        );
+    }
+    for (field, expected) in [
+        ("mir_digest", digest.as_str()),
+        ("mir_route_identity_digest", receipt_identity.as_str()),
+        ("route_identity_digest", receipt_identity.as_str()),
+    ] {
+        assert_eq!(
+            census_field(native, field),
+            Some(expected),
+            "{mode} native consumer {field}"
+        );
+    }
+
+    if expected_mode == "default" {
+        let route_lines = stderr
+            .lines()
+            .filter(|line| line.contains("canonical route disposition:"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            route_lines.len(),
+            1,
+            "{mode} must emit one default route disposition: {stderr}"
+        );
+        let marker = format!(
+            "canonical route disposition: canonical ({DIRECT_PRINT_RESULT_ROUTE_PROFILE}) mir_digest={digest}"
+        );
+        assert_eq!(
+            route_lines[0], marker,
+            "{mode} disposition does not carry its exact DirectPrintResult receipt"
+        );
+    }
+    assert_explicit_mir_census(stderr, &digest, mode);
     assert_no_legacy_fallback(stderr, mode);
+    assert!(
+        !stderr.contains("VerifierOnly"),
+        "{mode} execution cannot use a verifier-only projection: {stderr}"
+    );
+    (digest, receipt_identity)
 }
 
 fn assert_computed_key_get_default_route(stderr: &str, expected_digest: &str, mode: &str) {
@@ -826,7 +990,126 @@ fn assert_computed_key_get_default_route(stderr: &str, expected_digest: &str, mo
     assert_no_legacy_fallback(stderr, mode);
 }
 
-fn assert_direct_print_strict_memcheck(
+fn assert_keys_snapshot_default_route(stderr: &str, expected_digest: &str, mode: &str) {
+    let marker = format!(
+        "canonical route disposition: canonical ({KEYS_SNAPSHOT_ROUTE_PROFILE}) mir_digest="
+    );
+    let matching = stderr
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching.len(),
+        1,
+        "{mode} must emit one KeysSnapshot route receipt: {stderr}"
+    );
+    let digest = matching[0]
+        .split_once("mir_digest=")
+        .expect("KeysSnapshot route receipt contains a MIR digest")
+        .1
+        .trim();
+    assert_eq!(digest, expected_digest, "{mode} MIR digest differs");
+    assert_no_legacy_fallback(stderr, mode);
+}
+
+fn assert_heterogeneous_values_default_route(stderr: &str, expected_digest: &str, mode: &str) {
+    let marker = format!(
+        "canonical route disposition: canonical ({HETEROGENEOUS_VALUES_ROUTE_PROFILE}) mir_digest="
+    );
+    let matching = stderr
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching.len(),
+        1,
+        "{mode} must emit one heterogeneous Values route receipt: {stderr}"
+    );
+    let digest = matching[0]
+        .split_once("mir_digest=")
+        .expect("heterogeneous Values route receipt contains a MIR digest")
+        .1
+        .trim();
+    assert_eq!(digest, expected_digest, "{mode} MIR digest differs");
+    assert_no_legacy_fallback(stderr, mode);
+}
+
+fn census_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+    line.split_whitespace()
+        .find_map(|field| field.strip_prefix(&format!("{name}=")))
+}
+
+fn assert_direct_tuple_get_l1_route_census(stderr: &str, mode: &str) -> (String, String) {
+    let admission_rows = stderr
+        .lines()
+        .filter(|line| line.starts_with("MIMI_ROUTE_CENSUS route-admission "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        admission_rows.len(),
+        1,
+        "{mode} must report its exact source-bound route admission: {stderr}"
+    );
+    let admission = admission_rows[0];
+    assert_eq!(
+        census_field(admission, "checker_profile"),
+        Some(DIRECT_TUPLE_GET_L1_ROUTE_PROFILE),
+        "{mode} Checker profile"
+    );
+    assert_eq!(
+        census_field(admission, "build_route_profile"),
+        Some(DIRECT_TUPLE_GET_L1_ROUTE_PROFILE),
+        "{mode} build profile"
+    );
+    let digest = census_field(admission, "mir_digest")
+        .expect("route admission carries the MIR digest")
+        .to_owned();
+    let receipt_identity = census_field(admission, "receipt_identity_digest")
+        .expect("route admission carries the source receipt identity")
+        .to_owned();
+    assert_eq!(
+        census_field(admission, "mir_route_identity_digest"),
+        Some(receipt_identity.as_str()),
+        "{mode} MIR and Checker route identities differ"
+    );
+    assert_eq!(
+        census_field(admission, "build_route_identity_digest"),
+        Some(receipt_identity.as_str()),
+        "{mode} build and Checker route identities differ"
+    );
+
+    let native_rows = stderr
+        .lines()
+        .filter(|line| line.starts_with("MIMI_ROUTE_CENSUS canonical-native-build "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        native_rows.len(),
+        1,
+        "{mode} must report the native consumer receipt: {stderr}"
+    );
+    assert_eq!(
+        census_field(native_rows[0], "route_id"),
+        Some(DIRECT_TUPLE_GET_L1_ROUTE_PROFILE),
+        "{mode} native route identity"
+    );
+    assert_eq!(
+        census_field(native_rows[0], "profile"),
+        Some(DIRECT_TUPLE_GET_L1_ROUTE_PROFILE),
+        "{mode} native route profile"
+    );
+    assert_eq!(
+        census_field(native_rows[0], "mir_digest"),
+        Some(digest.as_str()),
+        "{mode} native MIR digest"
+    );
+    assert_no_legacy_fallback(stderr, mode);
+    assert!(
+        !stderr.contains("VerifierOnly"),
+        "{mode} execution cannot use the L2-only projection: {stderr}"
+    );
+    (digest, receipt_identity)
+}
+
+fn assert_direct_print_result_strict_memcheck(
     binary: &Path,
     mode: &str,
     expected_stdout: &str,
@@ -857,7 +1140,7 @@ fn assert_direct_print_strict_memcheck(
     let output = Command::new("valgrind")
         .args(&arguments)
         .output()
-        .expect("run DirectPrint native binary under required strict Valgrind Memcheck");
+        .expect("run DirectPrintResult native binary under required strict Valgrind Memcheck");
     retain_command_output(
         evidence_directory,
         OsStr::new("valgrind"),
@@ -907,12 +1190,12 @@ fn assert_direct_print_strict_memcheck(
         expected_stdout.as_bytes(),
         "{mode} native stdout"
     );
-    eprintln!("[mimi-test] complete DirectPrint Memcheck {mode} report:\n{report}");
+    eprintln!("[mimi-test] complete DirectPrintResult Memcheck {mode} report:\n{report}");
     (
         output
             .status
             .code()
-            .expect("validated DirectPrint Memcheck process status"),
+            .expect("validated DirectPrintResult Memcheck process status"),
         output.stdout,
     )
 }
@@ -1077,10 +1360,22 @@ fn map_any_owner_v2_default_and_explicit_native_builds_are_strict_memcheck_clean
 
 #[test]
 #[ignore = "strict native Memcheck L3; run scripts/verify-ordinary-map-v2-l3.sh"]
-fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are_strict_memcheck_clean(
+fn ordinary_map_owned_any_v2_direct_print_result_default_and_explicit_native_builds_are_strict_memcheck_clean(
 ) {
+    const {
+        assert!(
+            !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            "DirectPrintResult L3 must not open broad Map/Any production readiness"
+        );
+    };
+    assert_eq!(
+        std::env::var("MIMI_REQUIRE_VALGRIND").as_deref(),
+        Ok("1"),
+        "strict L3 execution requires MIMI_REQUIRE_VALGRIND=1"
+    );
+
     let (mimi, mimi_source) = mimi_bin_with_source();
-    let directory = L3RunDirectory::new_direct_print();
+    let directory = L3RunDirectory::new_direct_print_result();
     let artifact_mode = directory._temporary.is_none();
 
     if artifact_mode {
@@ -1093,14 +1388,14 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
     let version = Command::new("valgrind")
         .args(&version_arguments)
         .output()
-        .expect("query strict DirectPrint Memcheck Valgrind version");
+        .expect("query strict DirectPrintResult Memcheck Valgrind version");
     retain_command_output(
         &version_directory,
         OsStr::new("valgrind"),
         &version_arguments,
         &version,
     );
-    assert_success(&version, "DirectPrint Valgrind version query");
+    assert_success(&version, "DirectPrintResult Valgrind version query");
 
     let fixture_directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -1133,6 +1428,10 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
     ];
 
     let case_count = cases.len();
+    assert_eq!(
+        case_count, 4,
+        "DirectPrintResult L3 covers all four fixtures"
+    );
     for (case_index, (label, fixture_name, expected_stdout, expected_status)) in
         cases.into_iter().enumerate()
     {
@@ -1141,40 +1440,23 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
         create_capture_directory(&case_directory);
 
         let fixture_bytes = fs::read(&source).unwrap_or_else(|error| {
-            panic!("read DirectPrint L3 fixture {}: {error}", source.display())
+            panic!(
+                "read DirectPrintResult L3 fixture {}: {error}",
+                source.display()
+            )
         });
         write_new(&case_directory.join("source.fixture.mimi"), &fixture_bytes);
 
-        let receipt_directory = case_directory.join("receipt");
-        create_capture_directory(&receipt_directory);
-        let receipt_arguments = vec![
-            OsString::from("mir"),
-            OsString::from("--all"),
-            OsString::from("--receipt"),
-            source.as_os_str().to_owned(),
-        ];
-        let receipt = Command::new(&mimi)
-            .args(&receipt_arguments)
-            .output()
-            .expect("materialize DirectPrint MIR receipt for L3");
-        retain_command_output(
-            &receipt_directory,
-            mimi.as_os_str(),
-            &receipt_arguments,
-            &receipt,
-        );
-        let manifest = parse_manifest(&receipt);
-        let expected_digest = manifest
-            .get("mir_digest")
-            .expect("validated DirectPrint MIR receipt contains its graph digest")
-            .clone();
-
-        let mut outputs = Vec::with_capacity(2);
+        // Complete both compile-capable production routes and validate their
+        // Checker/MIR/native receipt identities before starting either L3
+        // Memcheck execution. The build census itself is the authoritative
+        // profile-specific receipt; a generic `mimi mir --receipt` is not.
+        let mut builds = Vec::with_capacity(2);
         for direct in [false, true] {
             let mode = if direct {
-                "explicit --mir DirectPrint native binary"
+                "explicit --mir DirectPrintResult native binary"
             } else {
-                "default DirectPrint native binary"
+                "default DirectPrintResult native binary"
             };
             let build_directory = case_directory.join(if direct {
                 "explicit-build"
@@ -1195,6 +1477,11 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
             }
 
             let mut command = Command::new(&mimi);
+            for (key, _) in
+                std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("MIMI_"))
+            {
+                command.env_remove(key);
+            }
             command.env("MIMI_ROUTE_CENSUS", "1").args(&build_arguments);
             let build = command
                 .output()
@@ -1208,21 +1495,39 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
             assert!(binary.is_file(), "{mode} did not leave its native binary");
 
             let stderr = text(&build.stderr);
-            if direct {
-                assert_explicit_mir_census(&stderr, &expected_digest, mode);
-            } else {
-                assert_direct_print_default_route(&stderr, &expected_digest, mode);
-            }
+            let expected_mode = if direct { "explicit-mir" } else { "default" };
+            let (mir_digest, receipt_identity) =
+                assert_direct_print_result_route_census(&stderr, expected_mode, mode);
+            builds.push((
+                binary,
+                mode.to_string(),
+                build_directory,
+                mir_digest,
+                receipt_identity,
+            ));
+        }
 
+        assert_eq!(
+            builds[0].3, builds[1].3,
+            "default and explicit DirectPrintResult builds must consume the same MIR graph"
+        );
+        assert_eq!(
+            builds[0].4, builds[1].4,
+            "default and explicit DirectPrintResult builds must consume the same Checker-bound route receipt"
+        );
+
+        let mut outputs = Vec::with_capacity(2);
+        for (binary, mode, _build_directory, _mir_digest, _receipt_identity) in builds {
+            let direct = mode.starts_with("explicit");
             let memcheck_directory = case_directory.join(if direct {
                 "explicit-memcheck"
             } else {
                 "default-memcheck"
             });
             create_capture_directory(&memcheck_directory);
-            outputs.push(assert_direct_print_strict_memcheck(
+            outputs.push(assert_direct_print_result_strict_memcheck(
                 &binary,
-                mode,
+                &mode,
                 expected_stdout,
                 expected_status,
                 &memcheck_directory,
@@ -1231,14 +1536,14 @@ fn ordinary_map_owned_any_v2_direct_print_default_and_explicit_native_builds_are
 
         assert_eq!(
             &outputs[0], &outputs[1],
-            "default/direct DirectPrint native status and stdout differ"
+            "default/explicit DirectPrintResult native status and stdout differ"
         );
     }
 
     write_new(
         &directory.path.join("run-summary.txt"),
         format!(
-            "route_profile={DIRECT_PRINT_ROUTE_PROFILE}\nglobal_map_any_v2_production_ready=false\ncase_count={case_count}\nnative_build_count={}\nmemcheck_run_count={}\ndefault_route_receipt_count={case_count}\nexplicit_mir_census_count={case_count}\nlegacy_fallback_count=0\n",
+            "route_profile={DIRECT_PRINT_RESULT_ROUTE_PROFILE}\nglobal_map_any_v2_production_ready=false\ncase_count={case_count}\nnative_build_count={}\nmemcheck_run_count={}\ndefault_route_receipt_count={case_count}\nexplicit_route_receipt_count={case_count}\nexplicit_mir_census_count={case_count}\nchecker_mir_build_identity_match_count={case_count}\nlegacy_fallback_count=0\n",
             case_count * 2,
             case_count * 2,
         )
@@ -1371,10 +1676,12 @@ fn ordinary_map_owned_any_v2_computed_key_string_get_default_and_explicit_builds
         )
     }
 
-    assert!(
-        !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
-        "ComputedKeyGet must not open global Map/Any v2 readiness"
-    );
+    const {
+        assert!(
+            !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            "ComputedKeyGet must not open global Map/Any v2 readiness"
+        );
+    };
     assert_eq!(
         std::env::var("MIMI_REQUIRE_VALGRIND").as_deref(),
         Ok("1"),
@@ -1502,6 +1809,455 @@ fn ordinary_map_owned_any_v2_computed_key_string_get_default_and_explicit_builds
         &directory.path.join("run-summary.txt"),
         format!(
             "route_profile={COMPUTED_KEY_GET_ROUTE_PROFILE}\nglobal_map_any_v2_production_ready=false\ncase_count=1\nnative_build_count=2\ncontrol_native_build_count=1\ntotal_native_build_count=3\nmemcheck_run_count=3\ntarget_memcheck_run_count=2\ncontrol_memcheck_run_count=1\ndefault_route_receipt_count=1\ncontrol_route_receipt_count=1\nexplicit_mir_census_count=1\nlegacy_fallback_count=0\nstill_reachable_baseline_bytes={baseline_bytes}\nstill_reachable_baseline_blocks={baseline_blocks}\ntarget_source_sha256={target_source_sha256}\ncontrol_source_sha256={control_source_sha256}\ntarget_mir_digest={target_digest}\ncontrol_mir_digest={control_digest}\nvalgrind_launcher_path={}\nvalgrind_engine_path={}\nvalgrind_version={}\n",
+            valgrind.launcher.display(),
+            valgrind.engine.display(),
+            valgrind.version,
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+#[ignore = "strict native Memcheck L3; run scripts/verify-ordinary-map-v2-l3.sh"]
+fn ordinary_map_owned_any_v2_keys_snapshot_default_and_explicit_builds_are_strict_memcheck_clean() {
+    const {
+        assert!(
+            !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            "KeysSnapshot L3 must not open global Map/Any v2 readiness"
+        );
+    };
+    assert_eq!(
+        std::env::var("MIMI_REQUIRE_VALGRIND").as_deref(),
+        Ok("1"),
+        "strict L3 execution requires MIMI_REQUIRE_VALGRIND=1"
+    );
+
+    let mimi = cargo_built_mimi_bin();
+    let directory = L3RunDirectory::new();
+    let artifact_mode = directory._temporary.is_none();
+    if artifact_mode {
+        retain_mimi_binary_identity(&mimi, "Cargo-built CARGO_BIN_EXE_mimi", &directory.path);
+    }
+
+    let source_hash_root = if artifact_mode {
+        directory
+            .path
+            .parent()
+            .expect("native evidence directory has an artifact root")
+            .join("source-hashes")
+    } else {
+        directory.path.join("source-hashes")
+    };
+    create_capture_directory(&source_hash_root);
+
+    let valgrind = record_strict_valgrind_identity(&directory.path);
+    let source = keys_snapshot_fixture();
+    let case_directory = directory.path.join("case-00-keys-snapshot");
+    create_capture_directory(&case_directory);
+
+    let fixture_bytes = fs::read(&source)
+        .unwrap_or_else(|error| panic!("read KeysSnapshot fixture {}: {error}", source.display()));
+    let captured_source = case_directory.join("source.fixture.mimi");
+    write_new(&captured_source, &fixture_bytes);
+    assert_eq!(
+        fs::read(&captured_source).expect("read captured KeysSnapshot fixture"),
+        fixture_bytes,
+        "captured KeysSnapshot fixture bytes changed"
+    );
+    let source_sha256 = retain_sha256(
+        &captured_source,
+        "keys-snapshot-fixture-source",
+        &source_hash_root,
+    );
+    write_new(
+        &case_directory.join("source-hash.expected.txt"),
+        format!(
+            "source_path={}\ncaptured_source_sha256={source_sha256}\n",
+            source.display()
+        )
+        .as_bytes(),
+    );
+
+    let receipt_directory = case_directory.join("receipt");
+    create_capture_directory(&receipt_directory);
+    let receipt_arguments = vec![
+        OsString::from("mir"),
+        OsString::from("--all"),
+        OsString::from("--receipt"),
+        source.as_os_str().to_owned(),
+    ];
+    let receipt = Command::new(&mimi)
+        .args(&receipt_arguments)
+        .output()
+        .expect("materialize the source-bound KeysSnapshot MIR receipt");
+    retain_command_output(
+        &receipt_directory,
+        mimi.as_os_str(),
+        &receipt_arguments,
+        &receipt,
+    );
+    let expected_digest = parse_manifest(&receipt)
+        .get("mir_digest")
+        .expect("validated MIR receipt contains its graph digest")
+        .clone();
+
+    let mut results = Vec::new();
+    for direct in [false, true] {
+        let mode = if direct {
+            "explicit --mir KeysSnapshot native build"
+        } else {
+            "default KeysSnapshot native build"
+        };
+        let build_directory = case_directory.join(if direct {
+            "explicit-build"
+        } else {
+            "default-build"
+        });
+        create_capture_directory(&build_directory);
+        let binary = build_directory.join("program");
+        let mut build_arguments = vec![
+            OsString::from("build"),
+            source.as_os_str().to_owned(),
+            OsString::from("--output"),
+            binary.as_os_str().to_owned(),
+        ];
+        if direct {
+            build_arguments.push(OsString::from("--mir"));
+        }
+        let mut build_command = Command::new(&mimi);
+        build_command
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .args(&build_arguments);
+        let build = build_command
+            .output()
+            .unwrap_or_else(|error| panic!("build {mode}: {error}"));
+        retain_command_output(&build_directory, mimi.as_os_str(), &build_arguments, &build);
+        write_new(
+            &build_directory.join("command.environment.txt"),
+            b"MIMI_ROUTE_CENSUS=1\n",
+        );
+        assert_success(&build, mode);
+        assert!(binary.is_file(), "{mode} did not leave its native binary");
+
+        let stderr = text(&build.stderr);
+        if direct {
+            assert_explicit_mir_census(&stderr, &expected_digest, mode);
+        } else {
+            assert_keys_snapshot_default_route(&stderr, &expected_digest, mode);
+        }
+
+        let memcheck_directory = case_directory.join(if direct {
+            "explicit-memcheck"
+        } else {
+            "default-memcheck"
+        });
+        create_capture_directory(&memcheck_directory);
+        results.push(assert_strict_memcheck_with_valgrind(
+            &valgrind.launcher,
+            &binary,
+            mode,
+            KEYS_SNAPSHOT_EXPECTED_STDOUT,
+            0,
+            &memcheck_directory,
+            true,
+        ));
+    }
+    assert_eq!(
+        results[0].0, results[1].0,
+        "default and explicit KeysSnapshot native stdout differ"
+    );
+
+    write_new(
+        &directory.path.join("run-summary.txt"),
+        format!(
+            "route_profile={KEYS_SNAPSHOT_ROUTE_PROFILE}\nglobal_map_any_v2_production_ready=false\ncase_count=1\nnative_build_count=2\nmemcheck_run_count=2\ndefault_route_receipt_count=1\nexplicit_mir_census_count=1\nlegacy_fallback_count=0\ndefault_still_reachable_bytes={}\ndefault_still_reachable_blocks={}\nexplicit_still_reachable_bytes={}\nexplicit_still_reachable_blocks={}\ntarget_source_sha256={source_sha256}\ntarget_mir_digest={expected_digest}\nvalgrind_launcher_path={}\nvalgrind_engine_path={}\nvalgrind_version={}\n",
+            results[0].1.still_reachable_bytes,
+            results[0].1.still_reachable_blocks,
+            results[1].1.still_reachable_bytes,
+            results[1].1.still_reachable_blocks,
+            valgrind.launcher.display(),
+            valgrind.engine.display(),
+            valgrind.version,
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+#[ignore = "strict native Memcheck L3; run scripts/verify-ordinary-map-v2-l3.sh"]
+fn ordinary_map_owned_any_v2_values_heterogeneous_string_index1_default_and_explicit_builds_are_strict_memcheck_clean(
+) {
+    const {
+        assert!(
+            !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            "heterogeneous Values L3 must not open global Map/Any v2 readiness"
+        );
+    };
+    assert_eq!(
+        std::env::var("MIMI_REQUIRE_VALGRIND").as_deref(),
+        Ok("1"),
+        "strict L3 execution requires MIMI_REQUIRE_VALGRIND=1"
+    );
+
+    let mimi = cargo_built_mimi_bin();
+    let directory = L3RunDirectory::new();
+    let artifact_mode = directory._temporary.is_none();
+    if artifact_mode {
+        retain_mimi_binary_identity(&mimi, "Cargo-built CARGO_BIN_EXE_mimi", &directory.path);
+    }
+
+    let source_hash_root = if artifact_mode {
+        directory
+            .path
+            .parent()
+            .expect("native evidence directory has an artifact root")
+            .join("source-hashes")
+    } else {
+        directory.path.join("source-hashes")
+    };
+    create_capture_directory(&source_hash_root);
+
+    let valgrind = record_strict_valgrind_identity(&directory.path);
+    let source = heterogeneous_values_fixture();
+    let case_directory = directory.path.join("case-00-heterogeneous-values");
+    create_capture_directory(&case_directory);
+    let fixture_bytes = fs::read(&source).unwrap_or_else(|error| {
+        panic!(
+            "read heterogeneous Values fixture {}: {error}",
+            source.display()
+        )
+    });
+    let captured_source = case_directory.join("source.fixture.mimi");
+    write_new(&captured_source, &fixture_bytes);
+    assert_eq!(
+        fs::read(&captured_source).expect("read captured heterogeneous Values fixture"),
+        fixture_bytes,
+        "captured heterogeneous Values fixture bytes changed"
+    );
+    let source_sha256 = retain_sha256(
+        &captured_source,
+        "heterogeneous-values-fixture-source",
+        &source_hash_root,
+    );
+    write_new(
+        &case_directory.join("source-hash.expected.txt"),
+        format!(
+            "source_path={}\ncaptured_source_sha256={source_sha256}\n",
+            source.display()
+        )
+        .as_bytes(),
+    );
+
+    let receipt_directory = case_directory.join("receipt");
+    create_capture_directory(&receipt_directory);
+    let receipt_arguments = vec![
+        OsString::from("mir"),
+        OsString::from("--all"),
+        OsString::from("--receipt"),
+        source.as_os_str().to_owned(),
+    ];
+    let receipt = Command::new(&mimi)
+        .args(&receipt_arguments)
+        .output()
+        .expect("materialize the source-bound heterogeneous Values MIR receipt");
+    retain_command_output(
+        &receipt_directory,
+        mimi.as_os_str(),
+        &receipt_arguments,
+        &receipt,
+    );
+    let expected_digest = parse_manifest(&receipt)
+        .get("mir_digest")
+        .expect("validated MIR receipt contains its graph digest")
+        .clone();
+
+    let mut results = Vec::new();
+    for direct in [false, true] {
+        let mode = if direct {
+            "explicit --mir heterogeneous Values native build"
+        } else {
+            "default heterogeneous Values native build"
+        };
+        let build_directory = case_directory.join(if direct {
+            "explicit-build"
+        } else {
+            "default-build"
+        });
+        create_capture_directory(&build_directory);
+        let binary = build_directory.join("program");
+        let mut build_arguments = vec![
+            OsString::from("build"),
+            source.as_os_str().to_owned(),
+            OsString::from("--output"),
+            binary.as_os_str().to_owned(),
+        ];
+        if direct {
+            build_arguments.push(OsString::from("--mir"));
+        }
+        let mut build_command = Command::new(&mimi);
+        build_command
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .args(&build_arguments);
+        let build = build_command
+            .output()
+            .unwrap_or_else(|error| panic!("build {mode}: {error}"));
+        retain_command_output(&build_directory, mimi.as_os_str(), &build_arguments, &build);
+        write_new(
+            &build_directory.join("command.environment.txt"),
+            b"MIMI_ROUTE_CENSUS=1\n",
+        );
+        assert_success(&build, mode);
+        assert!(binary.is_file(), "{mode} did not leave its native binary");
+        let stderr = text(&build.stderr);
+        if direct {
+            assert_explicit_mir_census(&stderr, &expected_digest, mode);
+        } else {
+            assert_heterogeneous_values_default_route(&stderr, &expected_digest, mode);
+        }
+
+        let memcheck_directory = case_directory.join(if direct {
+            "explicit-memcheck"
+        } else {
+            "default-memcheck"
+        });
+        create_capture_directory(&memcheck_directory);
+        results.push(assert_strict_memcheck_with_valgrind(
+            &valgrind.launcher,
+            &binary,
+            mode,
+            "true\n",
+            0,
+            &memcheck_directory,
+            true,
+        ));
+    }
+    assert_eq!(
+        results[0].0, results[1].0,
+        "default and explicit heterogeneous Values native stdout differ"
+    );
+
+    write_new(
+        &directory.path.join("run-summary.txt"),
+        format!(
+            "route_profile={HETEROGENEOUS_VALUES_ROUTE_PROFILE}\nglobal_map_any_v2_production_ready=false\ncase_count=1\nnative_build_count=2\nmemcheck_run_count=2\ndefault_route_receipt_count=1\nexplicit_mir_census_count=1\nlegacy_fallback_count=0\ndefault_still_reachable_bytes={}\ndefault_still_reachable_blocks={}\nexplicit_still_reachable_bytes={}\nexplicit_still_reachable_blocks={}\ntarget_source_sha256={source_sha256}\ntarget_mir_digest={expected_digest}\nvalgrind_launcher_path={}\nvalgrind_engine_path={}\nvalgrind_version={}\n",
+            results[0].1.still_reachable_bytes,
+            results[0].1.still_reachable_blocks,
+            results[1].1.still_reachable_bytes,
+            results[1].1.still_reachable_blocks,
+            valgrind.launcher.display(),
+            valgrind.engine.display(),
+            valgrind.version,
+        )
+        .as_bytes(),
+    );
+}
+
+#[test]
+#[ignore = "strict native Memcheck L3; run scripts/verify-ordinary-map-v2-l3.sh"]
+fn ordinary_map_owned_any_v2_direct_tuple_get_l1_default_and_explicit_builds_are_strict_memcheck_clean(
+) {
+    let (mimi, mimi_source) = mimi_bin_with_source();
+    let source = direct_tuple_get_l1_fixture();
+    let directory = L3RunDirectory::new();
+    let artifact_mode = directory._temporary.is_none();
+    if artifact_mode {
+        retain_mimi_binary_identity(&mimi, mimi_source, &directory.path);
+    }
+
+    let valgrind = record_strict_valgrind_identity(&directory.path);
+    let source_bytes = fs::read(&source).unwrap_or_else(|error| {
+        panic!(
+            "read direct tuple Get L1 fixture {}: {error}",
+            source.display()
+        )
+    });
+    write_new(&directory.path.join("source.fixture.mimi"), &source_bytes);
+
+    let mut outputs = Vec::new();
+    let mut build_identities = Vec::new();
+    let mut mir_digests = Vec::new();
+    for direct in [false, true] {
+        let mode = if direct {
+            "explicit --mir direct tuple Get L1 native binary"
+        } else {
+            "default direct tuple Get L1 native binary"
+        };
+        let case_directory = directory
+            .path
+            .join(if direct { "explicit" } else { "default" });
+        create_capture_directory(&case_directory);
+        let binary = case_directory.join("program");
+        let mut arguments = vec![
+            OsString::from("build"),
+            source.as_os_str().to_owned(),
+            OsString::from("--output"),
+            binary.as_os_str().to_owned(),
+        ];
+        if direct {
+            arguments.push(OsString::from("--mir"));
+        }
+        let mut command = Command::new(&mimi);
+        for (key, _) in
+            std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("MIMI_"))
+        {
+            command.env_remove(key);
+        }
+        command.env("MIMI_ROUTE_CENSUS", "1").args(&arguments);
+        let build = command
+            .output()
+            .unwrap_or_else(|error| panic!("build {mode}: {error}"));
+        retain_command_output(&case_directory, mimi.as_os_str(), &arguments, &build);
+        write_new(
+            &case_directory.join("command.environment.txt"),
+            b"MIMI_ROUTE_CENSUS=1\n",
+        );
+        assert_success(&build, mode);
+        assert!(
+            binary.is_file(),
+            "{mode} did not leave its native executable"
+        );
+
+        let (mir_digest, receipt_identity) =
+            assert_direct_tuple_get_l1_route_census(&text(&build.stderr), mode);
+        mir_digests.push(mir_digest);
+        build_identities.push(receipt_identity);
+
+        let memcheck_directory = case_directory.join("memcheck");
+        create_capture_directory(&memcheck_directory);
+        outputs.push(assert_strict_memcheck_with_valgrind(
+            &valgrind.launcher,
+            &binary,
+            mode,
+            "",
+            0,
+            &memcheck_directory,
+            artifact_mode,
+        ));
+    }
+
+    assert_eq!(
+        mir_digests[0], mir_digests[1],
+        "default and explicit builds must consume the same Checker-derived L1 MIR"
+    );
+    assert_eq!(
+        build_identities[0], build_identities[1],
+        "default and explicit builds must consume the same direct tuple route receipt"
+    );
+    assert_eq!(
+        outputs[0].0, outputs[1].0,
+        "default and explicit direct tuple native stdout differ"
+    );
+
+    write_new(
+        &directory.path.join("run-summary.txt"),
+        format!(
+            "route_profile={DIRECT_TUPLE_GET_L1_ROUTE_PROFILE}\ncase_count=1\nnative_build_count=2\nmemcheck_run_count=2\ndefault_route_receipt_count=1\nexplicit_route_receipt_count=1\nlegacy_fallback_count=0\ndefault_still_reachable_bytes={}\ndefault_still_reachable_blocks={}\nexplicit_still_reachable_bytes={}\nexplicit_still_reachable_blocks={}\nmir_digest={}\nreceipt_identity_digest={}\nvalgrind_launcher_path={}\nvalgrind_engine_path={}\nvalgrind_version={}\n",
+            outputs[0].1.still_reachable_bytes,
+            outputs[0].1.still_reachable_blocks,
+            outputs[1].1.still_reachable_bytes,
+            outputs[1].1.still_reachable_blocks,
+            mir_digests[0],
+            build_identities[0],
             valgrind.launcher.display(),
             valgrind.engine.display(),
             valgrind.version,

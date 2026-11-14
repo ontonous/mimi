@@ -1,0 +1,316 @@
+// W2 background-export protocol: a snapshot stays owned by one export Flow
+// through complete, failed, and acknowledged-cancel paths. Cancellation is a
+// request, then an owner handoff/acknowledgement, then cleanup; it is never a
+// drop(task) shortcut. An unresponsive owner is preserved in the companion
+// negative/target fixture w2_unresponsive_handoff.mimi.
+//
+// This is the full direct-terminal target: the current checker emits 10 E0423
+// when mutually exclusive I/O result arms each consume the same Writing Flow
+// value to reach Completed or Failed (and likewise for CleanupPending). The
+// source is kept intact to expose that path-sensitive ownership seam; it is
+// not counted as a passing fixture.
+
+type NodeId { store_id: i32, slot: i32, generation: i32 }
+type DocumentNode { id: NodeId, parent_slot: i32, kind: string, text: string, alive: bool }
+type Revision { document_id: i32, revision_id: i32, nodes: List<DocumentNode> }
+type ExportError {
+    TempWriteFailed(string)
+    TempReadFailed(string)
+    DestinationWriteFailed(string)
+    ChecksumMismatch
+    CancelAckFailed(string)
+    CleanupFailed(string)
+}
+type PublishReceipt { task_id: i32, revision_id: i32, destination: string, receipt_id: i32 }
+
+func serialize_revision(revision: Revision) -> string {
+    let mut contents = "document=" + to_string(revision.document_id) + "\n"
+    contents = contents + "revision=" + to_string(revision.revision_id) + "\n"
+    for node in revision.nodes {
+        if node.alive {
+            contents = contents + to_string(node.id.slot) + ":" + node.kind + ":" + node.text + "\n"
+        }
+    }
+    contents
+}
+
+flow ExportJob {
+    state Pending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, contents: string }
+    state Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, contents: string }
+    state CancelRequested { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, contents: string, requester: string }
+    state CleanupPending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, contents: string, cleanup_owner: string }
+    state CleanupReady { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, contents: string, cleanup_owner: string }
+    state Completed { task_id: i32, revision_id: i32, destination: string, receipt_id: i32 }
+    state Failed { task_id: i32, revision_id: i32, error: ExportError, temporary_path: string, outstanding_owner: string, destination_may_exist: bool }
+    state Cancelled { task_id: i32, revision_id: i32, cleanup_owner: string }
+
+    transition begin(Pending) -> Writing {
+        return Writing {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            contents: self.contents,
+        }
+    }
+    transition complete(Writing, receipt_id: i32) -> Completed {
+        return Completed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            destination: self.destination,
+            receipt_id: receipt_id,
+        }
+    }
+    transition fail_write(Writing, error: ExportError, destination_may_exist: bool) -> Failed {
+        return Failed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            error: error,
+            temporary_path: self.temporary_path,
+            outstanding_owner: "local exporter",
+            destination_may_exist: destination_may_exist,
+        }
+    }
+    transition request_cancel(Writing, requester: string) -> CancelRequested {
+        return CancelRequested {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            contents: self.contents,
+            requester: requester,
+        }
+    }
+    transition handoff_cleanup(CancelRequested, cleanup_owner: string) -> CleanupPending {
+        return CleanupPending {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            contents: self.contents,
+            cleanup_owner: cleanup_owner,
+        }
+    }
+    transition acknowledge_stop(CleanupPending) -> CleanupReady {
+        return CleanupReady {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            contents: self.contents,
+            cleanup_owner: self.cleanup_owner,
+        }
+    }
+    transition cancel_confirmed(CleanupReady) -> Cancelled {
+        return Cancelled {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            cleanup_owner: self.cleanup_owner,
+        }
+    }
+    transition cancel_ack_failed(CleanupPending, error: string) -> Failed {
+        return Failed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            error: CancelAckFailed(error),
+            temporary_path: self.temporary_path,
+            outstanding_owner: self.cleanup_owner,
+            destination_may_exist: false,
+        }
+    }
+    transition cleanup_failed(CleanupReady, error: string) -> Failed {
+        return Failed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            error: CleanupFailed(error),
+            temporary_path: self.temporary_path,
+            outstanding_owner: self.cleanup_owner,
+            destination_may_exist: false,
+        }
+    }
+    transition completion_wins(CancelRequested, receipt_id: i32) -> Completed {
+        return Completed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            destination: self.destination,
+            receipt_id: receipt_id,
+        }
+    }
+    transition race_write_failed(CancelRequested, error: string) -> Failed {
+        return Failed {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            error: DestinationWriteFailed(error),
+            temporary_path: self.temporary_path,
+            outstanding_owner: "local exporter",
+            destination_may_exist: true,
+        }
+    }
+}
+
+func successful_export(snapshot: Revision) -> bool {
+    let temporary_path = "/tmp/mimi-v02-w2-flow-success.tmp"
+    let destination = "/tmp/mimi-v02-w2-flow-success.txt"
+    let contents = serialize_revision(snapshot)
+    let pending = Pending {
+        task_id: 101,
+        snapshot: snapshot,
+        temporary_path: temporary_path,
+        destination: destination,
+        contents: contents,
+    }
+    let writing = ExportJob::begin(pending)
+    match write_file(temporary_path, contents) {
+        Err(error) => {
+            let failed = ExportJob::fail_write(writing, TempWriteFailed(error), false)
+            false
+        },
+        Ok(_) => match read_file(temporary_path) {
+            Err(error) => {
+                let removed = remove_file(temporary_path)
+                let failed = ExportJob::fail_write(writing, TempReadFailed(error), false)
+                false && removed
+            },
+            Ok(staged) => if staged != contents {
+                let removed = remove_file(temporary_path)
+                let failed = ExportJob::fail_write(writing, ChecksumMismatch, false)
+                false && removed
+            } else {
+                match write_file(destination, staged) {
+                    Err(error) => {
+                        let removed = remove_file(temporary_path)
+                        let failed = ExportJob::fail_write(writing, DestinationWriteFailed(error), true)
+                        false && removed
+                    },
+                    Ok(_) => {
+                        if remove_file(temporary_path) {
+                            let completed = ExportJob::complete(writing, 5001)
+                            completed.task_id == 101 && completed.revision_id == snapshot.revision_id &&
+                                match read_file(destination) {
+                                    Ok(published) => published == contents,
+                                    Err(_) => false,
+                                }
+                        } else {
+                            let failed = ExportJob::fail_write(writing, CleanupFailed("temporary file retained"), true)
+                            false
+                        }
+                    },
+                }
+            },
+        },
+    }
+}
+
+func failed_export(snapshot: Revision) -> bool {
+    let temporary_path = "/dev/null/mimi-v02-w2-failure.tmp"
+    let pending = Pending {
+        task_id: 102,
+        snapshot: snapshot,
+        temporary_path: temporary_path,
+        destination: "/tmp/mimi-v02-w2-never-published.txt",
+        contents: serialize_revision(snapshot),
+    }
+    let writing = ExportJob::begin(pending)
+    match write_file(temporary_path, "unwritable staging target") {
+        Err(error) => {
+            let failed = ExportJob::fail_write(writing, TempWriteFailed(error), false)
+            failed.task_id == 102 && !failed.destination_may_exist &&
+                failed.outstanding_owner == "local exporter"
+        },
+        Ok(_) => {
+            let failed = ExportJob::fail_write(writing, TempWriteFailed("fault injection missed"), false)
+            false
+        },
+    }
+}
+
+func acknowledged_cancel(snapshot: Revision) -> bool {
+    let temporary_path = "/tmp/mimi-v02-w2-flow-cancel.tmp"
+    let destination = "/tmp/mimi-v02-w2-flow-cancel.txt"
+    let contents = serialize_revision(snapshot)
+    let pending = Pending {
+        task_id: 103,
+        snapshot: snapshot,
+        temporary_path: temporary_path,
+        destination: destination,
+        contents: contents,
+    }
+    let writing = ExportJob::begin(pending)
+    match write_file(temporary_path, "header only; payload not written") {
+        Err(error) => {
+            let failed = ExportJob::fail_write(writing, TempWriteFailed(error), false)
+            false
+        },
+        Ok(_) => {
+            let requested = ExportJob::request_cancel(writing, "user")
+            let pending_cleanup = ExportJob::handoff_cleanup(requested, "RetryOwner")
+            let temp_was_retained_until_ack = file_exists(pending_cleanup.temporary_path)
+            if !temp_was_retained_until_ack {
+                let failed = ExportJob::cancel_ack_failed(pending_cleanup, "staged output disappeared before acknowledgement")
+                false
+            } else {
+                let ready = ExportJob::acknowledge_stop(pending_cleanup)
+                if remove_file(ready.temporary_path) {
+                    let cancelled = ExportJob::cancel_confirmed(ready)
+                    cancelled.task_id == 103 && cancelled.cleanup_owner == "RetryOwner" &&
+                        !file_exists(temporary_path) && !file_exists(destination)
+                } else {
+                    let failed = ExportJob::cleanup_failed(ready, "temporary output could not be removed")
+                    failed.task_id == 103 && failed.outstanding_owner == "RetryOwner"
+                }
+            }
+        },
+    }
+}
+
+func completion_cancel_race(snapshot: Revision) -> bool {
+    let destination = "/tmp/mimi-v02-w2-race.txt"
+    let temporary_path = "/tmp/mimi-v02-w2-race.tmp"
+    let writing = ExportJob::begin(Pending { task_id: 104, snapshot: snapshot, temporary_path: "/tmp/mimi-v02-w2-race.tmp", destination: "/tmp/mimi-v02-w2-race.txt", contents: serialize_revision(snapshot) })
+    let requested = ExportJob::request_cancel(writing, "user")
+    // This fixed schedule delivers completion after the request but before a
+    // cancellation acknowledgement. The destination write is real, and only
+    // then may the Completed terminal be recorded.
+    let contents = serialize_revision(snapshot)
+    match write_file(destination, contents) {
+        Ok(_) => {
+            let completed = ExportJob::completion_wins(requested, 5002)
+            let published = match read_file(destination) { Ok(bytes) => bytes == contents, Err(_) => false }
+            remove_file(destination)
+            remove_file(temporary_path)
+            completed.task_id == 104 && completed.receipt_id == 5002 && published
+        },
+        Err(error) => {
+            let failed = ExportJob::race_write_failed(requested, error)
+            remove_file(destination)
+            remove_file(temporary_path)
+            failed.task_id == 104 && failed.destination_may_exist
+        },
+    }
+}
+
+func main() -> i32 {
+    let document_id = 7
+    let title_id = NodeId { store_id: document_id, slot: 0, generation: 1 }
+    let body_id = NodeId { store_id: document_id, slot: 1, generation: 1 }
+    let snapshot = Revision {
+        document_id: document_id,
+        revision_id: 1,
+        nodes: [
+            DocumentNode { id: title_id, parent_slot: -1, kind: "title", text: "Meeting notes", alive: true },
+            DocumentNode { id: body_id, parent_slot: 0, kind: "paragraph", text: "A", alive: true },
+        ],
+    }
+    let success = successful_export(snapshot)
+    let failed_case = failed_export(snapshot)
+    let cancelled = acknowledged_cancel(snapshot)
+    let raced = completion_cancel_race(snapshot)
+    remove_file("/tmp/mimi-v02-w2-flow-success.txt")
+    remove_file("/tmp/mimi-v02-w2-race.txt")
+    if success && failed_case && cancelled && raced {
+        println(5)
+        0
+    } else {
+        1
+    }
+}

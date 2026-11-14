@@ -245,22 +245,41 @@ func encode_motd_msg(motd: string, ts: i64) -> string {
     "{\"type\":\"" + SVR_MOTD() + "\",\"text\":\"" + escape_json_string(motd) + "\",\"ts\":" + to_string(ts) + "}"
 }
 
+func command_map_set(current: Result<Record, i32>, key: string, value: Any) -> Result<Record, i32> {
+    match current {
+        Ok(root) => match map_set(root, key, value) {
+            Ok(updated) => {
+                drop(root)
+                Ok(updated)
+            }
+            Err(status) => {
+                drop(root)
+                Err(status)
+            }
+        }
+        Err(status) => Err(status)
+    }
+}
+
 // Parse a client command from a JSON string or command line
-func parse_client_command(line: string) -> Record {
+func parse_client_command(line: string) -> Result<Record, i32> {
     let trimmed = str_trim(line)
-    let mut result = map_new()
+    let mut result = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
     if len(trimmed) == 0 { return result }
     if json_is_valid(trimmed) {
         let cmd_raw = json_get_string(trimmed, "cmd")
-        if cmd_raw != "" { result = map_set(result, "cmd", cmd_raw) }
+        if cmd_raw != "" { result = command_map_set(result, "cmd", cmd_raw) }
         let room_raw = json_get_string(trimmed, "room")
-        if room_raw != "" { result = map_set(result, "room", room_raw) }
+        if room_raw != "" { result = command_map_set(result, "room", room_raw) }
         let text_raw = json_get_string(trimmed, "text")
-        if text_raw != "" { result = map_set(result, "text", text_raw) }
+        if text_raw != "" { result = command_map_set(result, "text", text_raw) }
         let to_raw = json_get_string(trimmed, "to")
-        if to_raw != "" { result = map_set(result, "to", to_raw) }
+        if to_raw != "" { result = command_map_set(result, "to", to_raw) }
         let name_raw = json_get_string(trimmed, "name")
-        if name_raw != "" { result = map_set(result, "name", name_raw) }
+        if name_raw != "" { result = command_map_set(result, "name", name_raw) }
         return result
     }
     if str_starts_with(trimmed, "/") {
@@ -268,8 +287,8 @@ func parse_client_command(line: string) -> Record {
         let parts = str_split(rest, " ")
         if len(parts) > 0 {
             let cmd = str_to_lower(parts[0])
-            result = map_set(result, "cmd", cmd)
-            if cmd == CMD_JOIN() && len(parts) > 1 { result = map_set(result, "room", parts[1]) }
+            result = command_map_set(result, "cmd", cmd)
+            if cmd == CMD_JOIN() && len(parts) > 1 { result = command_map_set(result, "room", parts[1]) }
             if cmd == CMD_MSG() && len(parts) > 1 {
                 let mut t = ""
                 let mut pi = 1
@@ -278,10 +297,10 @@ func parse_client_command(line: string) -> Record {
                     t = t + parts[pi]
                     pi = pi + 1
                 }
-                result = map_set(result, "text", t)
+                result = command_map_set(result, "text", t)
             }
             if (cmd == CMD_PRIVATE() || cmd == "priv" || cmd == "tell" || cmd == "whisper") && len(parts) > 2 {
-                result = map_set(result, "to", parts[1])
+                result = command_map_set(result, "to", parts[1])
                 let mut t = ""
                 let mut pi = 2
                 while pi < len(parts) {
@@ -289,11 +308,11 @@ func parse_client_command(line: string) -> Record {
                     t = t + parts[pi]
                     pi = pi + 1
                 }
-                result = map_set(result, "text", t)
+                result = command_map_set(result, "text", t)
             }
-            if cmd == CMD_NICK() && len(parts) > 1 { result = map_set(result, "name", parts[1]) }
-            if cmd == CMD_CREATE() && len(parts) > 1 { result = map_set(result, "room", parts[1]) }
-            if cmd == CMD_KICK() && len(parts) > 1 { result = map_set(result, "name", parts[1]) }
+            if cmd == CMD_NICK() && len(parts) > 1 { result = command_map_set(result, "name", parts[1]) }
+            if cmd == CMD_CREATE() && len(parts) > 1 { result = command_map_set(result, "room", parts[1]) }
+            if cmd == CMD_KICK() && len(parts) > 1 { result = command_map_set(result, "name", parts[1]) }
             if cmd == CMD_MOTD() && len(parts) > 1 {
                 let mut t = ""
                 let mut pi = 1
@@ -302,15 +321,15 @@ func parse_client_command(line: string) -> Record {
                     t = t + parts[pi]
                     pi = pi + 1
                 }
-                result = map_set(result, "text", t)
+                result = command_map_set(result, "text", t)
             }
         }
     } else if str_starts_with(trimmed, "@") {
         let rest = safe_substring(trimmed, 1, len(trimmed))
         let parts = str_split(rest, " ")
         if len(parts) > 1 {
-            result = map_set(result, "cmd", CMD_PRIVATE())
-            result = map_set(result, "to", parts[0])
+            result = command_map_set(result, "cmd", CMD_PRIVATE())
+            result = command_map_set(result, "to", parts[0])
             let mut t = ""
             let mut pi = 1
             while pi < len(parts) {
@@ -318,15 +337,56 @@ func parse_client_command(line: string) -> Record {
                 t = t + parts[pi]
                 pi = pi + 1
             }
-            result = map_set(result, "text", t)
+            result = command_map_set(result, "text", t)
         }
     } else {
         if len(trimmed) > 0 {
-            result = map_set(result, "cmd", CMD_MSG())
-            result = map_set(result, "text", trimmed)
+            result = command_map_set(result, "cmd", CMD_MSG())
+            result = command_map_set(result, "text", trimmed)
         }
     }
     result
+}
+
+func take_record_result(result: Result<Record, i32>) -> (Option<Record>, bool, i32) {
+    match result {
+        Ok(root) => (Some(root), false, 0),
+        Err(status) => (None, true, status)
+    }
+}
+
+func take_string_result(result: Result<string, i32>) -> (Option<string>, bool, i32) {
+    match result {
+        Ok(value) => (Some(value), false, 0),
+        Err(status) => (None, true, status)
+    }
+}
+
+func take_unit_result(result: Result<(), i32>) -> (bool, i32) {
+    match result {
+        Ok(()) => (false, 0),
+        Err(status) => (true, status)
+    }
+}
+
+func parse_client_command_or_exit(line: string) -> Record {
+    let (maybe_command, failed, status) = take_record_result(parse_client_command(line))
+    if failed {
+        println("Command map allocation failed with status " + to_string(status))
+        exit(status)
+    }
+    maybe_command.unwrap()
+}
+
+func parse_client_command_for_connection(line: string, fd: i64) -> Option<Record> {
+    match parse_client_command(line) {
+        Ok(command) => Some(command),
+        Err(status) => {
+            let ts = now_ms()
+            let _ = send(fd, encode_error_msg(map_status_message(status), ts))
+            None
+        }
+    }
 }
 
 func cmd_get_string(cmd: Record, key: string, default_val: string) -> string {
@@ -359,35 +419,130 @@ func is_valid_room_name(name: string) -> bool {
     regex_match(name, "^[a-zA-Z0-9_-]+$")
 }
 
+func make_user_info_json(nick: string, fd: i64, joined_at: i64, room: string) -> Result<string, i32> {
+    let mut info = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
+    info = command_map_set(info, "nick", nick)
+    info = command_map_set(info, "fd", fd)
+    info = command_map_set(info, "joined_at", joined_at)
+    info = command_map_set(info, "room", room)
+    match info {
+        Ok(root) => {
+            let json = to_json(root)
+            drop(root)
+            Ok(json)
+        }
+        Err(status) => Err(status)
+    }
+}
+
+func make_room_meta_json(name: string, created_at: i64, topic: string, motd: string, include_motd: bool) -> Result<string, i32> {
+    let mut meta = match map_new() {
+        Ok(root) => Ok(root),
+        Err(status) => Err(status)
+    }
+    meta = command_map_set(meta, "name", name)
+    meta = command_map_set(meta, "created_at", created_at)
+    meta = command_map_set(meta, "topic", topic)
+    if include_motd { meta = command_map_set(meta, "motd", motd) }
+    match meta {
+        Ok(root) => {
+            let json = to_json(root)
+            drop(root)
+            Ok(json)
+        }
+        Err(status) => Err(status)
+    }
+}
+
+func new_user_maps() -> Result<(Record, Record, Record), i32> {
+    match map_new() {
+        Ok(users) => match map_new() {
+            Ok(nicks) => match map_new() {
+                Ok(user_info) => Ok((users, nicks, user_info)),
+                Err(status) => { drop(users); drop(nicks); Err(status) }
+            }
+            Err(status) => { drop(users); Err(status) }
+        }
+        Err(status) => Err(status)
+    }
+}
+
+func new_room_maps() -> Result<(Record, Record), i32> {
+    match map_new() {
+        Ok(rooms) => match map_new() {
+            Ok(room_meta) => Ok((rooms, room_meta)),
+            Err(status) => { drop(rooms); Err(status) }
+        }
+        Err(status) => Err(status)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Section 4: User Manager Actor
 // ═══════════════════════════════════════════════════════════════════════════════
 
-actor UserManager {
-    users: Record = map_new()
-    nicks: Record = map_new()
-    user_info: Record = map_new()
-    nick_count: i32 = 0
-    msg_history: List<string> = [] as List<string>
-    max_history: i32 = 1000
+flow UserManagerFlow {
+    // The mailbox owns one persistent Flow value. Actor handles carry no
+    // mutable business fields; the operation result travels in the returned
+    // snapshot so the existing handler API can stay result-shaped.
+    state UserManagerLive {
+        initialized: bool,
+        history_initialized: bool,
+        users: Option<Record>,
+        nicks: Option<Record>,
+        user_info: Option<Record>,
+        nick_count: i32,
+        msg_history: List<string>,
+        max_history: i32,
+        last_status: i32,
+        last_message: string,
+        last_text: string,
+        last_number: i64,
+        last_flag: bool,
+        last_strings: List<string>,
+    }
 
-    func push_history(msg_json: string) {
+    transition init(UserManagerLive) -> UserManagerLive {
+        if self.initialized {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count,
+                self.msg_history, self.max_history, 0, "", "", 0 as i64, false, [])
+        }
+        match new_user_maps() {
+            Ok((users, nicks, user_info)) => {
+                let history = if self.history_initialized { self.msg_history } else { [] }
+                let history_limit = if self.history_initialized { self.max_history } else { 1000 }
+                return user_manager_live(true, true, Some(users), Some(nicks), Some(user_info),
+                    0, history, history_limit, 0, "", "", 0 as i64, false, [])
+            }
+            Err(status) => return user_manager_live(false, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count,
+                self.msg_history, self.max_history, status, "", "", 0 as i64, false, [])
+        }
+    }
+
+    transition push_history(UserManagerLive, msg_json: string) -> UserManagerLive {
         let src = self.msg_history
         let mut new_h: List<string> = []
         for x in src { push(new_h, x) }
         push(new_h, msg_json)
-        if len(new_h) > self.max_history {
+        let (history, limit) = if len(new_h) > self.max_history {
             let mut trimmed: List<string> = []
             let mut i = len(new_h) - self.max_history
             while i < len(new_h) {
                 push(trimmed, new_h[i])
                 i = i + 1
             }
-            self.msg_history = trimmed
-        } else { self.msg_history = new_h }
+            (trimmed, self.max_history)
+        } else { (new_h, self.max_history) }
+        return user_manager_live(self.initialized, true, self.users, self.nicks,
+            self.user_info, self.nick_count, history, limit, 0, "", "", 0 as i64, false, [])
     }
 
-    func get_history(count: i32) -> List<string> {
+    transition get_history(UserManagerLive, count: i32) -> UserManagerLive {
         let src = self.msg_history
         let total = len(src)
         let start = if count >= total { 0 } else { total - count }
@@ -397,209 +552,503 @@ actor UserManager {
             push(result, src[i])
             i = i + 1
         }
-        result
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count,
+            self.msg_history, self.max_history, 0, "", "", 0 as i64, false, result)
     }
 
-    func register(nick: string, fd: i64) -> string {
+    transition register(UserManagerLive, nick: string, fd: i64) -> UserManagerLive {
         let nick_lower = str_to_lower(nick)
-        let (exists, _) = map_get(self.nicks, nick_lower)
-        if exists { return "nick \"" + nick + "\" is already taken" }
+        let (exists, _) = map_get(self.nicks.unwrap(), nick_lower)
+        if exists {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "nick "" + nick + "" is already taken", "", 0 as i64, false, [])
+        }
         let fd_str = to_string(fd)
-        let (fd_exists, _) = map_get(self.users, fd_str)
-        if fd_exists { return "connection already registered" }
+        let (fd_exists, _) = map_get(self.users.unwrap(), fd_str)
+        if fd_exists {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "connection already registered", "", 0 as i64, false, [])
+        }
         let ts = now_ms()
-        let info = map_new()
-        let info2 = map_set(info, "nick", nick)
-        let info3 = map_set(info2, "fd", fd)
-        let info4 = map_set(info3, "joined_at", ts)
-        let info5 = map_set(info4, "room", "lobby")
-        let info_json = to_json(info5)
-        self.users = map_set(self.users, fd_str, nick)
-        self.nicks = map_set(self.nicks, nick_lower, fd_str)
-        self.user_info = map_set(self.user_info, nick_lower, info_json)
-        self.nick_count = self.nick_count + 1
-        "ok"
+        let (maybe_info_json, info_failed, info_status) = take_string_result(make_user_info_json(nick, fd, ts, "lobby"))
+        if info_failed {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, info_status, "", "", 0 as i64, false, [])
+        }
+        let info_json = maybe_info_json.unwrap()
+        let (maybe_new_users, users_failed, users_status) = match map_set(self.users.unwrap(), fd_str, nick) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if users_failed {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, users_status, "", "", 0 as i64, false, [])
+        }
+        let new_users = maybe_new_users.unwrap()
+        let (maybe_new_nicks, nicks_failed, nicks_status) = match map_set(self.nicks.unwrap(), nick_lower, fd_str) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if nicks_failed {
+            drop(new_users)
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, nicks_status, "", "", 0 as i64, false, [])
+        }
+        let new_nicks = maybe_new_nicks.unwrap()
+        let (maybe_new_user_info, info_map_failed, info_map_status) = match map_set(self.user_info.unwrap(), nick_lower, info_json) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if info_map_failed {
+            drop(new_users)
+            drop(new_nicks)
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, info_map_status, "", "", 0 as i64, false, [])
+        }
+        let new_user_info = maybe_new_user_info.unwrap()
+        drop(self.users.unwrap())
+        drop(self.nicks.unwrap())
+        drop(self.user_info.unwrap())
+        return user_manager_live(self.initialized, self.history_initialized,
+            Some(new_users), Some(new_nicks), Some(new_user_info), self.nick_count + 1,
+            self.msg_history, self.max_history, 0, "ok", "", 0 as i64, false, [])
     }
 
-    func unregister(fd: i64) -> string {
+    transition unregister(UserManagerLive, fd: i64) -> UserManagerLive {
         let fd_str = to_string(fd)
-        let (found, nick_val) = map_get(self.users, fd_str)
-        if !found { return "not found" }
+        let (found, nick_val) = map_get(self.users.unwrap(), fd_str)
+        if !found {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "", "not found", 0 as i64, false, [])
+        }
         let nick = to_string(nick_val)
         let nick_lower = str_to_lower(nick)
-        self.nicks = map_remove(self.nicks, nick_lower)
-        self.user_info = map_remove(self.user_info, nick_lower)
-        self.users = map_remove(self.users, fd_str)
-        if self.nick_count > 0 { self.nick_count = self.nick_count - 1 }
-        nick
+        let new_nicks = map_remove(self.nicks.unwrap(), nick_lower)
+        let new_user_info = map_remove(self.user_info.unwrap(), nick_lower)
+        let new_users = map_remove(self.users.unwrap(), fd_str)
+        drop(self.nicks.unwrap())
+        drop(self.user_info.unwrap())
+        drop(self.users.unwrap())
+        let next_count = if self.nick_count > 0 { self.nick_count - 1 } else { self.nick_count }
+        return user_manager_live(self.initialized, self.history_initialized,
+            Some(new_users), Some(new_nicks), Some(new_user_info), next_count,
+            self.msg_history, self.max_history, 0, "", nick, 0 as i64, false, [])
     }
 
-    func change_nick(fd: i64, new_nick: string) -> string {
+    transition change_nick(UserManagerLive, fd: i64, new_nick: string) -> UserManagerLive {
         let fd_str = to_string(fd)
-        let (found, old_val) = map_get(self.users, fd_str)
-        if !found { return "connection not registered" }
+        let (found, old_val) = map_get(self.users.unwrap(), fd_str)
+        if !found {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "connection not registered", "", 0 as i64, false, [])
+        }
         let old_nick = to_string(old_val)
         let old_lower = str_to_lower(old_nick)
         let new_lower = str_to_lower(new_nick)
-        let (exists, _) = map_get(self.nicks, new_lower)
-        if exists { return "nick \"" + new_nick + "\" is already taken" }
-        self.nicks = map_remove(self.nicks, old_lower)
-        self.nicks = map_set(self.nicks, new_lower, fd_str)
-        self.users = map_set(self.users, fd_str, new_nick)
-        let (found_info, info_val) = map_get(self.user_info, old_lower)
+        let (exists, _) = map_get(self.nicks.unwrap(), new_lower)
+        if exists {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "nick "" + new_nick + "" is already taken", "", 0 as i64, false, [])
+        }
+        let nicks_without_old = map_remove(self.nicks.unwrap(), old_lower)
+        let (maybe_new_nicks, nicks_failed, nicks_status) = match map_set(nicks_without_old, new_lower, fd_str) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        drop(nicks_without_old)
+        if nicks_failed {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, nicks_status, "", "", 0 as i64, false, [])
+        }
+        let new_nicks = maybe_new_nicks.unwrap()
+        let (maybe_new_users, users_failed, users_status) = match map_set(self.users.unwrap(), fd_str, new_nick) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if users_failed {
+            drop(new_nicks)
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, users_status, "", "", 0 as i64, false, [])
+        }
+        let new_users = maybe_new_users.unwrap()
+        let (found_info, _) = map_get(self.user_info.unwrap(), old_lower)
         if found_info {
             let ts = now_ms()
-            let ci = map_new()
-            let ci2 = map_set(ci, "nick", new_nick)
-            let ci3 = map_set(ci2, "fd", fd)
-            let ci4 = map_set(ci3, "joined_at", ts)
-            let ci5 = map_set(ci4, "room", "lobby")
-            self.user_info = map_remove(self.user_info, old_lower)
-            self.user_info = map_set(self.user_info, new_lower, to_json(ci5))
+            let (maybe_info_json, info_failed, info_status) = take_string_result(make_user_info_json(new_nick, fd, ts, "lobby"))
+            if info_failed {
+                drop(new_nicks)
+                drop(new_users)
+                return user_manager_live(self.initialized, self.history_initialized,
+                    self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                    self.max_history, info_status, "", "", 0 as i64, false, [])
+            }
+            let info_json = maybe_info_json.unwrap()
+            let info_without_old = map_remove(self.user_info.unwrap(), old_lower)
+            let (maybe_new_user_info, info_map_failed, info_map_status) = match map_set(info_without_old, new_lower, info_json) {
+                Ok(updated) => (Some(updated), false, 0),
+                Err(status) => (None, true, status)
+            }
+            drop(info_without_old)
+            if info_map_failed {
+                drop(new_nicks)
+                drop(new_users)
+                return user_manager_live(self.initialized, self.history_initialized,
+                    self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                    self.max_history, info_map_status, "", "", 0 as i64, false, [])
+            }
+            let new_user_info = maybe_new_user_info.unwrap()
+            drop(self.user_info.unwrap())
+            drop(self.nicks.unwrap())
+            drop(self.users.unwrap())
+            return user_manager_live(self.initialized, self.history_initialized,
+                Some(new_users), Some(new_nicks), Some(new_user_info), self.nick_count,
+                self.msg_history, self.max_history, 0, old_nick, "", 0 as i64, false, [])
         }
-        old_nick
+        drop(self.nicks.unwrap())
+        drop(self.users.unwrap())
+        return user_manager_live(self.initialized, self.history_initialized,
+            Some(new_users), Some(new_nicks), self.user_info, self.nick_count,
+            self.msg_history, self.max_history, 0, old_nick, "", 0 as i64, false, [])
     }
 
-    func get_nick(fd: i64) -> string {
+    transition get_nick(UserManagerLive, fd: i64) -> UserManagerLive {
         let fd_str = to_string(fd)
-        let (found, val) = map_get(self.users, fd_str)
-        if found { to_string(val) } else { "" }
+        let (found, val) = map_get(self.users.unwrap(), fd_str)
+        let text = if found { to_string(val) } else { "" }
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", text, 0 as i64, false, [])
     }
 
-    func get_fd(nick: string) -> i64 {
+    transition get_fd(UserManagerLive, nick: string) -> UserManagerLive {
         let nick_lower = str_to_lower(nick)
-        let (found, val) = map_get(self.nicks, nick_lower)
-        if found {
+        let (found, val) = map_get(self.nicks.unwrap(), nick_lower)
+        let fd = if found {
             let fd_str = to_string(val)
             let (ok_parse, parsed) = str_parse_int(fd_str)
-            if ok_parse { parsed as i64 } else { -1 }
-        } else { -1 }
+            if ok_parse { parsed as i64 } else { -1 as i64 }
+        } else { -1 as i64 }
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", "", fd, false, [])
     }
 
-    func nick_exists(nick: string) -> bool {
+    transition nick_exists(UserManagerLive, nick: string) -> UserManagerLive {
         let nick_lower = str_to_lower(nick)
-        let (exists, _) = map_get(self.nicks, nick_lower)
-        exists
+        let (exists, _) = map_get(self.nicks.unwrap(), nick_lower)
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", "", 0 as i64, exists, [])
     }
 
-    func list_nicks() -> List<string> {
+    transition list_nicks(UserManagerLive) -> UserManagerLive {
         let mut nick_list: List<string> = []
-        let u = self.users; let k = keys(u)
+        let u = self.users.unwrap()
+        let k = keys(u)
         for fd_str in k {
-            let (_, nick_val) = map_get(self.users, fd_str)
+            let (_, nick_val) = map_get(self.users.unwrap(), fd_str)
             push(nick_list, to_string(nick_val))
         }
-        nick_list
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", "", 0 as i64, false, nick_list)
     }
 
-    func count() -> i32 { self.nick_count }
+    transition count(UserManagerLive) -> UserManagerLive {
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", "", self.nick_count as i64, false, [])
+    }
 
-    func set_room(nick: string, room: string) {
+    transition set_room(UserManagerLive, nick: string, room: string) -> UserManagerLive {
         let nick_lower = str_to_lower(nick)
-        let (found, info_val) = map_get(self.user_info, nick_lower)
-        if found {
-            let info_str = to_string(info_val)
-            let fd_val = json_get_int(info_str, "fd") as i64
-            let ts = now_ms()
-            let ri = map_new()
-            let ri2 = map_set(ri, "nick", nick)
-            let ri3 = map_set(ri2, "fd", fd_val)
-            let ri4 = map_set(ri3, "joined_at", ts)
-            let ri5 = map_set(ri4, "room", room)
-            self.user_info = map_set(self.user_info, nick_lower, to_json(ri5))
+        let (found, info_val) = map_get(self.user_info.unwrap(), nick_lower)
+        if !found {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, 0, "", "", 0 as i64, false, [])
         }
+        let info_str = to_string(info_val)
+        let fd_val = json_get_int(info_str, "fd") as i64
+        let ts = now_ms()
+        let (maybe_info_json, info_failed, info_status) = take_string_result(make_user_info_json(nick, fd_val, ts, room))
+        if info_failed {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, info_status, "", "", 0 as i64, false, [])
+        }
+        let info_json = maybe_info_json.unwrap()
+        let (maybe_updated, set_failed, set_status) = match map_set(self.user_info.unwrap(), nick_lower, info_json) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if set_failed {
+            return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, set_status, "", "", 0 as i64, false, [])
+        }
+        let updated = maybe_updated.unwrap()
+        drop(self.user_info.unwrap())
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, Some(updated), self.nick_count, self.msg_history,
+            self.max_history, 0, "", "", 0 as i64, false, [])
     }
 
-    func get_room(nick: string) -> string {
+    transition get_room(UserManagerLive, nick: string) -> UserManagerLive {
         let nick_lower = str_to_lower(nick)
-        let (found, info_val) = map_get(self.user_info, nick_lower)
-        if found {
+        let (found, info_val) = map_get(self.user_info.unwrap(), nick_lower)
+        let text = if found {
             let info_str = to_string(info_val)
             json_get_string(info_str, "room")
         } else { "" }
+        return user_manager_live(self.initialized, self.history_initialized,
+            self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+            self.max_history, 0, "", text, 0 as i64, false, [])
     }
 
-    func clear() {
-        self.users = map_new()
-        self.nicks = map_new()
-        self.user_info = map_new()
-        self.nick_count = 0
+    transition clear(UserManagerLive) -> UserManagerLive {
+        match new_user_maps() {
+            Ok((users, nicks, user_info)) => {
+                if self.initialized {
+                    drop(self.users.unwrap())
+                    drop(self.nicks.unwrap())
+                    drop(self.user_info.unwrap())
+                }
+                let history = if self.history_initialized { self.msg_history } else { [] }
+                let limit = if self.history_initialized { self.max_history } else { 1000 }
+                return user_manager_live(true, true, Some(users), Some(nicks), Some(user_info),
+                    0, history, limit, 0, "", "", 0 as i64, false, [])
+            }
+            Err(status) => return user_manager_live(self.initialized, self.history_initialized,
+                self.users, self.nicks, self.user_info, self.nick_count, self.msg_history,
+                self.max_history, status, "", "", 0 as i64, false, [])
+        }
+    }
+
+    transition release_maps(UserManagerLive) -> UserManagerLive {
+        if self.initialized {
+            drop(self.users.unwrap())
+            drop(self.nicks.unwrap())
+            drop(self.user_info.unwrap())
+        }
+        let history = if self.history_initialized { self.msg_history } else { [] }
+        let limit = if self.history_initialized { self.max_history } else { 1000 }
+        return user_manager_live(false, true, None, None, None, 0, history, limit,
+            0, "", "", 0 as i64, false, [])
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Section 5: Room Manager Actor
-// ═══════════════════════════════════════════════════════════════════════════════
+actor UserManager runs UserManagerFlow {}
 
-actor RoomManager {
-    rooms: Record = map_new()
-    room_meta: Record = map_new()
-    room_count: i32 = 0
+func user_manager_live(initialized: bool, history_initialized: bool,
+    users: Option<Record>, nicks: Option<Record>, user_info: Option<Record>,
+    nick_count: i32, msg_history: List<string>, max_history: i32,
+    last_status: i32, last_message: string, last_text: string,
+    last_number: i64, last_flag: bool, last_strings: List<string>) -> UserManagerLive {
+    UserManagerLive {
+        initialized: initialized,
+        history_initialized: history_initialized,
+        users: users,
+        nicks: nicks,
+        user_info: user_info,
+        nick_count: nick_count,
+        msg_history: msg_history,
+        max_history: max_history,
+        last_status: last_status,
+        last_message: last_message,
+        last_text: last_text,
+        last_number: last_number,
+        last_flag: last_flag,
+        last_strings: last_strings,
+    }
+}
 
-    func create(name: string) -> string {
-        if len(name) < 1 { return "invalid room name: must be 1-32 chars, alphanumeric/hyphen" }
-        let (exists, _) = map_get(self.rooms, name)
-        if exists { return "room \"" + name + "\" already exists" }
-        let ts = now_ms()
-        self.rooms = map_set(self.rooms, name, to_json([]))
-        let mi = map_new()
-        let mi2 = map_set(mi, "name", name)
-        let mi3 = map_set(mi2, "created_at", ts)
-        let mi4 = map_set(mi3, "topic", "")
-        let meta = to_json(mi4)
-        self.room_meta = map_set(self.room_meta, name, meta)
-        self.room_count = self.room_count + 1
-        "ok"
+func user_manager_init(manager: UserManager) -> Result<(), i32> {
+    let state = manager.init()
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func user_manager_push_history(manager: UserManager, msg: string) -> UserManagerLive { manager.push_history(msg) }
+func user_manager_get_history(manager: UserManager, count: i32) -> List<string> { manager.get_history(count).last_strings }
+func user_manager_register(manager: UserManager, nick: string, fd: i64) -> Result<string, i32> {
+    let state = manager.register(nick, fd)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func user_manager_unregister(manager: UserManager, fd: i64) -> string { manager.unregister(fd).last_text }
+func user_manager_change_nick(manager: UserManager, fd: i64, nick: string) -> Result<string, i32> {
+    let state = manager.change_nick(fd, nick)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func user_manager_get_nick(manager: UserManager, fd: i64) -> string { manager.get_nick(fd).last_text }
+func user_manager_get_fd(manager: UserManager, nick: string) -> i64 { manager.get_fd(nick).last_number }
+func user_manager_nick_exists(manager: UserManager, nick: string) -> bool { manager.nick_exists(nick).last_flag }
+func user_manager_list_nicks(manager: UserManager) -> List<string> { manager.list_nicks().last_strings }
+func user_manager_count(manager: UserManager) -> i32 { manager.count().last_number as i32 }
+func user_manager_set_room(manager: UserManager, nick: string, room: string) -> Result<(), i32> {
+    let state = manager.set_room(nick, room)
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func user_manager_get_room(manager: UserManager, nick: string) -> string { manager.get_room(nick).last_text }
+func user_manager_clear(manager: UserManager) -> Result<(), i32> {
+    let state = manager.clear()
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func user_manager_release_maps(manager: UserManager) { let _ = manager.release_maps() }
+
+flow RoomManagerFlow {
+    state RoomManagerLive {
+        initialized: bool,
+        rooms: Option<Record>,
+        room_meta: Option<Record>,
+        room_count: i32,
+        last_status: i32,
+        last_message: string,
+        last_text: string,
+        last_number: i64,
+        last_flag: bool,
+        last_strings: List<string>,
     }
 
-    func join(room: string, nick: string) -> string {
-        let (exists, members_val) = map_get(self.rooms, room)
-        if !exists { return "room \"" + room + "\" does not exist" }
+    transition init(RoomManagerLive) -> RoomManagerLive {
+        if self.initialized {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "", "", 0 as i64, false, [])
+        }
+        match new_room_maps() {
+            Ok((rooms, room_meta)) => return room_manager_live(true, Some(rooms), Some(room_meta), 0,
+                0, "", "", 0 as i64, false, []),
+            Err(status) => return room_manager_live(false, self.rooms, self.room_meta, self.room_count,
+                status, "", "", 0 as i64, false, [])
+        }
+    }
+
+    transition create(RoomManagerLive, name: string) -> RoomManagerLive {
+        if len(name) < 1 {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "invalid room name: must be 1-32 chars, alphanumeric/hyphen", "", 0 as i64, false, [])
+        }
+        let (exists, _) = map_get(self.rooms.unwrap(), name)
+        if exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "room "" + name + "" already exists", "", 0 as i64, false, [])
+        }
+        let ts = now_ms()
+        let (maybe_meta, meta_failed, meta_status) = take_string_result(make_room_meta_json(name, ts, "", "", false))
+        if meta_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                meta_status, "", "", 0 as i64, false, [])
+        }
+        let meta = maybe_meta.unwrap()
+        let (maybe_new_rooms, rooms_failed, rooms_status) = match map_set(self.rooms.unwrap(), name, to_json([])) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if rooms_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                rooms_status, "", "", 0 as i64, false, [])
+        }
+        let new_rooms = maybe_new_rooms.unwrap()
+        let (maybe_new_room_meta, meta_map_failed, meta_map_status) = match map_set(self.room_meta.unwrap(), name, meta) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if meta_map_failed {
+            drop(new_rooms)
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                meta_map_status, "", "", 0 as i64, false, [])
+        }
+        let new_room_meta = maybe_new_room_meta.unwrap()
+        drop(self.rooms.unwrap())
+        drop(self.room_meta.unwrap())
+        return room_manager_live(self.initialized, Some(new_rooms), Some(new_room_meta), self.room_count + 1,
+            0, "ok", "", 0 as i64, false, [])
+    }
+
+    transition join(RoomManagerLive, room: string, nick: string) -> RoomManagerLive {
+        let (exists, members_val) = map_get(self.rooms.unwrap(), room)
+        if !exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "room "" + room + "" does not exist", "", 0 as i64, false, [])
+        }
         let members_str = to_string(members_val)
         let mut parsed = from_json::<List<string>>(members_str)
-        // v0.28.29 fix for mimichat gap #2: push directly to the from_json
-        // result instead of copying into a fresh list. Previously the
-        // codegen lost in-place mutations to `parsed`, so callers copied
-        // element-by-element; now the returned list is mutable. The
-        // interpreter path requires `mut` so the post-call assign-back
-        // path in `eval_call_dispatch` is taken.
         let mut already = false
         for x in parsed { if x == nick { already = true } }
-        if already { return "already in room" }
+        if already {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "already in room", "", 0 as i64, false, [])
+        }
         push(parsed, nick)
-        self.rooms = map_set(self.rooms, room, to_json(parsed))
-        "ok"
+        match map_set(self.rooms.unwrap(), room, to_json(parsed)) {
+            Ok(updated) => {
+                drop(self.rooms.unwrap())
+                return room_manager_live(self.initialized, Some(updated), self.room_meta, self.room_count,
+                    0, "ok", "", 0 as i64, false, [])
+            }
+            Err(status) => return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                status, "", "", 0 as i64, false, [])
+        }
     }
 
-    func is_member(room: string, nick: string) -> bool {
-        let (exists, members_val) = map_get(self.rooms, room)
-        if !exists { return false }
+    transition is_member(RoomManagerLive, room: string, nick: string) -> RoomManagerLive {
+        let (exists, members_val) = map_get(self.rooms.unwrap(), room)
+        if !exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "", "", 0 as i64, false, [])
+        }
         let members_str = to_string(members_val)
-        let mut parsed = from_json::<List<string>>(members_str)
-        let mut members: List<string> = []
-        for x in parsed { push(members, x) }
+        let parsed = from_json::<List<string>>(members_str)
         let mut found_member = false
-        for x in members { if x == nick { found_member = true } }
-        found_member
+        for x in parsed { if x == nick { found_member = true } }
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", "", 0 as i64, found_member, [])
     }
 
-    func leave(room: string, nick: string) -> string {
-        let (exists, members_val) = map_get(self.rooms, room)
-        if !exists { return "room does not exist" }
+    transition leave(RoomManagerLive, room: string, nick: string) -> RoomManagerLive {
+        let (exists, members_val) = map_get(self.rooms.unwrap(), room)
+        if !exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "room does not exist", "", 0 as i64, false, [])
+        }
         let members_str = to_string(members_val)
-        let mut parsed = from_json::<List<string>>(members_str)
-        let mut members: List<string> = []
-        for x in parsed { push(members, x) }
+        let parsed = from_json::<List<string>>(members_str)
         let mut new_members: List<string> = []
-        for x in members { if x != nick { push(new_members, x) } }
-        self.rooms = map_set(self.rooms, room, to_json(new_members))
-        "ok"
+        for x in parsed { if x != nick { push(new_members, x) } }
+        match map_set(self.rooms.unwrap(), room, to_json(new_members)) {
+            Ok(updated) => {
+                drop(self.rooms.unwrap())
+                return room_manager_live(self.initialized, Some(updated), self.room_meta, self.room_count,
+                    0, "ok", "", 0 as i64, false, [])
+            }
+            Err(status) => return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                status, "", "", 0 as i64, false, [])
+        }
     }
 
-    func remove_from_all(nick: string) {
-        let r = self.rooms; let room_names = keys(r)
+    transition remove_from_all(RoomManagerLive, nick: string) -> RoomManagerLive {
+        let (maybe_staged, clone_failed, clone_status) = match map_clone(self.rooms.unwrap()) {
+            Ok(root) => (Some(root), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if clone_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                clone_status, "", "", 0 as i64, false, [])
+        }
+        let mut staged = maybe_staged.unwrap()
+        let room_names = keys(staged)
         for rn in room_names {
-            let (_, members_val) = map_get(self.rooms, rn)
+            let (_, members_val) = map_get(staged, rn)
             let members_str = to_string(members_val)
             let parsed = from_json::<List<string>>(members_str)
             let mut members: List<string> = []
@@ -609,82 +1058,265 @@ actor RoomManager {
             if found {
                 let mut new_members: List<string> = []
                 for x in members { if x != nick { push(new_members, x) } }
-                self.rooms = map_set(self.rooms, rn, to_json(new_members))
+                match map_set(staged, rn, to_json(new_members)) {
+                    Ok(updated) => { drop(staged); staged = updated }
+                    Err(status) => {
+                        drop(staged)
+                        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                            status, "", "", 0 as i64, false, [])
+                    }
+                }
             }
         }
+        drop(self.rooms.unwrap())
+        return room_manager_live(self.initialized, Some(staged), self.room_meta, self.room_count,
+            0, "", "", 0 as i64, false, [])
     }
 
-    func get_members(room: string) -> List<string> {
-        let (exists, members_val) = map_get(self.rooms, room)
-        if !exists { return [] }
-        let members_str = to_string(members_val)
-        let mut parsed = from_json::<List<string>>(members_str)
-        let mut members: List<string> = []
-        for x in parsed { push(members, x) }
-        members
+    transition get_members(RoomManagerLive, room: string) -> RoomManagerLive {
+        let (exists, members_val) = map_get(self.rooms.unwrap(), room)
+        let members = if exists { members_from_json(to_string(members_val)) } else { [] }
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", "", 0 as i64, false, members)
     }
 
-    func list_rooms() -> List<string> { let r = self.rooms; keys(r) }
-
-    func member_count(room: string) -> i32 {
-        let (exists, members_val) = map_get(self.rooms, room)
-        if !exists { return 0 }
-        len(members_from_json(to_string(members_val)))
+    transition list_rooms(RoomManagerLive) -> RoomManagerLive {
+        let r = self.rooms.unwrap()
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", "", 0 as i64, false, keys(r))
     }
 
-    func set_topic(room: string, topic: string) -> string {
-        let (exists, meta_val) = map_get(self.room_meta, room)
-        if !exists { return "room does not exist" }
+    transition member_count(RoomManagerLive, room: string) -> RoomManagerLive {
+        let (exists, members_val) = map_get(self.rooms.unwrap(), room)
+        let count = if exists { len(members_from_json(to_string(members_val))) } else { 0 }
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", "", count as i64, false, [])
+    }
+
+    transition set_topic(RoomManagerLive, room: string, topic: string) -> RoomManagerLive {
+        let (exists, meta_val) = map_get(self.room_meta.unwrap(), room)
+        if !exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "room does not exist", "", 0 as i64, false, [])
+        }
         let meta_str = to_string(meta_val)
         let name = json_get_string(meta_str, "name")
         let created = json_get_int(meta_str, "created_at")
-        let si = map_new()
-        let si2 = map_set(si, "name", name)
-        let si3 = map_set(si2, "created_at", created)
-        let si4 = map_set(si3, "topic", topic)
-        let new_meta = to_json(si4)
-        self.room_meta = map_set(self.room_meta, room, new_meta)
-        "ok"
+        let (maybe_new_meta, build_failed, build_status) = take_string_result(make_room_meta_json(name, created, topic, json_get_string(meta_str, "motd"), str_contains(meta_str, ""motd"")))
+        if build_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                build_status, "", "", 0 as i64, false, [])
+        }
+        let new_meta = maybe_new_meta.unwrap()
+        let (maybe_updated, set_failed, set_status) = match map_set(self.room_meta.unwrap(), room, new_meta) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if set_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                set_status, "", "", 0 as i64, false, [])
+        }
+        let updated = maybe_updated.unwrap()
+        drop(self.room_meta.unwrap())
+        return room_manager_live(self.initialized, self.rooms, Some(updated), self.room_count,
+            0, "ok", "", 0 as i64, false, [])
     }
 
-    func get_topic(room: string) -> string {
-        let (exists, meta_val) = map_get(self.room_meta, room)
-        if !exists { return "" }
-        let meta_str = to_string(meta_val)
-        json_get_string(meta_str, "topic")
+    transition get_topic(RoomManagerLive, room: string) -> RoomManagerLive {
+        let (exists, meta_val) = map_get(self.room_meta.unwrap(), room)
+        let text = if exists { json_get_string(to_string(meta_val), "topic") } else { "" }
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", text, 0 as i64, false, [])
     }
 
-    func set_motd(room: string, motd: string) -> string {
-        let (exists, meta_val) = map_get(self.room_meta, room)
-        if !exists { return "room does not exist" }
+    transition set_motd(RoomManagerLive, room: string, motd: string) -> RoomManagerLive {
+        let (exists, meta_val) = map_get(self.room_meta.unwrap(), room)
+        if !exists {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                0, "room does not exist", "", 0 as i64, false, [])
+        }
         let meta_str = to_string(meta_val)
         let name = json_get_string(meta_str, "name")
         let created = json_get_int(meta_str, "created_at")
         let current_topic = json_get_string(meta_str, "topic")
-        let si = map_new()
-        let si2 = map_set(si, "name", name)
-        let si3 = map_set(si2, "created_at", created)
-        let si4 = map_set(si3, "topic", current_topic)
-        let si5 = map_set(si4, "motd", motd)
-        let new_meta = to_json(si5)
-        self.room_meta = map_set(self.room_meta, room, new_meta)
-        "ok"
+        let (maybe_new_meta, build_failed, build_status) = take_string_result(make_room_meta_json(name, created, current_topic, motd, true))
+        if build_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                build_status, "", "", 0 as i64, false, [])
+        }
+        let new_meta = maybe_new_meta.unwrap()
+        let (maybe_updated, set_failed, set_status) = match map_set(self.room_meta.unwrap(), room, new_meta) {
+            Ok(updated) => (Some(updated), false, 0),
+            Err(status) => (None, true, status)
+        }
+        if set_failed {
+            return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                set_status, "", "", 0 as i64, false, [])
+        }
+        let updated = maybe_updated.unwrap()
+        drop(self.room_meta.unwrap())
+        return room_manager_live(self.initialized, self.rooms, Some(updated), self.room_count,
+            0, "ok", "", 0 as i64, false, [])
     }
 
-    func get_motd(room: string) -> string {
-        let (exists, meta_val) = map_get(self.room_meta, room)
-        if !exists { return "" }
-        let meta_str = to_string(meta_val)
-        json_get_string(meta_str, "motd")
+    transition get_motd(RoomManagerLive, room: string) -> RoomManagerLive {
+        let (exists, meta_val) = map_get(self.room_meta.unwrap(), room)
+        let text = if exists { json_get_string(to_string(meta_val), "motd") } else { "" }
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", text, 0 as i64, false, [])
     }
 
-    func clear() {
-        self.rooms = map_new()
-        self.room_meta = map_new()
-        self.room_count = 0
+    transition clear(RoomManagerLive) -> RoomManagerLive {
+        match new_room_maps() {
+            Ok((rooms, room_meta)) => {
+                if self.initialized {
+                    drop(self.rooms.unwrap())
+                    drop(self.room_meta.unwrap())
+                }
+                return room_manager_live(true, Some(rooms), Some(room_meta), 0,
+                    0, "", "", 0 as i64, false, [])
+            }
+            Err(status) => return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+                status, "", "", 0 as i64, false, [])
+        }
     }
 
-    func count() -> i32 { self.room_count }
+    transition release_maps(RoomManagerLive) -> RoomManagerLive {
+        if self.initialized {
+            drop(self.rooms.unwrap())
+            drop(self.room_meta.unwrap())
+        }
+        return room_manager_live(false, None, None, 0, 0, "", "", 0 as i64, false, [])
+    }
+
+    transition count(RoomManagerLive) -> RoomManagerLive {
+        return room_manager_live(self.initialized, self.rooms, self.room_meta, self.room_count,
+            0, "", "", self.room_count as i64, false, [])
+    }
+}
+
+actor RoomManager runs RoomManagerFlow {}
+
+func room_manager_live(initialized: bool, rooms: Option<Record>, room_meta: Option<Record>, room_count: i32,
+    last_status: i32, last_message: string, last_text: string,
+    last_number: i64, last_flag: bool, last_strings: List<string>) -> RoomManagerLive {
+    RoomManagerLive {
+        initialized: initialized,
+        rooms: rooms,
+        room_meta: room_meta,
+        room_count: room_count,
+        last_status: last_status,
+        last_message: last_message,
+        last_text: last_text,
+        last_number: last_number,
+        last_flag: last_flag,
+        last_strings: last_strings,
+    }
+}
+
+func room_manager_init(manager: RoomManager) -> Result<(), i32> {
+    let state = manager.init()
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func room_manager_create(manager: RoomManager, name: string) -> Result<string, i32> {
+    let state = manager.create(name)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func room_manager_join(manager: RoomManager, room: string, nick: string) -> Result<string, i32> {
+    let state = manager.join(room, nick)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func room_manager_is_member(manager: RoomManager, room: string, nick: string) -> bool { manager.is_member(room, nick).last_flag }
+func room_manager_leave(manager: RoomManager, room: string, nick: string) -> Result<string, i32> {
+    let state = manager.leave(room, nick)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func room_manager_remove_from_all(manager: RoomManager, nick: string) -> Result<(), i32> {
+    let state = manager.remove_from_all(nick)
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func room_manager_get_members(manager: RoomManager, room: string) -> List<string> { manager.get_members(room).last_strings }
+func room_manager_list_rooms(manager: RoomManager) -> List<string> { manager.list_rooms().last_strings }
+func room_manager_member_count(manager: RoomManager, room: string) -> i32 { manager.member_count(room).last_number as i32 }
+func room_manager_set_topic(manager: RoomManager, room: string, topic: string) -> Result<string, i32> {
+    let state = manager.set_topic(room, topic)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func room_manager_get_topic(manager: RoomManager, room: string) -> string { manager.get_topic(room).last_text }
+func room_manager_set_motd(manager: RoomManager, room: string, motd: string) -> Result<string, i32> {
+    let state = manager.set_motd(room, motd)
+    if state.last_status == 0 { Ok(state.last_message) } else { Err(state.last_status) }
+}
+func room_manager_get_motd(manager: RoomManager, room: string) -> string { manager.get_motd(room).last_text }
+func room_manager_clear(manager: RoomManager) -> Result<(), i32> {
+    let state = manager.clear()
+    if state.last_status == 0 { Ok(()) } else { Err(state.last_status) }
+}
+func room_manager_release_maps(manager: RoomManager) { let _ = manager.release_maps() }
+func room_manager_count(manager: RoomManager) -> i32 { manager.count().last_number as i32 }
+
+func map_status_message(status: i32) -> string {
+    "map operation failed with status " + to_string(status)
+}
+
+func result_message(result: Result<string, i32>) -> string {
+    match result {
+        Ok(message) => message,
+        Err(status) => map_status_message(status)
+    }
+}
+
+func unit_result_message(result: Result<(), i32>) -> string {
+    match result {
+        Ok(()) => "",
+        Err(status) => map_status_message(status)
+    }
+}
+
+func initialized_user_manager_or_exit() -> UserManager {
+    let manager = UserManager.spawn()
+    let (failed, status) = take_unit_result(user_manager_init(manager))
+    if failed {
+        println("User manager initialization failed with status " + to_string(status))
+        exit(status)
+    }
+    manager
+}
+
+func initialized_room_manager_or_exit() -> RoomManager {
+    let manager = RoomManager.spawn()
+    let (failed, status) = take_unit_result(room_manager_init(manager))
+    if failed {
+        println("Room manager initialization failed with status " + to_string(status))
+        exit(status)
+    }
+    manager
+}
+
+func record_or_exit(result: Result<Record, i32>) -> Record {
+    let (maybe_root, failed, status) = take_record_result(result)
+    if failed {
+        println("Map initialization failed with status " + to_string(status))
+        exit(status)
+    }
+    maybe_root.unwrap()
+}
+
+func test_string_result(result: Result<string, i32>) -> string {
+    let (maybe_value, failed, status) = take_string_result(result)
+    if failed {
+        println("Test map operation failed with status " + to_string(status))
+        exit(status)
+    }
+    maybe_value.unwrap()
+}
+
+func test_unit_result(result: Result<(), i32>) {
+    let (failed, status) = take_unit_result(result)
+    if failed {
+        println("Test map operation failed with status " + to_string(status))
+        exit(status)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -783,14 +1415,14 @@ func send_help(fd: i64) {
 func handle_msg_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
     let text = cmd_get_string(cmd, "text", "")
     if is_blank(text) { let ts = now_ms(); send(fd, encode_error_msg("Message text cannot be empty.", ts)); return }
-    let mut room = user_mgr.get_room(nick)
+    let mut room = user_manager_get_room(user_mgr, nick)
     if room == "" { room = DEFAULT_ROOM() }
     let ts = now_ms()
     let msg_json = encode_chat_msg(nick, room, text, ts)
-    user_mgr.push_history(msg_json)
-    let members = room_mgr.get_members(room)
+    user_manager_push_history(user_mgr, msg_json)
+    let members = room_manager_get_members(room_mgr, room)
     for member in members {
-        let mfd = user_mgr.get_fd(member)
+        let mfd = user_manager_get_fd(user_mgr, member)
         if mfd >= 0 { send(mfd, msg_json) }
     }
 }
@@ -800,7 +1432,7 @@ func handle_private_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManage
     let text = cmd_get_string(cmd, "text", "")
     if is_blank(target) || is_blank(text) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /private <user> <message>", ts)); return }
     let ts = now_ms()
-    let target_fd = user_mgr.get_fd(target)
+    let target_fd = user_manager_get_fd(user_mgr, target)
     if target_fd < 0 { send(fd, encode_error_msg("User \"" + target + "\" not found.", ts)); return }
     let _ = send(target_fd, encode_private_msg(nick, target, text, ts))
     let _ = send(fd, encode_private_msg(nick, target, "(sent to " + target + ") " + text, ts))
@@ -809,23 +1441,25 @@ func handle_private_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManage
 func handle_join_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
     let room_name = cmd_get_string(cmd, "room", "")
     if is_blank(room_name) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /join <room>", ts)); return }
-    let current_room = user_mgr.get_room(nick)
-    let result = room_mgr.join(room_name, nick)
+    let current_room = user_manager_get_room(user_mgr, nick)
+    let result = result_message(room_manager_join(room_mgr, room_name, nick))
     if result == "ok" {
         let ts = now_ms()
-        user_mgr.set_room(nick, room_name)
+        let set_room_error = unit_result_message(user_manager_set_room(user_mgr, nick, room_name))
+        if set_room_error != "" { let _ = send(fd, encode_error_msg(set_room_error, ts)) }
         if current_room != "" && current_room != room_name {
-            room_mgr.leave(current_room, nick)
-            let old_members = room_mgr.get_members(current_room)
+            let leave_error = result_message(room_manager_leave(room_mgr, current_room, nick))
+            if leave_error != "ok" { let _ = send(fd, encode_error_msg(leave_error, ts)) }
+            let old_members = room_manager_get_members(room_mgr, current_room)
             for om in old_members {
-                let ofd = user_mgr.get_fd(om)
+                let ofd = user_manager_get_fd(user_mgr, om)
                 if ofd >= 0 && ofd != fd { send(ofd, encode_leave_msg(nick, current_room, ts)) }
             }
         }
         send(fd, encode_system_msg("Joined room \"" + room_name + "\"", ts))
-        let new_members = room_mgr.get_members(room_name)
+        let new_members = room_manager_get_members(room_mgr, room_name)
         for nm in new_members {
-            let nmfd = user_mgr.get_fd(nm)
+            let nmfd = user_manager_get_fd(user_mgr, nm)
             if nmfd >= 0 && nmfd != fd { send(nmfd, encode_join_msg(nick, room_name, ts)) }
         }
     } else {
@@ -837,22 +1471,24 @@ func handle_join_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, 
 func handle_leave_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
     let room_name = cmd_get_string(cmd, "room", "")
     if is_blank(room_name) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /leave <room>", ts)); return }
-    let result = room_mgr.leave(room_name, nick)
+    let result = result_message(room_manager_leave(room_mgr, room_name, nick))
     if result == "ok" {
         let ts = now_ms()
         send(fd, encode_system_msg("Left room \"" + room_name + "\"", ts))
-        let members = room_mgr.get_members(room_name)
+        let members = room_manager_get_members(room_mgr, room_name)
         for m in members {
-            let mfd = user_mgr.get_fd(m)
+            let mfd = user_manager_get_fd(user_mgr, m)
             if mfd >= 0 { send(mfd, encode_leave_msg(nick, room_name, ts)) }
         }
-        let current = user_mgr.get_room(nick)
+        let current = user_manager_get_room(user_mgr, nick)
         if current == room_name {
-            let def_join = room_mgr.join(DEFAULT_ROOM(), nick)
+            let def_join = result_message(room_manager_join(room_mgr, DEFAULT_ROOM(), nick))
             if def_join == "ok" {
-                user_mgr.set_room(nick, DEFAULT_ROOM())
-                let _ = send(fd, encode_system_msg("Switched to \"" + DEFAULT_ROOM() + "\"", ts))
+                let set_room_error = unit_result_message(user_manager_set_room(user_mgr, nick, DEFAULT_ROOM()))
+                if set_room_error == "" { let _ = send(fd, encode_system_msg("Switched to \"" + DEFAULT_ROOM() + "\"", ts)) }
+                else { let _ = send(fd, encode_error_msg(set_room_error, ts)) }
             }
+            else { let _ = send(fd, encode_error_msg(def_join, ts)) }
         }
     } else {
         let ts = now_ms()
@@ -863,7 +1499,7 @@ func handle_leave_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager,
 func handle_create_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager) {
     let room_name = cmd_get_string(cmd, "room", "")
     if is_blank(room_name) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /create <room>", ts)); return }
-    let result = room_mgr.create(room_name)
+    let result = result_message(room_manager_create(room_mgr, room_name))
     let ts = now_ms()
     if result == "ok" { let _ = send(fd, encode_system_msg("Room \"" + room_name + "\" created.", ts)) }
     else { let _ = send(fd, encode_error_msg(result, ts)) }
@@ -872,7 +1508,7 @@ func handle_create_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager
 func handle_nick_cmd(fd: i64, old_nick: string, cmd: Record, user_mgr: UserManager) -> string {
     let new_nick = cmd_get_string(cmd, "name", "")
     if is_blank(new_nick) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /nick <newnick>", ts)); return old_nick }
-    let result = user_mgr.change_nick(fd, new_nick)
+    let result = result_message(user_manager_change_nick(user_mgr, fd, new_nick))
     if result == "" || result == "ok" {
         let ts = now_ms(); send(fd, encode_system_msg("You are now known as \"" + new_nick + "\".", ts)); new_nick
     } else {
@@ -882,18 +1518,18 @@ func handle_nick_cmd(fd: i64, old_nick: string, cmd: Record, user_mgr: UserManag
 
 func handle_rooms_cmd(fd: i64, room_mgr: RoomManager) {
     let ts = now_ms()
-    let room_list = room_mgr.list_rooms()
+    let room_list = room_manager_list_rooms(room_mgr)
     let _ = send(fd, encode_rooms_msg(room_list, ts))
 }
 
 func handle_users_cmd(fd: i64, room_mgr: RoomManager, user_mgr: UserManager, nick: string) {
-    let room = user_mgr.get_room(nick)
+    let room = user_manager_get_room(user_mgr, nick)
     let ts = now_ms()
     if room == "" {
-        let all_nicks = user_mgr.list_nicks()
+        let all_nicks = user_manager_list_nicks(user_mgr)
         let _ = send(fd, encode_users_msg(all_nicks, ts))
     } else {
-        let members = room_mgr.get_members(room)
+        let members = room_manager_get_members(room_mgr, room)
         let _ = send(fd, encode_users_msg(members, ts))
     }
 }
@@ -901,29 +1537,30 @@ func handle_users_cmd(fd: i64, room_mgr: RoomManager, user_mgr: UserManager, nic
 func handle_kick_cmd(fd: i64, nick: string, cmd: Record, user_mgr: UserManager, room_mgr: RoomManager) {
     let target = cmd_get_string(cmd, "name", "")
     if is_blank(target) { let ts = now_ms(); send(fd, encode_error_msg("Usage: /kick <user>", ts)); return }
-    let target_fd = user_mgr.get_fd(target)
+    let target_fd = user_manager_get_fd(user_mgr, target)
     if target_fd < 0 { let ts = now_ms(); send(fd, encode_error_msg("User \"" + target + "\" not found.", ts)); return }
     let ts = now_ms()
     let _ = send(target_fd, encode_system_msg("You have been kicked from the server.", ts))
     let _ = send(fd, encode_system_msg("Kicked \"" + target + "\" from the server.", ts))
-    room_mgr.remove_from_all(target)
-    let _ = user_mgr.unregister(target_fd)
+    let room_error = unit_result_message(room_manager_remove_from_all(room_mgr, target))
+    if room_error != "" { let _ = send(fd, encode_error_msg(room_error, ts)) }
+    let _ = user_manager_unregister(user_mgr, target_fd)
 }
 
 func handle_topic_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager, user_mgr: UserManager) {
-    let room = user_mgr.get_room(nick)
+    let room = user_manager_get_room(user_mgr, nick)
     let topic_text = cmd_get_string(cmd, "text", "")
     let ts = now_ms()
     if is_blank(topic_text) {
-        let current = room_mgr.get_topic(room)
+        let current = room_manager_get_topic(room_mgr, room)
         if is_blank(current) { let _ = send(fd, encode_system_msg("Room \"" + room + "\" has no topic set.", ts)) }
         else { let _ = send(fd, encode_topic_msg(room, current, ts)) }
     } else {
-        let result = room_mgr.set_topic(room, topic_text)
+        let result = result_message(room_manager_set_topic(room_mgr, room, topic_text))
         if result == "ok" {
-            let members = room_mgr.get_members(room)
+            let members = room_manager_get_members(room_mgr, room)
             for m in members {
-                let mfd = user_mgr.get_fd(m)
+                let mfd = user_manager_get_fd(user_mgr, m)
                 if mfd >= 0 { let _ = send(mfd, encode_topic_msg(room, topic_text, ts)) }
             }
         } else { let _ = send(fd, encode_error_msg(result, ts)) }
@@ -932,11 +1569,11 @@ func handle_topic_cmd(fd: i64, nick: string, cmd: Record, room_mgr: RoomManager,
 
 func broadcast_system_msg(text: string, room_mgr: RoomManager, user_mgr: UserManager) {
     let ts = now_ms()
-    let rooms = room_mgr.list_rooms()
+    let rooms = room_manager_list_rooms(room_mgr)
     for rn in rooms {
-        let members = room_mgr.get_members(rn)
+        let members = room_manager_get_members(room_mgr, rn)
         for m in members {
-            let mfd = user_mgr.get_fd(m)
+            let mfd = user_manager_get_fd(user_mgr, m)
             if mfd >= 0 { send(mfd, encode_system_msg(text, ts)) }
         }
     }
@@ -944,12 +1581,12 @@ func broadcast_system_msg(text: string, room_mgr: RoomManager, user_mgr: UserMan
 
 func broadcast_nick_change(old_nick: string, new_nick: string, room_mgr: RoomManager, user_mgr: UserManager) {
     let ts = now_ms()
-    let rooms = room_mgr.list_rooms()
+    let rooms = room_manager_list_rooms(room_mgr)
     for rn in rooms {
-        let members = room_mgr.get_members(rn)
+        let members = room_manager_get_members(room_mgr, rn)
         if list_contains_string(members, new_nick) || list_contains_string(members, old_nick) {
             for m in members {
-                let mfd = user_mgr.get_fd(m)
+                let mfd = user_manager_get_fd(user_mgr, m)
                 if mfd >= 0 { send(mfd, encode_nick_msg(old_nick, new_nick, ts)) }
             }
         }
@@ -970,24 +1607,29 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
         send(client_fd, encode_error_msg("Invalid nickname. Must be 2-16 alphanumeric characters. Disconnecting.", ts))
         sleep(100); close_fd(client_fd); return 1
     }
-    if user_mgr.nick_exists(nick) {
+    if user_manager_nick_exists(user_mgr, nick) {
         send(client_fd, encode_error_msg("Nickname \"" + nick + "\" is already in use. Please reconnect with a different nick. Disconnecting.", ts))
         sleep(100); close_fd(client_fd); return 1
     }
-    let reg_result = user_mgr.register(nick, client_fd)
+    let reg_result = result_message(user_manager_register(user_mgr, nick, client_fd))
     if reg_result != "ok" {
         send(client_fd, encode_error_msg("Registration failed: " + reg_result + ". Disconnecting.", ts))
         sleep(100); close_fd(client_fd); return 1
     }
-    let join_result = room_mgr.join(DEFAULT_ROOM(), nick)
-    if join_result == "ok" { user_mgr.set_room(nick, DEFAULT_ROOM()) }
+    let join_result = result_message(room_manager_join(room_mgr, DEFAULT_ROOM(), nick))
+    if join_result == "ok" {
+        let set_room_error = unit_result_message(user_manager_set_room(user_mgr, nick, DEFAULT_ROOM()))
+        if set_room_error != "" { let _ = send(client_fd, encode_error_msg(set_room_error, now_ms())) }
+    } else {
+        let _ = send(client_fd, encode_error_msg(join_result, now_ms()))
+    }
     let welcome_ts = now_ms()
     let motd = "Welcome to MimiChat, " + nick + "! Type /help for available commands."
     send(client_fd, encode_system_msg(motd, welcome_ts))
     let join_ts = now_ms()
-    let members = room_mgr.get_members(DEFAULT_ROOM())
+    let members = room_manager_get_members(room_mgr, DEFAULT_ROOM())
     for member in members {
-        let mfd = user_mgr.get_fd(member)
+        let mfd = user_manager_get_fd(user_mgr, member)
         if mfd >= 0 && mfd != client_fd { send(mfd, encode_join_msg(nick, DEFAULT_ROOM(), join_ts)) }
     }
     let mut keep_running = true
@@ -995,7 +1637,9 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
         let raw = recv(client_fd, 4096)
         if len(raw) == 0 { keep_running = false }
         else {
-            let cmd = parse_client_command(raw)
+            let parsed_cmd = parse_client_command_for_connection(raw, client_fd)
+            if parsed_cmd.is_some() {
+            let cmd = parsed_cmd.unwrap()
             let cmd_type = cmd_get_string(cmd, "cmd", "")
             if cmd_type == CMD_QUIT() || cmd_type == "exit" || cmd_type == "quit" { keep_running = false }
             else if cmd_type == CMD_HELP() { send_help(client_fd) }
@@ -1025,7 +1669,7 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
             }
             else if cmd_type == CMD_HISTORY() {
                 let hist_ts = now_ms()
-                let entries = user_mgr.get_history(50)
+                let entries = user_manager_get_history(user_mgr, 50)
                 let _ = send(client_fd, encode_history_msg(entries, hist_ts))
             }
             else if cmd_type == "" { }
@@ -1033,16 +1677,19 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
                 let err_ts = now_ms()
                 let _ = send(client_fd, encode_error_msg("Unknown command: " + cmd_type + ". Type /help for commands.", err_ts))
             }
+            drop(cmd)
+            }
         }
     }
     let leave_ts = now_ms()
-    room_mgr.remove_from_all(current_nick)
-    user_mgr.unregister(client_fd)
-    let all_rooms = room_mgr.list_rooms()
+    let room_error = unit_result_message(room_manager_remove_from_all(room_mgr, current_nick))
+    if room_error != "" { let _ = send(client_fd, encode_error_msg(room_error, leave_ts)) }
+    user_manager_unregister(user_mgr, client_fd)
+    let all_rooms = room_manager_list_rooms(room_mgr)
     for rn in all_rooms {
-        let rmembers = room_mgr.get_members(rn)
+        let rmembers = room_manager_get_members(room_mgr, rn)
         for rm in rmembers {
-            let rfd = user_mgr.get_fd(rm)
+            let rfd = user_manager_get_fd(user_mgr, rm)
             if rfd >= 0 { send(rfd, encode_leave_msg(current_nick, rn, leave_ts)) }
         }
     }
@@ -1050,7 +1697,7 @@ func handle_connection(client_fd: i64, user_mgr: UserManager, room_mgr: RoomMana
     0
 }
 
-func init_server(config: ServerConfig) -> (i64, UserManager, RoomManager) {
+func init_server(config: ServerConfig) -> Result<(i64, UserManager, RoomManager), i32> {
     let srv = socket(2, 1, 0) as i64
     if srv < 0 { println("FATAL: Failed to create socket"); exit(1) }
     let ret = bind(srv, config.port)
@@ -1058,12 +1705,34 @@ func init_server(config: ServerConfig) -> (i64, UserManager, RoomManager) {
     let ret2 = listen(srv, config.max_clients)
     if ret2 < 0 { println("FATAL: Failed to listen on socket"); close_fd(srv); exit(1) }
     let um = UserManager.spawn()
+    match user_manager_init(um) {
+        Ok(()) => {},
+        Err(status) => { user_manager_release_maps(um); close_fd(srv); return Err(status) }
+    }
     let rm = RoomManager.spawn()
-    rm.create("lobby")
+    match room_manager_init(rm) {
+        Ok(()) => {},
+        Err(status) => { room_manager_release_maps(rm); user_manager_release_maps(um); close_fd(srv); return Err(status) }
+    }
+    let (maybe_create_result, create_failed, create_status) = take_string_result(room_manager_create(rm, "lobby"))
+    if create_failed {
+        room_manager_release_maps(rm)
+        user_manager_release_maps(um)
+        close_fd(srv)
+        return Err(create_status)
+    }
+    let create_result = maybe_create_result.unwrap()
+    if create_result != "ok" {
+        println("FATAL: Failed to initialize lobby: " + create_result)
+        room_manager_release_maps(rm)
+        user_manager_release_maps(um)
+        close_fd(srv)
+        return Err(1)
+    }
     println("MimiChat v0.1.0 server started on port " + to_string(config.port))
     println("History file: " + config.history_file)
     println("Max clients: " + to_string(config.max_clients))
-    (srv, um, rm)
+    Ok((srv, um, rm))
 }
 
 func run_server_loop(srv_fd: i64, user_mgr: UserManager, room_mgr: RoomManager, config: ServerConfig) -> i32 {
@@ -1388,10 +2057,10 @@ func test_format_timestamp_zeros() -> TestResult {
 }
 
 func test_cmd_get_string_default() -> TestResult {
-    let cmd = map_new()
+    let cmd = record_or_exit(map_new())
     let val = cmd_get_string(cmd, "nonexistent", "default")
     if val != "default" { return test_fail("cmd_get_string_default", "Expected default value") }
-    let cmd2 = map_set(map_new(), "key", "value")
+    let cmd2 = record_or_exit(command_map_set(map_new(), "key", "value"))
     let val2 = cmd_get_string(cmd2, "key", "fallback")
     if val2 != "value" { return test_fail("cmd_get_string_default", "Expected 'value', got '" + val2 + "'") }
     test_pass("cmd_get_string_default")
@@ -1464,23 +2133,23 @@ func test_safe_parse_int() -> TestResult {
 }
 
 func test_parse_client_command() -> TestResult {
-    let c1 = parse_client_command("/join general")
+    let c1 = parse_client_command_or_exit("/join general")
     if !cmd_is(c1, CMD_JOIN()) { return test_fail("parse_client_command", "Expected cmd=join") }
     let room1 = cmd_get_string(c1, "room", "")
     if room1 != "general" { return test_fail("parse_client_command", "Expected room=general, got '" + room1 + "'") }
-    let c2 = parse_client_command("/nick Alice")
+    let c2 = parse_client_command_or_exit("/nick Alice")
     if !cmd_is(c2, CMD_NICK()) { return test_fail("parse_client_command", "Expected cmd=nick") }
     let n2 = cmd_get_string(c2, "name", "")
     if n2 != "Alice" { return test_fail("parse_client_command", "Expected name=Alice, got '" + n2 + "'") }
-    let c3 = parse_client_command("hello world")
+    let c3 = parse_client_command_or_exit("hello world")
     if !cmd_is(c3, CMD_MSG()) { return test_fail("parse_client_command", "Expected cmd=msg for plain text") }
     let t3 = cmd_get_string(c3, "text", "")
     if t3 != "hello world" { return test_fail("parse_client_command", "Expected text=hello world, got '" + t3 + "'") }
-    let c4 = parse_client_command("{\"cmd\":\"join\",\"room\":\"test\"}")
+    let c4 = parse_client_command_or_exit("{\"cmd\":\"join\",\"room\":\"test\"}")
     if !cmd_is(c4, CMD_JOIN()) { return test_fail("parse_client_command", "Expected cmd=join from JSON") }
     let room4 = cmd_get_string(c4, "room", "")
     if room4 != "test" { return test_fail("parse_client_command", "Expected room=test from JSON, got '" + room4 + "'") }
-    let c5 = parse_client_command("{\"cmd\":\"private\",\"to\":\"bob\",\"text\":\"hi\"}")
+    let c5 = parse_client_command_or_exit("{\"cmd\":\"private\",\"to\":\"bob\",\"text\":\"hi\"}")
     if !cmd_is(c5, CMD_PRIVATE()) { return test_fail("parse_client_command", "Expected cmd=private from JSON") }
     let to5 = cmd_get_string(c5, "to", "")
     if to5 != "bob" { return test_fail("parse_client_command", "Expected to=bob, got '" + to5 + "'") }
@@ -1512,74 +2181,74 @@ func test_encode_system_msg() -> TestResult {
 }
 
 func test_user_manager_basic() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    if !um.nick_exists("Alice") { return test_fail("user_manager_basic", "Expected Alice to exist") }
-    let nick = um.get_nick(100 as i64)
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    if !user_manager_nick_exists(um, "Alice") { return test_fail("user_manager_basic", "Expected Alice to exist") }
+    let nick = user_manager_get_nick(um, 100 as i64)
     if nick != "Alice" { return test_fail("user_manager_basic", "Expected get_nick=Alice, got '" + nick + "'") }
-    let fd = um.get_fd("Alice")
+    let fd = user_manager_get_fd(um, "Alice")
     if fd != 100 as i64 { return test_fail("user_manager_basic", "Expected get_fd=100, got " + to_string(fd)) }
-    let cnt = um.count()
+    let cnt = user_manager_count(um)
     if cnt != 1 { return test_fail("user_manager_basic", "Expected count=1, got " + to_string(cnt)) }
     test_pass("user_manager_basic")
 }
 
 func test_user_manager_nick_collision() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    let r2 = um.register("Alice", 200 as i64)
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let r2 = test_string_result(user_manager_register(um, "Alice", 200 as i64))
     if r2 == "ok" { return test_fail("user_manager_nick_collision", "Expected collision for duplicate nick") }
-    let r3 = um.register("alice", 300 as i64)
+    let r3 = test_string_result(user_manager_register(um, "alice", 300 as i64))
     if r3 == "ok" { return test_fail("user_manager_nick_collision", "Expected collision for case-insensitive duplicate") }
     test_pass("user_manager_nick_collision")
 }
 
 func test_user_manager_change_nick() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    let old_nick_val = um.change_nick(100 as i64, "Alice99")
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let old_nick_val = test_string_result(user_manager_change_nick(um, 100 as i64, "Alice99"))
     if old_nick_val == "" || old_nick_val == "ok" { return test_fail("user_manager_change_nick", "Expected old nick returned") }
-    if um.nick_exists("Alice") { return test_fail("user_manager_change_nick", "Alice should not exist after rename") }
-    if !um.nick_exists("Alice99") { return test_fail("user_manager_change_nick", "Alice99 should exist") }
-    let new_nick = um.get_nick(100 as i64)
+    if user_manager_nick_exists(um, "Alice") { return test_fail("user_manager_change_nick", "Alice should not exist after rename") }
+    if !user_manager_nick_exists(um, "Alice99") { return test_fail("user_manager_change_nick", "Alice99 should exist") }
+    let new_nick = user_manager_get_nick(um, 100 as i64)
     if new_nick != "Alice99" { return test_fail("user_manager_change_nick", "Expected get_nick=Alice99, got '" + new_nick + "'") }
     test_pass("user_manager_change_nick")
 }
 
 func test_room_manager_basic() -> TestResult {
-    let rm = RoomManager.spawn()
-    let create_r = rm.create("lobby")
+    let rm = initialized_room_manager_or_exit()
+    let create_r = test_string_result(room_manager_create(rm, "lobby"))
     if create_r != "ok" { return test_fail("room_manager_basic", "Create lobby failed: " + create_r) }
-    let rooms = rm.list_rooms()
+    let rooms = room_manager_list_rooms(rm)
     if !list_contains_string(rooms, "lobby") { return test_fail("room_manager_basic", "Expected lobby in rooms") }
-    let cnt = rm.count()
+    let cnt = room_manager_count(rm)
     if cnt < 1 { return test_fail("room_manager_basic", "Expected count >= 1") }
     test_pass("room_manager_basic")
 }
 
 func test_room_manager_join_leave() -> TestResult {
-    let rm = RoomManager.spawn()
-    rm.create("lobby")
-    let r1 = rm.join("lobby", "Alice")
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "lobby"))
+    let r1 = test_string_result(room_manager_join(rm, "lobby", "Alice"))
     if r1 != "ok" { return test_fail("room_manager_join_leave", "Join failed: " + r1) }
-    if !rm.is_member("lobby", "Alice") { return test_fail("room_manager_join_leave", "Expected Alice to be member") }
-    let members = rm.get_members("lobby")
+    if !room_manager_is_member(rm, "lobby", "Alice") { return test_fail("room_manager_join_leave", "Expected Alice to be member") }
+    let members = room_manager_get_members(rm, "lobby")
     if !list_contains_string(members, "Alice") { return test_fail("room_manager_join_leave", "Expected Alice in members list") }
-    let r2 = rm.leave("lobby", "Alice")
+    let r2 = test_string_result(room_manager_leave(rm, "lobby", "Alice"))
     if r2 != "ok" { return test_fail("room_manager_join_leave", "Leave failed: " + r2) }
-    if rm.is_member("lobby", "Alice") { return test_fail("room_manager_join_leave", "Expected Alice to not be member after leave") }
+    if room_manager_is_member(rm, "lobby", "Alice") { return test_fail("room_manager_join_leave", "Expected Alice to not be member after leave") }
     test_pass("room_manager_join_leave")
 }
 
 func test_room_manager_create() -> TestResult {
-    let rm = RoomManager.spawn()
-    let r1 = rm.create("dev-chat")
+    let rm = initialized_room_manager_or_exit()
+    let r1 = test_string_result(room_manager_create(rm, "dev-chat"))
     if r1 != "ok" { return test_fail("room_manager_create", "Create failed: " + r1) }
-    let rooms = rm.list_rooms()
+    let rooms = room_manager_list_rooms(rm)
     if !list_contains_string(rooms, "dev-chat") { return test_fail("room_manager_create", "Expected dev-chat in rooms") }
-    let r2 = rm.create("dev-chat")
+    let r2 = test_string_result(room_manager_create(rm, "dev-chat"))
     if r2 == "ok" { return test_fail("room_manager_create", "Expected duplicate create to fail") }
-    let r3 = rm.create("")
+    let r3 = test_string_result(room_manager_create(rm, ""))
     if r3 == "ok" { return test_fail("room_manager_create", "Expected empty name create to fail") }
     test_pass("room_manager_create")
 }
@@ -1604,105 +2273,105 @@ func test_message_store_rollover() -> TestResult {
 }
 
 func test_integration_basic() -> TestResult {
-    let um = UserManager.spawn()
-    let rm = RoomManager.spawn()
-    rm.create("lobby")
-    let reg = um.register("TestUser", 999 as i64)
+    let um = initialized_user_manager_or_exit()
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "lobby"))
+    let reg = test_string_result(user_manager_register(um, "TestUser", 999 as i64))
     if reg != "ok" { return test_fail("integration_basic", "Registration failed: " + reg) }
-    let join_r = rm.join("lobby", "TestUser")
+    let join_r = test_string_result(room_manager_join(rm, "lobby", "TestUser"))
     if join_r != "ok" { return test_fail("integration_basic", "Join failed: " + join_r) }
-    um.set_room("TestUser", "lobby")
-    let members = rm.get_members("lobby")
+    test_unit_result(user_manager_set_room(um, "TestUser", "lobby"))
+    let members = room_manager_get_members(rm, "lobby")
     if !list_contains_string(members, "TestUser") { return test_fail("integration_basic", "Expected TestUser in room members") }
     let msg = encode_chat_msg("TestUser", "lobby", "Integration test message", now_ms())
     if !json_is_valid(msg) { return test_fail("integration_basic", "Invalid chat message JSON") }
     let msg_type = json_get_string(msg, "type")
     if msg_type != SVR_CHAT() { return test_fail("integration_basic", "Expected type=chat") }
-    let leave_r = rm.leave("lobby", "TestUser")
+    let leave_r = test_string_result(room_manager_leave(rm, "lobby", "TestUser"))
     if leave_r != "ok" { return test_fail("integration_basic", "Leave failed: " + leave_r) }
-    let unreg_result = um.unregister(999 as i64)
+    let unreg_result = user_manager_unregister(um, 999 as i64)
     if unreg_result == "not found" { return test_fail("integration_basic", "Unregister failed") }
     test_pass("integration_basic")
 }
 
 func test_user_manager_history() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    let h0 = um.get_history(10)
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let h0 = user_manager_get_history(um, 10)
     if len(h0) != 0 { return test_fail("user_manager_history", "Expected empty history, got " + to_string(len(h0))) }
-    um.push_history("{\"type\":\"chat\",\"text\":\"hello\"}")
-    um.push_history("{\"type\":\"chat\",\"text\":\"world\"}")
-    let h1 = um.get_history(10)
+    user_manager_push_history(um, "{\"type\":\"chat\",\"text\":\"hello\"}")
+    user_manager_push_history(um, "{\"type\":\"chat\",\"text\":\"world\"}")
+    let h1 = user_manager_get_history(um, 10)
     if len(h1) != 2 { return test_fail("user_manager_history", "Expected 2 entries, got " + to_string(len(h1))) }
-    let h2 = um.get_history(1)
+    let h2 = user_manager_get_history(um, 1)
     if len(h2) != 1 { return test_fail("user_manager_history", "Expected 1 entry with count=1, got " + to_string(len(h2))) }
     test_pass("user_manager_history")
 }
 
 func test_room_manager_topic() -> TestResult {
-    let rm = RoomManager.spawn()
-    let r1 = rm.create("general")
+    let rm = initialized_room_manager_or_exit()
+    let r1 = test_string_result(room_manager_create(rm, "general"))
     if r1 != "ok" { return test_fail("room_manager_topic", "Create failed: " + r1) }
-    let topic1 = rm.get_topic("general")
+    let topic1 = room_manager_get_topic(rm, "general")
     if topic1 != "" { return test_fail("room_manager_topic", "Expected empty topic, got '" + topic1 + "'") }
-    let r2 = rm.set_topic("general", "Chat about general stuff")
+    let r2 = test_string_result(room_manager_set_topic(rm, "general", "Chat about general stuff"))
     if r2 != "ok" { return test_fail("room_manager_topic", "set_topic failed: " + r2) }
-    let topic2 = rm.get_topic("general")
+    let topic2 = room_manager_get_topic(rm, "general")
     if topic2 != "Chat about general stuff" { return test_fail("room_manager_topic", "Expected 'Chat about general stuff', got '" + topic2 + "'") }
-    let r3 = rm.set_topic("nonexistent", "test")
+    let r3 = test_string_result(room_manager_set_topic(rm, "nonexistent", "test"))
     if r3 == "ok" { return test_fail("room_manager_topic", "Expected set_topic on nonexistent room to fail") }
     test_pass("room_manager_topic")
 }
 
 func test_room_manager_motd() -> TestResult {
-    let rm = RoomManager.spawn()
-    rm.create("general")
-    let m1 = rm.get_motd("general")
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "general"))
+    let m1 = room_manager_get_motd(rm, "general")
     if m1 != "" { return test_fail("room_manager_motd", "Expected empty motd, got '" + m1 + "'") }
-    let r1 = rm.set_motd("general", "Welcome to the general chat!")
+    let r1 = test_string_result(room_manager_set_motd(rm, "general", "Welcome to the general chat!"))
     if r1 != "ok" { return test_fail("room_manager_motd", "set_motd failed: " + r1) }
-    let m2 = rm.get_motd("general")
+    let m2 = room_manager_get_motd(rm, "general")
     if m2 != "Welcome to the general chat!" { return test_fail("room_manager_motd", "Expected motd to match") }
-    let r2 = rm.set_motd("nonexistent", "test")
+    let r2 = test_string_result(room_manager_set_motd(rm, "nonexistent", "test"))
     if r2 == "ok" { return test_fail("room_manager_motd", "set_motd on nonexistent room should fail") }
     test_pass("room_manager_motd")
 }
 
 func test_user_manager_get_room() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    let room1 = um.get_room("Alice")
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let room1 = user_manager_get_room(um, "Alice")
     if room1 != "lobby" { return test_fail("user_manager_get_room", "Expected lobby, got '" + room1 + "'") }
-    let room2 = um.get_room("Nonexistent")
+    let room2 = user_manager_get_room(um, "Nonexistent")
     if room2 != "" { return test_fail("user_manager_get_room", "Expected empty for nonexistent") }
     test_pass("user_manager_get_room")
 }
 
 func test_user_manager_list_nicks() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    um.register("Bob", 200 as i64)
-    let nicks = um.list_nicks()
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    test_string_result(user_manager_register(um, "Bob", 200 as i64))
+    let nicks = user_manager_list_nicks(um)
     if len(nicks) != 2 { return test_fail("user_manager_list_nicks", "Expected 2 nicks") }
     test_pass("user_manager_list_nicks")
 }
 
 func test_user_manager_clear() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    if um.count() != 1 { return test_fail("user_manager_clear", "Expected count=1") }
-    um.clear()
-    if um.count() != 0 { return test_fail("user_manager_clear", "Expected count=0 after clear") }
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    if user_manager_count(um) != 1 { return test_fail("user_manager_clear", "Expected count=1") }
+    test_unit_result(user_manager_clear(um))
+    if user_manager_count(um) != 0 { return test_fail("user_manager_clear", "Expected count=0 after clear") }
     test_pass("user_manager_clear")
 }
 
 func test_room_manager_clear() -> TestResult {
-    let rm = RoomManager.spawn()
-    rm.create("lobby")
-    rm.create("general")
-    if rm.count() != 2 { return test_fail("room_manager_clear", "Expected count=2") }
-    rm.clear()
-    if rm.count() != 0 { return test_fail("room_manager_clear", "Expected count=0 after clear") }
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "lobby"))
+    test_string_result(room_manager_create(rm, "general"))
+    if room_manager_count(rm) != 2 { return test_fail("room_manager_clear", "Expected count=2") }
+    test_unit_result(room_manager_clear(rm))
+    if room_manager_count(rm) != 0 { return test_fail("room_manager_clear", "Expected count=0 after clear") }
     test_pass("room_manager_clear")
 }
 
@@ -1737,55 +2406,55 @@ func test_is_blank_edge() -> TestResult {
 }
 
 func test_user_manager_set_room() -> TestResult {
-    let um = UserManager.spawn()
-    um.register("Alice", 100 as i64)
-    um.set_room("Alice", "general")
-    let r = um.get_room("Alice")
+    let um = initialized_user_manager_or_exit()
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    test_unit_result(user_manager_set_room(um, "Alice", "general"))
+    let r = user_manager_get_room(um, "Alice")
     if r != "general" { return test_fail("user_manager_set_room", "Expected 'general', got '" + r + "'") }
     test_pass("user_manager_set_room")
 }
 
 func test_user_manager_unregister() -> TestResult {
-    let um = UserManager.spawn()
-    let r1 = um.register("Alice", 100 as i64)
+    let um = initialized_user_manager_or_exit()
+    let r1 = test_string_result(user_manager_register(um, "Alice", 100 as i64))
     if r1 != "ok" { return test_fail("user_manager_unregister", "Register failed") }
-    let r2 = um.unregister(100 as i64)
+    let r2 = user_manager_unregister(um, 100 as i64)
     if r2 == "not found" { return test_fail("user_manager_unregister", "Unregister failed") }
-    if um.nick_exists("Alice") { return test_fail("user_manager_unregister", "Alice should not exist after unregister") }
-    let r3 = um.unregister(999 as i64)
+    if user_manager_nick_exists(um, "Alice") { return test_fail("user_manager_unregister", "Alice should not exist after unregister") }
+    let r3 = user_manager_unregister(um, 999 as i64)
     if r3 != "not found" { return test_fail("user_manager_unregister", "Expected 'not found' for bogus FD") }
     test_pass("user_manager_unregister")
 }
 
 func test_room_manager_count() -> TestResult {
-    let rm = RoomManager.spawn()
-    if rm.count() != 0 { return test_fail("room_manager_count", "Expected 0 at start") }
-    rm.create("lobby")
-    if rm.count() != 1 { return test_fail("room_manager_count", "Expected 1 after create") }
-    rm.create("random")
-    if rm.count() != 2 { return test_fail("room_manager_count", "Expected 2 after second create") }
+    let rm = initialized_room_manager_or_exit()
+    if room_manager_count(rm) != 0 { return test_fail("room_manager_count", "Expected 0 at start") }
+    test_string_result(room_manager_create(rm, "lobby"))
+    if room_manager_count(rm) != 1 { return test_fail("room_manager_count", "Expected 1 after create") }
+    test_string_result(room_manager_create(rm, "random"))
+    if room_manager_count(rm) != 2 { return test_fail("room_manager_count", "Expected 2 after second create") }
     test_pass("room_manager_count")
 }
 
 func test_room_manager_duplicate_join() -> TestResult {
-    let rm = RoomManager.spawn()
-    rm.create("lobby")
-    rm.join("lobby", "Alice")
-    let r2 = rm.join("lobby", "Alice")
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "lobby"))
+    test_string_result(room_manager_join(rm, "lobby", "Alice"))
+    let r2 = test_string_result(room_manager_join(rm, "lobby", "Alice"))
     if r2 == "" || r2 != "already in room" { return test_fail("room_manager_duplicate_join", "Expected duplicate join to fail, got '" + r2 + "'") }
     test_pass("room_manager_duplicate_join")
 }
 
 func test_room_manager_member_count() -> TestResult {
-    let rm = RoomManager.spawn()
-    rm.create("lobby")
-    if rm.member_count("lobby") != 0 { return test_fail("room_manager_member_count", "Expected 0 members") }
-    rm.join("lobby", "Alice")
-    if rm.member_count("lobby") != 1 { return test_fail("room_manager_member_count", "Expected 1 member") }
-    rm.join("lobby", "Bob")
-    if rm.member_count("lobby") != 2 { return test_fail("room_manager_member_count", "Expected 2 members") }
-    rm.leave("lobby", "Alice")
-    if rm.member_count("lobby") != 1 { return test_fail("room_manager_member_count", "Expected 1 member after leave") }
+    let rm = initialized_room_manager_or_exit()
+    test_string_result(room_manager_create(rm, "lobby"))
+    if room_manager_member_count(rm, "lobby") != 0 { return test_fail("room_manager_member_count", "Expected 0 members") }
+    test_string_result(room_manager_join(rm, "lobby", "Alice"))
+    if room_manager_member_count(rm, "lobby") != 1 { return test_fail("room_manager_member_count", "Expected 1 member") }
+    test_string_result(room_manager_join(rm, "lobby", "Bob"))
+    if room_manager_member_count(rm, "lobby") != 2 { return test_fail("room_manager_member_count", "Expected 2 members") }
+    test_string_result(room_manager_leave(rm, "lobby", "Alice"))
+    if room_manager_member_count(rm, "lobby") != 1 { return test_fail("room_manager_member_count", "Expected 1 member after leave") }
     test_pass("room_manager_member_count")
 }
 
@@ -1854,35 +2523,35 @@ func test_format_timestamp_large() -> TestResult {
 }
 
 func test_user_manager_get_nick() -> TestResult {
-    let um = UserManager.spawn()
-    let nick1 = um.get_nick(100 as i64)
+    let um = initialized_user_manager_or_exit()
+    let nick1 = user_manager_get_nick(um, 100 as i64)
     if nick1 != "" { return test_fail("user_manager_get_nick", "Expected empty for unknown FD") }
-    um.register("Alice", 100 as i64)
-    let nick2 = um.get_nick(100 as i64)
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let nick2 = user_manager_get_nick(um, 100 as i64)
     if nick2 != "Alice" { return test_fail("user_manager_get_nick", "Expected 'Alice', got '" + nick2 + "'") }
     test_pass("user_manager_get_nick")
 }
 
 func test_user_manager_get_fd() -> TestResult {
-    let um = UserManager.spawn()
-    let fd1 = um.get_fd("Alice")
+    let um = initialized_user_manager_or_exit()
+    let fd1 = user_manager_get_fd(um, "Alice")
     if fd1 >= 0 { return test_fail("user_manager_get_fd", "Expected negative for unknown nick") }
-    um.register("Alice", 100 as i64)
-    let fd2 = um.get_fd("Alice")
+    test_string_result(user_manager_register(um, "Alice", 100 as i64))
+    let fd2 = user_manager_get_fd(um, "Alice")
     if fd2 != 100 as i64 { return test_fail("user_manager_get_fd", "Expected fd=100, got " + to_string(fd2)) }
     test_pass("user_manager_get_fd")
 }
 
 func test_user_manager_history_trim() -> TestResult {
-    let um = UserManager.spawn()
+    let um = initialized_user_manager_or_exit()
     let mut i = 0
-    while i < 20 { um.push_history("{\"msg\":" + to_string(i) + "}"); i = i + 1 }
-    let h = um.get_history(100)
+    while i < 20 { user_manager_push_history(um, "{\"msg\":" + to_string(i) + "}"); i = i + 1 }
+    let h = user_manager_get_history(um, 100)
     if len(h) != 20 { return test_fail("user_manager_history_trim", "Expected 20 entries before trim, got " + to_string(len(h))) }
-    let um2 = UserManager.spawn()
+    let um2 = initialized_user_manager_or_exit()
     i = 0
-    while i < 1100 { um2.push_history("{\"msg\":" + to_string(i) + "}"); i = i + 1 }
-    let h2 = um2.get_history(2000)
+    while i < 1100 { user_manager_push_history(um2, "{\"msg\":" + to_string(i) + "}"); i = i + 1 }
+    let h2 = user_manager_get_history(um2, 2000)
     if len(h2) > 1050 { return test_fail("user_manager_history_trim", "Expected trim to limit history to <=1000, got " + to_string(len(h2))) }
     test_pass("user_manager_history_trim")
 }
@@ -2005,8 +2674,13 @@ func main() -> i32 {
         while i < len(arg_list) { push(server_args, arg_list[i]); i = i + 1 }
         let config = parse_server_args(server_args)
         println("Starting MimiChat server on port " + to_string(config.port) + "...")
-        let (srv_fd, um, rm) = init_server(config)
-        if srv_fd >= 0 { run_server_loop(srv_fd, um, rm, config) } else { 1 }
+        match init_server(config) {
+            Ok((srv_fd, um, rm)) => if srv_fd >= 0 { run_server_loop(srv_fd, um, rm, config) } else { 1 },
+            Err(status) => {
+                println("FATAL: Map initialization failed with status " + to_string(status))
+                status
+            }
+        }
     } else if mode == "client" || mode == "cli" || mode == "c" {
         let host = if len(arg_list) > 1 { arg_list[1] } else { "127.0.0.1" }
         let port = if len(arg_list) > 2 { safe_parse_int(arg_list[2], 7777) } else { 7777 }

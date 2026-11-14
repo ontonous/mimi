@@ -1,0 +1,61 @@
+{
+  "schema": "mimi-v02-w4-oracle-v1",
+  "listener": {
+    "scope_tag": 1,
+    "address": "127.0.0.1",
+    "requested_port": 0,
+    "scope_reject_code": -1001,
+    "port_reject_code": -1002
+  },
+  "checksum": {
+    "abi": "int32_t w4_checksum(int32_t)",
+    "vectors": [
+      {"input": 0, "result": 17},
+      {"input": 20, "result": 417},
+      {"input": 21, "result": 458},
+      {"input": 999, "result": 998018},
+      {"input": 1000, "result": -2},
+      {"input": -1, "result": -2}
+    ],
+    "error_mapping": "negative C result becomes ChecksumRange JSON; it does not terminate the service"
+  },
+  "clients": {
+    "client_a": {
+      "request_id": 101,
+      "value": 20,
+      "delay_ms": 750,
+      "response": {"id": 101, "checksum": 417}
+    },
+    "client_b": {
+      "first_request": "malformed JSON",
+      "first_response": {"error": "BadJson"},
+      "next_request": {"op": "checksum", "request_id": 202, "value": 20, "hold_ms": 0},
+      "next_response": {"id": 202, "checksum": 417},
+      "ffi_error_request": {"op": "checksum", "request_id": 303, "value": 1000, "hold_ms": 0},
+      "ffi_error_response": {"id": 303, "error": "ChecksumRange"}
+    }
+  },
+  "stop": {
+    "request": {"op": "stop", "request_id": 900},
+    "response": {"id": 900, "stopping": true},
+    "required_event_order": [
+      "IN_FLIGHT(101)",
+      "STOP_ACCEPTED(900)",
+      "RESPONSE(101)",
+      "DRAINED(0)"
+    ],
+    "unaccepted_after_stop": "connection refused after DRAINED"
+  },
+  "exports": {
+    "w4_factorial": {"input": 5, "result": 120},
+    "w4_status": {"input": 5, "result": 121},
+    "internal_export_probe": {"input": 5, "result": 145},
+    "internal_mimi_only_symbol": "not exported under the C ABI"
+  },
+  "limits": {
+    "request_line_bytes": 2048,
+    "worker_request_count": 256,
+    "backlog": 8,
+    "max_hold_ms": 2000
+  }
+}

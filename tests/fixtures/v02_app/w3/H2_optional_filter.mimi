@@ -1,0 +1,105 @@
+// H2: add a switchable integer smoothing filter while retaining the same
+// in-place List<i32> storage and D-10 no-allocation target.
+//
+// Filter is deliberately frozen and integer-only:
+//   gain[i] = clamp_i32(2 * (input[i] as i64), -1000, 1000)
+//   output[0] = gain[0]
+//   output[i] = trunc_toward_zero((output[i-1] + gain[i]) / 2), i > 0
+// The prior output lives in the already-written preceding list slot. No
+// scratch list, closure, or dynamic callback is involved.
+//
+// D-10 region entry/exit: call/return of process_h2. Its full graph is
+// process_h2 -> len, gain_clip -> clip_i64, optional smooth_pair, and len.
+// Includes both filter settings and invalid-length return. Setup, output, and
+// vector comparisons are outside. The current language cannot attach or prove
+// a `no_alloc` receipt; the static gate/native count are still required evidence.
+
+func clip_i64(value: i64) -> i32 {
+    if value < -1000 { -1000 } else if value > 1000 { 1000 } else { value as i32 }
+}
+
+func gain_clip(sample: i32) -> i32 {
+    clip_i64((sample as i64) * 2)
+}
+
+func smooth_pair(previous_output: i32, current_gain: i32) -> i32 {
+    ((previous_output + current_gain) / 2)
+}
+
+func process_h2(samples: mutate List<i32>, active_len: i32, filter: bool) -> i32 {
+    let slots = len(samples)
+    if active_len < 0 || active_len > slots { return -1 }
+
+    let mut index = 0
+    while index < active_len {
+        let current = gain_clip(samples[index])
+        if filter && index > 0 {
+            samples[index] = smooth_pair(samples[index - 1], current)
+        } else {
+            samples[index] = current
+        }
+        index += 1
+    }
+
+    if len(samples) != slots { return -2 }
+    0
+}
+
+func check_prefix(samples: view List<i32>, expected: view List<i32>, count: i32) -> bool {
+    if len(expected) < count || len(samples) < count { return false }
+    let mut index = 0
+    let mut same = true
+    while index < count {
+        if samples[index] != expected[index] { same = false }
+        index += 1
+    }
+    same
+}
+
+func print_prefix(samples: view List<i32>, count: i32) -> i32 {
+    let mut index = 0
+    while index < count {
+        println(samples[index])
+        index += 1
+    }
+    0
+}
+
+func main() -> i32 {
+    let mut unfiltered: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let base: List<i32> = [-1000, -1000, 0, 1000, 1000]
+    let unfiltered_slots = len(unfiltered)
+    if process_h2(unfiltered, 5, false) != 0 { return 1 }
+    if !check_prefix(unfiltered, base, 5) { return 2 }
+    if unfiltered[5] != 777 || len(unfiltered) != unfiltered_slots { return 3 }
+    println("gain/extremes")
+    print_prefix(unfiltered, 5)
+
+    let mut filtered: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let smoothed: List<i32> = [-1000, -1000, -500, 250, 625]
+    let filtered_slots = len(filtered)
+    if process_h2(filtered, 5, true) != 0 { return 4 }
+    if !check_prefix(filtered, smoothed, 5) { return 5 }
+    if filtered[5] != 777 || len(filtered) != filtered_slots { return 6 }
+    println("filter/extremes")
+    print_prefix(filtered, 5)
+
+    let mut short: List<i32> = [-501, 0, 501, 700, 701]
+    let short_filter: List<i32> = [-1000, -500, 250]
+    if process_h2(short, 3, true) != 0 { return 7 }
+    if !check_prefix(short, short_filter, 3) { return 8 }
+    if short[3] != 700 || short[4] != 701 { return 9 }
+    println("filter/short-active-3")
+    print_prefix(short, 3)
+
+    let mut full_short: List<i32> = [-501, 0, 501, 700, 701]
+    let full_short_filter: List<i32> = [-1000, -500, 250, 625, 812]
+    if process_h2(full_short, 5, true) != 0 { return 10 }
+    if !check_prefix(full_short, full_short_filter, 5) { return 11 }
+    println("filter/short-active-5")
+    print_prefix(full_short, 5)
+
+    let mut empty: List<i32> = []
+    if process_h2(empty, 0, true) != 0 || len(empty) != 0 { return 12 }
+    0
+}

@@ -1,0 +1,52 @@
+// V0.2 P6 W1: a small, real file/JSON command-line workload.
+//
+// The two parse functions model the two interchangeable parser libraries in
+// the acceptance story.  They deliberately have different names in this
+// source because the current module loader rejects two unqualified imports
+// with the same exported name; the duplicate-import probe in the runner
+// records that limitation separately.  The program itself exercises the real
+// file and JSON builtins and writes a report in the process working directory.
+
+func parse_primary(raw: string) -> string {
+    json_get_string(raw, "name")
+}
+
+func parse_secondary(raw: string) -> i32 {
+    json_get_int(raw, "retries")
+}
+
+func main() -> i32 {
+    let input_path = "v02-w1-input.json"
+    let report_path = "v02-w1-report.json"
+    let raw = "{\"name\":\"demo\",\"retries\":3}"
+
+    let written = write_file(input_path, raw)
+    if written.is_err() {
+        println("WriteFailed")
+        return 2
+    }
+
+    let loaded = read_file(input_path)
+    match loaded {
+        Ok(data) => {
+            if !json_is_valid(data) {
+                println("InvalidJson")
+                return 3
+            }
+            let name = parse_primary(data)
+            let retries = parse_secondary(data)
+            let report = name + ":" + to_string(retries)
+            let saved = write_file(report_path, report)
+            if saved.is_err() {
+                println("WriteFailed")
+                return 4
+            }
+            println(report)
+            0
+        },
+        Err(error) => {
+            println(error)
+            5
+        },
+    }
+}

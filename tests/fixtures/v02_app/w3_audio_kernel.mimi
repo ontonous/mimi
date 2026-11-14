@@ -1,0 +1,31 @@
+// V0.2 P6 W3: deterministic sample-buffer kernel.
+//
+// This is the required gain/clip vector.  The hot function only performs
+// arithmetic and writes a pre-sized list supplied by its caller.  The list
+// construction below is outside the hot function, making the allocation
+// boundary explicit for the cost runner.
+
+func gain_clip(x: i32) -> i32 {
+    let doubled = (x as i64) * 2
+    if doubled < -1000 {
+        -1000
+    } else if doubled > 1000 {
+        1000
+    } else {
+        doubled as i32
+    }
+}
+
+func main() -> i32 {
+    let a = gain_clip(-2147483648)
+    let b = gain_clip(-501)
+    let c = gain_clip(0)
+    let d = gain_clip(501)
+    let e = gain_clip(2147483647)
+    println(a)
+    println(b)
+    println(c)
+    println(d)
+    println(e)
+    0
+}

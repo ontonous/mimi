@@ -81,9 +81,7 @@ func main() -> i32 {
 '''
 
 tests["core_try_operator.mimi"] = r'''
-type Res { Ok(i64) | Err(string) }
-
-func parse_pos(s: string) -> Res {
+func parse_pos(s: string) -> Result<i64, string> {
     let p = str_parse_int(s)
     if p.0 {
         if p.1 > 0 { Ok(p.1) } else { Err("not positive") }
@@ -92,7 +90,7 @@ func parse_pos(s: string) -> Res {
     }
 }
 
-func half_of(s: string) -> Res {
+func half_of(s: string) -> Result<i64, string> {
     let n = parse_pos(s)?
     if n % 2 == 0 { Ok(n / 2) } else { Err("odd") }
 }
@@ -217,18 +215,23 @@ func main() -> i32 {
 '''
 
 tests["concurrency_actor.mimi"] = r'''
-actor Counter {
-    mut count: i32 = 0;
-    func increment() { self.count = self.count + 1 }
-    func get() -> i32 { return self.count }
+flow CounterFlow {
+    state Active { count: i32 }
+    transition increment(Active) -> Active {
+        return Active { count: self.count + 1 }
+    }
+    transition get(Active) -> Active {
+        return Active { count: self.count }
+    }
 }
+actor Counter runs CounterFlow {}
 
 func main() -> i32 {
     let c = Counter.spawn()
     c.increment()
     c.increment()
-    let v = c.get()
-    if v == 2 { 0 } else { 1 }
+    let current = c.get()
+    if current.count == 2 { 0 } else { 1 }
 }
 '''
 
@@ -307,14 +310,144 @@ func main() -> i32 {
 '''
 
 tests["std_maps.mimi"] = r'''
+// real_world: std::maps wrapper surface including Any-handle conversions.
+//
+// The std::maps set/remove wrappers preserve their input value by copying its
+// entries before mutation, then return a new Record handle. Keep the snapshots
+// below explicit so the VM path exercises that persistence contract. Native
+// `get_or_default<T>` remains fail-closed until Map entries carry a checked
+// dynamic type descriptor.
+
+use std::maps;
+
 func main() -> i32 {
-    let m = map_new()
-    let m2 = map_set(m, "a", 1)
-    let m3 = map_set(m2, "b", 2)
-    let found = map_get(m3, "a")
-    let sz = map_size(m3)
-    let has = has_key(m3, "b")
-    if found.0 && sz == 2 && has { 0 } else { 1 }
+    match new() {
+        Ok(m) => {
+            match set(m, "a", 1) {
+                Ok(m2) => {
+                    match set(m2, "b", 2) {
+                        Ok(m3) => {
+                            if size(m) != 0 {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 8
+                            }
+                            if size(m2) != 1 {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 9
+                            }
+                            if size(m3) != 2 {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 1
+                            }
+                            if !has_key(m3, "a") {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 2
+                            }
+                            let (found_a, _raw_va) = get(m3, "a")
+                            if !found_a {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 3
+                            }
+                            let mut va = 0
+                            let mut get_failed = false
+                            let mut get_status = 0
+                            match map_get_i32(m3, "a") {
+                                Ok(value) => { va = value },
+                                Err(status) => {
+                                    get_failed = true
+                                    get_status = status
+                                },
+                            }
+                            if get_failed {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return get_status
+                            }
+                            if va != 1 {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 4
+                            }
+                            let v_default = get_or_default(m3, "c", 99)
+                            if v_default != 99 {
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 5
+                            }
+                            let pairs = to_list(m3)
+                            if len(pairs) != 2 {
+                                drop(pairs)
+                                drop(m)
+                                drop(m2)
+                                drop(m3)
+                                return 6
+                            }
+                            drop(pairs)
+                            match remove(m3, "a") {
+                                Ok(m4) => {
+                                    if size(m4) != 1 {
+                                        drop(m)
+                                        drop(m2)
+                                        drop(m3)
+                                        drop(m4)
+                                        return 7
+                                    }
+                                    if size(m3) != 2 {
+                                        drop(m)
+                                        drop(m2)
+                                        drop(m3)
+                                        drop(m4)
+                                        return 10
+                                    }
+                                    if !has_key(m3, "a") {
+                                        drop(m)
+                                        drop(m2)
+                                        drop(m3)
+                                        drop(m4)
+                                        return 11
+                                    }
+                                    drop(m4)
+                                    drop(m3)
+                                    drop(m2)
+                                    drop(m)
+                                    0
+                                },
+                                Err(status) => {
+                                    drop(m)
+                                    drop(m2)
+                                    drop(m3)
+                                    status
+                                },
+                            }
+                        },
+                        Err(status) => {
+                            drop(m)
+                            drop(m2)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(m)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }
 '''
 
@@ -469,13 +602,35 @@ func main() -> i32 {
 
 tests["std_template.mimi"] = r'''
 use std::template
+use std::maps
+
+func make_vars() -> Result<Record, i32> {
+    match new() {
+        Ok(vars) => match set(vars, "name", "Mimi") {
+            Ok(updated) => {
+                drop(vars)
+                Ok(updated)
+            },
+            Err(status) => {
+                drop(vars)
+                Err(status)
+            },
+        },
+        Err(status) => Err(status),
+    }
+}
 
 func main() -> i32 {
-    let vars = map_new()
-    let vars2 = map_set(vars, "name", "Mimi")
-    let result = simple_render("Hello {{name}}!", vars2)
-    // Verify the function returns the correct rendered string
-    if result == "Hello Mimi!" { 0 } else { 1 }
+    match make_vars() {
+        Ok(vars) => {
+            let result = simple_render("Hello {{name}}!", vars)
+            match render_csv("Hello {{col_0}}!", [["Mimi"]]) {
+                Ok(csv_result) => if result == "Hello Mimi!" && csv_result == "Hello Mimi!" { 0 } else { 1 }
+                Err(status) => status
+            }
+        }
+        Err(status) => status
+    }
 }
 '''
 

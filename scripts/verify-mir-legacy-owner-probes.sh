@@ -528,6 +528,7 @@ printf 'preflight=%s\n' "$([[ "$preflight_status" -eq 0 ]] && printf PASS || pri
 
 tests=(
     codegen::tests::compile_checked_routes_generic_ignored_bool_binding_projection_without_legacy_access
+    codegen::tests::compile_checked_fails_closed_on_reachable_map_any_unpack
     verifier::tests::public_checked_verifier_routes_recoverable_cross_state_flow_to_mir
     verifier::tests::typed_ffi_symbolic_string_contexts_defer_without_legacy_access
     verifier::tests::canonical_mir_bool_result_postconditions_keep_flow_verdicts_through_dual
@@ -640,7 +641,7 @@ fi
 printf 'exit_code=%s\nsuccess=%s\n' "$audit_status" \
     "$([[ "$audit_status" -eq 0 ]] && printf true || printf false)" \
     > "$artifact_dir/static-audit.status"
-if ! grep -Fxq 'audit_status=ok' "$artifact_dir/static-audit.log"; then
+if ! grep -Fxq 'route_boundary_audit_status=passed' "$artifact_dir/static-audit.log"; then
     overall_status=1
 fi
 

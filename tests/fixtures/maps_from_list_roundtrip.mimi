@@ -11,17 +11,55 @@ use std::maps;
 
 func main() -> i32 {
     let m = map_from_list([("a", 1), ("b", 2)])
-    if size(m) != 2 { return 1 }
+    if size(m) != 2 {
+        drop(m)
+        return 1
+    }
     let (found_a, va) = get(m, "a")
-    if !found_a || va != 1 { return 2 }
+    if !found_a || va != 1 {
+        drop(va)
+        drop(m)
+        return 2
+    }
+    drop(va)
     let (found_b, vb) = get(m, "b")
-    if !found_b || vb != 2 { return 3 }
+    if !found_b || vb != 2 {
+        drop(vb)
+        drop(m)
+        return 3
+    }
+    drop(vb)
     let m2 = from_list(to_list(m))
-    if size(m2) != 2 { return 4 }
+    if size(m2) != 2 {
+        drop(m)
+        drop(m2)
+        return 4
+    }
     let (found_b2, vb2) = get(m2, "b")
-    if !found_b2 || vb2 != 2 { return 5 }
-    let m3 = set(m2, "c", 3)
-    if size(m3) != 3 { return 6 }
+    if !found_b2 || vb2 != 2 {
+        drop(vb2)
+        drop(m)
+        drop(m2)
+        return 5
+    }
+    drop(vb2)
+    let m3 = match set(m2, "c", 3) {
+        Ok(updated) => updated,
+        Err(status) => {
+            drop(m)
+            drop(m2)
+            return status
+        },
+    }
+    if size(m3) != 3 {
+        drop(m)
+        drop(m2)
+        drop(m3)
+        return 6
+    }
     println(size(m3))
+    drop(m3)
+    drop(m2)
+    drop(m)
     0
 }

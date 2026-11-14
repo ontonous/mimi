@@ -1,0 +1,30 @@
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "removed-key", "persistent String payload λ") {
+            Ok(set_root) => {
+        let remove_root = map_remove(set_root, "removed-key")
+        let pair = map_get(remove_root, "removed-key")
+
+        drop(empty)
+        drop(set_root)
+        drop(remove_root)
+
+        let found = pair.0
+        let miss = unpack_i32(pair.1)
+        drop(pair)
+
+        let observed = !found && miss == 0
+        observed
+            },
+            Err(status) => {
+            drop(empty)
+            false
+            },
+        }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}

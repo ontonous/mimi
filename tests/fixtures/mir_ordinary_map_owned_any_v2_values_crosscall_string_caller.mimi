@@ -1,0 +1,39 @@
+func snapshot_values() -> List {
+    let payload = "owned value"
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", payload) {
+                Ok(root) => {
+                    let snapshot = values(root)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    snapshot
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    []
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            []
+        },
+    }
+}
+
+func direct_caller() -> bool {
+    let snapshot = snapshot_values()
+    let copied = snapshot[0] as string
+    let matches = copied == "owned value"
+    drop(copied)
+    drop(snapshot)
+    matches
+}
+
+func main() -> i32 {
+    println(direct_caller())
+    0
+}

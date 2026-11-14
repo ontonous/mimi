@@ -1,0 +1,38 @@
+func main() -> i32 {
+    let payload_b = "second value"
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, "b", payload_b) {
+        Ok(with_b) => {
+    match map_set(with_b, "a", 41) {
+        Ok(root) => {
+                let snapshot = values(root)
+                drop(empty)
+                drop(with_b)
+                drop(root)
+                drop(payload_b)
+                let selected = snapshot[1] as string
+                let matches = selected == "second value"
+                drop(selected)
+                drop(snapshot)
+                println(matches)
+                0
+        },
+        Err(status) => {
+        drop(empty)
+        drop(with_b)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

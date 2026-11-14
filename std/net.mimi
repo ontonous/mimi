@@ -103,17 +103,20 @@ impl NetOps for string {
     }
 }
 
-// Compatibility functions — keep original signatures.
+// Compatibility wrappers — return explicit Result errors for fallible operations.
 
-// tcp_socket: Creates a TCP socket. Returns fd or negative on error.
-pub func tcp_socket() -> i64 {
-    socket(AF_INET, SOCK_STREAM, 0)
+// tcp_socket: Creates a TCP socket. Maps a negative builtin fd to SocketCreate.
+pub func tcp_socket() -> Result<i64, NetError> {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { Err(SocketCreate) } else { Ok(fd) }
 }
 
 // tcp_connect: Connects to host:port over TCP. Returns fd on success.
 pub func tcp_connect(host: string, port: i32) -> Result<i64, NetError> {
-    let fd = tcp_socket()
-    if fd < 0 { return Err(SocketCreate) }
+    let fd = match tcp_socket() {
+        Ok(socket_fd) => socket_fd,
+        Err(error) => return Err(error),
+    }
     let ret = connect(fd, host, port)
     if ret < 0 {
         close_fd(fd)
@@ -124,8 +127,10 @@ pub func tcp_connect(host: string, port: i32) -> Result<i64, NetError> {
 
 // tcp_listen: Listens on port with backlog. Returns fd on success.
 pub func tcp_listen(port: i32, backlog: i32) -> Result<i64, NetError> {
-    let fd = tcp_socket()
-    if fd < 0 { return Err(SocketCreate) }
+    let fd = match tcp_socket() {
+        Ok(socket_fd) => socket_fd,
+        Err(error) => return Err(error),
+    }
     let ret = bind(fd, port)
     if ret < 0 {
         close_fd(fd)

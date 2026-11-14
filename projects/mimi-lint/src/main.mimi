@@ -46,6 +46,7 @@ func lint_file(path: string, source: string) -> List<string> {
         return diags
     }
     let funcs_json = json_get_string(ast_json, "functions")
+    let tokens_json = lexer(source)
     let n = json_array_length(funcs_json)
     let mut fi = 0
     while fi < n {
@@ -56,12 +57,15 @@ func lint_file(path: string, source: string) -> List<string> {
             push(diags, path + ":" + fline + " [W001] 函数名 '" + fname + "' 应使用 snake_case 命名规则")
         }
         let has_body_str = json_get_string(func_json, "has_body")
-        if has_body_str == "false" {
+        let body_range = find_function_body(tokens_json, fname, fline)
+        let body_start = body_range[0]
+        let body_end = body_range[1]
+        if has_body_str == "false" || (body_start >= 0 && body_end == body_start) {
             push(diags, path + ":" + fline + " [W002] 函数 '" + fname + "' 实现体为空")
         }
         if has_body_str != "false" {
             let stmts_json = json_get_string(func_json, "stmts")
-            let body_diags = analyze_func_body(stmts_json, path, fname)
+            let body_diags = analyze_func_body(stmts_json, path, fname, tokens_json, body_start, body_end)
             for bd in body_diags {
                 push(diags, bd)
             }
@@ -71,11 +75,99 @@ func lint_file(path: string, source: string) -> List<string> {
     diags
 }
 
-func analyze_func_body(stmts_json: string, path: string, fname: string) -> List<string> {
+func find_function_body(tokens_json: string, fname: string, fline: string) -> List<i32> {
+    let mut result: List<i32> = []
+    push(result, -1)
+    push(result, -1)
+    let token_count = json_array_length(tokens_json)
+    let first_line = to_int(fline)
+    let mut ti = 0
+    while ti + 1 < token_count {
+        let token = json_get_element(tokens_json, ti)
+        let value = json_get_string(token, "value")
+        let line = to_int(json_get_string(token, "line"))
+        let next = json_get_element(tokens_json, ti + 1)
+        if value == "func" && line >= first_line && json_get_string(next, "value") == fname {
+            let mut open = -1
+            let mut scan = ti + 2
+            while scan < token_count && open < 0 {
+                let current = json_get_element(tokens_json, scan)
+                let current_value = json_get_string(current, "value")
+                if current_value == "{" {
+                    open = scan
+                } else if current_value == ";" || current_value == "func" {
+                    scan = token_count
+                } else {
+                    scan += 1
+                }
+            }
+            if open >= 0 {
+                let mut depth = 1
+                let mut close = open + 1
+                while close < token_count && depth > 0 {
+                    let current = json_get_element(tokens_json, close)
+                    let current_value = json_get_string(current, "value")
+                    if current_value == "{" {
+                        depth += 1
+                    } else if current_value == "}" {
+                        depth -= 1
+                    }
+                    if depth > 0 {
+                        close += 1
+                    }
+                }
+                if depth == 0 {
+                    result[0] = open + 1
+                    result[1] = close
+                }
+            }
+            return result
+        }
+        ti += 1
+    }
+    result
+}
+
+func analyze_func_body(stmts_json: string, path: string, fname: string, tokens_json: string, body_start: i32, body_end: i32) -> List<string> {
     let mut diags: List<string> = []
     let n = json_array_length(stmts_json)
-    let mut has_unreachable = false
     let mut complexity = 1
+
+    // Read all body tokens so nested branches and local bindings are not lost
+    // when the lightweight parser records only top-level statements.
+    if body_start >= 0 && body_end >= body_start {
+        let mut ti = body_start
+        while ti < body_end {
+            let token = json_get_element(tokens_json, ti)
+            let kind = json_get_string(token, "kind")
+            let value = json_get_string(token, "value")
+            if kind == "KEYWORD"
+                && (value == "if" || value == "else" || value == "while" || value == "for" || value == "loop" || value == "match")
+            {
+                complexity += 1
+            }
+            if kind == "KEYWORD" && value == "let" {
+                let mut binding = ti + 1
+                let after_let = json_get_element(tokens_json, binding)
+                if json_get_string(after_let, "value") == "mut" {
+                    binding += 1
+                }
+                if binding < body_end {
+                    let binding_token = json_get_element(tokens_json, binding)
+                    let name = json_get_string(binding_token, "value")
+                    if json_get_string(binding_token, "kind") == "IDENT"
+                        && !binding_has_use(tokens_json, body_start, body_end, binding, name)
+                    {
+                        let binding_line = json_get_string(binding_token, "line")
+                        push(diags, path + ":" + binding_line + " [W003] 局部变量 '" + name + "' 未使用")
+                    }
+                }
+            }
+            ti += 1
+        }
+    }
+
+    let mut has_unreachable = false
     let mut si = 0
     while si < n {
         let stmt = json_get_element(stmts_json, si)
@@ -83,9 +175,6 @@ func analyze_func_body(stmts_json: string, path: string, fname: string) -> List<
         let stmt_line = json_get_string(stmt, "line")
         if kind == "return" || kind == "break" || kind == "continue" {
             has_unreachable = true
-        }
-        if kind == "if" || kind == "while" || kind == "for" || kind == "else" {
-            complexity += 1
         }
         if has_unreachable {
             push(diags, path + ":" + stmt_line + " [W004] 函数 '" + fname + "' 中存在不可达代码")
@@ -100,6 +189,62 @@ func analyze_func_body(stmts_json: string, path: string, fname: string) -> List<
         push(diags, path + ":? [W006] 函数 '" + fname + "' 有 " + to_string(n) + " 条语句，建议 ≤ 50")
     }
     diags
+}
+
+func binding_has_use(tokens_json: string, body_start: i32, body_end: i32, binding: i32, name: string) -> bool {
+    let mut ti = body_start
+    while ti < body_end {
+        if ti != binding {
+            let token = json_get_element(tokens_json, ti)
+            if json_get_string(token, "kind") == "IDENT"
+                && json_get_string(token, "value") == name
+                && !is_binding_position(tokens_json, body_start, ti)
+                && !is_field_name(tokens_json, body_start, body_end, ti)
+                && !is_write_only_identifier(tokens_json, body_end, ti)
+            {
+                return true
+            }
+        }
+        ti += 1
+    }
+    false
+}
+
+func is_write_only_identifier(tokens_json: string, body_end: i32, index: i32) -> bool {
+    if index + 1 < body_end {
+        let next = json_get_element(tokens_json, index + 1)
+        return json_get_string(next, "value") == "="
+    }
+    false
+}
+
+func is_binding_position(tokens_json: string, body_start: i32, index: i32) -> bool {
+    if index <= body_start { return false }
+    let previous = json_get_element(tokens_json, index - 1)
+    let previous_value = json_get_string(previous, "value")
+    if previous_value == "let" { return true }
+    if previous_value == "mut" && index >= body_start + 2 {
+        let before_previous = json_get_element(tokens_json, index - 2)
+        return json_get_string(before_previous, "value") == "let"
+    }
+    false
+}
+
+func is_field_name(tokens_json: string, body_start: i32, body_end: i32, index: i32) -> bool {
+    if index > body_start {
+        let previous = json_get_element(tokens_json, index - 1)
+        let previous_value = json_get_string(previous, "value")
+        if previous_value == "." || previous_value == "::" { return true }
+    }
+    if index + 1 < body_end {
+        let next = json_get_element(tokens_json, index + 1)
+        if json_get_string(next, "value") == ":" && index > body_start {
+            let previous = json_get_element(tokens_json, index - 1)
+            let previous_value = json_get_string(previous, "value")
+            if previous_value == "{" || previous_value == "," { return true }
+        }
+    }
+    false
 }
 
 func is_snake_case(name: string) -> bool {

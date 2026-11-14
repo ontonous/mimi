@@ -1,0 +1,6 @@
+// S1: call the replacement checksum symbol with the same scalar ABI.
+extern "C" { func v02_checksum_alt(x: i32) -> i32; }
+func main() -> i32 {
+    println(v02_checksum_alt(20) + v02_checksum_alt(21) + 1)
+    0
+}

@@ -1,0 +1,34 @@
+// V-11/V-12 narrow family: all Map/Any ownership work settles in the
+// callable entry block, while a pure bool match consumes the owned payload in
+// one arm and joins to a scalar result.  Match-arm Map work remains rejected
+// by the dedicated owned-get receipt (see the negative fixture).
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "k\0🧪", "owned\0🧪值") {
+            Ok(root) => {
+        let pair = map_get(root, "k\0🧪")
+        drop(empty)
+        drop(root)
+
+        let payload = pair.1
+        let equal = match pair.0 {
+            true => payload == "owned\0🧪值",
+            false => false,
+        }
+        println(equal)
+        drop(pair)
+        drop(payload)
+        0
+            },
+            Err(status) => {
+            drop(empty)
+            status
+            },
+        }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

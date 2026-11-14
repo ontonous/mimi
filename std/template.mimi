@@ -94,19 +94,50 @@ pub func render_with_defaults(template: string, vars: Record, default_val: strin
 }
 
 // render_csv: Renders CSV rows using {{col_0}}, {{col_1}}, etc.
-pub func render_csv(template: string, rows: List<List<string>>) -> string {
-    let mut results = []
+pub func render_csv(template: string, rows: List<List<string>>) -> Result<string, i32> {
+    let mut results: Result<List<string>, i32> = Ok([])
     let mut ri = 0
     while ri < len(rows) {
-        let row = rows[ri]
-        let mut vars = map_new()
-        let mut ci = 0
-        while ci < len(row) {
-            vars = map_set(vars, "col_" + to_string(ci), row[ci])
-            ci = ci + 1
+        results = match results {
+            Ok(output) => {
+                let row = rows[ri]
+                let mut vars = match map_new() {
+                    Ok(root) => Ok(root),
+                    Err(status) => Err(status),
+                }
+                let mut ci = 0
+                while ci < len(row) {
+                    vars = match vars {
+                        Ok(root) => match map_set(root, "col_" + to_string(ci), row[ci]) {
+                            Ok(updated) => {
+                                drop(root)
+                                Ok(updated)
+                            },
+                            Err(status) => {
+                                drop(root)
+                                Err(status)
+                            },
+                        },
+                        Err(status) => Err(status),
+                    }
+                    ci = ci + 1
+                }
+                match vars {
+                    Ok(root) => {
+                        let rendered = simple_render(template, root)
+                        drop(root)
+                        push(output, rendered)
+                        Ok(output)
+                    },
+                    Err(status) => Err(status),
+                }
+            },
+            Err(status) => Err(status),
         }
-        push(results, simple_render(template, vars))
         ri = ri + 1
     }
-    str_join(results, "\n")
+    match results {
+        Ok(output) => Ok(str_join(output, "\n")),
+        Err(status) => Err(status),
+    }
 }

@@ -1,0 +1,28 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "payload", "snapshot survives") {
+                Ok(full) => {
+                    let source_copy = full
+                    let snapshot = map_get_string(source_copy, "payload")
+                    drop(empty)
+                    drop(full)
+                    drop(source_copy)
+                    match snapshot {
+                        Ok(text) => {
+                            println(text)
+                            drop(text)
+                            0
+                        },
+                        Err(status) => { status },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
+}

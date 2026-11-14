@@ -1,0 +1,23 @@
+// Canonical stdlib collection facades: List len/reverse/concat.
+use std::collections_core;
+
+func main() -> i32 {
+    ensures: result == 0
+    let xs = [3, 1, 4]
+    let n = list_len(xs)
+    println(n)
+
+    let ys = list_reverse(xs)
+    println(list_len(ys))
+    drop(ys)
+    drop(xs)
+
+    let left = [3, 1, 4]
+    let right = [9, 2]
+    let zs = list_concat(left, right)
+    println(list_len(zs))
+    drop(zs)
+    drop(left)
+    drop(right)
+    0
+}

@@ -1,0 +1,157 @@
+// SEQ-W2/D5: two independent background export workers run concurrently.
+// Each task receives an immutable document revision, owns its own Flow and
+// temporary/output paths, validates the staged bytes, and emits exactly one
+// Published or Failed receipt before join. There is no shared mutable queue or
+// implicit product Flow state.
+
+type NodeId { store_id: i32, slot: i32, generation: i32 }
+type DocumentNode { id: NodeId, parent_slot: i32, kind: string, text: string, alive: bool }
+type Revision { document_id: i32, revision_id: i32, nodes: List<DocumentNode> }
+type ExportReceipt { task_id: i32, revision_id: i32, destination: string, contents: string, published: bool, cleanup_error: string, cleanup_owner: string, temporary_path: string }
+type CleanupFailure { task_id: i32, temporary_path: string, cleanup_owner: string, destination_may_exist: bool, error: string }
+type ExportError { StageWrite(string) | StageRead(string) | ChecksumMismatch | PublishWriteMayBePartial(string) | Cleanup(CleanupFailure) }
+type ExportOutcome { Published(ExportReceipt) | Failed(ExportError) }
+
+func serialize_revision(revision: Revision) -> string {
+    let mut contents = "document=" + to_string(revision.document_id) + "\n"
+    contents = contents + "revision=" + to_string(revision.revision_id) + "\n"
+    for node in revision.nodes {
+        if node.alive { contents = contents + to_string(node.id.slot) + ":" + node.kind + ":" + node.text + "\n" }
+    }
+    contents
+}
+
+func try_write(path: string, contents: string) -> (bool, string) {
+    match write_file(path, contents) {
+        Ok(_) => (true, ""),
+        Err(error) => (false, error),
+    }
+}
+
+func try_read(path: string) -> (bool, string) {
+    match read_file(path) {
+        Ok(contents) => (true, contents),
+        Err(error) => (false, error),
+    }
+}
+
+func perform_export(task_id: i32, revision: Revision, temporary_path: string, destination: string) -> ExportOutcome {
+    let contents = serialize_revision(revision)
+    let staged_write = try_write(temporary_path, contents)
+    if !staged_write.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return Failed(StageWrite(staged_write.1)) }
+        return Failed(Cleanup(CleanupFailure { task_id: task_id, temporary_path: temporary_path, cleanup_owner: "export worker", destination_may_exist: false, error: "StageWrite failed: " + staged_write.1 + "; temporary output retained" }))
+    }
+    let readback = try_read(temporary_path)
+    if !readback.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return Failed(StageRead(readback.1)) }
+        return Failed(Cleanup(CleanupFailure { task_id: task_id, temporary_path: temporary_path, cleanup_owner: "export worker", destination_may_exist: false, error: "StageRead failed: " + readback.1 + "; temporary output retained" }))
+    }
+    if readback.1 != contents {
+        let removed = remove_file(temporary_path)
+        if removed { return Failed(ChecksumMismatch) }
+        return Failed(Cleanup(CleanupFailure { task_id: task_id, temporary_path: temporary_path, cleanup_owner: "export worker", destination_may_exist: false, error: "checksum mismatch and temporary file retained" }))
+    }
+    let publication = try_write(destination, readback.1)
+    if !publication.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return Failed(PublishWriteMayBePartial(publication.1)) }
+        return Failed(Cleanup(CleanupFailure { task_id: task_id, temporary_path: temporary_path, cleanup_owner: "export worker", destination_may_exist: true, error: "destination write failed and temporary file retained" }))
+    }
+    let removed = remove_file(temporary_path)
+    let cleanup_error = if removed { "" } else { "CleanupFailed: destination written; temporary file retained" }
+    let cleanup_owner = if removed { "" } else { "export worker" }
+    Published(ExportReceipt {
+        task_id: task_id,
+        revision_id: revision.revision_id,
+        destination: destination,
+        contents: contents,
+        published: true,
+        cleanup_error: cleanup_error,
+        cleanup_owner: cleanup_owner,
+        temporary_path: temporary_path,
+    })
+}
+
+flow ExportTask {
+    state Pending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
+    state Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
+    state Settled { task_id: i32, revision_id: i32, outcome: ExportOutcome }
+
+    transition begin(Pending) -> Writing {
+        return Writing {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+        }
+    }
+    transition settle(Writing, outcome: ExportOutcome) -> Settled {
+        return Settled {
+            task_id: self.task_id,
+            revision_id: self.snapshot.revision_id,
+            outcome: outcome,
+        }
+    }
+}
+
+func export_worker(task_id: i32, snapshot: Revision, temporary_path: string, destination: string) -> ExportOutcome {
+    let writing = ExportTask::begin(Pending {
+        task_id: task_id,
+        snapshot: snapshot,
+        temporary_path: temporary_path,
+        destination: destination,
+    })
+    let outcome = perform_export(task_id, snapshot, temporary_path, destination)
+    let settled = ExportTask::settle(writing, outcome)
+    settled.outcome
+}
+
+func published_revision(outcome: ExportOutcome, task_id: i32, contents: string) -> i32 {
+    match outcome {
+        Published(receipt) => {
+            if receipt.task_id == task_id && receipt.published && receipt.cleanup_error == "" && receipt.cleanup_owner == "" && receipt.contents == contents {
+                match read_file(receipt.destination) {
+                    Ok(written) => if written == contents { receipt.revision_id } else { -1 },
+                    Err(_) => -1,
+                }
+            } else {
+                -1
+            }
+        },
+        Failed(_) => -1,
+    }
+}
+
+func main() -> i32 {
+    let node_a = NodeId { store_id: 7, slot: 1, generation: 1 }
+    let node_b = NodeId { store_id: 8, slot: 1, generation: 1 }
+    let snapshot_a = Revision {
+        document_id: 7,
+        revision_id: 20,
+        nodes: [DocumentNode { id: node_a, parent_slot: 0, kind: "paragraph", text: "S1 A", alive: true }],
+    }
+    let snapshot_b = Revision {
+        document_id: 8,
+        revision_id: 30,
+        nodes: [DocumentNode { id: node_b, parent_slot: 0, kind: "paragraph", text: "S1 B", alive: true }],
+    }
+    let contents_a = serialize_revision(snapshot_a)
+    let contents_b = serialize_revision(snapshot_b)
+    let task_a = spawn export_worker(201, snapshot_a, "/tmp/mimi-v02-w2-d5-a.tmp", "/tmp/mimi-v02-w2-d5-a.txt")
+    let task_b = spawn export_worker(202, snapshot_b, "/tmp/mimi-v02-w2-d5-b.tmp", "/tmp/mimi-v02-w2-d5-b.txt")
+    let result_a = await task_a
+    let result_b = await task_b
+    let revision_a = published_revision(result_a, 201, contents_a)
+    let revision_b = published_revision(result_b, 202, contents_b)
+    remove_file("/tmp/mimi-v02-w2-d5-a.txt")
+    remove_file("/tmp/mimi-v02-w2-d5-b.txt")
+    if revision_a == 20 && revision_b == 30 {
+        println(revision_a + revision_b)
+        0
+    } else {
+        1
+    }
+}

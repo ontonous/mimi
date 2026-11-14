@@ -1,0 +1,28 @@
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "text", "owned\0 payload λ") {
+            Ok(root) => {
+        let pair = map_get(root, "text")
+        drop(empty)
+        drop(root)
+
+        let found = pair.0
+        let payload = unpack_string(pair.1)
+        drop(pair)
+
+        let bytes_match = payload == "owned\0 payload λ"
+        drop(payload)
+        found == bytes_match
+            },
+            Err(status) => {
+            drop(empty)
+            false
+            },
+        }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "mimi-v02-w4-offline-release"
+version = "0.2.0"
+description = "W4 transport split with a locked offline dependency"
+entry = "src/main.mimi"
+
+[[dependencies]]
+name = "w4_transport"
+version = "=0.2.0"

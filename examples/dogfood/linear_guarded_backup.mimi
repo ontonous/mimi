@@ -1,0 +1,57 @@
+// 0.1.9 Phase G — dogfood：线性能力管线（非玩具）。
+//
+// 场景：带 SystemToken 能力门禁的"受保护备份"流水线。
+//  - `linear T` 泛型直通：把 token 经泛型管线整体转移（Phase A-C 种类系统）。
+//  - SystemToken 每次授权一次受保护操作（read_file_guarded / get_env_guarded），
+//    恰一次消费（Phase D 能力门禁）。
+//  - MutexGuard 恰一次 unlock（Phase E）。
+// 双后端（VM≡native）运行同一输出。
+
+cap BackupCap;
+
+// 泛型线性直通：种类系统的教科书用例——`linear T` 整体转移。
+func transfer<linear T>(x: T) -> T { x }
+
+// 管线 stage：token 经线性直通保持线性，原样返回。
+func stage(t: SystemToken) -> SystemToken {
+    transfer(t)
+}
+
+// 管线 execute：以 SystemToken 为能力门禁执行一次受保护读取（消费 token）。
+func read_guarded(path: string, t: SystemToken) -> Result<string, string> {
+    read_file_guarded(path, t)
+}
+
+func main() -> i32 {
+    // 1) MutexGuard 恰一次 unlock——共享"备份计数"。
+    let m = mutex_new(0)
+    let g = mutex_lock(m)
+    let n = mutex_get(g)
+    mutex_unlock(g)
+    drop(m)
+    if n == 0 {
+        println("mutex-guard-ok")
+    } else {
+        println("mutex-guard-bad")
+    }
+
+    // 2) SystemToken 能力门禁：read_file_guarded（路径不存在 → Err 分支）。
+    let t0 = make_token()
+    let t1 = stage(t0)            // linear T 转移，token 仍线性
+    let r = read_guarded("/nonexistent/mimi-dogfood.txt", t1)  // 恰一次消费
+    match r {
+        Ok(s) => { println(s) }
+        Err(_) => { println("guarded-read-rejected") }
+    }
+
+    // 3) SystemToken 能力门禁：get_env_guarded（PATH 恒在 → Ok 分支）。
+    let t2 = make_token()
+    let e = get_env_guarded("PATH", t2)
+    match e {
+        Ok(s) => {
+            if len(s) > 0 { println("guarded-env-ok") } else { println("guarded-env-empty") }
+        }
+        Err(_) => { println("guarded-env-err") }
+    }
+    0
+}

@@ -2,10 +2,13 @@
 // White-paper section 6.7: "采用全 Actor 静默策略（与 Pony 一致）"
 // When consumer actor enters mute, producers are push-muted.
 
-actor Consumer {
-    n: i32
-    func bump() -> i32 { self.n = self.n + 1; self.n }
+flow ConsumerState {
+    state Active { n: i32 }
+    transition bump(Active) -> Active {
+        return Active { n: self.n + 1 }
+    }
 }
+actor Consumer runs ConsumerState {}
 func main() -> i32 {
     let c = Consumer.spawn()
     actor_set_mailbox_depth(c, 2)

@@ -9,8 +9,13 @@ func distance(p: Point) -> f64 {
     sqrt(p.x * p.x + p.y * p.y)
 }
 
-func main() -> f64 {
+func origin_and_point_distance() -> f64 {
     let origin = Point { x: 0.0, y: 0.0 };
     let p = Point { x: 3.0, y: 4.0 };
     return distance(origin) + distance(p);
+}
+
+func main() -> i32 {
+    println(origin_and_point_distance());
+    0
 }

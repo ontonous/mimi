@@ -17,12 +17,124 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = RUNNER.read_text(encoding="utf-8")
+        cls.cli_source = (ROOT / "tests/real_world_cli.rs").read_text(encoding="utf-8")
 
     def test_route_tests_record_the_production_main_thread_stack_budget(self) -> None:
         self.assertIn("TEST_THREAD_STACK_BYTES=8388608", self.source)
         self.assertIn("effective.RUST_MIN_STACK=%s\\n", self.source)
-        self.assertIn('env RUST_MIN_STACK="$TEST_THREAD_STACK_BYTES"', self.source)
+        self.assertIn('"RUST_MIN_STACK=$TEST_THREAD_STACK_BYTES"', self.source)
         self.assertIn('printf \'RUST_MIN_STACK=%s\\nLLVM_SYS_181_PREFIX=%s\\n\'', self.source)
+
+    def test_nested_helper_actor_fixture_bytes_are_pinned_before_cargo(self) -> None:
+        self.assertIn(
+            'CAPTURE_FIXTURE_SHA256="12ad7930f779d1454cd90919c55d76e9a126c5dc8cabfdf748b5c99992f2483f"',
+            self.source,
+        )
+        self.assertIn(
+            'SHADOW_FIXTURE_SHA256="28144bad3ccf5018250ebf3ebaf8f5ad88006ba18cfbad5388fbd515a3fa0f7e"',
+            self.source,
+        )
+        validation_call = self.source.index(
+            'validate_actor_fixture_source_pins > "$ARTIFACT_DIR/actor-fixture-source-pins.txt"'
+        )
+        expectation_gate = self.source.index("# Require a caller-reviewed expectation contract")
+        self.assertLess(validation_call, expectation_gate)
+        validator_start = self.source.index("validate_actor_fixture_source_pins() {")
+        validator_end = self.source.index("\n}\n", validator_start) + 2
+        validator = self.source[validator_start:validator_end]
+        self.assertIn('sha256sum -- "$fixture"', validator)
+        self.assertIn('[[ "$actual" != "$expected" ]]', validator)
+        self.assertIn("actor_nested_func_capture.mimi|$CAPTURE_FIXTURE_SHA256", validator)
+        self.assertIn("actor_nested_func_shadow.mimi|$SHADOW_FIXTURE_SHA256", validator)
+
+        helper_start = self.cli_source.index("fn assert_original_actor_cli_routes(")
+        helper_end = self.cli_source.index("\n#[test]", helper_start)
+        actor_helper = self.cli_source[helper_start:helper_end]
+        self.assertIn('!opcodes.contains("MIR_ACTOR_FIELD_STORE")', actor_helper)
+        self.assertNotIn('&& opcodes.contains("MIR_ACTOR_FIELD_STORE")', actor_helper)
+
+    def test_actor_route_helper_checks_binary_bytes_against_supplied_sha256(self) -> None:
+        hash_start = self.cli_source.index("fn sha256_file(path: &Path) -> String {")
+        helper_start = self.cli_source.index("fn route_census_mimi_path() -> PathBuf {", hash_start)
+        route_end = self.cli_source.index("\nfn assert_original_actor_cli_routes(", helper_start)
+        hash_helper = self.cli_source[hash_start:helper_start]
+        route_helper = self.cli_source[helper_start:route_end]
+
+        self.assertIn('Command::new("sha256sum")', hash_helper)
+        self.assertIn('.arg("--")', hash_helper)
+        self.assertIn("output.status.success()", hash_helper)
+        self.assertIn("actual_sha256, sha256", route_helper)
+        self.assertIn("route-census Mimi binary bytes do not match", route_helper)
+        self.assertIn("MIMI_ROUTE_CENSUS_MIMI_SHA256", route_helper)
+        actor_helper_end = self.cli_source.index("#[test]", route_end)
+        actor_helper = self.cli_source[route_end:actor_helper_end]
+        self.assertIn("Command::new(route_census_mimi_path())", actor_helper)
+        self.assertNotIn("Command::new(mimi_bin())", actor_helper)
+
+        strict_start = self.cli_source.index(
+            "fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memcheck_l3() {"
+        )
+        strict_end = self.cli_source.index("\n#[test]", strict_start)
+        strict_test = self.cli_source[strict_start:strict_end]
+        self.assertEqual(strict_test.count("Command::new(route_census_mimi_path())"), 2)
+        self.assertNotIn("Command::new(mimi_bin())", strict_test)
+
+    def test_actor_route_gates_scrub_inherited_prefix_then_inject_receipt_authority(self) -> None:
+        unset_start = self.source.index("route_census_unset_inherited_environment() {")
+        unset_end = self.source.index("\n}\n", unset_start) + 2
+        unset_helper = self.source[unset_start:unset_end]
+        self.assertIn("compgen -e", unset_helper)
+        self.assertIn('[[ "$route_env_name" == MIMI_ROUTE_CENSUS* ]]', unset_helper)
+        self.assertIn("ROUTE_CENSUS_UNSET_ARGS+=(-u \"$route_env_name\")", unset_helper)
+
+        gate_start = self.source.index("record_gate() {")
+        gate_end = self.source.index("\nrecord_build() {", gate_start)
+        gate = self.source[gate_start:gate_end]
+        scrub = gate.index("route_census_unset_inherited_environment")
+        launch = gate.index('if "${cargo_env[@]}" "$cargo_path"')
+        self.assertLess(scrub, launch)
+        self.assertIn('"${ROUTE_CENSUS_UNSET_ARGS[@]}"', gate)
+        self.assertIn('if [[ "${1:-}" == "--current-source-mimi-receipt" ]]', gate)
+        self.assertIn('MIMI_ROUTE_CENSUS=1', gate)
+        self.assertIn('"MIMI_ROUTE_CENSUS_MIMI=$CURRENT_SOURCE_MIMI_PATH"', gate)
+        self.assertIn('"MIMI_ROUTE_CENSUS_MIMI_SHA256=$CURRENT_SOURCE_MIMI_SHA256"', gate)
+        self.assertIn("MIMI_ROUTE_CENSUS_AUTHORITY_SOURCE=<unset>", gate)
+        self.assertIn('"$current_sha256" != "$CURRENT_SOURCE_MIMI_SHA256"', gate)
+        self.assertIn('"$receipt_sha256" != "$CURRENT_SOURCE_MIMI_SHA256"', gate)
+        self.assertEqual(self.source.count("--current-source-mimi-receipt"), 4)
+
+        build = self.source.index("record_build current-source-mimi-build build --bin mimi --locked || true")
+        for label in ("capture-cli-default-explicit-l2", "shadow-cli-default-explicit-l2", "actor-strict-l3"):
+            gate_call = self.source.index(f"record_gate {label}")
+            call_end = self.source.index("|| true", gate_call)
+            self.assertLess(build, gate_call)
+            self.assertIn("--current-source-mimi-receipt", self.source[gate_call:call_end])
+
+        no_z3_start = self.source.index("record_gate no-z3-owner-attribution-l2")
+        no_z3_end = self.source.index("|| true", no_z3_start)
+        self.assertNotIn("--current-source-mimi-receipt", self.source[no_z3_start:no_z3_end])
+
+        build_start = self.source.index("record_build() {")
+        build_end = self.source.index("\nrecord_python_step() {", build_start)
+        build_recorder = self.source[build_start:build_end]
+        self.assertIn("route_census_unset_inherited_environment", build_recorder)
+        self.assertIn('"${ROUTE_CENSUS_UNSET_ARGS[@]}"', build_recorder)
+
+        python_start = self.source.index("record_python_step() {")
+        python_end = self.source.index("\nrequire_l3_memcheck_reports() {", python_start)
+        python_recorder = self.source[python_start:python_end]
+        self.assertIn("route_census_unset_inherited_environment", python_recorder)
+        self.assertIn('"${ROUTE_CENSUS_UNSET_ARGS[@]}"', python_recorder)
+
+    def test_receipt_build_hash_is_verified_before_actor_route_authority_is_set(self) -> None:
+        build_start = self.source.index("record_build() {")
+        build_end = self.source.index("\nrecord_python_step() {", build_start)
+        build = self.source[build_start:build_end]
+        self.assertIn("route_census_unset_inherited_environment", build)
+        self.assertIn("current_sha256=\"$(sha256sum -- \"$ISOLATED_MIMI_PATH\"", build)
+        self.assertIn('"$current_sha256" == "$receipt_sha256"', build)
+        self.assertIn('CURRENT_SOURCE_MIMI_PATH="$ISOLATED_MIMI_PATH"', build)
+        self.assertIn('CURRENT_SOURCE_MIMI_SHA256="$receipt_sha256"', build)
 
     def test_legacy_owner_audit_script_is_a_required_source_input(self) -> None:
         required_sources_start = self.source.index("local -a required_sources=(")
@@ -214,7 +326,7 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
         self.assertIn("outer_before", self.source)
         self.assertIn("build_receipt.reconcile_source_manifests(", self.source)
 
-    def test_census_requires_one_independent_v4_manifest_before_cargo_and_reuses_it(self) -> None:
+    def test_census_requires_v5_route_expectations_from_v4_source_authority_before_cargo(self) -> None:
         preflight = self.source.index("# Require a caller-reviewed expectation contract")
         cargo_version = self.source.index("cargo --version")
         first_expensive_gate = self.source.index("record_gate checker-owner-effects-l1")
@@ -225,13 +337,14 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
         self.assertLess(preflight, cargo_version)
         self.assertLess(preflight, first_expensive_gate)
         for required_fragment in (
-            "MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS must name an independent schema-v4 expectations manifest",
+            "MIMI_ACTOR_TWO_FIXTURE_EXPECTATIONS must name an independent schema-v5 route expectations manifest backed by schema-v4 source-authority decisions",
             "census.load_expectations(manifest_path, root)",
             "set(declared) != source_paths",
             "expectation.get(\"class\") == \"unmapped\"",
             "expectation.get(\"source_sha256\") != source.get(\"sha256\")",
             "census.expectation_source_contract_valid_for_preflight(expectation)",
             "census.expectation_paths_requiring_runtime_authority(bound)",
+            '"status": "validated_schema_v5_route_expectations"',
             '"runtime_authority_pending_count"',
             "--expectations \"$CENSUS_EXPECTATIONS_PATH\"",
             "--report \"$ARTIFACT_DIR/full-route-census.initial.json\"",
@@ -287,7 +400,7 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("independent schema-v4 expectations", result.stderr)
+        self.assertIn("independent schema-v5 route expectations", result.stderr)
         self.assertFalse(cargo_log.exists(), "Cargo must not be executed before preflight")
 
     def test_actor_strict_report_rejects_bootstrap_generation_mode(self) -> None:
@@ -298,10 +411,13 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
         self.assertIn("Actor gate rejects bootstrap_observation authority bundles", validator)
 
     def test_census_receipt_is_created_only_after_build_source_snapshots(self) -> None:
-        before = self.source.index("source-before-capture")
-        cargo = self.source.index('"${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}"')
-        after = self.source.index("source-after-capture", cargo)
-        receipt = self.source.index("receipt_command=(", after)
+        build_start = self.source.index("record_build() {")
+        build_end = self.source.index("\nrecord_python_step() {", build_start)
+        build = self.source[build_start:build_end]
+        before = build.index("source-before-capture")
+        cargo = build.index('"${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}"')
+        after = build.index("source-after-capture", cargo)
+        receipt = build.index("receipt_command=(", after)
         self.assertLess(before, cargo)
         self.assertLess(cargo, after)
         self.assertLess(after, receipt)
@@ -321,11 +437,14 @@ class ActorTwoFixtureRunnerSourceContractTests(unittest.TestCase):
         )
 
     def test_selected_cargo_identity_and_config_are_captured_around_build(self) -> None:
-        identity_before = self.source.index("cargo-identity-before-capture")
-        config_before = self.source.index("cargo-config-before-capture")
-        cargo = self.source.index('"${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}"')
-        identity_after = self.source.index("cargo-identity-after-capture", cargo)
-        config_after = self.source.index("cargo-config-after-capture", cargo)
+        build_start = self.source.index("record_build() {")
+        build_end = self.source.index("\nrecord_python_step() {", build_start)
+        build = self.source[build_start:build_end]
+        identity_before = build.index("cargo-identity-before-capture")
+        config_before = build.index("cargo-config-before-capture")
+        cargo = build.index('"${cargo_env[@]}" "$cargo_path" "${cargo_args[@]}"')
+        identity_after = build.index("cargo-identity-after-capture", cargo)
+        config_after = build.index("cargo-config-after-capture", cargo)
         self.assertLess(identity_before, cargo)
         self.assertLess(config_before, cargo)
         self.assertLess(cargo, identity_after)

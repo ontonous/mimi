@@ -7,7 +7,7 @@
   mega.mimi                 全部模块共存
   traps/<mod>_<fn>.mimi     按设计即陷阱的函数（fail 等）单独验证退出码对拍
 
-用法: python3 scripts/gen-stdlib-matrix.py [--out tests/stdlib_matrix_generated]
+用法: python3 scripts/gen-stdlib-matrix.py --out /external/evidence/stdlib-matrix/<run-id>
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import itertools
 import re
 import sys
 from pathlib import Path
+from stdlib_matrix_artifacts import MatrixArtifactError, write_manifest
 
 REPO = Path(__file__).resolve().parent.parent
 STD = REPO / "std"
@@ -93,7 +94,7 @@ def load_modules() -> dict[str, list[dict]]:
 
 
 # --------------------------------------------------------------------------
-# 每函数覆盖表：args / stmts（完整替换语句）/ uses（额外 use）/ skip / helpers
+# 每函数覆盖表：args / stmts / pre_stmts / post_stmts / uses / skip / helpers
 # --------------------------------------------------------------------------
 
 OVERRIDES: dict[str, dict] = {
@@ -207,34 +208,87 @@ OVERRIDES: dict[str, dict] = {
     "json.to_string_pretty": {"args": '"{\\"a\\": 1}"'},
     "json.array_length": {"args": '"[1, 2, 3]"'},
     # ---- maps ----
-    "maps.new": {"ret_shape": "record"},
-    "maps.get": {"ret_shape": "tuple", "args": "map_from_list([]), \"k\""},
-    "maps.set": {"ret_shape": "record", "args": "map_from_list([]), \"k\", 7"},
-    "maps.has_key": {"args": "map_from_list([]), \"k\""},
-    "maps.remove": {"ret_shape": "record", "args": "map_from_list([]), \"k\""},
-    "maps.size": {"args": "map_from_list([])"},
-    "maps.from_list": {"ret_shape": "record", "stmts": [
-        "let mfl_b = new();",
-        'let mfl_c = set(set(mfl_b, "a", 1), "b", 2);',
-        "println(size(mfl_c));",
-        "let mfl_rt = from_list(to_list(mfl_c));",
+    "maps.new": {"ret_shape": "result_record"},
+    "maps.get": {
+        "ret_shape": "tuple", "args": 'mget_input, "k"',
+        "pre_stmts": ["let mget_input = map_from_list([]);"],
+        "post_stmts": ["drop(mget_input);"],
+    },
+    "maps.set": {
+        "ret_shape": "result_record", "args": 'mset_input, "k", 7',
+        "pre_stmts": ["let mset_input = map_from_list([]);"],
+        "post_stmts": ["drop(mset_input);"],
+    },
+    "maps.has_key": {
+        "args": 'mhas_input, "k"',
+        "pre_stmts": ["let mhas_input = map_from_list([]);"],
+        "post_stmts": ["drop(mhas_input);"],
+    },
+    "maps.remove": {
+        "ret_shape": "result_record", "args": 'mremove_input, "k"',
+        "pre_stmts": ["let mremove_input = map_from_list([]);"],
+        "post_stmts": ["drop(mremove_input);"],
+    },
+    "maps.size": {
+        "args": "msize_input",
+        "pre_stmts": ["let msize_input = map_from_list([]);"],
+        "post_stmts": ["drop(msize_input);"],
+    },
+    "maps.from_list": {"stmts": [
+        'let mfl_src = map_from_list([("a", 1), ("b", 2)]);',
+        "let mfl_rt = from_list(to_list(mfl_src));",
         "println(size(mfl_rt));",
+        "drop(mfl_rt);",
+        "drop(mfl_src);",
     ]},
-    "maps.get_or_default": {"args": "map_from_list([]), \"k\", 99"},
-    "maps.merge": {"ret_shape": "record",
-                   "args": "map_from_list([]), map_from_list([])"},
+    "maps.get_or_default": {
+        "args": 'mdefault_input, "k", 99',
+        "pre_stmts": ["let mdefault_input = map_from_list([]);"],
+        "post_stmts": ["drop(mdefault_input);"],
+    },
+    "maps.merge": {
+        "ret_shape": "result_record", "args": "mmerge_left, mmerge_right",
+        "pre_stmts": [
+            'let mmerge_left = map_from_list([("a", 1)]);',
+            'let mmerge_right = map_from_list([("b", 2)]);',
+        ],
+        "post_stmts": ["drop(mmerge_left);", "drop(mmerge_right);"],
+    },
     "maps.to_list": {"stmts": [
-        "let tl = to_list(map_from_list([]));",
+        "let tl_input = map_from_list([]);",
+        "let tl = to_list(tl_input);",
         "println(len(tl));",
+        "drop(tl);",
+        "drop(tl_input);",
     ]},
-    "maps.filter_keys": {"ret_shape": "record",
-                         "args": 'map_from_list([]), fn(k: string) -> bool { k == "a" }'},
-    "maps.map_values": {"ret_shape": "record",
-                        "args": "map_from_list([]), fn(v: Any) -> Any { v }"},
-    "maps.update": {"ret_shape": "record",
-                    "args": 'map_from_list([]), "k", fn(v: Any) -> Any { v }'},
-    "maps.pick": {"ret_shape": "record", "args": 'map_from_list([]), ["a"]'},
-    "maps.omit": {"ret_shape": "record", "args": 'map_from_list([]), ["a"]'},
+    "maps.filter_keys": {
+        "ret_shape": "result_record",
+        "args": 'mfilter_input, fn(k: string) -> bool { k == "a" }',
+        "pre_stmts": ['let mfilter_input = map_from_list([("a", 1)]);'],
+        "post_stmts": ["drop(mfilter_input);"],
+    },
+    "maps.map_values": {
+        "ret_shape": "result_record",
+        "args": "mvalues_input, fn(v: Any) -> Any { v }",
+        "pre_stmts": ['let mvalues_input = map_from_list([("a", 1)]);'],
+        "post_stmts": ["drop(mvalues_input);"],
+    },
+    "maps.update": {
+        "ret_shape": "result_record",
+        "args": 'mupdate_input, "a", fn(v: Any) -> Any { v }',
+        "pre_stmts": ['let mupdate_input = map_from_list([("a", 1)]);'],
+        "post_stmts": ["drop(mupdate_input);"],
+    },
+    "maps.pick": {
+        "ret_shape": "result_record", "args": 'mpick_input, ["a"]',
+        "pre_stmts": ['let mpick_input = map_from_list([("a", 1)]);'],
+        "post_stmts": ["drop(mpick_input);"],
+    },
+    "maps.omit": {
+        "ret_shape": "result_record", "args": 'momit_input, ["a"]',
+        "pre_stmts": ['let momit_input = map_from_list([("a", 1)]);'],
+        "post_stmts": ["drop(momit_input);"],
+    },
     # ---- mymath 域敏感样例 ----
     "mymath.factorial": {"args": "6"},
     "mymath.fibonacci": {"args": "10"},
@@ -295,7 +349,7 @@ OVERRIDES: dict[str, dict] = {
         "println(ri >= 5);",
     ]},
     # ---- net（错误路径为主；本机回环即时拒绝）----
-    "net.tcp_socket": {"stmts": ["println(tcp_socket() >= 0);"]},
+    "net.tcp_socket": {"ret_shape": "result", "args": ""},
     "net.tcp_connect": {"ret_shape": "result", "args": '"127.0.0.1", 9'},
     "net.tcp_listen": {"ret_shape": "result", "args": "0, 1"},
     "net.tcp_accept": {"ret_shape": "result", "args": "-1"},
@@ -473,6 +527,7 @@ TRAP_FUNCS = {
 PAIR_REP = {
     "array": 'println(array_len(["b", "a"]));',
     "collections": "println(sum([1, 2, 3]));",
+    "collections_core": "println(list_len([1, 2, 3]));",
     "crypto": 'println(hex_encode("AB"));',
     "csv": 'println(cell([["a", "b"]], 0, 1));',
     "datetime": 'println(format_duration_secs(3661));',
@@ -485,7 +540,7 @@ PAIR_REP = {
     "json": 'println(is_valid_json("{}"));',
     "maps": "println(size(map_from_list([])));",
     "mymath": "println(gcd(48, 18));",
-    "net": "println(tcp_socket() >= 0);",
+    "net": "match tcp_socket() { Ok(v) => { println(v) } Err(e) => { println(e) } }",
     "prelude": "println(identity(5));",
     "random": "let shp = shuffle([3, 1, 2]); println(sort_list(shp));",
     "result": "let rp: Result<i32, string> = Ok(1); println(is_ok_result(rp));",
@@ -569,34 +624,41 @@ def emit_call(func: dict, ov: dict) -> tuple[list[str], list[str]]:
     if shape is None:
         shape = classify_ret(func["ret"])
     uses = list(ov.get("uses_extra", []))
+    prefix = list(ov.get("pre_stmts", []))
+    suffix = list(ov.get("post_stmts", []))
     if shape == "unit":
-        return uses, [f"{call};"]
+        return uses, prefix + [f"{call};"] + suffix
     if shape == "print":
-        return uses, [f"println({call});"]
+        return uses, prefix + [f"println({call});"] + suffix
     if shape == "result":
-        return uses, [
+        return uses, prefix + [
             f"match {call} {{ Ok(v) => {{ println(v) }} Err(e) => {{ println(e) }} }}",
-        ]
+        ] + suffix
+    if shape == "result_record":
+        return uses, prefix + [
+            f"match {call} {{ Ok(v) => {{ println(size(v)); drop(v) }} Err(e) => {{ println(e) }} }}",
+        ] + suffix
     if shape == "option":
-        return uses, [
+        return uses, prefix + [
             f"match {call} {{ Some(v) => {{ println(v) }} None => {{ println(-777777) }} }}",
-        ]
+        ] + suffix
     if shape == "tuple":
-        return uses, [
+        return uses, prefix + [
             f"let tv_{tag} = {call};",
             f"println(tv_{tag}.0);",
             f"println(tv_{tag}.1);",
-        ]
+        ] + suffix
     if shape == "record":
-        return uses, [
+        return uses, prefix + [
             f"let mr_{tag} = {call};",
             f"println(size(mr_{tag}));",
-        ]
+            f"drop(mr_{tag});",
+        ] + suffix
     if shape == "set":
-        return uses, [
+        return uses, prefix + [
             f"let ms_{tag} = {call};",
             f"println(set_size(ms_{tag}));",
-        ]
+        ] + suffix
     raise ValueError(f"unknown ret shape {shape} for {name}")
 
 
@@ -681,28 +743,17 @@ def gen_trap(mod: str, fname: str, call: str) -> str:
     )
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="tests/stdlib_matrix_generated")
-    args = ap.parse_args()
-    out = REPO / args.out
+def render_sources() -> dict[str, str]:
+    """Return every matrix source in deterministic path order without writing files."""
+    global _LET_SEQ
+    _LET_SEQ = 0
     mods = load_modules()
-    (out / "singles").mkdir(parents=True, exist_ok=True)
-    (out / "pairs").mkdir(parents=True, exist_ok=True)
-    (out / "traps").mkdir(parents=True, exist_ok=True)
-
-    n_single = n_pair = n_trap = 0
-    uncovered: list[str] = []
+    outputs: dict[str, str] = {}
     for mod, funcs in mods.items():
         text = gen_single(mod, funcs)
-        (out / "singles" / f"{mod}.mimi").write_text(text)
-        n_single += 1
-        for line in text.splitlines():
-            if line.startswith("// TODO-UNCOVERED"):
-                uncovered.append(line)
+        outputs[f"singles/{mod}.mimi"] = text
     for a, b in itertools.combinations(sorted(mods), 2):
-        (out / "pairs" / f"{a}__{b}.mimi").write_text(gen_pair(a, b))
-        n_pair += 1
+        outputs[f"pairs/{a}__{b}.mimi"] = gen_pair(a, b)
     mega_body = []
     mega_uses = []
     for mod in sorted(mods):
@@ -717,12 +768,64 @@ def main() -> int:
     mega.append("func main() {")
     mega.extend("    " + mb for mb in mega_body)
     mega.append("}")
-    (out / "mega.mimi").write_text("\n".join(mega) + "\n")
+    outputs["mega.mimi"] = "\n".join(mega) + "\n"
     for (mod, fname), call in TRAP_FUNCS.items():
-        (out / "traps" / f"{mod}_{fname}.mimi").write_text(gen_trap(mod, fname, call))
-        n_trap += 1
+        outputs[f"traps/{mod}_{fname}.mimi"] = gen_trap(mod, fname, call)
+    return dict(sorted(outputs.items()))
 
-    print(f"singles={n_single} pairs={n_pair} mega=1 traps={n_trap}")
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--out",
+        required=True,
+        type=Path,
+        help="new empty output directory outside the repository; no repo-local default is used",
+    )
+    args = ap.parse_args()
+    out = args.out.expanduser().absolute()
+    if out.exists() or out.is_symlink():
+        ap.error(f"refusing to overwrite an existing generated directory: {out}")
+    try:
+        out.resolve(strict=False).relative_to(REPO.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        ap.error(f"generated output must be outside the repository: {out}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    outputs = render_sources()
+    for relative, text in outputs.items():
+        path = out / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    try:
+        manifest_path = write_manifest(
+            REPO,
+            out,
+            {relative: text.encode("utf-8") for relative, text in outputs.items()},
+        )
+    except (MatrixArtifactError, OSError, ValueError) as error:
+        print(f"stdlib matrix artifact manifest failed: {error}", file=sys.stderr)
+        return 2
+
+    counts = {
+        "singles": sum(path.startswith("singles/") for path in outputs),
+        "pairs": sum(path.startswith("pairs/") for path in outputs),
+        "mega": int("mega.mimi" in outputs),
+        "traps": sum(path.startswith("traps/") for path in outputs),
+    }
+    uncovered = [
+        f"{path}: {line}"
+        for path, text in outputs.items()
+        for line in text.splitlines()
+        if line.startswith("// TODO-UNCOVERED")
+    ]
+    print(
+        f"singles={counts['singles']} pairs={counts['pairs']} "
+        f"mega={counts['mega']} traps={counts['traps']}"
+    )
+    print(f"manifest={manifest_path}")
     if uncovered:
         print(f"-- uncovered ({len(uncovered)}):")
         for u in uncovered:

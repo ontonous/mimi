@@ -1,0 +1,43 @@
+// Negative V-11/V-12 boundary: a Map operation introduced in a match arm is
+// not path-local in the current owned-get receipt and must fail closed.
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "k", "v") {
+                Ok(root) => {
+                    let pair = map_get(root, "k")
+                    drop(empty)
+                    drop(root)
+                    let value = match pair.0 {
+                        true => {
+                            match map_new() {
+                                Ok(arm_empty) => {
+                                    match map_set(arm_empty, "arm", 1) {
+                                        Ok(arm_root) => {
+                                            drop(arm_empty)
+                                            drop(arm_root)
+                                            1
+                                        },
+                                        Err(_) => {
+                                            drop(arm_empty)
+                                            0
+                                        },
+                                    }
+                                },
+                                Err(_) => 0,
+                            }
+                        },
+                        false => 0,
+                    }
+                    drop(pair)
+                    value
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
+}

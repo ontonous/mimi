@@ -31,7 +31,15 @@ func parse_command(line: string) -> (string, string, string) {
 func main() -> i32 {
     println("mimi-kv v0.1.0 — embedded key-value store")
 
-    let mut data = map_new()
+    let (initial_data, map_failed, map_status) = match map_new() {
+        Ok(root) => (Some(root), false, 0),
+        Err(status) => (None, true, status)
+    }
+    if map_failed {
+        println("Map initialization failed with status " + to_string(map_status))
+        return map_status
+    }
+    let mut data = initial_data.unwrap()
     let mut count = 0
 
     // Auto-load if data file exists
@@ -40,7 +48,9 @@ func main() -> i32 {
         if rr.is_ok() {
             let json = rr.unwrap()
             if json != "" && json_is_valid(json) {
-                data = from_json(json)
+                let loaded_data = from_json(json)
+                drop(data)
+                data = loaded_data
                 let lk = keys(data)
                 count = len(lk)
                 println("Loaded " + to_string(count) + " keys")
@@ -49,17 +59,19 @@ func main() -> i32 {
     }
 
     let server_fd = socket(2, 1, 0)
-    if server_fd < 0 { println("Socket failed") return 1 }
+    if server_fd < 0 { println("Socket failed"); drop(data); return 1 }
 
     if bind(server_fd, 6380) < 0 {
         println("Bind failed on port 6380")
         close_fd(server_fd)
+        drop(data)
         return 1
     }
 
     if listen(server_fd, 16) < 0 {
         println("Listen failed")
         close_fd(server_fd)
+        drop(data)
         return 1
     }
 
@@ -80,9 +92,17 @@ func main() -> i32 {
                 }
                 if cmd == "SET" && key != "" && val != "" {
                     let existed = has_key(data, key)
-                    data = map_set(data, key, val)
-                    if !existed { count = count + 1 }
-                    let _ = send(cfd, ok_msg("stored"))
+                    match map_set(data, key, val) {
+                        Ok(updated) => {
+                            drop(data)
+                            data = updated
+                            if !existed { count = count + 1 }
+                            let _ = send(cfd, ok_msg("stored"))
+                        }
+                        Err(status) => {
+                            let _ = send(cfd, err_msg("store failed (status " + to_string(status) + ")"))
+                        }
+                    }
                 }
                 if cmd == "GET" && key != "" {
                     let r = map_get(data, key)
@@ -94,7 +114,9 @@ func main() -> i32 {
                 }
                 if cmd == "DEL" && key != "" {
                     if has_key(data, key) {
-                        data = map_remove(data, key)
+                        let updated = map_remove(data, key)
+                        drop(data)
+                        data = updated
                         count = count - 1
                         let _ = send(cfd, ok_msg("deleted"))
                     } else {
@@ -137,7 +159,9 @@ func main() -> i32 {
                         if rr2.is_ok() {
                             let json2 = rr2.unwrap()
                             if json2 != "" && json_is_valid(json2) {
-                                data = from_json(json2)
+                                let loaded_data = from_json(json2)
+                                drop(data)
+                                data = loaded_data
                                 let lk2 = keys(data)
                                 count = len(lk2)
                                 let _ = send(cfd, ok_msg("loaded"))
@@ -152,9 +176,17 @@ func main() -> i32 {
                     }
                 }
                 if cmd == "CLEAR" {
-                    data = map_new()
-                    count = 0
-                    let _ = send(cfd, ok_msg("cleared"))
+                    match map_new() {
+                        Ok(empty) => {
+                            drop(data)
+                            data = empty
+                            count = 0
+                            let _ = send(cfd, ok_msg("cleared"))
+                        }
+                        Err(status) => {
+                            let _ = send(cfd, err_msg("clear failed (status " + to_string(status) + ")"))
+                        }
+                    }
                 }
                 if cmd == "QUIT" {
                     let _ = send(cfd, "+BYE\n")
@@ -164,6 +196,7 @@ func main() -> i32 {
         }
     }
 
+    drop(data)
     close_fd(server_fd)
     0
 }

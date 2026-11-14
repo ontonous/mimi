@@ -32,14 +32,16 @@ KNOWN_GAPS = {
         "fallback (fail-closed by design; see RESULTS.md 0.1.7 status)"
     ),
     "std_maps.mimi": (
-        "R6-1177 b1e81324: ordinary Map entries erase the stored value tag; "
-        "get_or_default<T> cannot prove the stored Any matches T, so native "
-        "build rejects DynamicAnyUnpack with E0722 while VM run remains supported"
+        "0.1.11 closure: ordinary untyped Map/Any (untagged Any payloads) "
+        "has no compatibility route; the default Canonical MIR route rejects "
+        "the incomplete owner-v2 attempt with MIR-COVERAGE-001 and never "
+        "retries Legacy, so run and build both fail closed"
     ),
     "std_maps_counter_generic.mimi": (
-        "R6-1177 b1e81324: the generic Map counter relies on an unchecked "
-        "Any-to-T unpack; native build rejects DynamicAnyUnpack with E0722 "
-        "while VM run remains supported"
+        "0.1.11 closure: the generic Map counter relies on untyped Any "
+        "entries; the default Canonical MIR route rejects the incomplete "
+        "owner-v2 attempt with MIR-COVERAGE-001 and never retries Legacy, "
+        "so run and build both fail closed"
     ),
 }
 

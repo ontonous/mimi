@@ -1,0 +1,51 @@
+{
+  "schema": "mimi-v02-w4-change-oracle-v1",
+  "provenance": "Derived from W4 task requirements and the independently authored W4 C fixtures/README. No compiler or host-driver execution is claimed.",
+  "S1": {
+    "stdout": "",
+    "files": {},
+    "same_symbol": "w4_checksum",
+    "same_signature": "int32_t(int32_t)",
+    "vectors": [
+      {"input": 0, "result": 17},
+      {"input": 20, "result": 417},
+      {"input": 21, "result": 458},
+      {"input": 999, "result": 998018},
+      {"input": 1000, "result": -2},
+      {"input": -1, "result": -2}
+    ],
+    "required_regression": "Preserve the complete W4 request transcript, event partial order, FFI error mapping, and export ABI."
+  },
+  "S2": {
+    "stdout": "Timeout;owner=retry-queue\nRetryComplete id=731 checksum=417\n",
+    "files": {},
+    "handoff": {"request_id": 731, "retry_owner": "retry-queue", "checksum_input": 20, "checksum": 417, "retry_count": 1},
+    "limits": ["Cooperative work-boundary deadline only", "Does not promise interruption of blocking tcp_recv or forced task cancellation"]
+  },
+  "S3": {
+    "mimi": {"stdout": "S3_SCOPE_DENIED_BEFORE_SOCKET\n", "files": {}, "status": "unverified"},
+    "endpoint_scope": {
+      "stdout": "S3_SCOPE_ORACLE_OK denied_syscalls=0 allowed_listener_syscalls=1\n",
+      "files": {},
+      "denied": [
+        {"scope": 0, "port": 0, "result": -1001},
+        {"scope": 1, "port": 23999, "result": -1002},
+        {"operation": "connect", "scope": 0, "port": 24000, "result": -1001},
+        {"operation": "connect", "scope": 1, "port": 24101, "result": -1002}
+      ],
+      "denied_syscalls": {"socket": 0, "bind": 0, "connect": 0, "listen": 0},
+      "allowed_listener": {"scope": 1, "requested_port": 0, "selected_port_range": [24000, 24100], "syscalls": {"socket": 1, "bind": 1, "connect": 0, "listen": 1}}
+    }
+  },
+  "S4": {
+    "status": "blocked",
+    "required_oracle": "w4/oracle/w4_expected.json#$",
+    "deployment": {"install": ["--offline", "--frozen"], "launch_working_directory": "outside source fixture and package cache"},
+    "blocker": "The checked-in locked offline package is a deployment anchor; offline installation, out-of-tree launch, full W4 host transcript, cache invalidation, and L1/L2/L3 have not been run."
+  },
+  "negatives": {
+    "wrong_scalar_argument": {"expected": "Reject the call-site string argument to the i32 checksum import before execution.", "diagnostic_contains": ["E0209"], "status": "unverified"},
+    "wrong_external_abi": {"expected": "Reject a Mimi i64(i64) declaration that disagrees with the C i32(i32) export.", "status": "blocked", "blocker": "Extern declarations are not compared to a C header/prototype."},
+    "borrowed_string_ownership": {"expected": "Reject a borrowed static C string declared as an owned Mimi string without a compatible ownership/destructor contract.", "status": "blocked", "blocker": "The current extern surface has no string view/owned/destructor annotation."}
+  }
+}

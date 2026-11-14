@@ -1,0 +1,28 @@
+// A user function with the same spelling must not borrow the canonical
+// std::maps.get_or_default<i32> route authority.
+func get_or_default<T>(m: Record, key: string, default: T) -> T {
+    drop(m)
+    default
+}
+
+func main() -> i32 {
+    let empty_result: Result<Record, i32> = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result: Result<Record, i32> = map_set(empty, "hits", 0)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<i32>(root, "hits", 73)
+                    drop(empty)
+                    println(observed)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

@@ -1,0 +1,35 @@
+// Exact fallible New/Set/GetAny lineage with an owned dynamic Any result.
+// GetAny publication capacity is a recoverable Err(4), distinct from the
+// existing New(3) and Set(2) result domains.
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let changed = map_set(root, "answer", 42)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let fetched = map_get_any(updated, "answer")
+                    match fetched {
+                        Ok(pair) => {
+                            let found = pair.0
+                            let payload = unpack_i32(pair.1)
+                            drop(pair)
+                            drop(updated)
+                            if found { payload } else { 0 }
+                        },
+                        Err(status) => {
+                            drop(updated)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

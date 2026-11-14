@@ -1,0 +1,75 @@
+use std::strings
+use std::time
+
+const MAX_HOLD_MS: i32 = 2000
+
+const EVENT_READY: i32 = 1
+const EVENT_HANDOFF: i32 = 2
+const EVENT_IN_FLIGHT: i32 = 3
+const EVENT_RESPONSE: i32 = 4
+const EVENT_BAD_JSON: i32 = 5
+const EVENT_FFI_ERROR: i32 = 6
+const EVENT_STOP_ACCEPTED: i32 = 7
+const EVENT_WORKER_DONE: i32 = 8
+const EVENT_DRAINED: i32 = 9
+
+extern "C" {
+    // C contract is recorded in ../../oracle/w4_ffi_contract.json.
+    func w4_checksum(value: i32) -> i32;
+    func w4_trace(code: i32, detail: i32) -> i32;
+}
+
+pub func note(code: i32, detail: i32) {
+    let _ = w4_trace(code, detail)
+}
+
+pub func c_checksum(value: i32) -> Result<i32, string> {
+    let result = w4_checksum(value)
+    if result < 0 {
+        Err("ChecksumRange")
+    } else {
+        Ok(result)
+    }
+}
+
+pub func checksum_response(raw: string, slot: i32) -> string {
+    if !json_is_valid(raw) {
+        note(EVENT_BAD_JSON, slot)
+        return "{\"error\":\"BadJson\"}"
+    }
+    if !json_has_key(raw, "op") || !json_has_key(raw, "request_id") {
+        return "{\"error\":\"BadSchema\"}"
+    }
+
+    let operation = json_get_string(raw, "op")
+    let request_id = json_get_int(raw, "request_id")
+    if operation != "checksum" {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadOperation\"}"
+    }
+    if !json_has_key(raw, "value") || !json_has_key(raw, "hold_ms") {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadSchema\"}"
+    }
+
+    let value = json_get_int(raw, "value")
+    let hold_ms = json_get_int(raw, "hold_ms")
+    if hold_ms < 0 || hold_ms > MAX_HOLD_MS {
+        return "{\"id\":" + to_string(request_id) + ",\"error\":\"HoldLimit\"}"
+    }
+    if hold_ms > 0 {
+        note(EVENT_IN_FLIGHT, request_id)
+        sleep_ms(hold_ms)
+    }
+
+    let checked = c_checksum(value)
+    match checked {
+        Ok(checksum) => "{\"id\":" + to_string(request_id) + ",\"checksum\":" + to_string(checksum) + "}",
+        Err(_) => {
+            note(EVENT_FFI_ERROR, request_id)
+            "{\"id\":" + to_string(request_id) + ",\"error\":\"ChecksumRange\"}"
+        },
+    }
+}
+
+pub func valid_stop(raw: string) -> bool {
+    json_is_valid(raw) && json_has_key(raw, "op") && json_has_key(raw, "request_id") && json_get_string(raw, "op") == "stop"
+}

@@ -1,0 +1,25 @@
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "answer", true) {
+            Ok(root) => {
+        let pair = map_get(root, "answer")
+        drop(empty)
+        drop(root)
+
+        let found = pair.0
+        let payload = pair.1 as bool
+        drop(pair)
+        found && payload
+            },
+            Err(status) => {
+            drop(empty)
+            false
+            },
+        }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}

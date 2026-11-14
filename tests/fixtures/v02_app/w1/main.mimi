@@ -1,0 +1,236 @@
+// W1: a real config-report command. The host-facing entry accepts one
+// one-shot SystemToken for each guarded filesystem operation; the ordinary
+// CLI cannot supply scoped tokens yet, so main fails closed while
+// run_with_grants contains the complete application path.
+use apps::config_json as config_parser
+use apps::record_json as record_parser
+
+func option_value(argv: List<string>, flag: string, fallback: string) -> string {
+    let mut i = 0
+    while i + 1 < len(argv) {
+        if argv[i] == flag { return argv[i + 1] }
+        i = i + 1
+    }
+    fallback
+}
+
+func has_flag(argv: List<string>, flag: string) -> bool {
+    for arg in argv {
+        if arg == flag { return true }
+    }
+    false
+}
+
+func usage() -> string {
+    "mimi02-config-tool --config PATH --input-dir DIR --output PATH [--dry-run]"
+}
+
+func settle_record_grants(grants: List<SystemToken>) {
+    for grant in grants { token_id(grant) }
+}
+
+func settle_output_grant(grant: Option<SystemToken>) {
+    match grant {
+        Some(token) => { let _ = token_id(token); },
+        None => {},
+    }
+}
+
+func error_exit_code(error: string) -> i32 {
+    if starts_with(error, "ConfigReadFailed:") { return 2 }
+    if starts_with(error, "Config:") { return 3 }
+    if starts_with(error, "RecordReadFailed:") { return 4 }
+    if starts_with(error, "Record:") { return 5 }
+    if starts_with(error, "WriteFailed:") { return 6 }
+    if error == "WritePermissionMissing" { return 7 }
+    if error == "PermissionGrantCountMismatch" { return 8 }
+    9
+}
+
+func render_report(
+    config_name: string,
+    retries: i64,
+    files: List<string>,
+    total: i64
+) -> string {
+    let mut report = "{\"config\":{\"name\":" + to_json(config_name)
+    report = report + ",\"retries\":" + to_string(retries)
+    report = report + "},\"files\":" + to_json(files)
+    report = report + ",\"total\":" + to_string(total) + "}"
+    report
+}
+
+func write_report_with_grant(
+    report: string,
+    output_path: string,
+    token: SystemToken
+) -> Result<string, string> {
+    match write_file_guarded(output_path, report, token) {
+        Ok(_) => Ok(report),
+        Err(error) => Err("WriteFailed:" + error),
+    }
+}
+
+func write_report(
+    report: string,
+    output_path: string,
+    output_grant: Option<SystemToken>
+) -> Result<string, string> {
+    match output_grant {
+        Some(token) => write_report_with_grant(report, output_path, token),
+        None => Err("WritePermissionMissing"),
+    }
+}
+
+// Host-facing application entry. config_grant carries the config-directory
+// read scope; each record_grants element carries the input-directory read
+// scope for one file operation; output_grant carries the output write scope.
+// The optional output grant is settled on every normal path, but only the
+// non-dry-run branch invokes the guarded write API. Keeping these scopes
+// separate makes C3 a narrow change to data-root authority without changing
+// parser or report APIs.
+func process_records(
+    config_name: string,
+    retries: i64,
+    relative_files: List<string>,
+    input_dir: string,
+    record_grants: List<SystemToken>
+) -> Result<string, string> {
+    if len(relative_files) != len(record_grants) {
+        // Even on a manifest mismatch, settle each one-shot token rather than
+        // leaving part of the host grant list live in the caller's scope.
+        settle_record_grants(record_grants)
+        Err("PermissionGrantCountMismatch")
+    } else {
+        // C2's observable change point is the per-record accumulator and the
+        // report builder: the parser already validates and returns source.
+        let mut total: i64 = 0
+        let mut first_error = ""
+        let mut file_index = 0
+        for grant in record_grants {
+            let relative_path = relative_files[file_index]
+            let full_path = path_join(input_dir, relative_path)
+            match read_file_guarded(full_path, grant) {
+                Ok(record_raw) => {
+                    match record_parser::parse(record_raw) {
+                        Ok(checked_record) => {
+                            let amount = checked_record.1
+                            total = total + amount
+                        },
+                        Err(error) => {
+                            if first_error == "" {
+                                first_error = "Record:" + relative_path + ":" + error
+                            }
+                        },
+                    }
+                },
+                Err(error) => {
+                    if first_error == "" {
+                        first_error = "RecordReadFailed:" + relative_path + ":" + error
+                    }
+                },
+            }
+            file_index = file_index + 1
+        }
+        if first_error != "" {
+            Err(first_error)
+        } else {
+            Ok(render_report(config_name, retries, relative_files, total))
+        }
+    }
+}
+
+func parse_config_and_collect(
+    config_raw: string,
+    input_dir: string,
+    record_grants: List<SystemToken>
+) -> Result<string, string> {
+    match config_parser::parse(config_raw) {
+        Ok(config) => {
+            process_records(
+                config.0,
+                config.1,
+                config.2,
+                input_dir,
+                record_grants
+            )
+        },
+        Err(error) => {
+            settle_record_grants(record_grants)
+            Err("Config:" + error)
+        },
+    }
+}
+
+pub func run_with_grants(
+    argv: List<string>,
+    config_grant: SystemToken,
+    record_grants: List<SystemToken>,
+    output_grant: Option<SystemToken>
+) -> Result<string, string> {
+    let config_path = option_value(argv, "--config", "sample/config/config.json")
+    let input_dir = option_value(argv, "--input-dir", "sample/records")
+    let output_path = option_value(argv, "--output", "sample/output/report.json")
+    // C4 extends this selector with --preview while keeping the same
+    // report computation and no-write behavior.
+    let dry_run = has_flag(argv, "--dry-run")
+
+    match read_file_guarded(config_path, config_grant) {
+        Ok(contents) => {
+            match parse_config_and_collect(
+                contents,
+                input_dir,
+                record_grants
+            ) {
+                Ok(report) => {
+                    if dry_run {
+                        // Dry-run consumes any optional write grant without
+                        // invoking the guarded write API.
+                        settle_output_grant(output_grant)
+                        println(report)
+                        Ok(report)
+                    } else {
+                        match write_report(report, output_path, output_grant) {
+                            Ok(output) => {
+                                println(output)
+                                Ok(output)
+                            },
+                            Err(error) => Err(error),
+                        }
+                    }
+                },
+                Err(error) => {
+                    settle_output_grant(output_grant)
+                    Err(error)
+                },
+            }
+        },
+        Err(error) => {
+            settle_record_grants(record_grants)
+            settle_output_grant(output_grant)
+            Err("ConfigReadFailed:" + error)
+        },
+    }
+}
+
+// CLI result adapter used by the host launcher once it can inject scoped
+// grants. It keeps distinct user errors and exit categories at the boundary.
+pub func run_cli_with_grants(
+    argv: List<string>,
+    config_grant: SystemToken,
+    record_grants: List<SystemToken>,
+    output_grant: Option<SystemToken>
+) -> i32 {
+    match run_with_grants(argv, config_grant, record_grants, output_grant) {
+        Ok(_) => 0,
+        Err(error) => {
+            println(error)
+            error_exit_code(error)
+        },
+    }
+}
+
+func main() -> i32 {
+    println("HostCapabilitiesRequired: run_with_grants needs scoped host-issued SystemToken grants")
+    78
+}

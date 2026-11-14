@@ -1,0 +1,99 @@
+{
+  "schema": "mimi-v02-w1-oracle-v1",
+  "provenance": "Hand-derived from the frozen W1 file/config/report contract and checked-in inputs. This is an independent expected-behavior oracle, not a compiler observation.",
+  "entrypoint": "w1/main.mimi",
+  "current_execution_status": {
+    "status": "blocked",
+    "reason": "The ordinary CLI cannot inject host-issued scoped SystemToken grants. The current main intentionally returns HostCapabilitiesRequired (78); that is a host-boundary observation, not a W1 acceptance result.",
+    "additional_blockers": [
+      "Dynamic path-scope denial currently traps in the runtime and cannot be caught by the application's Result branch.",
+      "A deterministic guarded-write failure needs a host write grant and an explicit failing target."
+    ]
+  },
+  "cases": {
+    "normal": {
+      "status": "blocked_by_host_grants",
+      "argv": ["--config", "sample/config/config.json", "--input-dir", "sample/records", "--output", "sample/output/report.json"],
+      "expected": {
+        "exit_code": 0,
+        "stdout": "{\"config\":{\"name\":\"demo\",\"retries\":3},\"files\":[\"alpha.json\",\"beta.json\"],\"total\":10}\n",
+        "files": {"sample/output/report.json": "{\"config\":{\"name\":\"demo\",\"retries\":3},\"files\":[\"alpha.json\",\"beta.json\"],\"total\":10}"},
+        "parsed_records": [
+          {"file": "alpha.json", "source": "inventory", "amount": 4},
+          {"file": "beta.json", "source": "pricing", "amount": 6}
+        ],
+        "total": 10,
+        "write_count": 1
+      }
+    },
+    "dry_run": {
+      "status": "blocked_by_host_grants",
+      "argv": ["--config", "sample/config/config.json", "--input-dir", "sample/records", "--output", "sample/output/report.json", "--dry-run"],
+      "expected": {
+        "exit_code": 0,
+        "stdout": "{\"config\":{\"name\":\"demo\",\"retries\":3},\"files\":[\"alpha.json\",\"beta.json\"],\"total\":10}\n",
+        "files": {},
+        "write_count": 0
+      }
+    },
+    "config_empty_files": {
+      "status": "blocked_by_host_grants",
+      "argv": ["--config", "sample/cases/config_empty_files.json", "--input-dir", "sample/cases", "--output", "sample/output/report.json"],
+      "expected": {
+        "exit_code": 0,
+        "stdout": "{\"config\":{\"name\":\"empty-set\",\"retries\":0},\"files\":[],\"total\":0}\n",
+        "files": {"sample/output/report.json": "{\"config\":{\"name\":\"empty-set\",\"retries\":0},\"files\":[],\"total\":0}"},
+        "read_record_count": 0,
+        "write_count": 1
+      }
+    },
+    "config_duplicate": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_duplicate.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 3, "error": "Config:DuplicateKey:name"}},
+    "config_duplicate_escaped_key": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_duplicate_escaped_key.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 3, "error": "Config:DuplicateKey:name"}},
+    "config_empty": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_empty.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 3, "error": "Config:InvalidJson"}},
+    "config_malformed": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_malformed.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 3, "error": "Config:InvalidJson"}},
+    "config_unicode_nul": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_unicode_nul.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 3, "error": "Config:InvalidUnicodeNul"}},
+    "record_duplicate": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_record_duplicate.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 5, "error": "Record:record_duplicate.json:DuplicateKey:source"}},
+    "record_empty": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_record_empty.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 5, "error": "Record:record_empty.json:InvalidJson"}},
+    "record_malformed": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_record_malformed.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 5, "error": "Record:record_malformed.json:InvalidJson"}},
+    "record_quoted_amount": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_record_quoted_amount.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 5, "error": "Record:record_quoted_amount.json:InvalidField:amount"}},
+    "record_unicode_nul": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_record_unicode_nul.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 5, "error": "Record:record_unicode_nul.json:InvalidUnicodeNul"}},
+    "record_missing": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/config_missing_record.json", "--input-dir", "sample/cases"], "expected": {"exit_code": 4, "error_prefix": "RecordReadFailed:does-not-exist.json:"}},
+    "config_read_missing": {"status": "blocked_by_host_grants", "argv": ["--config", "sample/cases/absent-config.json", "--input-dir", "sample/cases"], "input": {"path": "sample/cases/absent-config.json", "exists": false}, "expected": {"exit_code": 2, "error_prefix": "ConfigReadFailed:"}},
+    "path_escape": {
+      "status": "blocked_by_runtime_trap",
+      "argv": ["--config", "sample/cases/config_path_escape.json", "--input-dir", "sample/records"],
+      "expected": {"reject_before_open": "../outside/secret.json", "caught_error": false},
+      "blocker": "Runtime scope denial currently traps instead of returning a catchable Result; do not count a trap as the required W1 permission-error behavior."
+    },
+    "write_failure": {
+      "status": "blocked_by_host_grants",
+      "argv": ["--config", "sample/config/config.json", "--input-dir", "sample/records", "--output", "sample/records"],
+      "expected": {"exit_code": 6, "error_prefix": "WriteFailed:", "write_count": 1},
+      "blocker": "Requires an injected output grant and a deterministic failing directory target."
+    },
+    "preview": {
+      "status": "not_in_baseline",
+      "expected": {"same_report_as": "dry_run", "write_count": 0},
+      "blocker": "--preview is a C4 cumulative change and is intentionally absent from the W1 baseline."
+    }
+  },
+  "parser_cases": {
+    "config_duplicate": {"input": "w1/sample/cases/config_duplicate.json", "parser": "config", "expected": {"error": "DuplicateKey:name"}},
+    "config_duplicate_escaped_key": {"input": "w1/sample/cases/config_duplicate_escaped_key.json", "parser": "config", "expected": {"error": "DuplicateKey:name"}},
+    "config_empty": {"input": "w1/sample/cases/config_empty.json", "parser": "config", "expected": {"error": "InvalidJson"}},
+    "config_malformed": {"input": "w1/sample/cases/config_malformed.json", "parser": "config", "expected": {"error": "InvalidJson"}},
+    "config_unicode_nul": {"input": "w1/sample/cases/config_unicode_nul.json", "parser": "config", "expected": {"error": "InvalidUnicodeNul"}},
+    "config_empty_files": {"input": "w1/sample/cases/config_empty_files.json", "parser": "config", "expected": {"value": {"name": "empty-set", "retries": 0, "files": []}}},
+    "record_duplicate": {"input": "w1/sample/cases/record_duplicate.json", "parser": "record", "expected": {"error": "DuplicateKey:source"}},
+    "record_empty": {"input": "w1/sample/cases/record_empty.json", "parser": "record", "expected": {"error": "InvalidJson"}},
+    "record_malformed": {"input": "w1/sample/cases/record_malformed.json", "parser": "record", "expected": {"error": "InvalidJson"}},
+    "record_quoted_amount": {"input": "w1/sample/cases/record_quoted_amount.json", "parser": "record", "expected": {"error": "InvalidField:amount"}},
+    "record_unicode_nul": {"input": "w1/sample/cases/record_unicode_nul.json", "parser": "record", "expected": {"error": "InvalidUnicodeNul"}}
+  },
+  "requirements": {
+    "C1": {"expected": "Replace the config parser behind the existing parse(string) boundary without changing app behavior.", "baseline_report": "{\"config\":{\"name\":\"demo\",\"retries\":3},\"files\":[\"alpha.json\",\"beta.json\"],\"total\":10}"},
+    "C2": {"expected_report": "{\"config\":{\"name\":\"demo\",\"retries\":3},\"files\":[\"alpha.json\",\"beta.json\"],\"sources\":[\"inventory\",\"pricing\"],\"total\":10}", "sources_in_file_order": ["inventory", "pricing"]},
+    "C3": {"expected": "Issue config, record, and output grants with distinct least-privilege scopes; reject traversal before opening the outside file.", "escape_target": "../outside/secret.json", "required": "caught permission error before open", "status": "blocked", "blocker": "The current runtime scope denial is an uncaught InterpError trap."},
+    "C4": {"expected": "--preview is cumulative, equals dry-run output, and performs no output write.", "same_report_as": "dry_run", "write_count": 0, "status": "not_in_baseline"}
+  }
+}

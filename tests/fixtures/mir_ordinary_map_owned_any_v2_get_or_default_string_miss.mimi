@@ -1,0 +1,34 @@
+use std::maps;
+
+func main() -> i32 {
+    let stored_payload = "stored elsewhere"
+    let fallback = "default miss"
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "other", stored_payload)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", fallback)
+                    println(observed)
+                    drop(observed)
+                    drop(empty)
+                    drop(root)
+                    drop(stored_payload)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(stored_payload)
+                    drop(fallback)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            drop(stored_payload)
+            drop(fallback)
+            status
+        },
+    }
+}

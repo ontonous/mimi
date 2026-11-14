@@ -1,0 +1,12 @@
+// DO NOT BUILD OR RUN. C returns process-owned static storage. The current
+// extern surface has no owned/view/destructor clause, so Mimi cannot express
+// the contract needed to admit this declaration safely.
+extern "C" {
+    func w4_borrowed_static_text() -> string;
+}
+
+func main() -> i32 {
+    let text = w4_borrowed_static_text()
+    println(text)
+    0
+}

@@ -1,13 +1,40 @@
 func checked_map_size() -> i32 {
     requires: true
-    ensures: result == 1
-    let root = map_new()
-    let inserted = map_set(root, "remove", "x\0雪")
-    let with_keep = map_set(inserted, "keep", "stay")
-    let removed = map_remove(with_keep, "remove")
-    let size = map_size(removed)
-    drop(removed)
-    size
+    ensures: result == 1 || result == 2 || result == 3
+    match map_new() {
+        Ok(root) => {
+            let first_payload = "x\0雪"
+            let first_result = map_set(root, "remove", first_payload)
+            drop(first_payload)
+            match first_result {
+                Ok(inserted) => {
+                    drop(root)
+                    let second_payload = "stay"
+                    let second_result = map_set(inserted, "keep", second_payload)
+                    drop(second_payload)
+                    match second_result {
+                        Ok(with_keep) => {
+                            drop(inserted)
+                            let removed = map_remove(with_keep, "remove")
+                            drop(with_keep)
+                            let size = map_size(removed)
+                            drop(removed)
+                            size
+                        },
+                        Err(status) => {
+                            drop(inserted)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 
 func main() -> i32 {

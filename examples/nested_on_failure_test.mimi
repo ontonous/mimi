@@ -1,21 +1,16 @@
 // Test nested on failure compensation mechanism
 
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func step1() -> Res {
+func step1() -> Result<i32, string> {
     println("Step 1...");
     Ok(1)
 }
 
-func step2() -> Res {
+func step2() -> Result<i32, string> {
     println("Step 2...");
     Err("step 2 failed")
 }
 
-func step3() -> Res {
+func step3() -> Result<i32, string> {
     println("Step 3...");
     Ok(3)
 }
@@ -28,7 +23,7 @@ func cleanup2() {
     println("CLEANUP 2 executed");
 }
 
-func main() -> Res {
+func run_nested() -> Result<i32, string> {
     on failure { cleanup1(); }
 
     let a = step1()?;
@@ -39,4 +34,11 @@ func main() -> Res {
 
     let c = step3()?;
     Ok(c)
+}
+
+func main() -> i32 {
+    match run_nested() {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
 }

@@ -1,0 +1,28 @@
+// V0.2 P6 W4 malformed-request/fault probe.  Invalid JSON is rejected for
+// this request only; the caller then handles a valid request, demonstrating
+// that the service loop can continue after a per-request error.
+
+func validate_request(raw: string) -> Result<i32, string> {
+    if !json_is_valid(raw) {
+        return Err("BadJson")
+    }
+    let value = json_get_int(raw, "value")
+    if value < 0 {
+        return Err("NegativeValue")
+    }
+    Ok(value)
+}
+
+func main() -> i32 {
+    let bad = validate_request("{bad")
+    match bad {
+        Err(error) => println(error),
+        Ok(_) => println("UnexpectedOk"),
+    }
+    let good = validate_request("{\"value\":5}")
+    match good {
+        Ok(value) => println(value),
+        Err(error) => println(error),
+    }
+    0
+}

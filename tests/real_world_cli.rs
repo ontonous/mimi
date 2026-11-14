@@ -6107,6 +6107,137 @@ fn canonical_scalar_ffi_cli_combined_requires_ensures_runtime_verify_boundary() 
 }
 
 #[test]
+fn canonical_ffi_string_record_default_dual_cli_proven_disproven_nits() {
+    if !mimi::verifier::is_z3_available() {
+        eprintln!("SKIP: Z3 not available");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "mimi_ffi_string_record_dual_cli_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create String-record FFI verifier CLI fixture directory");
+
+    for (case, ensures, expected_status, expected_summary, success) in [
+        (
+            "proven",
+            "len(result.label) >= 0",
+            "✓ pass",
+            "1/1 verified",
+            true,
+        ),
+        (
+            "disproven",
+            "len(result.label) > 0",
+            "✗ fail",
+            "0/1 verified",
+            false,
+        ),
+        (
+            "nits",
+            "char_at(result.label, 0) == \"x\"",
+            "? unknown",
+            "0/1 verified",
+            false,
+        ),
+    ] {
+        let source = dir.join(format!("{case}.mimi"));
+        fs::write(
+            &source,
+            format!(
+                r#"
+                #[repr(C)] type Pair {{ value: i64, label: string }}
+                extern "C" {{
+                    func foreign(value: Pair) -> Pair
+                        requires: value.value >= 0 && len(value.label) > 0
+                        ensures: {ensures};
+                }}
+                func caller(value: Pair) -> Pair {{
+                    requires: value.value >= 0 && len(value.label) > 0
+                    foreign(value)
+                }}
+                func main() -> i64 {{ 0 }}
+                "#
+            ),
+        )
+        .expect("write String-record FFI verifier CLI source");
+
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .env("MIMI_VERBOSE", "1")
+            .arg("verify")
+            .arg("--stats")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("run default verify for {case}: {error}"));
+        assert_eq!(
+            output.status.success(),
+            success,
+            "default verify {case} exit mismatch:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let transcript = format!("{stdout}\n{stderr}");
+        assert!(
+            stderr.contains(
+                "canonical route disposition: verifier-only (verifier-ffi-owner-slice-v1; no execution route)"
+            ),
+            "default verify {case} must select the exact proof-only FFI owner slice:\n{transcript}"
+        );
+        assert!(
+            stdout.contains("caller calls foreign") && stdout.contains(expected_status),
+            "default verify {case} did not report the expected owner row/status:\n{transcript}"
+        );
+        assert!(
+            stdout.contains(expected_summary),
+            "default verify {case} summary mismatch:\n{transcript}"
+        );
+        assert!(
+            !transcript.contains("canonical MIR verifier provenance: profile=canonical-contract-request-v1"),
+            "the verifier-only owner slice must not be represented as an execution receipt:\n{transcript}"
+        );
+    }
+
+    let proven_source = dir.join("proven.mimi");
+    for (name, args) in [
+        ("explicit MIR verifier", vec!["verify", "--mir"]),
+        ("default run", vec!["run"]),
+        ("default build", vec!["build"]),
+    ] {
+        let output = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .env("MIMI_VERBOSE", "1")
+            .args(args)
+            .arg(&proven_source)
+            .output()
+            .unwrap_or_else(|error| panic!("run {name} for String-record FFI source: {error}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let transcript = format!("{stdout}\n{stderr}");
+        assert!(
+            !output.status.success(),
+            "{name} must fail closed for the verifier-only FFI owner slice:\n{transcript}"
+        );
+        assert!(
+            transcript.contains("MIR-FFI-DECLARATION-001"),
+            "{name} must preserve the scalar FFI boundary diagnostic:\n{transcript}"
+        );
+        assert!(
+            !transcript.contains("canonical route disposition: legacy"),
+            "{name} must not fall back to the legacy route:\n{transcript}"
+        );
+    }
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_cli_multi_callsite_mixed_verdict_matches_receipt_and_mir() {
     let dir = std::env::temp_dir().join(format!(
         "mimi_ffi_multi_callsite_mixed_cli_{}_{}",
@@ -6569,7 +6700,7 @@ fn canonical_scalar_ffi_cli_verify_orders_diagnostics_and_roundtrips_receipt() {
     assert_eq!(manifest_receipt, checked);
     assert_eq!(
         manifest_receipt.root_owners,
-        vec![mimi::core::NodeId("function:main".into())]
+        vec![mimi::core::resolved::NodeId("function:main".into())]
     );
     assert!(
         !String::from_utf8_lossy(&inspect.stderr).contains("canonical route disposition: legacy")
@@ -6782,11 +6913,11 @@ fn canonical_scalar_ffi_cli_import_graph_mixed_verdict_preserves_manifest_and_so
     assert_eq!(
         checked.root_owners,
         vec![
-            mimi::core::NodeId("function:imported_bad".into()),
-            mimi::core::NodeId("function:imported_ok".into()),
-            mimi::core::NodeId("function:main".into()),
-            mimi::core::NodeId("function:mid_bad".into()),
-            mimi::core::NodeId("function:mid_ok".into()),
+            mimi::core::resolved::NodeId("function:imported_bad".into()),
+            mimi::core::resolved::NodeId("function:imported_ok".into()),
+            mimi::core::resolved::NodeId("function:main".into()),
+            mimi::core::resolved::NodeId("function:mid_bad".into()),
+            mimi::core::resolved::NodeId("function:mid_ok".into()),
         ]
     );
     let inspect = |receipt_first: bool| {
@@ -13215,6 +13346,157 @@ fn canonical_mir_alias_qualified_import_call_fails_closed_before_consumers() {
 }
 
 #[test]
+fn canonical_module_aliases_bind_same_named_exports_by_module_identity() {
+    let dir = project_root().join("target").join(format!(
+        "mimi-cli-module-identity-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    let apps_dir = dir.join("apps");
+    fs::create_dir_all(&apps_dir).expect("create module directory");
+    fs::write(
+        dir.join("mimi.toml"),
+        "[package]\nname = \"module_identity_fixture\"\nversion = \"0.1.0\"\nentry = \"main.mimi\"\n",
+    )
+    .expect("write module identity manifest");
+    fs::write(
+        apps_dir.join("left.mimi"),
+        "pub func parse(value: i32) -> i32 { value + 10 }\n",
+    )
+    .expect("write left parse module");
+    fs::write(
+        apps_dir.join("right.mimi"),
+        "pub func parse(left: i32, right: i32) -> i32 { left + right + 20 }\n",
+    )
+    .expect("write right parse module");
+    let main = dir.join("main.mimi");
+    fs::write(
+        &main,
+        "use apps::left as left;\nuse apps::right as right;\nfunc main() -> i32 { println(left.parse(1)); println(right.parse(2, 3)); 0 }\n",
+    )
+    .expect("write module identity entry");
+
+    let run = |explicit_mir: bool| {
+        let mut command = Command::new(mimi_bin());
+        command.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            command.arg("--mir");
+        }
+        command
+            .arg(&main)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .expect("spawn module alias run")
+    };
+    let vm = run(false);
+    let reference = run(true);
+    for (label, output) in [("default", &vm), ("--mir", &reference)] {
+        assert!(
+            output.status.success(),
+            "{label} module alias run failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "11\n25\n");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr)
+                .contains("canonical route disposition: legacy"),
+            "{label} module alias call used legacy routing:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(vm.stdout, reference.stdout);
+    assert!(
+        String::from_utf8_lossy(&vm.stderr).contains("canonical route disposition: canonical"),
+        "default alias-qualified call did not report a canonical route: {}",
+        String::from_utf8_lossy(&vm.stderr)
+    );
+
+    let query = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["query", "calls"])
+        .arg(&main)
+        .output()
+        .expect("query module alias call identities");
+    assert!(
+        query.status.success(),
+        "module call identity query failed:\n{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    let query: serde_json::Value =
+        serde_json::from_slice(&query.stdout).expect("parse module call identity query");
+    let calls = query["data"]["calls"]
+        .as_array()
+        .expect("query contains call records");
+    for (callee, expected_owner) in [
+        ("left::parse", "function:apps::left::parse"),
+        ("right::parse", "function:apps::right::parse"),
+    ] {
+        let call = calls
+            .iter()
+            .find(|call| call["callee"] == callee)
+            .unwrap_or_else(|| panic!("query omitted {callee}: {query}"));
+        assert_eq!(
+            call["resolved_callee"]["id"], expected_owner,
+            "query bound {callee} to the wrong module owner"
+        );
+    }
+
+    let mir = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .args(["mir", "--all", "--receipt"])
+        .arg(&main)
+        .output()
+        .expect("inspect complete module alias MIR graph");
+    assert!(
+        mir.status.success(),
+        "complete module alias MIR inspection failed:\n{}\n{}",
+        String::from_utf8_lossy(&mir.stdout),
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    let mir_receipt = String::from_utf8_lossy(&mir.stdout);
+    assert!(mir_receipt.contains("function:apps::left::parse"));
+    assert!(mir_receipt.contains("function:apps::right::parse"));
+
+    if can_link() {
+        for explicit_mir in [false, true] {
+            let binary = dir.join(if explicit_mir {
+                "module-identity-mir"
+            } else {
+                "module-identity-default"
+            });
+            let mut build = Command::new(mimi_bin());
+            build.current_dir(project_root()).arg("build");
+            if explicit_mir {
+                build.arg("--mir");
+            }
+            let build = build
+                .arg(&main)
+                .arg("-o")
+                .arg(&binary)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .expect("spawn native module alias build");
+            assert!(
+                build.status.success(),
+                "native module alias build (explicit_mir={explicit_mir}) failed:\n{}",
+                String::from_utf8_lossy(&build.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&build.stderr)
+                .contains("canonical route disposition: legacy"));
+            let native = Command::new(&binary)
+                .output()
+                .expect("run native module alias binary");
+            assert!(native.status.success(), "native module alias binary failed");
+            assert_eq!(String::from_utf8_lossy(&native.stdout), "11\n25\n");
+        }
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn canonical_scalar_ffi_duplicate_imported_declarations_fail_closed_across_cli_consumers() {
     let dir = project_root().join("target").join(format!(
         "mimi-cli-duplicate-imported-ffi-{}-{}",
@@ -13408,9 +13690,9 @@ fn canonical_scalar_ffi_transitive_import_graph_matches_receipt_and_consumers() 
     assert_eq!(
         checked.root_owners,
         vec![
-            mimi::core::NodeId("function:imported_labs".into()),
-            mimi::core::NodeId("function:main".into()),
-            mimi::core::NodeId("function:mid".into()),
+            mimi::core::resolved::NodeId("function:imported_labs".into()),
+            mimi::core::resolved::NodeId("function:main".into()),
+            mimi::core::resolved::NodeId("function:mid".into()),
         ]
     );
 
@@ -13762,10 +14044,10 @@ fn canonical_scalar_ffi_transitive_import_graph_merges_mixed_width_call_sites() 
     assert_eq!(
         checked.root_owners,
         vec![
-            mimi::core::NodeId("function:combine".into()),
-            mimi::core::NodeId("function:main".into()),
-            mimi::core::NodeId("function:narrow".into()),
-            mimi::core::NodeId("function:wide".into()),
+            mimi::core::resolved::NodeId("function:combine".into()),
+            mimi::core::resolved::NodeId("function:main".into()),
+            mimi::core::resolved::NodeId("function:narrow".into()),
+            mimi::core::resolved::NodeId("function:wide".into()),
         ]
     );
     assert_eq!(checked.ffi_digest.len(), 64);
@@ -13946,13 +14228,13 @@ fn canonical_scalar_ffi_transitive_failure_preserves_side_effect_order() {
     assert_eq!(
         checked.root_owners,
         vec![
-            mimi::core::NodeId("function:checked_labs".into()),
-            mimi::core::NodeId("function:emit_marker".into()),
-            mimi::core::NodeId("function:forward_labs".into()),
-            mimi::core::NodeId("function:forward_marker".into()),
-            mimi::core::NodeId("function:forward_seed".into()),
-            mimi::core::NodeId("function:main".into()),
-            mimi::core::NodeId("function:seed".into()),
+            mimi::core::resolved::NodeId("function:checked_labs".into()),
+            mimi::core::resolved::NodeId("function:emit_marker".into()),
+            mimi::core::resolved::NodeId("function:forward_labs".into()),
+            mimi::core::resolved::NodeId("function:forward_marker".into()),
+            mimi::core::resolved::NodeId("function:forward_seed".into()),
+            mimi::core::resolved::NodeId("function:main".into()),
+            mimi::core::resolved::NodeId("function:seed".into()),
         ]
     );
 
@@ -15256,7 +15538,7 @@ fn canonical_mir_verifier_proves_owned_string_result_without_fallback() {
         stdout.contains("canonical MIR ensures contract proven"),
         "{stdout}"
     );
-    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(stdout.contains("2/2 verified"), "{stdout}");
     assert!(
         !stdout.contains("flow_ast"),
         "legacy verifier fallback leaked: {stdout}"
@@ -15462,7 +15744,8 @@ fn canonical_mir_verifier_proves_non_copy_record_move_projection_without_fallbac
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(stdout.contains("2/2 verified"), "{stdout}");
+    assert!(stdout.contains("function:result_string_i32"), "{stdout}");
     assert!(
         stdout.contains("canonical MIR ensures contract proven"),
         "{stdout}"
@@ -15493,7 +15776,8 @@ fn canonical_mir_verifier_proves_non_copy_result_string_i32_without_fallback() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("1/1 verified"), "{stdout}");
+    assert!(stdout.contains("2/2 verified"), "{stdout}");
+    assert!(stdout.contains("function:result_string_i32"), "{stdout}");
     assert!(
         stdout.contains("canonical MIR ensures contract proven"),
         "{stdout}"
@@ -15554,7 +15838,11 @@ fn canonical_mir_verifier_classifies_result_string_string_without_fallback() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("0/1 verified"), "{stdout}");
+    assert!(stdout.contains("1/2 verified"), "{stdout}");
+    assert!(
+        stdout.contains("function:rejected_result_string_string"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("canonical non-Copy Result<string, i32> variant contract"),
         "{stdout}"
@@ -22074,6 +22362,54 @@ fn canonical_mir_run_cli_rejects_unsupported_list_shape_without_fallback() {
 }
 
 #[test]
+fn dual_scalar_contract_default_cli_proves_and_disproves() {
+    let proven_fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_branch_contract.mimi");
+    let proven = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&proven_fixture)
+        .output()
+        .expect("failed to spawn default dual verifier for a proven scalar contract");
+    assert!(
+        proven.status.success(),
+        "default dual verifier rejected a proven contract:\n{}\n{}",
+        String::from_utf8_lossy(&proven.stderr),
+        String::from_utf8_lossy(&proven.stdout)
+    );
+    let proven_stdout = String::from_utf8_lossy(&proven.stdout);
+    assert!(proven_stdout.contains("canonical MIR ensures contract proven"));
+    assert!(proven_stdout.contains("1/1 verified"));
+    assert!(!proven_stdout.contains("No contracts to verify"));
+
+    let disproven_fixture = project_root()
+        .join("tests")
+        .join("fixtures")
+        .join("mir_verifier_disproven_contract.mimi");
+    let disproven = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&disproven_fixture)
+        .output()
+        .expect("failed to spawn default dual verifier for a disproven scalar contract");
+    assert!(
+        !disproven.status.success(),
+        "a counterexample must fail the CLI"
+    );
+    let disproven_stdout = String::from_utf8_lossy(&disproven.stdout);
+    let disproven_stderr = String::from_utf8_lossy(&disproven.stderr);
+    assert!(
+        disproven_stderr
+            .contains("canonical MIR ensures contract is disproven; counterexample: result = 1"),
+        "unexpected default dual verifier rejection:\n{disproven_stdout}\n{disproven_stderr}"
+    );
+    assert!(disproven_stdout.contains("0/1 verified"));
+    assert!(!disproven_stdout.contains("No contracts to verify"));
+}
+
+#[test]
 fn canonical_mir_verifier_proves_branch_contract() {
     let fixture = project_root()
         .join("tests")
@@ -22648,7 +22984,7 @@ func main() -> i64 { println(1); foreign((42 as i64, "ok")) }
         (
             "string_result",
             r#"extern "C" { func foreign(value: i64) -> string; }
-func main() -> string { foreign(42 as i64) }
+func main() -> i32 { foreign(42 as i64); 0 }
 "#,
             "result type is outside canonical scalar FFI",
         ),
@@ -23695,28 +24031,38 @@ fn real_world_cli_suite() {
 }
 
 #[test]
-fn ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility() {
+fn ordinary_map_any_untyped_fixtures_fail_closed_without_legacy_retry() {
     let root = project_root().join("tests").join("real_world");
     for fixture in ["std_maps.mimi", "std_maps_counter_generic.mimi"] {
         let source = root.join(fixture);
+        // The ordinary untyped Map/Any surface (untagged Any payloads with
+        // DynamicAnyUnpack) no longer has a compatibility route: the default
+        // Canonical MIR route must reject the incomplete owner-v2 attempt
+        // without retrying Legacy, and no backend may produce output.
         let run = Command::new(mimi_bin())
             .current_dir(project_root())
             .arg("run")
             .arg(&source)
             .env("MIMI_ROUTE_CENSUS", "1")
             .output()
-            .expect("spawn ordinary Map/Any compatibility run");
+            .expect("spawn ordinary Map/Any fail-closed run");
         let run_stderr = String::from_utf8_lossy(&run.stderr);
+        let run_stdout = String::from_utf8_lossy(&run.stdout);
         assert!(
-            run.status.success(),
-            "the VM compatibility route must keep {fixture} executable:\nstdout:\n{}\nstderr:\n{run_stderr}",
-            String::from_utf8_lossy(&run.stdout)
+            !run.status.success(),
+            "the untyped Map/Any compatibility route is retired; {fixture} must not run:\nstdout:\n{run_stdout}\nstderr:\n{run_stderr}"
         );
         assert!(
-            run_stderr.contains(
-                "canonical route disposition: legacy (ordinary-map-owner-lifecycle-compatibility)"
-            ),
-            "ordinary untyped Map/Any must remain on its named compatibility route for {fixture}: {run_stderr}"
+            run_stderr.contains("MIR-COVERAGE-001"),
+            "{fixture} must be rejected by the default Canonical MIR route: {run_stderr}"
+        );
+        assert!(
+            !run_stderr.contains("legacy"),
+            "{fixture} rejection must not mention a legacy retry: {run_stderr}"
+        );
+        assert!(
+            run_stdout.trim().is_empty(),
+            "a route-rejected program must not produce stdout: {run_stdout}"
         );
 
         let binary = std::env::temp_dir().join(format!(
@@ -23732,21 +24078,917 @@ fn ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility() {
             .arg("-o")
             .arg(&binary)
             .output()
-            .expect("spawn Map/Any native build");
+            .expect("spawn Map/Any fail-closed build");
         let stderr = String::from_utf8_lossy(&build.stderr);
         assert!(
             !build.status.success(),
-            "native compilation of {fixture} must stay outside the untagged Any profile"
+            "native compilation of {fixture} must stay fail-closed on the incomplete owner profile"
         );
         assert!(
-            stderr.contains("E0722") && stderr.contains("DynamicAnyUnpack"),
-            "{fixture} must fail at the explicit tag-safety boundary: {stderr}"
+            stderr.contains("MIR-COVERAGE-001"),
+            "{fixture} build must be rejected by the route gate, not a later backend stage: {stderr}"
         );
         assert!(
             !binary.exists(),
             "rejected native compilation of {fixture} must not leave an artifact"
         );
     }
+}
+
+#[test]
+fn ordinary_map_any_direct_payload_print_uses_production_cli_route() {
+    const ROUTE_ID: &str = "map-any-owner-v2-direct-print-v1";
+    assert!(
+        mimi::verifier::is_z3_available(),
+        "the Map/Any direct-print production route gate requires the MIR verifier"
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-map-any-direct-print-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create Map/Any direct-print CLI directory");
+
+    let assert_no_legacy_route = |label: &str, stderr: &str| {
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{label} must not enter the compatibility route: {stderr}"
+        );
+    };
+    let assert_run_route = |label: &str, explicit_mir: bool, stderr: &str| {
+        assert_no_legacy_route(label, stderr);
+        let mode = if explicit_mir {
+            "explicit-mir"
+        } else {
+            "default"
+        };
+        assert!(
+            stderr.contains(&format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=run mode={mode} checker_profile={ROUTE_ID} mir_digest="
+            )),
+            "{label} must report the exact route receipt profile: {stderr}"
+        );
+        let disposition = if explicit_mir {
+            format!("canonical route disposition: explicit canonical ({ROUTE_ID}) mir_digest=")
+        } else {
+            format!("canonical route disposition: canonical ({ROUTE_ID}) mir_digest=")
+        };
+        assert!(
+            stderr.contains(&disposition),
+            "{label} must expose the exact canonical Map/Any route identity: {stderr}"
+        );
+    };
+
+    for (label, set_key, set_value, get_key, expected_stdout) in [
+        ("i32", "answer", "42", "answer", "42\n"),
+        (
+            "string",
+            "answer",
+            r#""payload λ""#,
+            "answer",
+            "payload λ\n",
+        ),
+        (
+            "missing-string-root",
+            "present",
+            r#""present but not selected""#,
+            "missing",
+            "0\n",
+        ),
+    ] {
+        let source = dir.join(format!("{label}.mimi"));
+        fs::write(
+            &source,
+            format!(
+                r#"func main() -> i32 {{
+    let empty = map_new()
+    let root = map_set(empty, "{set_key}", {set_value})
+    let pair = map_get(root, "{get_key}")
+    drop(empty)
+    drop(root)
+    println(pair.1)
+    drop(pair)
+    0
+}}
+"#
+            ),
+        )
+        .expect("write exact direct Map/Any payload-print source");
+
+        let checked = Command::new(mimi_bin())
+            .current_dir(project_root())
+            .arg("check")
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {label} direct-print check: {error}"));
+        let checked_stdout = String::from_utf8_lossy(&checked.stdout);
+        let checked_stderr = String::from_utf8_lossy(&checked.stderr);
+        assert!(
+            checked.status.success(),
+            "{label} direct-print source must check successfully: stdout={checked_stdout} stderr={checked_stderr}"
+    );
+        assert!(
+            checked_stdout.contains("checked successfully"),
+            "{label} check must report success: {checked_stdout}"
+        );
+
+        for explicit_mir in [false, true] {
+            let mode = if explicit_mir {
+                "explicit-mir"
+            } else {
+                "default"
+            };
+            let mut run = Command::new(mimi_bin());
+            run.current_dir(project_root()).arg("run");
+            if explicit_mir {
+                run.arg("--mir");
+            }
+            let run = run
+                .arg(&source)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("start {label} {mode} run: {error}"));
+            let run_stdout = String::from_utf8_lossy(&run.stdout);
+            let run_stderr = String::from_utf8_lossy(&run.stderr);
+            assert!(
+                run.status.success(),
+                "{label} {mode} route run failed: stdout={run_stdout} stderr={run_stderr}"
+            );
+            assert_eq!(run_stdout, expected_stdout, "{label} {mode} stdout");
+            assert_run_route(&format!("{label} {mode} run"), explicit_mir, &run_stderr);
+
+            let binary = dir.join(format!("{label}-{mode}"));
+            let mut build = Command::new(mimi_bin());
+            build.current_dir(project_root()).arg("build");
+            if explicit_mir {
+                build.arg("--mir");
+            }
+            let build = build
+                .arg(&source)
+                .arg("--output")
+                .arg(&binary)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("start {label} {mode} build: {error}"));
+            let build_stdout = String::from_utf8_lossy(&build.stdout);
+            let build_stderr = String::from_utf8_lossy(&build.stderr);
+            assert!(
+                build.status.success(),
+                "{label} {mode} native build failed: stdout={build_stdout} stderr={build_stderr}"
+            );
+            assert_no_legacy_route(&format!("{label} {mode} build"), &build_stderr);
+            let route_consumer = if explicit_mir {
+                "explicit-mir"
+            } else {
+                "default"
+            };
+            assert!(
+                build_stderr.contains(&format!(
+                    "MIMI_ROUTE_CENSUS canonical-native-build consumer={route_consumer} route_id={ROUTE_ID} "
+                )),
+                "{label} {mode} build must identify its canonical Map/Any route: {build_stderr}"
+    );
+
+            let native = Command::new(&binary)
+                .current_dir(project_root())
+                .output()
+                .unwrap_or_else(|error| panic!("run {label} {mode} native binary: {error}"));
+            assert_eq!(
+                native.status.code(),
+                Some(0),
+                "{label} {mode} native exit must match Mimi run: {}",
+                String::from_utf8_lossy(&native.stderr)
+            );
+            assert_eq!(
+                native.stdout,
+                expected_stdout.as_bytes(),
+                "{label} {mode} native stdout"
+            );
+
+            let mut verify = Command::new(mimi_bin());
+            verify.current_dir(project_root()).arg("verify");
+            if explicit_mir {
+                verify.arg("--mir");
+            }
+            let verify = verify
+                .arg(&source)
+                .env("MIMI_ROUTE_CENSUS", "1")
+                .output()
+                .unwrap_or_else(|error| panic!("start {label} {mode} verify: {error}"));
+            let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+            let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+            assert!(
+                verify.status.success(),
+                "{label} {mode} verify failed: stdout={verify_stdout} stderr={verify_stderr}"
+            );
+            assert_no_legacy_route(&format!("{label} {mode} verify"), &verify_stderr);
+            assert!(
+                verify_stderr.contains(&format!(
+                    "MIMI_ROUTE_CENSUS route-admission consumer=verify mode={mode} checker_profile={ROUTE_ID} mir_digest="
+                )),
+                "{label} {mode} verify must report the exact route receipt profile: {verify_stderr}"
+    );
+            assert!(
+                verify_stderr.contains(&format!(
+                    "canonical MIR verifier provenance: profile={ROUTE_ID} mir_digest="
+                )),
+                "{label} {mode} verifier provenance must retain the exact Map/Any route identity: {verify_stderr}"
+            );
+        }
+    }
+
+    // Repeating the same direct observation is a natural near miss for this
+    // one-print receipt. It must fail before producing either line and cannot
+    // escape through the compatibility route.
+    let repeated = dir.join("repeated-print.mimi");
+    fs::write(
+        &repeated,
+        r#"func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 42)
+    let pair = map_get(root, "answer")
+    drop(empty)
+    drop(root)
+    println(pair.1)
+    println(pair.1)
+    drop(pair)
+    0
+}
+"#,
+    )
+    .expect("write repeated direct-print near-miss source");
+    let checked = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("check")
+        .arg(&repeated)
+        .output()
+        .expect("check repeated direct-print near miss");
+    assert!(
+        checked.status.success(),
+        "the repeated-print near miss should be well-typed before route admission: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    for explicit_mir in [false, true] {
+        let mode = if explicit_mir {
+            "explicit-mir"
+        } else {
+            "default"
+        };
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&repeated)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start repeated-print {mode} run: {error}"));
+        let stdout = String::from_utf8_lossy(&run.stdout);
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(
+            !run.status.success(),
+            "repeated direct print is outside the one-observation route: stdout={stdout:?} stderr={stderr}"
+        );
+        assert!(
+            stdout.is_empty(),
+            "the failed repeated-print route must reject before either print: {stdout:?}"
+        );
+        assert_no_legacy_route(&format!("repeated-print {mode} run"), &stderr);
+        assert!(
+            stderr.contains("MIR-COVERAGE-001") || stderr.contains("canonical MIR"),
+            "repeated direct print must fail closed at the canonical Map/Any boundary: {stderr}"
+        );
+
+        let binary = dir.join(format!("repeated-{mode}"));
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&repeated)
+            .arg("--output")
+            .arg(&binary)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start repeated-print {mode} build: {error}"));
+        let build_stdout = String::from_utf8_lossy(&build.stdout);
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            !build.status.success(),
+            "repeated direct print must fail native {mode} build: stdout={build_stdout:?} stderr={build_stderr}"
+        );
+        assert!(
+            build_stdout.is_empty(),
+            "failed repeated-print {mode} build must not emit stdout: {build_stdout:?}"
+        );
+        assert_no_legacy_route(&format!("repeated-print {mode} build"), &build_stderr);
+        assert!(
+            build_stderr.contains("MIR-COVERAGE-001") || build_stderr.contains("canonical MIR"),
+            "repeated direct print must fail closed in native {mode} build: {build_stderr}"
+        );
+        assert!(
+            !binary.exists(),
+            "failed repeated-print {mode} build must not leave a binary"
+        );
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&repeated)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start repeated-print {mode} verify: {error}"));
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            !verify.status.success(),
+            "repeated direct print must fail {mode} verification: stdout={verify_stdout:?} stderr={verify_stderr}"
+        );
+        assert!(
+            verify_stdout.is_empty(),
+            "failed repeated-print {mode} verification must not emit stdout: {verify_stdout:?}"
+        );
+        assert_no_legacy_route(&format!("repeated-print {mode} verify"), &verify_stderr);
+        assert!(
+            verify_stderr.contains("MIR-COVERAGE-001")
+                || verify_stderr.to_ascii_lowercase().contains("canonical mir"),
+            "repeated direct print must fail closed in {mode} verification: {verify_stderr}"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn ordinary_map_any_direct_print_same_root_map_size_uses_production_cli_route() {
+    const ROUTE_ID: &str = "map-any-owner-v2-direct-print-v1";
+    const {
+        assert!(
+            !mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY,
+            "the narrow DirectPrint route must leave global owner-v2 readiness closed"
+        );
+    };
+    assert!(
+        mimi::verifier::is_z3_available(),
+        "the Map/Any DirectPrint production route gate requires the MIR verifier"
+    );
+
+    let source = project_root().join(
+        "tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_same_root_map_size_i32.mimi",
+    );
+    assert!(
+        source.is_file(),
+        "the dedicated DirectPrint fixture must exist"
+    );
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-map-any-direct-print-size-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create Map/Any direct-print size CLI directory");
+
+    let assert_no_fallback = |label: &str, stderr: &str| {
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{label} must have zero legacy fallback: {stderr}"
+        );
+        assert!(
+            !stderr.contains("global_map_any_v2_production_ready=true"),
+            "{label} must leave global owner-v2 readiness closed: {stderr}"
+        );
+    };
+    let route_digests = |label: &str, consumer: &str, mode: &str, stderr: &str| {
+        let prefix = format!(
+            "MIMI_ROUTE_CENSUS route-admission consumer={consumer} mode={mode} checker_profile={ROUTE_ID} mir_digest="
+        );
+        let mut matching = stderr.lines().filter(|line| line.starts_with(&prefix));
+        let line = matching.next().unwrap_or_else(|| {
+            panic!("{label} must report its exact DirectPrint receipt: {stderr}")
+        });
+        assert!(
+            matching.next().is_none(),
+            "{label} must report exactly one DirectPrint receipt: {stderr}"
+        );
+        let mir_digest = line
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("mir_digest="))
+            .expect("route-admission receipt MIR digest")
+            .to_owned();
+        let receipt_identity_digest = line
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("receipt_identity_digest="))
+            .expect("route-admission receipt identity digest")
+            .to_owned();
+        for (name, digest) in [
+            ("MIR", mir_digest.as_str()),
+            ("receipt identity", receipt_identity_digest.as_str()),
+        ] {
+            assert_eq!(digest.len(), 64, "{label} {name} digest length");
+            assert!(
+                digest.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "{label} {name} digest must be hexadecimal: {digest}"
+            );
+        }
+        (mir_digest, receipt_identity_digest)
+    };
+    let assert_run_disposition = |label: &str, explicit_mir: bool, digest: &str, stderr: &str| {
+        let route = if explicit_mir {
+            "explicit canonical"
+        } else {
+            "canonical"
+        };
+        let expected =
+            format!("canonical route disposition: {route} ({ROUTE_ID}) mir_digest={digest}");
+        assert!(
+            stderr.lines().any(|line| line == expected.as_str()),
+            "{label} must expose the exact DirectPrint disposition {expected}: {stderr}"
+        );
+    };
+
+    let mut mode_receipts = Vec::new();
+    for explicit_mir in [false, true] {
+        let mode = if explicit_mir {
+            "explicit-mir"
+        } else {
+            "default"
+        };
+
+        let mut run = Command::new(mimi_bin());
+        run.current_dir(project_root()).arg("run");
+        if explicit_mir {
+            run.arg("--mir");
+        }
+        let run = run
+            .arg(&source)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} DirectPrint run: {error}"));
+        let run_stdout = String::from_utf8_lossy(&run.stdout);
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{mode} Mimi run must return main's Map size result 1: stdout={run_stdout:?} stderr={run_stderr}"
+        );
+        assert_eq!(run_stdout, "42\n", "{mode} DirectPrint run stdout");
+        assert_no_fallback(&format!("{mode} run"), &run_stderr);
+        let (run_digest, run_identity) =
+            route_digests(&format!("{mode} run"), "run", mode, &run_stderr);
+        assert_run_disposition(
+            &format!("{mode} run"),
+            explicit_mir,
+            &run_digest,
+            &run_stderr,
+        );
+
+        let binary = dir.join(format!("map-size-{mode}"));
+        let mut build = Command::new(mimi_bin());
+        build.current_dir(project_root()).arg("build");
+        if explicit_mir {
+            build.arg("--mir");
+        }
+        let build = build
+            .arg(&source)
+            .arg("--output")
+            .arg(&binary)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} DirectPrint native build: {error}"));
+        let build_stdout = String::from_utf8_lossy(&build.stdout);
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build.status.success(),
+            "{mode} DirectPrint native build failed: stdout={build_stdout} stderr={build_stderr}"
+        );
+        assert_no_fallback(&format!("{mode} build"), &build_stderr);
+        let (build_digest, build_identity) =
+            route_digests(&format!("{mode} build"), "build", mode, &build_stderr);
+        let native_route_prefix = format!(
+            "MIMI_ROUTE_CENSUS canonical-native-build consumer={mode} route_id={ROUTE_ID} "
+        );
+        let native_route = build_stderr
+            .lines()
+            .find(|line| line.starts_with(&native_route_prefix))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{mode} native build must report exact DirectPrint provenance: {build_stderr}"
+                )
+            });
+        assert!(
+            native_route
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("mir_digest="))
+                == Some(build_digest.as_str()),
+            "{mode} native-build manifest must bind the admitted MIR digest: {native_route}"
+        );
+        assert_eq!(
+            run_digest, build_digest,
+            "{mode} run and native build must use the same canonical MIR"
+        );
+        assert_eq!(
+            run_identity, build_identity,
+            "{mode} run and native build must use the same route receipt identity"
+        );
+
+        let native = Command::new(&binary)
+            .current_dir(project_root())
+            .output()
+            .unwrap_or_else(|error| panic!("run {mode} DirectPrint native binary: {error}"));
+        let native_stdout = String::from_utf8_lossy(&native.stdout);
+        assert_eq!(
+            native.status.code(),
+            Some(1),
+            "{mode} native binary must return main's Map size result 1: stdout={native_stdout:?} stderr={}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(native_stdout, "42\n", "{mode} native binary stdout");
+
+        let mut verify = Command::new(mimi_bin());
+        verify.current_dir(project_root()).arg("verify");
+        if explicit_mir {
+            verify.arg("--mir");
+        }
+        let verify = verify
+            .arg(&source)
+            .env("MIMI_ROUTE_CENSUS", "1")
+            .env("MIMI_VERBOSE", "1")
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} DirectPrint verify: {error}"));
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert!(
+            verify.status.success(),
+            "{mode} DirectPrint verify failed: stdout={verify_stdout} stderr={verify_stderr}"
+        );
+        assert_no_fallback(&format!("{mode} verify"), &verify_stderr);
+        let (verify_digest, verify_identity) =
+            route_digests(&format!("{mode} verify"), "verify", mode, &verify_stderr);
+        let verifier_provenance_prefix = format!(
+            "canonical MIR verifier provenance: profile={ROUTE_ID} mir_digest={verify_digest} "
+        );
+        assert!(
+            verify_stderr
+                .lines()
+                .any(|line| line.starts_with(&verifier_provenance_prefix)),
+            "{mode} verifier must expose exact DirectPrint provenance: {verify_stderr}"
+        );
+        assert_eq!(
+            run_digest, verify_digest,
+            "{mode} run and verifier must use the same canonical MIR"
+        );
+        assert_eq!(
+            run_identity, verify_identity,
+            "{mode} run and verifier must use the same route receipt identity"
+        );
+        mode_receipts.push((mode, run_digest, run_identity));
+    }
+
+    assert_eq!(
+        mode_receipts[0].1, mode_receipts[1].1,
+        "default and explicit --mir must use the same canonical MIR digest"
+    );
+    assert_eq!(
+        mode_receipts[0].2, mode_receipts[1].2,
+        "default and explicit --mir must use the same DirectPrint receipt identity"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+// This contract-free fixture is an L1 route/admission check only; `verify`
+// reports no contracts and this test is not L2 proof evidence.
+#[test]
+fn ordinary_map_owned_any_v2_map_set_drop_control_result_default_and_explicit_cli_route_only() {
+    const ROUTE_PROFILE: &str = "map-any-owner-v2-map-set-drop-control-result-branch-v1";
+    const FIXTURE_RELATIVE_PATH: &str =
+        "tests/fixtures/mir_ordinary_map_any_v2_map_set_drop_control.mimi";
+    const FIXTURE_SHA256: &str = "29fcad6d4e2ec8c5e45be48ccc96a2a9d62567b9dd8c82bb2febdf8ff6c5a12b";
+
+    let repo = project_root();
+    let source = repo.join(FIXTURE_RELATIVE_PATH);
+    assert!(
+        source.is_file(),
+        "the pinned MapSetDropControl fixture must exist"
+    );
+    assert_eq!(
+        sha256_file(&source),
+        FIXTURE_SHA256,
+        "MapSetDropControl fixture bytes changed; update the pin only with an explicit semantic reason"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "mimi-map-set-drop-control-result-cli-route-only-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).expect("create MapSetDropControl route-only CLI directory");
+
+    let configure_cli = |command: &mut Command, verbose: bool| {
+        let mimi_variables = std::env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| key.to_string_lossy().starts_with("MIMI_"))
+            .collect::<Vec<_>>();
+        for key in mimi_variables {
+            command.env_remove(key);
+        }
+        command
+            .env_remove("LD_PRELOAD")
+            .env("MIMI_ROUTE_CENSUS", "1");
+        if verbose {
+            command.env("MIMI_VERBOSE", "1");
+        }
+    };
+
+    let parse_fields = |text: &str, label: &str| {
+        let mut fields = BTreeMap::new();
+        for token in text.split_whitespace() {
+            let (key, value) = token
+                .split_once('=')
+                .unwrap_or_else(|| panic!("{label} contains malformed route field {token:?}"));
+            assert!(
+                fields.insert(key.to_owned(), value.to_owned()).is_none(),
+                "{label} repeats route field {key}"
+            );
+        }
+        fields
+    };
+
+    let route_admission = |consumer: &str, mode: &str, stderr: &str, label: &str| {
+        let lines = stderr
+            .lines()
+            .filter(|line| line.starts_with("MIMI_ROUTE_CENSUS route-admission "))
+            .collect::<Vec<_>>();
+        let [line] = lines.as_slice() else {
+            panic!(
+                "{label} must emit exactly one route-admission line, found {}:\n{stderr}",
+                lines.len()
+            );
+        };
+        let text = line
+            .strip_prefix("MIMI_ROUTE_CENSUS route-admission ")
+            .expect("route-admission prefix");
+        let fields = parse_fields(text, label);
+        let expected_keys: &[&str] = match consumer {
+            "run" | "verify" => &[
+                "consumer",
+                "mode",
+                "checker_profile",
+                "mir_digest",
+                "receipt_identity_digest",
+            ],
+            "build" => &[
+                "consumer",
+                "mode",
+                "checker_profile",
+                "build_route_profile",
+                "mir_digest",
+                "mir_route_identity_digest",
+                "receipt_identity_digest",
+                "build_route_identity_digest",
+            ],
+            _ => panic!("unexpected CLI consumer {consumer}"),
+        };
+        assert_eq!(
+            fields.len(),
+            expected_keys.len(),
+            "{label} route-admission field set changed: {fields:?}"
+        );
+        for key in expected_keys {
+            assert!(fields.contains_key(*key), "{label} lacks {key}: {fields:?}");
+        }
+        assert_eq!(fields["consumer"], consumer, "{label} consumer");
+        assert_eq!(fields["mode"], mode, "{label} route mode");
+        assert_eq!(
+            fields["checker_profile"], ROUTE_PROFILE,
+            "{label} must use the dedicated MapSetDropControl Result profile"
+        );
+        for key in ["mir_digest", "receipt_identity_digest"] {
+            let value = &fields[key];
+            assert!(
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "{label} {key} must be a lowercase 64-hex identity: {value}"
+            );
+        }
+        if consumer == "build" {
+            assert_eq!(fields["build_route_profile"], ROUTE_PROFILE, "{label}");
+            for key in ["mir_route_identity_digest", "build_route_identity_digest"] {
+                assert_eq!(
+                    fields[key], fields["receipt_identity_digest"],
+                    "{label} {key} must preserve the Checker route receipt identity"
+                );
+            }
+        }
+        fields
+    };
+
+    let assert_no_fallback = |label: &str, stdout: &[u8], stderr: &[u8]| {
+        let transcript = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(stdout),
+            String::from_utf8_lossy(stderr)
+        )
+        .to_ascii_lowercase();
+        assert!(
+            !transcript.contains("legacy"),
+            "{label} must have zero legacy fallback: {transcript}"
+        );
+        assert!(
+            !transcript.contains("verifier-only"),
+            "{label} must have zero verifier-only fallback: {transcript}"
+        );
+    };
+
+    let one_line_fields = |stderr: &str, prefix: &str, label: &str| {
+        let lines = stderr
+            .lines()
+            .filter(|line| line.starts_with(prefix))
+            .collect::<Vec<_>>();
+        let [line] = lines.as_slice() else {
+            panic!(
+                "{label} must emit exactly one {prefix:?} line, found {}:\n{stderr}",
+                lines.len()
+            );
+        };
+        parse_fields(
+            line.strip_prefix(prefix).expect("route census prefix"),
+            label,
+        )
+    };
+
+    let mut mode_identities = Vec::new();
+    for explicit_mir in [false, true] {
+        let mode = if explicit_mir {
+            "explicit-mir"
+        } else {
+            "default"
+        };
+
+        let mut run_command = Command::new(mimi_bin());
+        run_command.current_dir(&repo).arg("run");
+        if explicit_mir {
+            run_command.arg("--mir");
+        }
+        configure_cli(&mut run_command, false);
+        let run = run_command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} MapSetDropControl run: {error}"));
+        let run_stdout = String::from_utf8_lossy(&run.stdout);
+        let run_stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "{mode} run must return main's exact zero result: stdout={run_stdout:?} stderr={run_stderr}"
+        );
+        assert!(run.stdout.is_empty(), "{mode} run stdout must be empty");
+        assert_no_fallback(&format!("{mode} run"), &run.stdout, &run.stderr);
+        let run_route = route_admission("run", mode, &run_stderr, &format!("{mode} run"));
+        let run_digest = run_route["mir_digest"].clone();
+        let run_identity = run_route["receipt_identity_digest"].clone();
+        let run_disposition = if explicit_mir {
+            format!(
+                "MIMI_ROUTE_CENSUS route-admission consumer=run mode={mode} checker_profile={ROUTE_PROFILE} mir_digest={run_digest} receipt_identity_digest={run_identity}\ncanonical route disposition: explicit canonical ({ROUTE_PROFILE}) mir_digest={run_digest}\n"
+            )
+        } else {
+            format!(
+                "canonical route disposition: canonical ({ROUTE_PROFILE}) mir_digest={run_digest}\nMIMI_ROUTE_CENSUS route-admission consumer=run mode={mode} checker_profile={ROUTE_PROFILE} mir_digest={run_digest} receipt_identity_digest={run_identity}\n"
+            )
+        };
+        assert_eq!(
+            run.stderr,
+            run_disposition.as_bytes(),
+            "{mode} run stderr must contain only the exact canonical route disposition and single route receipt"
+        );
+
+        let binary = dir.join(format!("map-set-drop-control-result-{mode}"));
+        let mut build_command = Command::new(mimi_bin());
+        build_command.current_dir(&repo).arg("build");
+        if explicit_mir {
+            build_command.arg("--mir");
+        }
+        configure_cli(&mut build_command, false);
+        let build = build_command
+            .arg(&source)
+            .arg("--output")
+            .arg(&binary)
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} MapSetDropControl native build: {error}"));
+        let build_stdout = String::from_utf8_lossy(&build.stdout);
+        let build_stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            build.status.success(),
+            "{mode} native build failed: stdout={build_stdout} stderr={build_stderr}"
+        );
+        assert!(binary.is_file(), "{mode} build must produce its binary");
+        assert_no_fallback(&format!("{mode} build"), &build.stdout, &build.stderr);
+        let build_transcript = format!("{build_stdout}\n{build_stderr}").to_ascii_lowercase();
+        for marker in ["memcheck", "valgrind", "error summary:"] {
+            assert!(
+                !build_transcript.contains(marker),
+                "{mode} build must compile without running the binary or invoking Memcheck: {build_transcript}"
+            );
+        }
+
+        let build_route = route_admission("build", mode, &build_stderr, &format!("{mode} build"));
+        assert_eq!(
+            build_route["mir_digest"], run_digest,
+            "{mode} build must use the run's canonical MIR graph"
+        );
+        assert_eq!(
+            build_route["receipt_identity_digest"], run_identity,
+            "{mode} build must use the run's Checker route receipt identity"
+        );
+        let native_route = one_line_fields(
+            &build_stderr,
+            "MIMI_ROUTE_CENSUS canonical-native-build ",
+            &format!("{mode} native build"),
+        );
+        assert_eq!(native_route["consumer"], mode);
+        assert_eq!(native_route["route_id"], ROUTE_PROFILE);
+        assert_eq!(native_route["profile"], ROUTE_PROFILE);
+        assert_eq!(native_route["build_route_profile"], ROUTE_PROFILE);
+        assert_eq!(native_route["mir_digest"], run_digest);
+        assert_eq!(native_route["mir_route_identity_digest"], run_identity);
+        assert_eq!(native_route["route_identity_digest"], run_identity);
+
+        let mut verify_command = Command::new(mimi_bin());
+        verify_command.current_dir(&repo).arg("verify");
+        if explicit_mir {
+            verify_command.arg("--mir");
+        }
+        configure_cli(&mut verify_command, true);
+        let verify = verify_command
+            .arg(&source)
+            .output()
+            .unwrap_or_else(|error| panic!("start {mode} MapSetDropControl verify: {error}"));
+        let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+        let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+        assert_eq!(
+            verify.status.code(),
+            Some(0),
+            "{mode} verify must complete without a contract failure: stdout={verify_stdout:?} stderr={verify_stderr}"
+        );
+        assert_eq!(
+            verify_stdout,
+            format!("No contracts to verify in {}\n", source.display()),
+            "{mode} verify must report the exact no-contract result"
+        );
+        assert!(
+            !verify_stdout.contains("Proven") && !verify_stderr.contains("Proven"),
+            "{mode} no-contract verification must not fabricate a proof: stdout={verify_stdout:?} stderr={verify_stderr}"
+        );
+        assert_no_fallback(&format!("{mode} verify"), &verify.stdout, &verify.stderr);
+        let verify_route =
+            route_admission("verify", mode, &verify_stderr, &format!("{mode} verify"));
+        assert_eq!(
+            verify_route["mir_digest"], run_digest,
+            "{mode} verifier must inspect the run's canonical MIR graph"
+        );
+        assert_eq!(
+            verify_route["receipt_identity_digest"], run_identity,
+            "{mode} verifier must use the run's Checker route receipt identity"
+        );
+        let provenance = one_line_fields(
+            &verify_stderr,
+            "canonical MIR verifier provenance: ",
+            &format!("{mode} verify"),
+        );
+        assert_eq!(provenance["profile"], ROUTE_PROFILE);
+        assert_eq!(provenance["mir_digest"], run_digest);
+        assert_eq!(provenance["route_identity_digest"], run_identity);
+
+        mode_identities.push((run_digest, run_identity));
+    }
+
+    assert_eq!(
+        mode_identities[0].0, mode_identities[1].0,
+        "default and explicit --mir must share the same source-bound MIR digest"
+    );
+    assert_eq!(
+        mode_identities[0].1, mode_identities[1].1,
+        "default and explicit --mir must share the same route receipt identity"
+    );
+    assert_eq!(
+        sha256_file(&source),
+        FIXTURE_SHA256,
+        "the direct source fixture changed while the CLI gate was running"
+    );
+    fs::remove_dir_all(&dir).expect("remove MapSetDropControl route-only CLI directory");
 }
 
 // R6-1047: the integer-payload session face is a migrated default-route
@@ -24059,11 +25301,65 @@ fn canonical_mir_concrete_record_protocol_method_uses_default_route() {
 }
 
 #[test]
-fn dynamic_protocol_method_neighbor_keeps_default_legacy_compatibility() {
+fn dynamic_protocol_method_is_rejected_on_all_default_cli_routes() {
     let fixture = project_root()
         .join("tests")
         .join("fixtures")
         .join("mir_protocol_method_dyn.mimi");
+
+    let assert_rejected = |stage: &str, output: &std::process::Output| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{stage} must fail at canonical route selection: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{stage} must not execute: {stderr}"
+        );
+        assert!(
+            stderr.contains("default Canonical MIR route rejected"),
+            "{stage} must fail at default route selection: {stderr}"
+        );
+        assert!(
+            stderr.contains("MIR-COVERAGE-001"),
+            "{stage} must retain the MIR coverage diagnostic code: {stderr}"
+        );
+        assert!(
+            stderr.contains("dynamic Protocol method dispatch"),
+            "{stage} must identify the removed dynamic Protocol shape: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{stage} must not use a compatibility route: {stderr}"
+        );
+    };
+    let assert_nondefault_route_rejected = |stage: &str, output: &std::process::Output| {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{stage} must reject dynamic Protocol before a MIR consumer: {stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{stage} must not execute: {stderr}"
+        );
+        assert!(
+            stderr.contains("MIR-COVERAGE-001"),
+            "{stage} must retain the MIR coverage diagnostic code: {stderr}"
+        );
+        assert!(
+            stderr.contains("dynamic Protocol method dispatch"),
+            "{stage} must identify the removed dynamic Protocol shape: {stderr}"
+        );
+        assert!(
+            !stderr.contains("canonical route disposition: legacy"),
+            "{stage} must not use a compatibility route: {stderr}"
+        );
+    };
+
     let run = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("run")
@@ -24071,19 +25367,22 @@ fn dynamic_protocol_method_neighbor_keeps_default_legacy_compatibility() {
         .env("MIMI_VERBOSE", "1")
         .output()
         .expect("spawn dynamic protocol-method run");
-    let run_stderr = String::from_utf8_lossy(&run.stderr);
-    assert_eq!(
-        run.status.code(),
-        Some(41),
-        "dynamic protocol dispatch must keep working: {run_stderr}"
-    );
-    assert!(run.stdout.is_empty());
-    assert!(run_stderr.contains("canonical route disposition: legacy"));
+    assert_rejected("run", &run);
+
+    let explicit_run = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("run")
+        .arg("--mir")
+        .arg(&fixture)
+        .output()
+        .expect("spawn explicit MIR dynamic protocol-method run");
+    assert_nondefault_route_rejected("run --mir", &explicit_run);
 
     let binary = std::env::temp_dir().join(format!(
-        "mimi-dynamic-protocol-compatibility-{}",
+        "mimi-dynamic-protocol-rejected-{}",
         std::process::id()
     ));
+    let _ = fs::remove_file(&binary);
     let build = Command::new(mimi_bin())
         .current_dir(project_root())
         .arg("build")
@@ -24093,19 +25392,69 @@ fn dynamic_protocol_method_neighbor_keeps_default_legacy_compatibility() {
         .env("MIMI_VERBOSE", "1")
         .output()
         .expect("spawn dynamic protocol-method build");
-    let build_stderr = String::from_utf8_lossy(&build.stderr);
+    assert_rejected("build", &build);
     assert!(
-        build.status.success(),
-        "dynamic protocol compatibility build must succeed: {build_stderr}"
+        !binary.exists(),
+        "rejected build must not leave a native artifact at {}",
+        binary.display()
     );
-    assert!(build_stderr.contains("canonical route disposition: legacy"));
-    let native = Command::new(&binary)
+
+    let explicit_binary = std::env::temp_dir().join(format!(
+        "mimi-dynamic-protocol-explicit-rejected-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&explicit_binary);
+    let explicit_build = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("build")
+        .arg("--mir")
+        .arg(&fixture)
+        .arg("-o")
+        .arg(&explicit_binary)
         .output()
-        .expect("execute dynamic protocol compatibility binary");
-    let _ = fs::remove_file(&binary);
-    assert_eq!(native.status.code(), Some(41));
-    assert!(native.stdout.is_empty());
-    assert!(native.stderr.is_empty());
+        .expect("spawn explicit MIR dynamic protocol-method build");
+    assert_nondefault_route_rejected("build --mir", &explicit_build);
+    assert!(
+        !explicit_binary.exists(),
+        "rejected explicit MIR build must not leave a native artifact at {}",
+        explicit_binary.display()
+    );
+
+    let disasm = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("disasm")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn dynamic protocol-method disasm");
+    assert_rejected("disasm", &disasm);
+
+    let verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .env("MIMI_VERBOSE", "1")
+        .output()
+        .expect("spawn dynamic protocol-method verify");
+    assert_rejected("verify", &verify);
+
+    let explicit_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg("--mir")
+        .arg(&fixture)
+        .output()
+        .expect("spawn explicit MIR dynamic protocol-method verify");
+    assert_rejected("verify --mir", &explicit_verify);
+
+    let dump_z3_verify = Command::new(mimi_bin())
+        .current_dir(project_root())
+        .arg("verify")
+        .arg(&fixture)
+        .arg("--dump-z3")
+        .output()
+        .expect("spawn diagnostic-only dynamic protocol-method verify");
+    assert_rejected("verify --dump-z3", &dump_z3_verify);
 }
 
 // R6-1049: the scalar-assign face (root-level statement, direct local target,
@@ -25505,6 +26854,36 @@ fn canonical_mir_string_assign_keeps_compatibility_route() {
 
 // The two original Actor regressions now require the same checked state,
 // mailbox and lexical environment graph through default and explicit routes.
+fn sha256_file(path: &Path) -> String {
+    let output = Command::new("sha256sum")
+        .arg("--")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| {
+            panic!("hash route-census Mimi binary {}: {error}", path.display())
+        });
+    assert!(
+        output.status.success(),
+        "sha256sum failed for route-census Mimi binary {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let digest = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .expect("sha256sum must print a digest")
+        .to_owned();
+    assert!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "sha256sum returned a non-canonical digest for {}: {digest}",
+        path.display()
+    );
+    digest
+}
+
 fn route_census_mimi_path() -> PathBuf {
     let path = std::env::var_os("MIMI_ROUTE_CENSUS_MIMI");
     let sha256 = std::env::var("MIMI_ROUTE_CENSUS_MIMI_SHA256").ok();
@@ -25539,6 +26918,13 @@ fn route_census_mimi_path() -> PathBuf {
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
                 "route census Mimi SHA-256 must be lowercase hexadecimal"
+            );
+            let actual_sha256 = sha256_file(&path);
+            assert_eq!(
+                actual_sha256,
+                sha256,
+                "route-census Mimi binary bytes do not match MIMI_ROUTE_CENSUS_MIMI_SHA256: {}",
+                path.display()
             );
             println!(
                 "MIMI_ROUTE_CENSUS_AUTHORITY_BINARY path={} sha256={}",
@@ -25776,10 +27162,10 @@ fn assert_original_actor_cli_routes(fixture: &str, expected: &[u8], strict_memch
         ::std::string::String::from_utf8_lossy(&disasm.stderr)
     );
     let opcodes = ::std::string::String::from_utf8_lossy(&disasm.stdout);
+    ::std::assert!(opcodes.contains("MIR_ACTOR_SPAWN") && opcodes.contains("MIR_ACTOR_CALL"));
     ::std::assert!(
-        opcodes.contains("MIR_ACTOR_SPAWN")
-            && opcodes.contains("MIR_ACTOR_CALL")
-            && opcodes.contains("MIR_ACTOR_FIELD_STORE")
+        !opcodes.contains("MIR_ACTOR_FIELD_STORE"),
+        "Flow payload updates must not lower to Actor-owned field stores: {opcodes}"
     );
     ::std::assert!(!::std::string::String::from_utf8_lossy(&disasm.stderr)
         .contains("canonical route disposition: legacy"));
@@ -25825,7 +27211,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
         assert_original_actor_cli_routes(fixture, expected, false);
 
         let source = project_root().join("tests/real_world").join(fixture);
-        let receipt = Command::new(mimi_bin())
+        let receipt = Command::new(route_census_mimi_path())
             .arg("mir")
             .arg(&source)
             .arg("--receipt")
@@ -25869,7 +27255,7 @@ fn canonical_actor_original_default_and_explicit_native_bins_pass_strict_memchec
             ));
             fs::create_dir_all(&dir).expect("create strict Actor L3 directory");
             let binary = dir.join("actor");
-            let mut build = Command::new(mimi_bin());
+            let mut build = Command::new(route_census_mimi_path());
             build.current_dir(project_root()).arg("build").arg(&source);
             if explicit_mir {
                 build.arg("--mir");

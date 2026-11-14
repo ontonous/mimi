@@ -1,0 +1,13 @@
+// C3: tighten the write scope.  The boundary check runs before the write and
+// reports a denied path without touching the outside location.
+func allowed(path: string) -> bool { path == "v02-c3-report.json" }
+func main() -> i32 {
+    let requested = "outside/v02-c3-report.json"
+    if !allowed(requested) {
+        println("PermissionDenied")
+        return 0
+    }
+    let w = write_file(requested, "unreachable")
+    if w.is_err() { println("WriteFailed"); return 3 }
+    0
+}

@@ -1,18 +1,36 @@
-func contains_inserted_key() -> bool {
-    ensures: result == true
-    let root = map_new()
-    let inserted = map_set(root, "answer", 42)
-    let present = has_key(inserted, "answer")
-    drop(inserted)
-    present
+func contains_inserted_key() -> Result<bool, i32> {
+    // The contract constrains the successful payload and permits an Err to be
+    // returned unchanged to the caller.
+    ensures: result.is_err() || result.unwrap_or(false) == true
+    match map_new() {
+        Ok(root) => match map_set(root, "answer", 42) {
+            Ok(inserted) => {
+                drop(root)
+                let present = has_key(inserted, "answer")
+                drop(inserted)
+                Ok(present)
+            },
+            Err(status) => {
+                drop(root)
+                Err(status)
+            },
+        },
+        Err(status) => Err(status),
+    }
 }
 
-func contains_missing_key() -> bool {
-    ensures: result == false
-    let root = map_new()
-    let missing = has_key(root, "missing")
-    drop(root)
-    missing
+func contains_missing_key() -> Result<bool, i32> {
+    // On success the queried key must be absent; an allocation status remains
+    // an Err and is deliberately outside the successful-value assertion.
+    ensures: result.is_err() || result.unwrap_or(false) == false
+    match map_new() {
+        Ok(root) => {
+            let missing = has_key(root, "missing")
+            drop(root)
+            Ok(missing)
+        },
+        Err(status) => Err(status),
+    }
 }
 
 func main() -> i32 { 0 }

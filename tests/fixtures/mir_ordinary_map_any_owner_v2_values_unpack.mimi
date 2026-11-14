@@ -2,22 +2,52 @@ type Label { text: string }
 
 func main() -> i32 {
     let label = Label { text: "route discriminator" }
-    let empty = map_new()
-    let with_number = map_set(empty, "a-number", 41)
-    let with_text = map_set(with_number, "b-text", "route text discriminator")
-    let root = map_set(with_text, "z-label", label)
-    let snapshot = values(root)
-    let index = 0
-    let literal_value = snapshot[0] as i32
-    let dynamic_value = snapshot[index] as i32
-    let text_copy = snapshot[1] as string
-    let label_copy = snapshot[2] as Label
-    drop(snapshot)
-    drop(label_copy)
-    drop(empty)
-    drop(with_number)
-    drop(with_text)
-    drop(root)
-    drop(label)
-    literal_value + dynamic_value - 82
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, "a-number", 41) {
+        Ok(with_number) => {
+    match map_set(with_number, "b-text", "route text discriminator") {
+        Ok(with_text) => {
+    match map_set(with_text, "z-label", label) {
+        Ok(root) => {
+                    let snapshot = values(root)
+                    let index = 0
+                    let literal_value = snapshot[0] as i32
+                    let dynamic_value = snapshot[index] as i32
+                    let text_copy = snapshot[1] as string
+                    let label_copy = snapshot[2] as Label
+                    drop(snapshot)
+                    drop(label_copy)
+                    drop(empty)
+                    drop(with_number)
+                    drop(with_text)
+                    drop(root)
+                    drop(label)
+                    literal_value + dynamic_value - 82
+        },
+        Err(status) => {
+        drop(empty)
+        drop(with_number)
+        drop(with_text)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        drop(with_number)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
 }

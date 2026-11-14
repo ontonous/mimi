@@ -1,0 +1,11 @@
+func main() -> i32 {
+    let empty = map_new()
+    let root = map_set(empty, "answer", 41)
+    let snapshot = values(root)
+    let index: i32 = 0
+    let item = snapshot[index] as i32
+    drop(snapshot)
+    drop(empty)
+    drop(root)
+    item
+}

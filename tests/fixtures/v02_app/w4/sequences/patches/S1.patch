@@ -1,0 +1,21 @@
+--- a/baseline/native/w4_trusted.c
++++ b/baseline/native/w4_trusted.c
+@@ -117,12 +117,16 @@
+     return (int32_t)ntohs(address.sin_port);
+ }
+ 
+-/* Frozen independent oracle: checksum(x) = x*x + 17 for 0 <= x <= 999. */
++/* S1 replacement: same scalar ABI and result, bounded sum-of-odds form. */
+ int32_t w4_checksum(int32_t value) {
+     if (value < 0 || value > 999) {
+         return -2;
+     }
+-    return (int32_t)((int64_t)value * (int64_t)value + 17);
++    int64_t sum = 17;
++    for (int32_t odd = 1; odd < value * 2; odd += 2) {
++        sum += odd;
++    }
++    return (int32_t)sum;
+ }
+ 
+ /* Fixed-size event records let the host schedule stop during in-flight work. */

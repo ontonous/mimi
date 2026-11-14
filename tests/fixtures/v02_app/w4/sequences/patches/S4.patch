@@ -1,0 +1,1326 @@
+--- a/baseline/mimi.toml
++++ /dev/null
+@@ -1,5 +0,0 @@
+-[package]
+-name = "mimi-v02-w4-loopback-service"
+-version = "0.2.0"
+-description = "W4 loopback JSON service, trusted C ABI, cooperative stop, and host oracle"
+-entry = "src/main.mimi"
+--- a/baseline/native/w4_endpoint_scope.c
++++ /dev/null
+@@ -1,43 +0,0 @@
+-#include <stdint.h>
+-
+-extern int64_t w4_open_listener(int32_t scope, int32_t port, int32_t backlog);
+-extern int64_t w4_connect_loopback(int32_t scope, int32_t port);
+-
+-enum {
+-    W4_SCOPE_LOOPBACK = 1,
+-    W4_ERR_SCOPE = -1001,
+-    W4_ERR_PORT = -1002,
+-    W4_ERR_BIND = -1004,
+-};
+-
+-/* Enforce the scope before any system call. Port zero selects only from the
+- * fixed loopback range; a direct nonzero request must already be in range. */
+-int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog) {
+-    if (scope != W4_SCOPE_LOOPBACK) {
+-        return W4_ERR_SCOPE;
+-    }
+-    if (backlog < 1 || backlog > 64 || port < 0 || port > 65535 ||
+-        (port != 0 && (port < 24000 || port > 24100))) {
+-        return W4_ERR_PORT;
+-    }
+-    if (port != 0) {
+-        return w4_open_listener(scope, port, backlog);
+-    }
+-    for (int32_t candidate = 24000; candidate <= 24100; ++candidate) {
+-        int64_t fd = w4_open_listener(scope, candidate, backlog);
+-        if (fd >= 0 || fd != W4_ERR_BIND) {
+-            return fd;
+-        }
+-    }
+-    return W4_ERR_BIND;
+-}
+-
+-int64_t w4_connect_loopback_s3(int32_t scope, int32_t port) {
+-    if (scope != W4_SCOPE_LOOPBACK) {
+-        return W4_ERR_SCOPE;
+-    }
+-    if (port < 24000 || port > 24100) {
+-        return W4_ERR_PORT;
+-    }
+-    return w4_connect_loopback(scope, port);
+-}
+--- a/baseline/native/w4_endpoint_scope_oracle.c
++++ /dev/null
+@@ -1,58 +0,0 @@
+-#define _POSIX_C_SOURCE 200809L
+-#include <assert.h>
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <sys/socket.h>
+-#include <sys/types.h>
+-#include <unistd.h>
+-
+-extern int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog);
+-extern int64_t w4_connect_loopback_s3(int32_t scope, int32_t port);
+-extern int32_t w4_listener_port(int64_t fd);
+-
+-static int socket_calls;
+-static int bind_calls;
+-static int listen_calls;
+-static int connect_calls;
+-int __real_socket(int domain, int type, int protocol);
+-int __real_bind(int fd, const struct sockaddr *address, socklen_t length);
+-int __real_listen(int fd, int backlog);
+-int __real_connect(int fd, const struct sockaddr *address, socklen_t length);
+-int __wrap_socket(int domain, int type, int protocol) {
+-    ++socket_calls;
+-    return __real_socket(domain, type, protocol);
+-}
+-int __wrap_bind(int fd, const struct sockaddr *address, socklen_t length) {
+-    ++bind_calls;
+-    return __real_bind(fd, address, length);
+-}
+-int __wrap_listen(int fd, int backlog) {
+-    ++listen_calls;
+-    return __real_listen(fd, backlog);
+-}
+-int __wrap_connect(int fd, const struct sockaddr *address, socklen_t length) {
+-    ++connect_calls;
+-    return __real_connect(fd, address, length);
+-}
+-
+-int main(void) {
+-    assert(w4_open_listener_s3(0, 0, 8) == -1001);
+-    assert(w4_open_listener_s3(1, 23999, 8) == -1002);
+-    assert(w4_open_listener_s3(1, 24101, 8) == -1002);
+-    assert(w4_connect_loopback_s3(0, 24000) == -1001);
+-    assert(w4_connect_loopback_s3(1, 23999) == -1002);
+-    assert(w4_connect_loopback_s3(1, 24101) == -1002);
+-    assert(socket_calls == 0 && bind_calls == 0 && listen_calls == 0 && connect_calls == 0);
+-
+-    int64_t listener = w4_open_listener_s3(1, 0, 8);
+-    assert(listener >= 0);
+-    int32_t port = w4_listener_port(listener);
+-    assert(port >= 24000 && port <= 24100);
+-    int64_t client = w4_connect_loopback_s3(1, port);
+-    assert(client >= 0);
+-    assert(socket_calls > 0 && bind_calls > 0 && listen_calls > 0 && connect_calls == 1);
+-    (void)close((int)client);
+-    (void)close((int)listener);
+-    puts("S3_SCOPE_ORACLE_OK");
+-    return 0;
+-}
+--- a/baseline/native/w4_trusted.c
++++ /dev/null
+@@ -1,146 +0,0 @@
+-#define _POSIX_C_SOURCE 200809L
+-
+-#include <arpa/inet.h>
+-#include <errno.h>
+-#include <fcntl.h>
+-#include <netinet/in.h>
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <sys/socket.h>
+-#include <unistd.h>
+-
+-enum {
+-    W4_SCOPE_LOOPBACK = 1,
+-    W4_ERR_SCOPE = -1001,
+-    W4_ERR_PORT = -1002,
+-    W4_ERR_SOCKET = -1003,
+-    W4_ERR_BIND = -1004,
+-    W4_ERR_LISTEN = -1005,
+-    W4_ERR_CONNECT = -1006,
+-    W4_ERR_FD = -1007,
+-};
+-
+-enum {
+-    W4_EVENT_READY = 1,
+-    W4_EVENT_HANDOFF = 2,
+-    W4_EVENT_IN_FLIGHT = 3,
+-    W4_EVENT_RESPONSE = 4,
+-    W4_EVENT_BAD_JSON = 5,
+-    W4_EVENT_FFI_ERROR = 6,
+-    W4_EVENT_STOP_ACCEPTED = 7,
+-    W4_EVENT_WORKER_DONE = 8,
+-    W4_EVENT_DRAINED = 9,
+-};
+-
+-/*
+- * Closed endpoint capability: the only accepted tag denotes 127.0.0.1.
+- * The helper never accepts a caller-provided address string or resolves DNS.
+- * On success, the caller owns the returned fd and must close it once.
+- */
+-int64_t w4_open_listener(int32_t scope, int32_t port, int32_t backlog) {
+-    if (scope != W4_SCOPE_LOOPBACK) {
+-        return W4_ERR_SCOPE;
+-    }
+-    if (port < 0 || port > 65535 || backlog < 1 || backlog > 64) {
+-        return W4_ERR_PORT;
+-    }
+-
+-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+-    if (fd < 0) {
+-        return W4_ERR_SOCKET;
+-    }
+-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+-
+-    int reuse = 1;
+-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+-
+-    struct sockaddr_in address;
+-    memset(&address, 0, sizeof(address));
+-    address.sin_family = AF_INET;
+-    address.sin_port = htons((uint16_t)port);
+-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+-
+-    if (bind(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
+-        close(fd);
+-        return W4_ERR_BIND;
+-    }
+-    if (listen(fd, backlog) != 0) {
+-        close(fd);
+-        return W4_ERR_LISTEN;
+-    }
+-    return (int64_t)fd;
+-}
+-
+-/* S3 uses the same closed scope tag for the only outbound endpoint. */
+-int64_t w4_connect_loopback(int32_t scope, int32_t port) {
+-    if (scope != W4_SCOPE_LOOPBACK) {
+-        return W4_ERR_SCOPE;
+-    }
+-    if (port < 1 || port > 65535) {
+-        return W4_ERR_PORT;
+-    }
+-
+-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+-    if (fd < 0) {
+-        return W4_ERR_SOCKET;
+-    }
+-    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+-
+-    struct sockaddr_in address;
+-    memset(&address, 0, sizeof(address));
+-    address.sin_family = AF_INET;
+-    address.sin_port = htons((uint16_t)port);
+-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+-    if (connect(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
+-        close(fd);
+-        return W4_ERR_CONNECT;
+-    }
+-    return (int64_t)fd;
+-}
+-
+-int32_t w4_listener_port(int64_t raw_fd) {
+-    if (raw_fd < 0 || raw_fd > INT32_MAX) {
+-        return W4_ERR_FD;
+-    }
+-    int fd = (int)raw_fd;
+-    struct sockaddr_in address;
+-    socklen_t length = (socklen_t)sizeof(address);
+-    memset(&address, 0, sizeof(address));
+-    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0) {
+-        return W4_ERR_FD;
+-    }
+-    if (address.sin_family != AF_INET ||
+-        address.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
+-        return W4_ERR_SCOPE;
+-    }
+-    return (int32_t)ntohs(address.sin_port);
+-}
+-
+-/* S1 replacement: same scalar ABI and result, bounded sum-of-odds form. */
+-int32_t w4_checksum(int32_t value) {
+-    if (value < 0 || value > 999) {
+-        return -2;
+-    }
+-    int64_t sum = 17;
+-    for (int32_t odd = 1; odd < value * 2; odd += 2) {
+-        sum += odd;
+-    }
+-    return (int32_t)sum;
+-}
+-
+-/* Fixed-size event records let the host schedule stop during in-flight work. */
+-int32_t w4_trace(int32_t code, int32_t detail) {
+-    char record[64];
+-    int length = snprintf(record, sizeof(record), "W4_EVENT %d %d\n", code, detail);
+-    if (length <= 0 || (size_t)length >= sizeof(record)) {
+-        return -1;
+-    }
+-    ssize_t written = write(STDERR_FILENO, record, (size_t)length);
+-    return written == length ? 0 : -1;
+-}
+-
+-/* Negative ownership fixture only. Never call through a Mimi string import. */
+-const char *w4_borrowed_static_text(void) {
+-    return "C-owned static storage";
+-}
+--- a/baseline/src/exports.mimi
++++ /dev/null
+@@ -1,23 +0,0 @@
+-// Exports-only target. This file intentionally has no main function.
+-
+-pub extern "C" func w4_factorial(value: i32) -> i32 {
+-    if value <= 1 {
+-        1
+-    } else {
+-        value * w4_factorial(value - 1)
+-    }
+-}
+-
+-pub extern "C" func w4_status(value: i32) -> i32 {
+-    if value < 0 {
+-        -1
+-    } else {
+-        w4_factorial(value) + 1
+-    }
+-}
+-
+-// The service calls through this function from Mimi. The host driver calls
+-// the C wrappers above from a separately loaded shared object.
+-pub func internal_export_probe(value: i32) -> i32 {
+-    w4_status(value) + w4_factorial(value - 1)
+-}
+--- a/baseline/src/main.mimi
++++ /dev/null
+@@ -1,36 +0,0 @@
+-use protocol::open_loopback_listener
+-use protocol::bound_loopback_port
+-use protocol::note
+-use server::run_service
+-use exports::internal_export_probe
+-
+-const EVENT_READY: i32 = 1
+-
+-func main() -> i32 {
+-    let opened = open_loopback_listener(1, 0, 8)
+-    if opened.is_err() {
+-        println("W4_LISTENER_FAILED")
+-        return 1
+-    }
+-    let listener = opened.unwrap()
+-
+-    let port_result = bound_loopback_port(listener)
+-    if port_result.is_err() {
+-        close_fd(listener)
+-        println("W4_ENDPOINT_IDENTITY_FAILED")
+-        return 2
+-    }
+-    let port = port_result.unwrap()
+-    note(EVENT_READY, port)
+-    println("W4_READY " + to_string(port))
+-
+-    // This call remains in Mimi and reaches the same source body exported to C.
+-    let probe = internal_export_probe(5)
+-    if probe != 145 {
+-        close_fd(listener)
+-        println("W4_EXPORT_BODY_MISMATCH")
+-        return 3
+-    }
+-
+-    run_service(listener)
+-}
+--- a/baseline/src/protocol.mimi
++++ /dev/null
+@@ -1,203 +0,0 @@
+-use std::net
+-use std::strings
+-use std::time
+-
+-const MAX_REQUEST_BYTES: i32 = 2048
+-const MAX_HOLD_MS: i32 = 2000
+-const REQUEST_BUDGET_MS: i64 = 250
+-
+-const EVENT_READY: i32 = 1
+-const EVENT_HANDOFF: i32 = 2
+-const EVENT_IN_FLIGHT: i32 = 3
+-const EVENT_RESPONSE: i32 = 4
+-const EVENT_BAD_JSON: i32 = 5
+-const EVENT_FFI_ERROR: i32 = 6
+-const EVENT_STOP_ACCEPTED: i32 = 7
+-const EVENT_WORKER_DONE: i32 = 8
+-const EVENT_DRAINED: i32 = 9
+-const EVENT_TIMEOUT_TRANSFER: i32 = 10
+-const EVENT_TIMEOUT_COMPLETE: i32 = 11
+-
+-extern "C" {
+-    // C contract is recorded in ../../oracle/w4_ffi_contract.json.
+-    func w4_open_listener_s3(scope: i32, port: i32, backlog: i32) -> i64;
+-    func w4_connect_loopback_s3(scope: i32, port: i32) -> i64;
+-    func w4_listener_port(fd: i64) -> i32;
+-    func w4_checksum(value: i32) -> i32;
+-    func w4_trace(code: i32, detail: i32) -> i32;
+-}
+-
+-pub func note(code: i32, detail: i32) {
+-    let _ = w4_trace(code, detail)
+-}
+-
+-pub func open_loopback_listener(scope: i32, port: i32, backlog: i32) -> Result<i64, string> {
+-    if scope != 1 || backlog < 1 || backlog > 64 ||
+-       (port != 0 && (port < 24000 || port > 24100)) {
+-        return Err("EndpointDenied")
+-    }
+-    let fd = w4_open_listener_s3(scope, port, backlog)
+-    if fd == -1001 {
+-        return Err("EndpointDenied")
+-    }
+-    if fd == -1002 {
+-        return Err("PortDenied")
+-    }
+-    if fd < 0 {
+-        return Err("BindFailed")
+-    }
+-    Ok(fd)
+-}
+-
+-pub func connect_loopback(scope: i32, port: i32) -> Result<i64, string> {
+-    if scope != 1 || port < 24000 || port > 24100 {
+-        return Err("EndpointDenied")
+-    }
+-    let fd = w4_connect_loopback_s3(scope, port)
+-    if fd == -1001 || fd == -1002 {
+-        Err("EndpointDenied")
+-    } else if fd < 0 {
+-        Err("ConnectFailed")
+-    } else {
+-        Ok(fd)
+-    }
+-}
+-
+-pub func bound_loopback_port(fd: i64) -> Result<i32, string> {
+-    let port = w4_listener_port(fd)
+-    if port < 1 || port > 65535 {
+-        Err("EndpointIdentityFailed")
+-    } else {
+-        Ok(port)
+-    }
+-}
+-
+-pub func c_checksum(value: i32) -> Result<i32, string> {
+-    let result = w4_checksum(value)
+-    if result < 0 {
+-        Err("ChecksumRange")
+-    } else {
+-        Ok(result)
+-    }
+-}
+-
+-// The retry owner blocks until one request id is transferred. The channel send
+-// in checksum_response is the single ownership handoff for that request.
+-func retry_checksum_once(value: i32, retry_owner: Channel<i64>) -> (i32, i32) {
+-    let request_id = channel_recv(retry_owner) as i32
+-    (request_id, w4_checksum(value))
+-}
+-
+-// Read one newline-delimited frame while preserving any bytes after it for the
+-// next call. Status is 1 for a line, 0 for clean EOF, -1 for receive failure,
+-// and -2 for a truncated or oversized frame.
+-pub func next_line(fd: i64, pending: string) -> (i32, string, string) {
+-    let mut buffer = pending
+-    while !contains(buffer, "\n") {
+-        let received = tcp_recv(fd, MAX_REQUEST_BYTES)
+-        if received.is_err() {
+-            return (-1, "", buffer)
+-        }
+-        let chunk = received.unwrap()
+-        if chunk == "" {
+-            if buffer == "" {
+-                return (0, "", "")
+-            }
+-            return (-2, "", buffer)
+-        }
+-        buffer = buffer + chunk
+-        if buffer.len() > MAX_REQUEST_BYTES {
+-            return (-2, "", buffer)
+-        }
+-    }
+-
+-    let parts = split(buffer, "\n")
+-    if parts.len() == 0 {
+-        return (-2, "", "")
+-    }
+-    let mut rest = ""
+-    for index in range(1, parts.len()) {
+-        if index > 1 {
+-            rest = rest + "\n"
+-        }
+-        rest = rest + parts[index]
+-    }
+-    (1, parts[0], rest)
+-}
+-
+-pub func send_line(fd: i64, line: string) -> bool {
+-    let framed = line + "\n"
+-    let mut offset = 0
+-    while offset < framed.len() {
+-        let sent = tcp_send(fd, substring(framed, offset, framed.len()))
+-        if sent.is_err() {
+-            return false
+-        }
+-        let amount = sent.unwrap()
+-        if amount <= 0 {
+-            return false
+-        }
+-        offset = offset + (amount as i32)
+-    }
+-    true
+-}
+-
+-pub func checksum_response(raw: string, slot: i32) -> string {
+-    if !json_is_valid(raw) {
+-        note(EVENT_BAD_JSON, slot)
+-        return "{\"error\":\"BadJson\"}"
+-    }
+-    if !json_has_key(raw, "op") || !json_has_key(raw, "request_id") {
+-        return "{\"error\":\"BadSchema\"}"
+-    }
+-
+-    let operation = json_get_string(raw, "op")
+-    let request_id = json_get_int(raw, "request_id")
+-    if operation != "checksum" {
+-        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadOperation\"}"
+-    }
+-    if !json_has_key(raw, "value") || !json_has_key(raw, "hold_ms") {
+-        return "{\"id\":" + to_string(request_id) + ",\"error\":\"BadSchema\"}"
+-    }
+-
+-    let value = json_get_int(raw, "value")
+-    let hold_ms = json_get_int(raw, "hold_ms")
+-    if hold_ms < 0 || hold_ms > MAX_HOLD_MS {
+-        return "{\"id\":" + to_string(request_id) + ",\"error\":\"HoldLimit\"}"
+-    }
+-    let deadline_ms = timestamp_ms() + REQUEST_BUDGET_MS
+-    if hold_ms > 0 {
+-        note(EVENT_IN_FLIGHT, request_id)
+-        sleep_ms(hold_ms)
+-    }
+-
+-    let checked = if timestamp_ms() > deadline_ms {
+-        let retry_owner = channel_new()
+-        let retry_task = spawn retry_checksum_once(value, retry_owner)
+-        channel_send(retry_owner, request_id as i64)
+-        note(EVENT_TIMEOUT_TRANSFER, request_id)
+-        let (completed_id, checksum) = await retry_task
+-        channel_drop(retry_owner)
+-        note(EVENT_TIMEOUT_COMPLETE, completed_id)
+-        if completed_id != request_id {
+-            Err("RetryOwnerMismatch")
+-        } else if checksum < 0 {
+-            Err("ChecksumRange")
+-        } else {
+-            Ok(checksum)
+-        }
+-    } else {
+-        c_checksum(value)
+-    }
+-    match checked {
+-        Ok(checksum) => "{\"id\":" + to_string(request_id) + ",\"checksum\":" + to_string(checksum) + "}",
+-        Err(_) => {
+-            note(EVENT_FFI_ERROR, request_id)
+-            "{\"id\":" + to_string(request_id) + ",\"error\":\"ChecksumRange\"}"
+-        },
+-    }
+-}
+-
+-pub func valid_stop(raw: string) -> bool {
+-    json_is_valid(raw) && json_has_key(raw, "op") && json_has_key(raw, "request_id") && json_get_string(raw, "op") == "stop"
+-}
+--- a/baseline/src/server.mimi
++++ /dev/null
+@@ -1,125 +0,0 @@
+-use std::net
+-use protocol::next_line
+-use protocol::checksum_response
+-use protocol::send_line
+-use protocol::note
+-use protocol::valid_stop
+-
+-const EVENT_HANDOFF: i32 = 2
+-const EVENT_RESPONSE: i32 = 4
+-const EVENT_STOP_ACCEPTED: i32 = 7
+-const EVENT_WORKER_DONE: i32 = 8
+-const EVENT_DRAINED: i32 = 9
+-
+-func serve_connection(client: i64, slot: i32, start_gate: Channel<i64>) -> i32 {
+-    let _ = channel_recv(start_gate)
+-    let mut pending = ""
+-    let mut handled = 0
+-    while handled < 256 {
+-        let (status, raw, rest) = next_line(client, pending)
+-        pending = rest
+-        if status == 0 {
+-            close_fd(client)
+-            note(EVENT_WORKER_DONE, slot)
+-            return 0
+-        }
+-        if status < 0 {
+-            let _ = send_line(client, "{\"error\":\"BadFrame\"}")
+-            close_fd(client)
+-            note(EVENT_WORKER_DONE, slot)
+-            return 1
+-        }
+-
+-        let response = checksum_response(raw, slot)
+-        if !send_line(client, response) {
+-            close_fd(client)
+-            note(EVENT_WORKER_DONE, slot)
+-            return 2
+-        }
+-        if json_is_valid(raw) && json_has_key(raw, "request_id") {
+-            note(EVENT_RESPONSE, json_get_int(raw, "request_id"))
+-        }
+-        handled = handled + 1
+-    }
+-    let _ = send_line(client, "{\"error\":\"RequestLimit\"}")
+-    close_fd(client)
+-    note(EVENT_WORKER_DONE, slot)
+-    3
+-}
+-
+-pub func run_service(listener: i64) -> i32 {
+-    // Exactly two client sockets are handed to concurrent worker tasks. The
+-    // coordinator keeps both futures and owns their terminal join obligation.
+-    let first = tcp_accept(listener)
+-    if first.is_err() {
+-        close_fd(listener)
+-        return 10
+-    }
+-    let first_fd = first.unwrap()
+-    let first_gate = channel_new()
+-    let first_task = spawn serve_connection(first_fd, 1, first_gate)
+-    note(EVENT_HANDOFF, 1)
+-    channel_send(first_gate, 1 as i64)
+-
+-    let second = tcp_accept(listener)
+-    if second.is_err() {
+-        close_fd(listener)
+-        let _ = await first_task
+-        channel_drop(first_gate)
+-        return 11
+-    }
+-    let second_fd = second.unwrap()
+-    let second_gate = channel_new()
+-    let second_task = spawn serve_connection(second_fd, 2, second_gate)
+-    note(EVENT_HANDOFF, 2)
+-    channel_send(second_gate, 2 as i64)
+-
+-    // The stop connection is accepted on the same restricted loopback
+-    // listener. Invalid stop requests fail locally and do not discard workers.
+-    let mut stopped = false
+-    let mut stop_attempts = 0
+-    while !stopped && stop_attempts < 16 {
+-        let candidate = tcp_accept(listener)
+-        if candidate.is_err() {
+-            close_fd(listener)
+-            let _ = await first_task
+-            let _ = await second_task
+-            channel_drop(first_gate)
+-            channel_drop(second_gate)
+-            return 12
+-        }
+-        let stop_fd = candidate.unwrap()
+-        let (status, line, _) = next_line(stop_fd, "")
+-        if status != 1 || !valid_stop(line) {
+-            let _ = send_line(stop_fd, "{\"error\":\"StopDenied\"}")
+-            close_fd(stop_fd)
+-            stop_attempts = stop_attempts + 1
+-        } else {
+-            let request_id = json_get_int(line, "request_id")
+-            note(EVENT_STOP_ACCEPTED, request_id)
+-            let _ = send_line(stop_fd, "{\"id\":" + to_string(request_id) + ",\"stopping\":true}")
+-            close_fd(stop_fd)
+-            stopped = true
+-        }
+-    }
+-
+-    close_fd(listener)
+-    if !stopped {
+-        let _ = await first_task
+-        let _ = await second_task
+-        channel_drop(first_gate)
+-        channel_drop(second_gate)
+-        return 13
+-    }
+-
+-    let first_result = await first_task
+-    let second_result = await second_task
+-    channel_drop(first_gate)
+-    channel_drop(second_gate)
+-    note(EVENT_DRAINED, 0)
+-    if first_result != 0 || second_result != 0 {
+-        return 14
+-    }
+-    println("W4_SERVICE_DRAINED")
+-    0
+-}
+--- /dev/null
++++ b/offline-release/.mimi/deps/w4_transport/transport.mimi
+@@ -0,0 +1,112 @@
++use std::net
++use std::strings
++
++extern "C" {
++    func w4_open_listener_s3(scope: i32, port: i32, backlog: i32) -> i64;
++    func w4_connect_loopback_s3(scope: i32, port: i32) -> i64;
++    func w4_listener_port(fd: i64) -> i32;
++}
++
++pub func open_loopback_listener(scope: i32, port: i32, backlog: i32) -> Result<i64, string> {
++    if scope != 1 || backlog < 1 || backlog > 64 ||
++       (port != 0 && (port < 24000 || port > 24100)) {
++        return Err("EndpointDenied")
++    }
++    let fd = w4_open_listener_s3(scope, port, backlog)
++    if fd == -1001 || fd == -1002 {
++        Err("EndpointDenied")
++    } else if fd < 0 {
++        Err("BindFailed")
++    } else {
++        Ok(fd)
++    }
++}
++
++pub func connect_loopback(scope: i32, port: i32) -> Result<i64, string> {
++    if scope != 1 || port < 24000 || port > 24100 {
++        return Err("EndpointDenied")
++    }
++    let fd = w4_connect_loopback_s3(scope, port)
++    if fd == -1001 || fd == -1002 {
++        Err("EndpointDenied")
++    } else if fd < 0 {
++        Err("ConnectFailed")
++    } else {
++        Ok(fd)
++    }
++}
++
++pub func bound_loopback_port(fd: i64) -> Result<i32, string> {
++    let port = w4_listener_port(fd)
++    if port < 24000 || port > 24100 {
++        Err("EndpointIdentityFailed")
++    } else {
++        Ok(port)
++    }
++}
++
++pub func accept_client(fd: i64) -> Result<i64, NetError> {
++    tcp_accept(fd)
++}
++
++pub func receive_bytes(fd: i64, maximum: i32) -> Result<string, NetError> {
++    tcp_recv(fd, maximum)
++}
++
++pub func send_bytes(fd: i64, bytes: string) -> Result<i64, NetError> {
++    tcp_send(fd, bytes)
++}
++
++// Read one newline-delimited frame while preserving any bytes after it for
++// the next call. Status is 1 for a line, 0 for clean EOF, -1 for receive
++// failure, and -2 for a truncated or oversized frame.
++pub func next_line(fd: i64, pending: string) -> (i32, string, string) {
++    let mut buffer = pending
++    while !contains(buffer, "\n") {
++        let received = receive_bytes(fd, 2048)
++        if received.is_err() {
++            return (-1, "", buffer)
++        }
++        let chunk = received.unwrap()
++        if chunk == "" {
++            if buffer == "" {
++                return (0, "", "")
++            }
++            return (-2, "", buffer)
++        }
++        buffer = buffer + chunk
++        if buffer.len() > 2048 {
++            return (-2, "", buffer)
++        }
++    }
++
++    let parts = split(buffer, "\n")
++    if parts.len() == 0 {
++        return (-2, "", "")
++    }
++    let mut rest = ""
++    for index in range(1, parts.len()) {
++        if index > 1 {
++            rest = rest + "\n"
++        }
++        rest = rest + parts[index]
++    }
++    (1, parts[0], rest)
++}
++
++pub func send_line(fd: i64, line: string) -> bool {
++    let framed = line + "\n"
++    let mut offset = 0
++    while offset < framed.len() {
++        let sent = send_bytes(fd, substring(framed, offset, framed.len()))
++        if sent.is_err() {
++            return false
++        }
++        let amount = sent.unwrap()
++        if amount <= 0 {
++            return false
++        }
++        offset = offset + (amount as i32)
++    }
++    true
++}
+--- /dev/null
++++ b/offline-release/README.md
+@@ -0,0 +1,25 @@
++# Cumulative W4 offline deployment (S4)
++
++This checkpoint carries the S1 checksum replacement, S2 cooperative request
++handoff, and S3 closed endpoint range into the package-split deployment.
++`w4_transport` owns listener scope checks, accepted sockets, byte transport,
++and line framing; JSON and checksum policy stay in `src/`.
++
++Build the trusted C shared library from this checkpoint's native adapter and
++run installation with the package cache already present:
++
++```sh
++cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
++  native/w4_trusted.c native/w4_endpoint_scope.c \
++  -o /tmp/libw4_trusted.so
++mimi install --offline --frozen
++mimi build src/exports.mimi --shared -o /tmp/libw4_exports.so
++mimi build src/main.mimi --link-search /tmp --link-lib w4_trusted \
++  -o /tmp/w4_offline
++(cd /tmp && LD_LIBRARY_PATH=/tmp /tmp/w4_host_driver --native \
++  /tmp/w4_offline /tmp/libw4_exports.so /tmp/libw4_trusted.so)
++```
++
++Build `/tmp/w4_host_driver` from the frozen host-oracle C source before this
++step. The request oracle and C export ABI remain the fixed W4 fixtures. This
++recipe is an execution target; no S4 command is claimed as run by patch generation.
+--- /dev/null
++++ b/offline-release/mimi.lock
+@@ -0,0 +1,6 @@
++[[package]]
++name = "w4_transport"
++version = "0.2.0"
++constraint = "=0.2.0"
++source = "registry"
++checksum = "dc3963fac22eb86428323f32b9fab02737931053b4007a78be46e7f8c3ce10a0"
+--- /dev/null
++++ b/offline-release/mimi.toml
+@@ -0,0 +1,9 @@
++[package]
++name = "mimi-v02-w4-offline-release"
++version = "0.2.0"
++description = "Cumulative W4 service with pinned offline transport"
++entry = "src/main.mimi"
++
++[[dependencies]]
++name = "w4_transport"
++version = "=0.2.0"
+--- /dev/null
++++ b/offline-release/native/w4_endpoint_scope.c
+@@ -0,0 +1,43 @@
++#include <stdint.h>
++
++extern int64_t w4_open_listener(int32_t scope, int32_t port, int32_t backlog);
++extern int64_t w4_connect_loopback(int32_t scope, int32_t port);
++
++enum {
++    W4_SCOPE_LOOPBACK = 1,
++    W4_ERR_SCOPE = -1001,
++    W4_ERR_PORT = -1002,
++    W4_ERR_BIND = -1004,
++};
++
++/* Enforce the scope before any system call. Port zero selects only from the
++ * fixed loopback range; a direct nonzero request must already be in range. */
++int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (backlog < 1 || backlog > 64 || port < 0 || port > 65535 ||
++        (port != 0 && (port < 24000 || port > 24100))) {
++        return W4_ERR_PORT;
++    }
++    if (port != 0) {
++        return w4_open_listener(scope, port, backlog);
++    }
++    for (int32_t candidate = 24000; candidate <= 24100; ++candidate) {
++        int64_t fd = w4_open_listener(scope, candidate, backlog);
++        if (fd >= 0 || fd != W4_ERR_BIND) {
++            return fd;
++        }
++    }
++    return W4_ERR_BIND;
++}
++
++int64_t w4_connect_loopback_s3(int32_t scope, int32_t port) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (port < 24000 || port > 24100) {
++        return W4_ERR_PORT;
++    }
++    return w4_connect_loopback(scope, port);
++}
+--- /dev/null
++++ b/offline-release/native/w4_endpoint_scope_oracle.c
+@@ -0,0 +1,58 @@
++#define _POSIX_C_SOURCE 200809L
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <sys/socket.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++extern int64_t w4_open_listener_s3(int32_t scope, int32_t port, int32_t backlog);
++extern int64_t w4_connect_loopback_s3(int32_t scope, int32_t port);
++extern int32_t w4_listener_port(int64_t fd);
++
++static int socket_calls;
++static int bind_calls;
++static int listen_calls;
++static int connect_calls;
++int __real_socket(int domain, int type, int protocol);
++int __real_bind(int fd, const struct sockaddr *address, socklen_t length);
++int __real_listen(int fd, int backlog);
++int __real_connect(int fd, const struct sockaddr *address, socklen_t length);
++int __wrap_socket(int domain, int type, int protocol) {
++    ++socket_calls;
++    return __real_socket(domain, type, protocol);
++}
++int __wrap_bind(int fd, const struct sockaddr *address, socklen_t length) {
++    ++bind_calls;
++    return __real_bind(fd, address, length);
++}
++int __wrap_listen(int fd, int backlog) {
++    ++listen_calls;
++    return __real_listen(fd, backlog);
++}
++int __wrap_connect(int fd, const struct sockaddr *address, socklen_t length) {
++    ++connect_calls;
++    return __real_connect(fd, address, length);
++}
++
++int main(void) {
++    assert(w4_open_listener_s3(0, 0, 8) == -1001);
++    assert(w4_open_listener_s3(1, 23999, 8) == -1002);
++    assert(w4_open_listener_s3(1, 24101, 8) == -1002);
++    assert(w4_connect_loopback_s3(0, 24000) == -1001);
++    assert(w4_connect_loopback_s3(1, 23999) == -1002);
++    assert(w4_connect_loopback_s3(1, 24101) == -1002);
++    assert(socket_calls == 0 && bind_calls == 0 && listen_calls == 0 && connect_calls == 0);
++
++    int64_t listener = w4_open_listener_s3(1, 0, 8);
++    assert(listener >= 0);
++    int32_t port = w4_listener_port(listener);
++    assert(port >= 24000 && port <= 24100);
++    int64_t client = w4_connect_loopback_s3(1, port);
++    assert(client >= 0);
++    assert(socket_calls > 0 && bind_calls > 0 && listen_calls > 0 && connect_calls == 1);
++    (void)close((int)client);
++    (void)close((int)listener);
++    puts("S3_SCOPE_ORACLE_OK");
++    return 0;
++}
+--- /dev/null
++++ b/offline-release/native/w4_trusted.c
+@@ -0,0 +1,146 @@
++#define _POSIX_C_SOURCE 200809L
++
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++enum {
++    W4_SCOPE_LOOPBACK = 1,
++    W4_ERR_SCOPE = -1001,
++    W4_ERR_PORT = -1002,
++    W4_ERR_SOCKET = -1003,
++    W4_ERR_BIND = -1004,
++    W4_ERR_LISTEN = -1005,
++    W4_ERR_CONNECT = -1006,
++    W4_ERR_FD = -1007,
++};
++
++enum {
++    W4_EVENT_READY = 1,
++    W4_EVENT_HANDOFF = 2,
++    W4_EVENT_IN_FLIGHT = 3,
++    W4_EVENT_RESPONSE = 4,
++    W4_EVENT_BAD_JSON = 5,
++    W4_EVENT_FFI_ERROR = 6,
++    W4_EVENT_STOP_ACCEPTED = 7,
++    W4_EVENT_WORKER_DONE = 8,
++    W4_EVENT_DRAINED = 9,
++};
++
++/*
++ * Closed endpoint capability: the only accepted tag denotes 127.0.0.1.
++ * The helper never accepts a caller-provided address string or resolves DNS.
++ * On success, the caller owns the returned fd and must close it once.
++ */
++int64_t w4_open_listener(int32_t scope, int32_t port, int32_t backlog) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (port < 0 || port > 65535 || backlog < 1 || backlog > 64) {
++        return W4_ERR_PORT;
++    }
++
++    int fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0) {
++        return W4_ERR_SOCKET;
++    }
++    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
++
++    int reuse = 1;
++    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
++
++    struct sockaddr_in address;
++    memset(&address, 0, sizeof(address));
++    address.sin_family = AF_INET;
++    address.sin_port = htons((uint16_t)port);
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++
++    if (bind(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
++        close(fd);
++        return W4_ERR_BIND;
++    }
++    if (listen(fd, backlog) != 0) {
++        close(fd);
++        return W4_ERR_LISTEN;
++    }
++    return (int64_t)fd;
++}
++
++/* S3 uses the same closed scope tag for the only outbound endpoint. */
++int64_t w4_connect_loopback(int32_t scope, int32_t port) {
++    if (scope != W4_SCOPE_LOOPBACK) {
++        return W4_ERR_SCOPE;
++    }
++    if (port < 1 || port > 65535) {
++        return W4_ERR_PORT;
++    }
++
++    int fd = socket(AF_INET, SOCK_STREAM, 0);
++    if (fd < 0) {
++        return W4_ERR_SOCKET;
++    }
++    (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
++
++    struct sockaddr_in address;
++    memset(&address, 0, sizeof(address));
++    address.sin_family = AF_INET;
++    address.sin_port = htons((uint16_t)port);
++    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (connect(fd, (const struct sockaddr *)&address, sizeof(address)) != 0) {
++        close(fd);
++        return W4_ERR_CONNECT;
++    }
++    return (int64_t)fd;
++}
++
++int32_t w4_listener_port(int64_t raw_fd) {
++    if (raw_fd < 0 || raw_fd > INT32_MAX) {
++        return W4_ERR_FD;
++    }
++    int fd = (int)raw_fd;
++    struct sockaddr_in address;
++    socklen_t length = (socklen_t)sizeof(address);
++    memset(&address, 0, sizeof(address));
++    if (getsockname(fd, (struct sockaddr *)&address, &length) != 0) {
++        return W4_ERR_FD;
++    }
++    if (address.sin_family != AF_INET ||
++        address.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) {
++        return W4_ERR_SCOPE;
++    }
++    return (int32_t)ntohs(address.sin_port);
++}
++
++/* S1 replacement: same scalar ABI and result, bounded sum-of-odds form. */
++int32_t w4_checksum(int32_t value) {
++    if (value < 0 || value > 999) {
++        return -2;
++    }
++    int64_t sum = 17;
++    for (int32_t odd = 1; odd < value * 2; odd += 2) {
++        sum += odd;
++    }
++    return (int32_t)sum;
++}
++
++/* Fixed-size event records let the host schedule stop during in-flight work. */
++int32_t w4_trace(int32_t code, int32_t detail) {
++    char record[64];
++    int length = snprintf(record, sizeof(record), "W4_EVENT %d %d\n", code, detail);
++    if (length <= 0 || (size_t)length >= sizeof(record)) {
++        return -1;
++    }
++    ssize_t written = write(STDERR_FILENO, record, (size_t)length);
++    return written == length ? 0 : -1;
++}
++
++/* Negative ownership fixture only. Never call through a Mimi string import. */
++const char *w4_borrowed_static_text(void) {
++    return "C-owned static storage";
++}
+--- /dev/null
++++ b/offline-release/src/exports.mimi
+@@ -0,0 +1,23 @@
++// Exports-only target. This file intentionally has no main function.
++
++pub extern "C" func w4_factorial(value: i32) -> i32 {
++    if value <= 1 {
++        1
++    } else {
++        value * w4_factorial(value - 1)
++    }
++}
++
++pub extern "C" func w4_status(value: i32) -> i32 {
++    if value < 0 {
++        -1
++    } else {
++        w4_factorial(value) + 1
++    }
++}
++
++// The service calls through this function from Mimi. The host driver calls
++// the C wrappers above from a separately loaded shared object.
++pub func internal_export_probe(value: i32) -> i32 {
++    w4_status(value) + w4_factorial(value - 1)
++}
+--- /dev/null
++++ b/offline-release/src/main.mimi
+@@ -0,0 +1,36 @@
++use w4_transport::transport::open_loopback_listener
++use w4_transport::transport::bound_loopback_port
++use protocol::note
++use server::run_service
++use exports::internal_export_probe
++
++const EVENT_READY: i32 = 1
++
++func main() -> i32 {
++    let opened = open_loopback_listener(1, 0, 8)
++    if opened.is_err() {
++        println("W4_LISTENER_FAILED")
++        return 1
++    }
++    let listener = opened.unwrap()
++
++    let port_result = bound_loopback_port(listener)
++    if port_result.is_err() {
++        close_fd(listener)
++        println("W4_ENDPOINT_IDENTITY_FAILED")
++        return 2
++    }
++    let port = port_result.unwrap()
++    note(EVENT_READY, port)
++    println("W4_READY " + to_string(port))
++
++    // This call remains in Mimi and reaches the same source body exported to C.
++    let probe = internal_export_probe(5)
++    if probe != 145 {
++        close_fd(listener)
++        println("W4_EXPORT_BODY_MISMATCH")
++        return 3
++    }
++
++    run_service(listener)
++}
+--- /dev/null
++++ b/offline-release/src/protocol.mimi
+@@ -0,0 +1,47 @@
++use std::strings
++use std::time
++
++const MAX_HOLD_MS: i32 = 2000
++const REQUEST_BUDGET_MS: i64 = 250
++
++const EVENT_READY: i32 = 1
++const EVENT_HANDOFF: i32 = 2
++const EVENT_IN_FLIGHT: i32 = 3
++const EVENT_RESPONSE: i32 = 4
++const EVENT_BAD_JSON: i32 = 5
++const EVENT_FFI_ERROR: i32 = 6
++const EVENT_STOP_ACCEPTED: i32 = 7
++const EVENT_WORKER_DONE: i32 = 8
++const EVENT_DRAINED: i32 = 9
++const EVENT_TIMEOUT_TRANSFER: i32 = 10
++const EVENT_TIMEOUT_COMPLETE: i32 = 11
++
++extern "C" {
++    // C ABI and checksum vectors are frozen by the independent W4 oracle.
++    func w4_checksum(value: i32) -> i32;
++    func w4_trace(code: i32, detail: i32) -> i32;
++}
++
++pub func note(code: i32, detail: i32) {
++    let _ = w4_trace(code, detail)
++}
++
++pub func c_checksum(value: i32) -> Result<i32, string> {
++    let result = w4_checksum(value)
++    if result < 0 {
++        Err("ChecksumRange")
++    } else {
++        Ok(result)
++    }
++}
++
++// The retry owner blocks until one request id is transferred. The channel send
++// in checksum_response is the single ownership handoff for that request.
++func retry_checksum_once(value: i32, retry_owner: Channel<i64>) -> (i32, i32) {
++    let request_id = channel_recv(retry_owner) as i32
++    (request_id, w4_checksum(value))
++}
++
++pub func valid_stop(raw: string) -> bool {
++    json_is_valid(raw) && json_has_key(raw, "op") && json_has_key(raw, "request_id") && json_get_string(raw, "op") == "stop"
++}
+--- /dev/null
++++ b/offline-release/src/server.mimi
+@@ -0,0 +1,125 @@
++use w4_transport::transport::next_line
++use protocol::checksum_response
++use w4_transport::transport::accept_client
++use w4_transport::transport::send_line
++use protocol::note
++use protocol::valid_stop
++
++const EVENT_HANDOFF: i32 = 2
++const EVENT_RESPONSE: i32 = 4
++const EVENT_STOP_ACCEPTED: i32 = 7
++const EVENT_WORKER_DONE: i32 = 8
++const EVENT_DRAINED: i32 = 9
++
++func serve_connection(client: i64, slot: i32, start_gate: Channel<i64>) -> i32 {
++    let _ = channel_recv(start_gate)
++    let mut pending = ""
++    let mut handled = 0
++    while handled < 256 {
++        let (status, raw, rest) = next_line(client, pending)
++        pending = rest
++        if status == 0 {
++            close_fd(client)
++            note(EVENT_WORKER_DONE, slot)
++            return 0
++        }
++        if status < 0 {
++            let _ = send_line(client, "{\"error\":\"BadFrame\"}")
++            close_fd(client)
++            note(EVENT_WORKER_DONE, slot)
++            return 1
++        }
++
++        let response = checksum_response(raw, slot)
++        if !send_line(client, response) {
++            close_fd(client)
++            note(EVENT_WORKER_DONE, slot)
++            return 2
++        }
++        if json_is_valid(raw) && json_has_key(raw, "request_id") {
++            note(EVENT_RESPONSE, json_get_int(raw, "request_id"))
++        }
++        handled = handled + 1
++    }
++    let _ = send_line(client, "{\"error\":\"RequestLimit\"}")
++    close_fd(client)
++    note(EVENT_WORKER_DONE, slot)
++    3
++}
++
++pub func run_service(listener: i64) -> i32 {
++    // Exactly two client sockets are handed to concurrent worker tasks. The
++    // coordinator keeps both futures and owns their terminal join obligation.
++    let first = accept_client(listener)
++    if first.is_err() {
++        close_fd(listener)
++        return 10
++    }
++    let first_fd = first.unwrap()
++    let first_gate = channel_new()
++    let first_task = spawn serve_connection(first_fd, 1, first_gate)
++    note(EVENT_HANDOFF, 1)
++    channel_send(first_gate, 1 as i64)
++
++    let second = accept_client(listener)
++    if second.is_err() {
++        close_fd(listener)
++        let _ = await first_task
++        channel_drop(first_gate)
++        return 11
++    }
++    let second_fd = second.unwrap()
++    let second_gate = channel_new()
++    let second_task = spawn serve_connection(second_fd, 2, second_gate)
++    note(EVENT_HANDOFF, 2)
++    channel_send(second_gate, 2 as i64)
++
++    // The stop connection is accepted on the same restricted loopback
++    // listener. Invalid stop requests fail locally and do not discard workers.
++    let mut stopped = false
++    let mut stop_attempts = 0
++    while !stopped && stop_attempts < 16 {
++        let candidate = accept_client(listener)
++        if candidate.is_err() {
++            close_fd(listener)
++            let _ = await first_task
++            let _ = await second_task
++            channel_drop(first_gate)
++            channel_drop(second_gate)
++            return 12
++        }
++        let stop_fd = candidate.unwrap()
++        let (status, line, _) = next_line(stop_fd, "")
++        if status != 1 || !valid_stop(line) {
++            let _ = send_line(stop_fd, "{\"error\":\"StopDenied\"}")
++            close_fd(stop_fd)
++            stop_attempts = stop_attempts + 1
++        } else {
++            let request_id = json_get_int(line, "request_id")
++            note(EVENT_STOP_ACCEPTED, request_id)
++            let _ = send_line(stop_fd, "{\"id\":" + to_string(request_id) + ",\"stopping\":true}")
++            close_fd(stop_fd)
++            stopped = true
++        }
++    }
++
++    close_fd(listener)
++    if !stopped {
++        let _ = await first_task
++        let _ = await second_task
++        channel_drop(first_gate)
++        channel_drop(second_gate)
++        return 13
++    }
++
++    let first_result = await first_task
++    let second_result = await second_task
++    channel_drop(first_gate)
++    channel_drop(second_gate)
++    note(EVENT_DRAINED, 0)
++    if first_result != 0 || second_result != 0 {
++        return 14
++    }
++    println("W4_SERVICE_DRAINED")
++    0
++}

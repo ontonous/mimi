@@ -27,6 +27,12 @@ const CASES: &[Case] = &[
         trap_code: None,
     },
     Case {
+        fixture: "mir_ordinary_map_any_match.mimi",
+        expected_stdout: "true\n",
+        expected_exit: 0,
+        trap_code: None,
+    },
+    Case {
         fixture: "mir_ordinary_map_any_get_kind_mismatch.mimi",
         expected_stdout: "77\n",
         expected_exit: 1,
@@ -535,5 +541,40 @@ fn ordinary_map_any_get_cli_shares_receipt_across_default_direct_and_native_path
             "[mimi-test] kept MapGetAny native directory: {}",
             directory.display()
         );
+    }
+}
+
+#[test]
+fn ordinary_map_any_match_arm_map_is_rejected_without_legacy_fallback() {
+    let mimi = mimi_bin();
+    let source = fixture("mir_ordinary_map_any_match_arm_map.mimi");
+
+    for command_name in ["mir", "run", "build"] {
+        let mut command = Command::new(&mimi);
+        command.env("MIMI_ROUTE_CENSUS", "1").arg(command_name);
+        if command_name == "build" {
+            command
+                .arg(&source)
+                .arg("--output")
+                .arg(std::env::temp_dir().join(format!(
+                    "mimi-ordinary-map-any-match-arm-map-{}",
+                    std::process::id()
+                )));
+        } else {
+            command.arg(&source);
+        }
+        let output = command
+            .output()
+            .expect("run unsupported match-arm Map probe");
+        assert!(
+            !output.status.success(),
+            "{command_name} unexpectedly accepted match-arm Map work"
+        );
+        let stderr = text(&output.stderr);
+        assert!(
+            stderr.contains("MIR-COVERAGE-001"),
+            "{command_name} lost the fail-closed coverage diagnostic: {stderr}"
+        );
+        assert_no_legacy_fallback(&stderr, command_name);
     }
 }

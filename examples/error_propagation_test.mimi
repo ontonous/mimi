@@ -1,21 +1,16 @@
 // Test error propagation with compensation - simple case
 
-type Res {
-    Ok(i32)
-    Err(string)
-}
-
-func step1() -> Res {
+func step1() -> Result<i32, string> {
     println("Step 1...");
     Ok(1)
 }
 
-func step2() -> Res {
+func step2() -> Result<i32, string> {
     println("Step 2...");
     Err("step 2 failed")
 }
 
-func step3() -> Res {
+func step3() -> Result<i32, string> {
     println("Step 3...");
     Ok(3)
 }
@@ -28,7 +23,7 @@ func cleanup2() {
     println("CLEANUP 2 executed");
 }
 
-func main() -> i32 {
+func run_steps() -> Result<i32, string> {
     on failure { cleanup1(); }
 
     let a = step1()?;
@@ -38,5 +33,12 @@ func main() -> i32 {
     let c = step3()?;
 
     println("All steps completed");
-    0
+    Ok(0)
+}
+
+func main() -> i32 {
+    match run_steps() {
+        Ok(_) => 0,
+        Err(_) => 1,
+    }
 }

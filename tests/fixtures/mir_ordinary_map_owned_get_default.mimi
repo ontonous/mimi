@@ -1,23 +1,80 @@
 func main() -> i32 {
-    let empty = map_new()
-    let with_number = map_set(empty, "number", 42)
-    let full = map_set(with_number, "text", "owned string")
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "number", 42) {
+                Ok(with_number) => {
+                    match map_set(with_number, "text", "owned string") {
+                        Ok(full) => {
+                            let number = map_get_i32(full, "number")
+                            let mut number_ok = false
+                            match number {
+                                Ok(value) => { number_ok = value == 42 },
+                                Err(_) => { number_ok = false },
+                            }
+                            let wrong_number = map_get_i32(full, "text")
+                            let mut wrong_number_ok = false
+                            match wrong_number {
+                                Ok(_) => { wrong_number_ok = false },
+                                Err(status) => { wrong_number_ok = status == 2 },
+                            }
+                            let missing_number = map_get_i32(full, "missing")
+                            let mut missing_number_ok = false
+                            match missing_number {
+                                Ok(_) => { missing_number_ok = false },
+                                Err(status) => { missing_number_ok = status == 1 },
+                            }
+                            let text = map_get_string(full, "text")
+                            let mut text_ok = false
+                            match text {
+                                Ok(value) => {
+                                    let matches = value == "owned string"
+                                    drop(value)
+                                    text_ok = matches
+                                },
+                                Err(_) => { text_ok = false },
+                            }
+                            let wrong_text = map_get_string(full, "number")
+                            let mut wrong_text_ok = false
+                            match wrong_text {
+                                Ok(value) => {
+                                    drop(value)
+                                    wrong_text_ok = false
+                                },
+                                Err(status) => { wrong_text_ok = status == 2 },
+                            }
+                            let missing_text = map_get_string(full, "missing")
+                            let mut missing_text_ok = false
+                            match missing_text {
+                                Ok(value) => {
+                                    drop(value)
+                                    missing_text_ok = false
+                                },
+                                Err(status) => { missing_text_ok = status == 1 },
+                            }
+                            let gets_ok = number_ok && wrong_number_ok && missing_number_ok
+                                && text_ok && wrong_text_ok && missing_text_ok
 
-    let number = map_get_i32(full, "number")
-    let wrong_number = map_get_i32(full, "text")
-    let missing_number = map_get_i32(full, "missing")
-    let text = map_get_string(full, "text")
-    let wrong_text = map_get_string(full, "number")
-    let missing_text = map_get_string(full, "missing")
+                            let full_size = map_size(full)
+                            let empty_size = map_size(empty)
 
-    drop(text)
-    drop(wrong_text)
-    drop(missing_text)
-    let full_size = map_size(full)
-    let empty_size = map_size(empty)
-
-    drop(empty)
-    drop(with_number)
-    drop(full)
-    full_size - 2 + empty_size
+                            drop(empty)
+                            drop(with_number)
+                            drop(full)
+                            if gets_ok { full_size - 2 + empty_size } else { 1 }
+                        },
+                        Err(status) => {
+                            drop(empty)
+                            drop(with_number)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

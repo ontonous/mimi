@@ -1,6 +1,4 @@
-type Res { Ok(i64) | Err(string) }
-
-func parse_pos(s: string) -> Res {
+func parse_pos(s: string) -> Result<i64, string> {
     let p = str_parse_int(s)
     if p.0 {
         if p.1 > 0 { Ok(p.1) } else { Err("not positive") }
@@ -9,7 +7,7 @@ func parse_pos(s: string) -> Res {
     }
 }
 
-func half_of(s: string) -> Res {
+func half_of(s: string) -> Result<i64, string> {
     let n = parse_pos(s)?
     if n % 2 == 0 { Ok(n / 2) } else { Err("odd") }
 }

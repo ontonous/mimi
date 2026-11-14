@@ -1,21 +1,17 @@
-// Regression (L1): an un-annotated bind of an ACTOR method result must carry
-// the declared return type into codegen's variable-type registry. Without the
-// actor-method fallback in infer_impl_method_return_type, `let ss = h.items()`
-// lost the string-element ABI and `ss[0]` printed the raw fat-box handle as
-// i64 on native while the VM printed the real string.
+// Regression (L1): an un-annotated bind of an ordinary Actor method result
+// must carry the declared return type into codegen's variable-type registry.
+// This keeps the List<string> method-result fallback target on a plain Actor.
+// Actor field writes are rejected with E0448, so the fixture starts with the
+// same list value that the old load("tag") call installed and tests only the
+// method-result ABI; it does not claim to cover mutable Actor-field ownership.
 actor Holder {
-    items: List<string> = [];
-
-    func load(s: string) {
-        self.items = [s]
-    }
+    items: List<string> = ["tag"];
 
     func get_items() -> List<string> { self.items }
 }
 
 func main() -> i32 {
     let h = Holder.spawn()
-    h.load("tag")
     let ss = h.get_items()
     if ss[0] == "tag" {
         println(ss[0])

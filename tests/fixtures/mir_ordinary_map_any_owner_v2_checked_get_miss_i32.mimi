@@ -1,0 +1,25 @@
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+        match map_set(empty, "stored", 17) {
+            Ok(root) => {
+        let pair = map_get(root, "missing")
+        drop(empty)
+        drop(root)
+
+        let found = pair.0
+        let payload = unpack_i32(pair.1)
+        drop(pair)
+        found
+            },
+            Err(status) => {
+            drop(empty)
+            false
+            },
+        }
+        },
+        Err(status) => {
+        false
+        },
+    }
+}

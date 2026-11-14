@@ -1,0 +1,13 @@
+// C1: replace the parser implementation while retaining the file/JSON contract.
+func parse_replacement(raw: string) -> string { json_get_string(raw, "name") + "-v2" }
+func main() -> i32 {
+    let raw = "{\"name\":\"demo\",\"retries\":3}"
+    let path = "v02-c1.json"
+    let w = write_file(path, raw)
+    if w.is_err() { return 2 }
+    let r = read_file(path)
+    match r {
+        Ok(data) => { println(parse_replacement(data) + ":" + to_string(json_get_int(data, "retries"))); 0 },
+        Err(error) => { println(error); 3 },
+    }
+}

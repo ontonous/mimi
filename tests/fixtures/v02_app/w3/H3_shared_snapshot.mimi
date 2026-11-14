@@ -1,0 +1,88 @@
+// H3: model a shareable ordinary List snapshot, observe the shared update, then
+// complete the same demand after establishing unique ownership. A no_alloc
+// checker must reject the shared hot call as a possible COW detach; rejecting
+// it is an intermediate cost finding, not completion of H3. The exclusive path
+// below performs the same gain/clip work under the target no_alloc contract.
+//
+// D-10 region on the accepted path: call/return of process_exclusive, including
+// its invalid-length edge, len, gain_clip -> clip_i64, and final len. The
+// list literals, snapshot creation/release, expected-value checking, and output
+// are outside. The current source language has no no_alloc syntax, COW cost
+// receipt, or allocator capacity query, so this file records the target seam.
+
+func clip_i64(value: i64) -> i32 {
+    if value < -1000 { -1000 } else if value > 1000 { 1000 } else { value as i32 }
+}
+
+func gain_clip(sample: i32) -> i32 {
+    clip_i64((sample as i64) * 2)
+}
+
+func process_exclusive(samples: mutate List<i32>, active_len: i32) -> i32 {
+    let slots = len(samples)
+    if active_len < 0 || active_len > slots { return -1 }
+    let mut index = 0
+    while index < active_len {
+        samples[index] = gain_clip(samples[index])
+        index += 1
+    }
+    if len(samples) != slots { return -2 }
+    0
+}
+
+func print_prefix(samples: view List<i32>, count: i32) -> i32 {
+    let mut index = 0
+    while index < count {
+        println(samples[index])
+        index += 1
+    }
+    0
+}
+
+func main() -> i32 {
+    // Shared candidate: the snapshot remains observable while the mutable
+    // owner enters the hot routine. Under D-10 the no_alloc declaration for
+    // this call must be rejected with a possible-COW reason. The declaration
+    // itself cannot yet be written because no_alloc is not a Mimi construct;
+    // this executable path is retained to exercise value isolation and allow
+    // the native cost harness to observe whether a detach actually allocates.
+    let mut shared_working: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let snapshot: List<i32> = shared_working
+    if snapshot[0] != -2147483648 || snapshot[4] != 2147483647 { return 1 }
+    if process_exclusive(shared_working, 5) != 0 { return 2 }
+    if snapshot[0] != -2147483648 || snapshot[1] != -501 || snapshot[4] != 2147483647 { return 3 }
+    if shared_working[0] != -1000 || shared_working[1] != -1000 || shared_working[2] != 0 { return 4 }
+    if shared_working[3] != 1000 || shared_working[4] != 1000 || shared_working[5] != 777 { return 5 }
+    print_prefix(shared_working, 5)
+
+    // The accepted exclusive-buffer optimization: release the snapshot, create
+    // a fresh owner outside the region, then enter the hot path with no alias.
+    drop(snapshot)
+    let mut working: List<i32> = [-2147483648, -501, 0, 501, 2147483647, 777]
+    let slots = len(working)
+    if process_exclusive(working, 5) != 0 { return 6 }
+    if len(working) != slots || working[5] != 777 { return 7 }
+    if working[0] != -1000 || working[1] != -1000 || working[2] != 0 { return 8 }
+    if working[3] != 1000 || working[4] != 1000 { return 9 }
+    print_prefix(working, 5)
+
+    // Empty and shorter-than-storage runs remain valid under the exclusive
+    // path, with inactive slots untouched.
+    let mut short: List<i32> = [-501, 0, 501, 700, 701]
+    if process_exclusive(short, 3) != 0 { return 10 }
+    if short[0] != -1000 || short[1] != 0 || short[2] != 1000 { return 11 }
+    if short[3] != 700 || short[4] != 701 { return 12 }
+    let mut empty: List<i32> = []
+    if process_exclusive(empty, 0) != 0 || len(empty) != 0 { return 13 }
+    0
+}
+
+// Additional negative suggestions for H3:
+// - Retain `snapshot` and invoke the no_alloc update: reject possible COW.
+// - Assign the list to a second owner inside a helper, then call the kernel
+//   through that helper: the cost reason must cross the complete call graph.
+// - Use a callback that may retain the snapshot or replace a list slot with a
+//   newly allocated list: reject unknown effects / allocation source.
+// - Confirm the native run reports zero physical allocations in the accepted
+//   region and unchanged runtime capacity; VM framework allocations are listed
+//   separately per D-10.

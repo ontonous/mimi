@@ -1,14 +1,47 @@
 func main() -> i32 {
-    let root = map_new()
-    let updated = map_set(root, "answer", 42)
-    let size = map_size(updated)
-    println(size)
-    drop(updated)
-    let temporary_size = map_size(map_new())
-    println(temporary_size)
-    let temporary_updated = map_set(map_new(), "temporary", 7)
-    let temporary_updated_size = map_size(temporary_updated)
-    println(temporary_updated_size)
-    drop(temporary_updated)
-    0
+    match map_new() {
+        Ok(root) => {
+            match map_set(root, "answer", 42) {
+                Ok(updated) => {
+                    let size = map_size(updated)
+                    println(size)
+                    drop(root)
+                    drop(updated)
+
+                    match map_new() {
+                        Ok(temporary) => {
+                            let temporary_size = map_size(temporary)
+                            println(temporary_size)
+                            drop(temporary)
+
+                            match map_new() {
+                                Ok(temporary_root) => {
+                                    match map_set(temporary_root, "temporary", 7) {
+                                        Ok(temporary_updated) => {
+                                            let temporary_updated_size = map_size(temporary_updated)
+                                            println(temporary_updated_size)
+                                            drop(temporary_root)
+                                            drop(temporary_updated)
+                                            0
+                                        },
+                                        Err(status) => {
+                                            drop(temporary_root)
+                                            status
+                                        },
+                                    }
+                                },
+                                Err(status) => status,
+                            }
+                        },
+                        Err(status) => status,
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }

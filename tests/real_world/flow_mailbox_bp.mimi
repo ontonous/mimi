@@ -2,20 +2,19 @@
 // @mailbox(depth=N) annotation parse + actor depth/mute query dual-backend.
 
 flow Engine {
-    @mailbox(depth = 128)
     state Idle
     state Running { ticks: i32 }
     transition start(Idle) -> Running { return Running { ticks: 0 } }
     transition tick(Running) -> Running { return Running { ticks: self.ticks + 1 } }
 }
 
-actor Counter {
-    n: i32
-    func bump() -> i32 {
-        self.n = self.n + 1
-        self.n
+flow CounterState @mailbox(depth = 128) {
+    state Active { n: i32 }
+    transition bump(Active) -> Active {
+        return Active { n: self.n + 1 }
     }
 }
+actor Counter runs CounterState {}
 
 func main() -> i32 {
     let s0 = Idle { }
@@ -28,6 +27,6 @@ func main() -> i32 {
     println(actor_mailbox_depth(c))
     println(actor_is_muted(c))
     let v = c.bump()
-    println(v)
+    println(v.n)
     0
 }

@@ -1,0 +1,5 @@
+[package]
+name = "mimi-v02-w1-config-tool"
+version = "0.2.0"
+description = "W1 config-driven JSON report tool with distinct parser modules and scoped file grants"
+entry = "main.mimi"

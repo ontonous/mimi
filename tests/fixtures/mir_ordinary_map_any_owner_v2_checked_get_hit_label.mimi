@@ -1,0 +1,28 @@
+type Label { text: string }
+
+func main() -> bool {
+    match map_new() {
+        Ok(empty) => {
+            let label_value = Label { text: "owned label λ" }
+            match map_set(empty, "label", label_value) {
+                Ok(root) => {
+                    let pair = map_get(root, "label")
+                    drop(empty)
+                    drop(root)
+                    let found = pair.0
+                    let payload = pair.1 as Label
+                    drop(pair)
+                    drop(payload)
+                    drop(label_value)
+                    found
+                },
+                Err(_) => {
+                    drop(empty)
+                    drop(label_value)
+                    false
+                },
+            }
+        },
+        Err(_) => false,
+    }
+}

@@ -1,13 +1,41 @@
 func main() -> i32 {
-    let root = map_new()
-    let first = map_set(root, "remove", "a\0b雪")
-    let updated = map_set(first, "🗺️", "雪")
-    let removed = map_remove(updated, "remove")
-    let size = map_size(removed)
-    println(size)
-    let missing = map_remove(removed, "absent")
-    let missing_size = map_size(missing)
-    println(missing_size)
-    drop(missing)
-    0
+    match map_new() {
+        Ok(root) => {
+            let first_payload = "a\0b雪"
+            let first_result = map_set(root, "remove", first_payload)
+            drop(first_payload)
+            match first_result {
+                Ok(first) => {
+                    drop(root)
+                    let second_payload = "雪"
+                    let second_result = map_set(first, "🗺️", second_payload)
+                    drop(second_payload)
+                    match second_result {
+                        Ok(updated) => {
+                            drop(first)
+                            let removed = map_remove(updated, "remove")
+                            drop(updated)
+                            let size = map_size(removed)
+                            println(size)
+                            let missing = map_remove(removed, "absent")
+                            drop(removed)
+                            let missing_size = map_size(missing)
+                            println(missing_size)
+                            drop(missing)
+                            0
+                        },
+                        Err(status) => {
+                            drop(first)
+                            status
+                        },
+                    }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }

@@ -1,18 +1,21 @@
-// Regression (L1, R6-1031): a nested `func` inside an actor method that
-// captures an enclosing local must become a closure, exactly like the same
-// shape in ordinary bodies. The previous actor-only duplicate compiled it as
-// a standalone function and rejected the capture with E0700 on native while
-// the VM ran it correctly.
-actor Counter {
-    base: i32 = 0;
+// Regression (L1, R6-1031): a nested `func` inside an explicit Actor mailbox
+// method captures an enclosing local. CounterFlow state and its transition
+// remain explicit metadata; this case exercises the scalar mailbox result.
+flow CounterFlow {
+    state Active { base: i32 }
 
+    transition record(Active, value: i32) -> Active {
+        return Active { base: value }
+    }
+}
+
+actor Counter runs CounterFlow {
     func bump(delta: i32) -> i32 {
         let scale = 10
         func scaled(d: i32) -> i32 {
             scale + d
         }
-        self.base = self.base + scaled(delta)
-        self.base
+        scaled(delta)
     }
 }
 

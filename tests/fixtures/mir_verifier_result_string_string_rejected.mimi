@@ -1,4 +1,9 @@
-func main() -> Result<string, string> {
+func rejected_result_string_string() -> Result<string, string> {
     ensures: true
     Err("rejected")
+}
+
+func main() -> i32 {
+    ensures: true
+    0
 }

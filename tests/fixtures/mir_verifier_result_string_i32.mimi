@@ -1,4 +1,9 @@
-func main() -> Result<string, i32> {
+func result_string_i32() -> Result<string, i32> {
     ensures: true
     Ok("owned")
+}
+
+func main() -> i32 {
+    ensures: true
+    0
 }

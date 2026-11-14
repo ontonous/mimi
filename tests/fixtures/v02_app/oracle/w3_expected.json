@@ -1,0 +1,50 @@
+{
+  "schema": "mimi-v02-w3-oracle-v1",
+  "provenance": "Integer vectors hand-calculated from g(x)=clamp(2*x,-1000,1000) in i64 and the frozen H2 recurrence; values are independent of the Mimi implementations.",
+  "baseline": {
+    "stdout": "-1000\n-1000\n0\n1000\n1000\n",
+    "files": {},
+    "input": [-2147483648, -501, 0, 501, 2147483647],
+    "active_len": 5,
+    "expected": [-1000, -1000, 0, 1000, 1000],
+    "storage_tail": 777,
+    "allocation_claim": {"status": "unverified", "required": "static no_alloc proof and native physical allocation count of zero in the declared hot region"}
+  },
+  "changes": {
+    "H1": {
+      "stdout": "-1000\n-1000\n0\n1000\n1000\n",
+      "files": {},
+      "boundary_input": [-2147483648, -501, -500, 499, 500, 2147483647],
+      "boundary_expected": [-1000, -1000, -1000, 998, 1000, 1000],
+      "expected": [-1000, -1000, 0, 1000, 1000],
+      "storage_tail": 777
+    },
+    "H2": {
+      "stdout": "gain/extremes\n-1000\n-1000\n0\n1000\n1000\nfilter/extremes\n-1000\n-1000\n-500\n250\n625\nfilter/short-active-3\n-1000\n-500\n250\nfilter/short-active-5\n-1000\n-500\n250\n625\n812\n",
+      "files": {},
+      "gain_extremes": [-1000, -1000, 0, 1000, 1000],
+      "filter_extremes": [-1000, -1000, -500, 250, 625],
+      "filter_short_active_3": [-1000, -500, 250],
+      "filter_short_active_5": [-1000, -500, 250, 625, 812],
+      "recurrence": "y[0]=g(x[0]); y[i]=trunc_toward_zero((y[i-1]+g(x[i]))/2)",
+      "storage_tail": 777
+    },
+    "H3": {
+      "stdout": "-1000\n-1000\n0\n1000\n1000\n-1000\n-1000\n0\n1000\n1000\n",
+      "files": {},
+      "snapshot": [-2147483648, -501, 0, 501, 2147483647, 777],
+      "updated_shared_working": [-1000, -1000, 0, 1000, 1000, 777],
+      "updated_exclusive_working": [-1000, -1000, 0, 1000, 1000, 777],
+      "filter_short_active_3": [-1000, 0, 1000],
+      "expected_value_semantics": "The retained snapshot remains unchanged while the unique working owner is updated; active prefix only, tail preserved.",
+      "allocation_claim": {"status": "unverified", "required": "shared call rejected under no_alloc as possible COW; exclusive call has zero static/physical allocations"}
+    }
+  },
+  "no_alloc_negative_requirements": {
+    "push_pop_growth": {"status": "not_materialized", "expected": "Reject push/pop/resize/replacement and any possible backing-store growth in the hot call graph."},
+    "transform_collection": {"status": "not_materialized", "expected": "Reject concat/reverse/map/filter or scratch-list transformation in the hot call graph."},
+    "live_snapshot_cow": {"status": "not_materialized", "expected": "Reject a potentially detaching mutation while an observable snapshot remains live."},
+    "unknown_callback_or_ffi": {"status": "not_materialized", "expected": "Reject an unknown-effect callback, allocating destructor/defer, or unannotated FFI call reachable from the hot region."},
+    "error_and_bounds_paths": {"status": "not_materialized", "expected": "Bounds and early-error paths are included in the cost region; reject or prove every path without hiding allocation."}
+  }
+}

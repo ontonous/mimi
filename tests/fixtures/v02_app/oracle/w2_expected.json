@@ -1,0 +1,62 @@
+{
+  "schema": "mimi-v02-w2-oracle-v1",
+  "provenance": "Hand-derived from the W2 document/revision requirements and checked-in source anchors; no Mimi execution result is represented here.",
+  "baseline": {
+    "stdout": "20\n10\n10\n0\n",
+    "files": {},
+    "expected_state": {
+      "document_id": 7,
+      "revision_zero": {"revision_id": 0, "body": "Draft"},
+      "revision_a": {"revision_id": 1, "body": "A"},
+      "snapshot_s1": {"revision_id": 1, "body": "A"},
+      "revision_b": {"revision_id": 2, "body": "B"},
+      "undo_result": {"revision_id": 1, "body": "A"},
+      "stale_generation": {"slot": 1, "generation": 2, "result": "StaleNodeId"},
+      "editor_view_epoch_after_cursor_move": 1,
+      "serialized_snapshot_s1": "document=7\nrevision=1\n0:title:Meeting notes\n1:paragraph:A\n",
+      "export": {"published": true, "temporary_removed": true, "cleanup_owner": ""}
+    },
+    "negative_requirements": ["closed_session_edit_rejected"]
+  },
+  "negative": {
+    "closed_session_edit_rejected": {
+      "mode": "mimi_check_reject",
+      "source": "w2/w2_closed_edit_rejected.mimi",
+      "expected": "Reject an edit transition on a Closed document state before execution.",
+      "diagnostic_contains": ["E0211"],
+      "status": "unverified"
+    },
+    "unresponsive_handoff": {
+      "mode": "mimi_stdout",
+      "source": "w2/w2_unresponsive_handoff.mimi",
+      "stdout": "RetryOwner\nCleanupPending\n",
+      "files": {},
+      "expected_invariant": "Never claim Cancelled while the cleanup owner has not acknowledged; preserve a durable responsibility record.",
+      "status": "unverified"
+    },
+    "flow_protocol": {
+      "mode": "mimi_stdout",
+      "source": "w2/w2_flow_protocol.mimi",
+      "stdout": "5\n",
+      "files": {},
+      "expected_invariant": "Success, write failure, acknowledged cancellation, completion-wins race, and cleanup ownership must settle distinctly.",
+      "status": "blocked",
+      "blocker": "Current checker rejects mutually exclusive Flow/ownership arms with E0423; this source is a required target, not a pass."
+    }
+  },
+  "changes": {
+    "D1": {"stdout": "20\n10\n7\n", "files": {}, "expected_invariants": ["Edit deltas retain the S1 snapshot", "Undo restores the prior revision identity", "Node IDs remain document-scoped and stale generations reject"]},
+    "D2": {"stdout": "Cancelled\nRetryable\n", "files": {}, "expected_invariants": ["Cancellation does not publish partial output", "The original temporary output remains owned until writer-stop acknowledgement", "Cleanup responsibility transfers once to RetryOwner", "Retry has one publisher and a terminal receipt"]},
+    "D3": {"stdout": "ChecksumMismatch\n", "files": {}, "expected_invariants": ["A checksum mismatch has its own error variant", "Previously declared write/read errors remain distinguishable"]},
+    "D4": {"stdout": "20\n", "files": {}, "expected_invariants": ["Exporter is imported from a separate file module", "The public effect upper bound is enforced at the module boundary"], "status": "blocked", "blocker": "Current Mimi has no accepted checked public effect upper-bound syntax; the runtime export behavior does not prove this static requirement."},
+    "D5": {"stdout": "50\n", "files": {}, "expected_invariants": ["Two independent export tasks retain separate snapshots, Flow state, cleanup ownership, and join results"]}
+  },
+  "sequence_regressions": {
+    "W2": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["The frozen baseline document, undo, stale-ID, autosave, export, and cleanup behavior remains unchanged."]},
+    "D1": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["Baseline behavior plus retained delta snapshots, undo identity, and delta-count assertions."]},
+    "D2": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["Baseline and D1 assertions remain; cancellation preserves the partial temp until acknowledgement, does not publish it, and retry publishes exactly once."]},
+    "D3": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["Earlier document/cancel assertions remain; checksum mismatch is distinct and earlier write/read errors stay distinguishable."]},
+    "D4": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["Earlier behavior remains and export uses the separate typed module; checked effect ceiling remains an explicit blocker."]},
+    "D5": {"stdout": "20\n10\n10\n0\n", "files": {}, "expected_invariants": ["The full prior regression set remains; both workers return typed terminal outcomes with their own IDs, revisions, content, and cleanup ownership."]}
+  }
+}

@@ -1,0 +1,22 @@
+// V0.2 P6 W4 concurrency companion.  Two real Mimi workers publish checksum
+// requests to one Channel; the caller joins both before reading the results.
+// The independent oracle compares the sum, since worker completion order is
+// intentionally an allowed event permutation.
+
+func worker(queue: Channel<i64>, request: i64) -> i32 {
+    channel_send(queue, request * 2)
+    0
+}
+
+func main() -> i32 {
+    let queue = channel_new()
+    let first = spawn worker(queue, 20)
+    let second = spawn worker(queue, 21)
+    await first
+    await second
+    let a = channel_recv(queue)
+    let b = channel_recv(queue)
+    println(a + b)
+    channel_drop(queue)
+    0
+}

@@ -1,36 +1,55 @@
 func carry<T>(value: T) -> T { value }
 
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "k\0🧪", "owned\0🧪值")
-    let pair = map_get(root, "k\0🧪")
-    drop(empty)
-    drop(root)
-
-    let found = pair.0
-    let payload = pair.1
-    let carried = carry(payload)
-    let equal = if found { carried == "owned\0🧪值" } else { false }
-    println(found)
-    println(equal)
-    drop(pair)
-    drop(payload)
-    drop(carried)
-
-    let number_empty = map_new()
-    let number_root = map_set(number_empty, "zero", 0)
-    let number_pair = map_get(number_root, "zero")
-    drop(number_empty)
-    drop(number_root)
-
-    let number_found = number_pair.0
-    let zero_payload = number_pair.1
-    let zero_carried = carry(zero_payload)
-    let zero = if number_found { zero_carried } else { 0 }
-    println(number_found)
-    println(zero)
-    drop(number_pair)
-    drop(zero_payload)
-    drop(zero_carried)
-    0
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "k\0🧪", "owned\0🧪值") {
+                Ok(root) => {
+                    let pair = map_get(root, "k\0🧪")
+                    drop(empty)
+                    drop(root)
+                    let found = pair.0
+                    let payload = pair.1
+                    let carried = carry(payload)
+                    let equal = if found { carried == "owned\0🧪值" } else { false }
+                    println(found)
+                    println(equal)
+                    drop(pair)
+                    drop(payload)
+                    drop(carried)
+                    match map_new() {
+                        Ok(number_empty) => {
+                            match map_set(number_empty, "zero", 0) {
+                                Ok(number_root) => {
+                                    let number_pair = map_get(number_root, "zero")
+                                    drop(number_empty)
+                                    drop(number_root)
+                                    let number_found = number_pair.0
+                                    let zero_payload = number_pair.1
+                                    let zero_carried = carry(zero_payload)
+                                    let zero = if number_found { zero_carried } else { 0 }
+                                    println(number_found)
+                                    println(zero)
+                                    drop(number_pair)
+                                    drop(zero_payload)
+                                    drop(zero_carried)
+                                    0
+                                },
+                                Err(status) => {
+                                    drop(number_empty)
+                                    status
+                                },
+                            }
+                        },
+                        Err(status) => { status },
+                    }
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

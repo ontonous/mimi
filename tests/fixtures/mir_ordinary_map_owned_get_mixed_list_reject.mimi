@@ -3,14 +3,29 @@
 // selected; `drop(values)` is deliberately the only List use so no ListOp
 // candidate can hide the collection boundary.
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 1)
-    let typed = map_get_i32(root, "answer")
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "answer", 1) {
+                Ok(root) => {
+                    let typed = map_get_i32(root, "answer")
+                    match typed {
+                        Ok(value) => { drop(value) },
+                        Err(status) => { drop(status) },
+                    }
 
-    let values = [1, 2, 3]
-    println(1)
-    drop(values)
-    drop(empty)
-    drop(root)
-    0
+                    let values = [1, 2, 3]
+                    println(1)
+                    drop(values)
+                    drop(empty)
+                    drop(root)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => { status },
+    }
 }

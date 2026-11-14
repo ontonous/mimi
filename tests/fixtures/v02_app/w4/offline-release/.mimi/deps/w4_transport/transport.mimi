@@ -1,0 +1,95 @@
+use std::net
+use std::strings
+
+extern "C" {
+    func w4_open_listener(scope: i32, port: i32, backlog: i32) -> i64;
+    func w4_listener_port(fd: i64) -> i32;
+}
+
+pub func open_loopback_listener(port: i32, backlog: i32) -> Result<i64, string> {
+    if port < 0 || port > 65535 || backlog < 1 || backlog > 64 {
+        return Err("EndpointDenied")
+    }
+    let fd = w4_open_listener(1, port, backlog)
+    if fd == -1001 { return Err("EndpointDenied") }
+    if fd == -1002 { return Err("PortDenied") }
+    if fd < 0 { return Err("BindFailed") }
+    Ok(fd)
+}
+
+pub func bound_loopback_port(fd: i64) -> Result<i32, string> {
+    let port = w4_listener_port(fd)
+    if port < 1 || port > 65535 {
+        Err("EndpointIdentityFailed")
+    } else {
+        Ok(port)
+    }
+}
+
+// Public transport surface retained when the service source moved from the
+// baseline tree into the offline package deployment.
+pub func accept_client(fd: i64) -> Result<i64, NetError> {
+    tcp_accept(fd)
+}
+
+pub func receive_bytes(fd: i64, maximum: i32) -> Result<string, NetError> {
+    tcp_recv(fd, maximum)
+}
+
+pub func send_bytes(fd: i64, bytes: string) -> Result<i64, NetError> {
+    tcp_send(fd, bytes)
+}
+
+// Read one newline-delimited frame while preserving any bytes after it for
+// the next call. Status is 1 for a line, 0 for clean EOF, -1 for receive
+// failure, and -2 for a truncated or oversized frame.
+pub func next_line(fd: i64, pending: string) -> (i32, string, string) {
+    let mut buffer = pending
+    while !contains(buffer, "\n") {
+        let received = receive_bytes(fd, 2048)
+        if received.is_err() {
+            return (-1, "", buffer)
+        }
+        let chunk = received.unwrap()
+        if chunk == "" {
+            if buffer == "" {
+                return (0, "", "")
+            }
+            return (-2, "", buffer)
+        }
+        buffer = buffer + chunk
+        if buffer.len() > 2048 {
+            return (-2, "", buffer)
+        }
+    }
+
+    let parts = split(buffer, "\n")
+    if parts.len() == 0 {
+        return (-2, "", "")
+    }
+    let mut rest = ""
+    for index in range(1, parts.len()) {
+        if index > 1 {
+            rest = rest + "\n"
+        }
+        rest = rest + parts[index]
+    }
+    (1, parts[0], rest)
+}
+
+pub func send_line(fd: i64, line: string) -> bool {
+    let framed = line + "\n"
+    let mut offset = 0
+    while offset < framed.len() {
+        let sent = send_bytes(fd, substring(framed, offset, framed.len()))
+        if sent.is_err() {
+            return false
+        }
+        let amount = sent.unwrap()
+        if amount <= 0 {
+            return false
+        }
+        offset = offset + (amount as i32)
+    }
+    true
+}

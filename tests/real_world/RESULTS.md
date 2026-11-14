@@ -6,12 +6,12 @@
 **评估命令**：`cargo test --test real_world_cli -- --test-threads=1` + 定向双后端 smoke
 **环境**：Ubuntu, LLVM 18 (via /tmp/llvm-wrapper), cc/gcc
 
-## R6-1177 当前 Map/Any 边界
+## R6-1177 当前 Map/Any 边界（0.1.11 收口更新）
 
-- 普通 `Map<_, Any>` 的条目目前没有能供 checker/native 消费者核验的动态类型标签。`get_or_default<T>` 的默认值只能确定返回端静态 `T`，不能证明已存条目也是 `T`；String 条目按 `i32` 读取曾使 native 输出指针位值，而 VM 返回 String。
-- 因此 `std_maps.mimi` 与 `std_maps_counter_generic.mimi` 继续通过 `mimi run` 的 VM 兼容路径；默认 native build 对可达 `DynamicAnyUnpack` 以 E0722 拒绝，且不生成可执行文件。两者登记为 fail-closed known gaps，并由 `ordinary_map_any_native_fixtures_fail_closed_with_vm_compatibility` 钉住 VM 成功/native 拒绝/产物缺席三项行为。
-- 这不是普通 Map/Any 的 MIR 迁移证明：typed descriptor、entry/root owner graph、clone/overwrite/remove/retained get/values/destroy 的所有权证据及 same-MIR 四消费者语义仍未闭合；在那之前不能把 E0722 换成 legacy native fallback。
-- `run_suite.py` 与 Cargo 的 `KNOWN_GAPS` 已同步登记这两项，且仍逐项执行；若将来默认 native 路径通过，漂移检查会要求同一修复切片删除 gap 登记。
+- 普通 `Map<_, Any>` 的条目目前没有能供 checker/native 消费者核验的动态类型标签。`get_or_default<T>` 的默认值只能确定返回端静态 `T`，不能证明已存条目也是 `T`。
+- 0.1.11 收口后，未类型化 Map/Any 的兼容路由整体退役：`std_maps.mimi` 与 `std_maps_counter_generic.mimi` 在默认 Canonical MIR 路由上以 `MIR-COVERAGE-001` fail-closed 拒绝，run 与 build 均失败且不重试 Legacy、不产生输出或产物。两项登记为 fail-closed known gaps，并由 `ordinary_map_any_untyped_fixtures_fail_closed_without_legacy_retry` 钉住路由拒绝/无 legacy 重试/无产物三项行为。
+- 这不是普通 Map/Any 的 MIR 迁移证明：typed descriptor、entry/root owner graph、clone/overwrite/remove/retained get/values/destroy 的所有权证据及 same-MIR 四消费者语义由 0.1.11 的 typed 窄剖面切片（CheckedGet、get_or_default、values、keys、clone isolation 等）逐项承载。
+- `run_suite.py` 与 Cargo 的 `KNOWN_GAPS` 已同步登记这两项，且仍逐项执行；若将来默认路由恢复可执行，漂移检查会要求同一修复切片删除 gap 登记。
 
 ## 0.1.7 状态快照（历史）
 

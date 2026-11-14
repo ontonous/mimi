@@ -1,0 +1,27 @@
+use std::maps;
+
+func cold() -> Result<i32, i32> {
+    let empty_result: Result<Record, i32> = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result: Result<Record, i32> = map_set(empty, "hits", 0)
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<i32>(root, "hits", 99)
+                    drop(empty)
+                    drop(root)
+                    Ok(observed)
+                },
+                Err(status) => {
+                    drop(empty)
+                    Err(status)
+                },
+            }
+        },
+        Err(status) => Err(status),
+    }
+}
+
+func main() -> i32 {
+    0
+}

@@ -1,0 +1,64 @@
+type Label { text: string }
+
+func main() -> i32 {
+    let source_label = Label { text: "label payload" }
+    match map_new() {
+        Ok(empty) => {
+    match map_set(empty, "a-number", 41) {
+        Ok(number_root) => {
+    match map_set(number_root, "b-text", "text payload") {
+        Ok(text_root) => {
+    match map_set(text_root, "z-label", source_label) {
+        Ok(root) => {
+                    let snapshot = values(root)
+
+                    drop(empty)
+                    drop(number_root)
+                    drop(text_root)
+                    drop(root)
+                    drop(source_label)
+
+                    let number_value = snapshot[0] as i32
+                    let number_matches = number_value == 41
+                    let text_value = snapshot[1] as string
+                    let text_matches = text_value == "text payload"
+                    drop(text_value)
+                    let label_value = snapshot[2] as Label
+                    let label_text = label_value.text
+                    let label_matches = label_text == "label payload"
+                    let label_differs = label_text != "not label payload"
+                    drop(label_text)
+                    drop(snapshot)
+
+                    println(number_matches)
+                    println(text_matches)
+                    println(label_matches)
+                    println(label_differs)
+                    0
+        },
+        Err(status) => {
+        drop(empty)
+        drop(number_root)
+        drop(text_root)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        drop(number_root)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        drop(empty)
+        status
+        },
+    }
+        },
+        Err(status) => {
+        status
+        },
+    }
+}

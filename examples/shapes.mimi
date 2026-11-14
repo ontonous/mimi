@@ -12,8 +12,13 @@ func area(s: Shape) -> f64 {
     }
 }
 
-func main() -> f64 {
+func combined_shape_area() -> f64 {
     let c = Circle(2.0);
     let r = Rectangle(3.0, 4.0);
     return area(c) + area(r);
+}
+
+func main() -> i32 {
+    println(combined_shape_area());
+    0
 }

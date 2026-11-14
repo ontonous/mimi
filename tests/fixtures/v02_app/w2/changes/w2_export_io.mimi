@@ -1,0 +1,97 @@
+// W2 D4 export module interface. The typed request preserves document and
+// node revision identities across the file boundary. The body performs the
+// staged write/readback/commit sequence. Intended public ceiling: write the
+// explicit temp and destination paths, read back the temp path, and remove the
+// temp path. The language does not yet let this module declare or verify that
+// ceiling, so the signature below is an API boundary, not a static effect proof.
+
+pub type SnapshotNode {
+    slot: i32,
+    generation: i32,
+    parent_slot: i32,
+    kind: string,
+    text: string,
+}
+pub type ExportRequest { document_id: i32, revision_id: i32, nodes: List<SnapshotNode> }
+pub type ExportReceipt {
+    document_id: i32,
+    revision_id: i32,
+    destination: string,
+    contents: string,
+    published: bool,
+    cleanup_error: string,
+}
+
+pub func serialize_request(request: ExportRequest) -> string {
+    let mut contents = "document=" + to_string(request.document_id) + "\n"
+    contents = contents + "revision=" + to_string(request.revision_id) + "\n"
+    for node in request.nodes {
+        contents = contents + to_string(node.slot) + ":" + node.kind + ":" + node.text + "\n"
+    }
+    contents
+}
+
+func write_error(path: string, contents: string) -> string {
+    match write_file(path, contents) {
+        Err(error) => error,
+        Ok(_) => "",
+    }
+}
+
+func read_stage(path: string) -> (bool, string, string) {
+    match read_file(path) {
+        Ok(contents) => (true, contents, ""),
+        Err(error) => (false, "", error),
+    }
+}
+
+pub func export_snapshot(request: ExportRequest, temporary_path: string, destination: string) -> Result<ExportReceipt, string> {
+    let contents = serialize_request(request)
+    let stage_error = write_error(temporary_path, contents)
+    if stage_error != "" {
+        return Err("TempWriteFailed: " + stage_error)
+    }
+    let readback = read_stage(temporary_path)
+    if !readback.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return Err("TempReadFailed: " + readback.2) }
+        return Err("TempReadFailed: " + readback.2 + "; CleanupFailed: temporary file retained")
+    }
+    let staged = readback.1
+    if staged != contents {
+        let removed = remove_file(temporary_path)
+        if removed { return Err("ChecksumMismatch") }
+        return Err("ChecksumMismatch; CleanupFailed: temporary file retained")
+    }
+    match write_file(destination, staged) {
+        Err(error) => {
+            let removed = remove_file(temporary_path)
+            if removed { Err("DestinationWriteFailed; destination may contain partial bytes: " + error) }
+            else { Err("DestinationWriteFailed; destination may contain partial bytes: " + error + "; CleanupFailed: temporary retained") }
+        },
+        Ok(_) => {
+            let removed = remove_file(temporary_path)
+            if removed {
+                Ok(ExportReceipt {
+                    document_id: request.document_id,
+                    revision_id: request.revision_id,
+                    destination: destination,
+                    contents: contents,
+                    published: true,
+                    cleanup_error: "",
+                })
+            } else {
+                // The destination is already written; cleanup failure must not
+                // be reported as an un-published export.
+                Ok(ExportReceipt {
+                    document_id: request.document_id,
+                    revision_id: request.revision_id,
+                    destination: destination,
+                    contents: contents,
+                    published: true,
+                    cleanup_error: "CleanupFailed: temporary file retained",
+                })
+            }
+        },
+    }
+}

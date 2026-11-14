@@ -1,0 +1,45 @@
+type Label { text: string }
+
+func main() -> i32 {
+    let payload = Label { text: "shared" }
+    match map_new() {
+        Ok(base) => {
+            let flag = true
+            if flag {
+                match map_set(base, "left", payload) {
+                    Ok(child) => {
+                        map_size(child)
+                        drop(child)
+                        drop(base)
+                        drop(payload)
+                        0
+                    },
+                    Err(status) => {
+                        drop(base)
+                        drop(payload)
+                        status
+                    },
+                }
+            } else {
+                match map_set(base, "right", payload) {
+                    Ok(child) => {
+                        map_size(child)
+                        drop(child)
+                        drop(base)
+                        drop(payload)
+                        0
+                    },
+                    Err(status) => {
+                        drop(base)
+                        drop(payload)
+                        status
+                    },
+                }
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            status
+        },
+    }
+}

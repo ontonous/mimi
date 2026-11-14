@@ -1,0 +1,113 @@
+--- w2_document_core.mimi
++++ w2_document_core.mimi
+@@ -21,6 +21,16 @@
+     revision_id: i32,
+     parent_revision: i32,
+     nodes: List<DocumentNode>,
++}
++// Undo history stores the changed value and revision identity, not a full
++// copy of the node tree. Applying an inverse edit materializes the old view.
++type EditDelta {
++    node_id: NodeId,
++    before_text: string,
++    after_text: string,
++    from_revision: i32,
++    from_parent_revision: i32,
++    to_revision: i32,
+ }
+ type EditorView { cursor: NodeId, layout_epoch: i32 }
+ type PublishReceipt {
+@@ -242,21 +252,41 @@
+ }
+ 
+ flow DocumentSession {
+-    state Open { document_id: i32, current: Revision, undo: List<Revision> }
++    state Open { document_id: i32, current: Revision, undo: List<EditDelta> }
+     state Closed { document_id: i32, final_revision: Revision }
+ 
+-    transition edit(Open, next: Revision) -> Open {
+-        let mut history: List<Revision> = []
++    transition edit(Open, next: Revision, delta: EditDelta) -> Open {
++        let mut history: List<EditDelta> = []
+         for saved in self.undo { push(history, saved) }
+-        push(history, self.current)
++        push(history, delta)
+         return Open { document_id: self.document_id, current: next, undo: history }
+     }
+ 
+     transition undo(Open) -> Open {
+-        // The caller can only request this operation after an edit. The undo
+-        // payload is retained as immutable revisions, not mutated in place.
++        // Reverse only the latest recorded edit. The prior snapshot remains
++        // an immutable value, while the current tree is rebuilt on demand.
+         let last = len(self.undo) - 1
+-        let restored = self.undo[last]
++        let delta = self.undo[last]
++        let mut restored_nodes: List<DocumentNode> = []
++        for node in self.current.nodes {
++            if self.current.revision_id == delta.to_revision && same_node_id(node.id, delta.node_id) && node.text == delta.after_text {
++                push(restored_nodes, DocumentNode {
++                    id: node.id,
++                    parent_slot: node.parent_slot,
++                    kind: node.kind,
++                    text: delta.before_text,
++                    alive: node.alive,
++                })
++            } else {
++                push(restored_nodes, node)
++            }
++        }
++        let restored = Revision {
++            document_id: self.current.document_id,
++            revision_id: delta.from_revision,
++            parent_revision: delta.from_parent_revision,
++            nodes: restored_nodes,
++        }
+         let history = self.undo[0..last]
+         return Open { document_id: self.document_id, current: restored, undo: history }
+     }
+@@ -300,14 +330,31 @@
+     let revision_a_ok = revision_a_result.1
+     let snapshot_s1 = copy_snapshot(revision_a)
+     let session_zero = Open { document_id: document_id, current: revision_zero, undo: [] }
+-    let session_a = DocumentSession::edit(session_zero, revision_a)
++    let delta_a = EditDelta {
++        node_id: body_id,
++        before_text: "Draft",
++        after_text: "A",
++        from_revision: revision_zero.revision_id,
++        from_parent_revision: revision_zero.parent_revision,
++        to_revision: revision_a.revision_id,
++    }
++    let session_a = DocumentSession::edit(session_zero, revision_a, delta_a)
+     let revision_b_result = match edit_node(session_a.current, body_id, "B") {
+         Ok(revision) => (revision, true),
+         Err(_) => (session_a.current, false),
+     }
+     let revision_b = revision_b_result.0
+     let revision_b_ok = revision_b_result.1
+-    let session_b = DocumentSession::edit(session_a, revision_b)
++    let delta_b = EditDelta {
++        node_id: body_id,
++        before_text: "A",
++        after_text: "B",
++        from_revision: revision_a.revision_id,
++        from_parent_revision: revision_a.parent_revision,
++        to_revision: revision_b.revision_id,
++    }
++    let session_b = DocumentSession::edit(session_a, revision_b, delta_b)
++    let session_b_delta_count = len(session_b.undo)
+     let session_after_undo = DocumentSession::undo(session_b)
+ 
+     // The generation is part of NodeId identity. The stale generation has a
+@@ -371,7 +418,9 @@
+         Ok(revision) => match node_text(revision, body_id) { Ok(text) => text == "B", Err(_) => false },
+         Err(_) => false,
+     }
+-    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 &&
++    let delta_undo_ok = session_b_delta_count == 2 && len(session_after_undo.undo) == 1 &&
++        session_after_undo.current.revision_id == revision_a.revision_id
++    let check = stale_rejected && deleted_id_rejected && view1.layout_epoch == 1 && delta_undo_ok &&
+         closed.document_id == document_id &&
+         node_text(closed_revision, body_id) == Ok("A") &&
+         revision_a_ok && revision_b_ok && output_ok && snapshot_ok && edited_b_ok && autosave_ok && export_ok

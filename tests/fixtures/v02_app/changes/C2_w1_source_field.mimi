@@ -1,0 +1,8 @@
+// C2: add an explicit source field to the report.
+func main() -> i32 {
+    let raw = "{\"name\":\"demo\",\"retries\":3}"
+    if !json_is_valid(raw) { return 2 }
+    let report = "source=primary;name=" + json_get_string(raw, "name") + ";retries=" + to_string(json_get_int(raw, "retries"))
+    println(report)
+    0
+}

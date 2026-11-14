@@ -4,24 +4,27 @@
 cap FileReadCap;
 cap FileWriteCap;
 
-actor Counter {
-    count: i32 = 0;
+flow CounterState {
+    state Active { count: i32 }
 
-    func increment() {
-        self.count = self.count + 1;
+    transition increment(Active) -> Active {
+        return Active { count: self.count + 1 }
     }
 
-    func get_count() -> i32 {
-        return self.count;
+    transition get_count(Active) -> Active {
+        return Active { count: self.count }
     }
 }
+
+actor Counter runs CounterState {}
 
 func main() -> i32 {
     println("=== Actor ===");
     let c = Counter.spawn();
     c.increment();
     c.increment();
-    println("count =", c.get_count());
+    let count = c.get_count();
+    println("count =", count.count);
 
     println("=== cap 声明 ===");
     println("cap types: FileReadCap, FileWriteCap");

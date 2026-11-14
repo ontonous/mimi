@@ -42,7 +42,7 @@ fn native_build_route_census(stderr: &[u8]) -> BTreeMap<String, String> {
 fn static_generic_trait_specialization_runs_through_default_and_explicit_mir_cli_routes() {
     let mimi = mimi_bin();
     let source = fixture();
-    let expected_stdout = "22\n11\n";
+    let expected_stdout = "33\n22\n11\n";
 
     let default = Command::new(&mimi)
         .env("MIMI_ROUTE_CENSUS", "1")
@@ -197,7 +197,7 @@ fn static_generic_trait_build_receipt_tracks_the_native_artifact_on_both_routes(
             "native artifact failed: {}",
             String::from_utf8_lossy(&native.stderr)
         );
-        assert_eq!(String::from_utf8_lossy(&native.stdout), "22\n11\n");
+        assert_eq!(String::from_utf8_lossy(&native.stdout), "33\n22\n11\n");
     }
 
     std::fs::remove_dir_all(&artifact_dir).expect("remove native build census directory");

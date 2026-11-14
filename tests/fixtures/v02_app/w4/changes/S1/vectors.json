@@ -1,0 +1,13 @@
+{
+  "same_symbol": "w4_checksum",
+  "same_signature": "int32_t(int32_t)",
+  "vectors": [
+    {"input": 0, "result": 17},
+    {"input": 20, "result": 417},
+    {"input": 21, "result": 458},
+    {"input": 999, "result": 998018},
+    {"input": 1000, "result": -2},
+    {"input": -1, "result": -2}
+  ],
+  "required_regression": "full W4 event order, two client transcript, C error mapping, and export ABI"
+}

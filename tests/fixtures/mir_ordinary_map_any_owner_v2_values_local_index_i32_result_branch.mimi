@@ -1,0 +1,24 @@
+func main() -> i32 {
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "answer", 41) {
+                Ok(root) => {
+                    let snapshot = values(root)
+                    let index: i32 = 0
+                    let item = snapshot[index] as i32
+                    drop(snapshot)
+                    drop(empty)
+                    drop(root)
+                    item
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            status
+        },
+    }
+}

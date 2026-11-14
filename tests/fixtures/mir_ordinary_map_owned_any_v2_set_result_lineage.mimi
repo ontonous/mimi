@@ -1,0 +1,23 @@
+// Exact first SetResult lineage profile: both recoverable Map operations
+// return Result values, and each root is settled on every reachable branch.
+func main() -> i32 {
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let changed = map_set(root, "answer", 42)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let size = map_size(updated)
+                    drop(updated)
+                    size
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
+}

@@ -1,0 +1,32 @@
+// This user-defined same-name helper intentionally omits whole-pair settlement.
+func get_or_default<T>(m: Record, key: string, default: T) -> T {
+    let pair = map_get(m, key)
+    let selected = if pair.0 { pair.1 } else { default }
+    selected
+}
+
+func main() -> i32 {
+    let empty_result = map_new()
+    match empty_result {
+        Ok(empty) => {
+            let root_result = map_set(empty, "hits", "stored")
+            match root_result {
+                Ok(root) => {
+                    let observed = get_or_default::<string>(root, "hits", "fallback")
+                    println(observed)
+                    drop(observed)
+                    drop(empty)
+                    drop(root)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
+            }
+        },
+        Err(status) => {
+            status
+        },
+    }
+}

@@ -1,23 +1,28 @@
-// Full test of actor functionality - spawn and method calls
+// Full test of actor functionality - spawn and Flow-backed state transitions.
 
-actor Counter {
-    count: i32 = 0;
+flow CounterState {
+    state Active { count: i32 }
 
-    func increment() {
-        self.count = self.count + 1;
+    transition increment(Active) -> Active {
+        return Active { count: self.count + 1 }
     }
 
-    func get_count() -> i32 {
-        return self.count;
+    transition get_count(Active) -> Active {
+        return Active { count: self.count }
     }
 }
 
+actor Counter runs CounterState {}
+
 func main() -> i32 {
     let c = Counter.spawn();
-    println(c.get_count());
+    let initial = c.get_count();
+    println(initial.count);
     c.increment();
-    println(c.get_count());
+    let after_first = c.get_count();
+    println(after_first.count);
     c.increment();
-    println(c.get_count());
+    let after_second = c.get_count();
+    println(after_second.count);
     42
 }

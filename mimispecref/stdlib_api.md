@@ -3,7 +3,7 @@
 > Auto-generated from `mimi/std/*.mimi`. Do not edit manually.
 
 
-> **379 public functions + constants across 23 modules.**
+> **381 public functions + constants across 24 modules.**
 
 
 ## `array` (16)
@@ -70,6 +70,12 @@
 - `pub func min_index(xs: List<i32>) -> i32` — min_index: Returns the index of the minimum element (-1 if empty).
 - `pub func max_index(xs: List<i32>) -> i32` — max_index: Returns the index of the maximum element (-1 if empty).
 
+## `collections_core` (3)
+
+- `pub func list_len<T>(xs: List<T>) -> i32` — list_len takes a List<T> by value and returns its element count.
+- `pub func list_reverse<T>(xs: List<T>) -> List<T>` — list_reverse consumes its List<T> receiver and returns the reversed List<T>.
+- `pub func list_concat<T>(xs: List<T>, ys: List<T>) -> List<T>` — list_concat consumes both Lists and returns their concatenation.
+
 ## `crypto` (5)
 
 - `pub func is_valid_hex(s: string) -> bool` — is_valid_hex: Returns true if s is valid hexadecimal.
@@ -126,12 +132,11 @@
 - `pub func first_arg() -> string` — first_arg: Returns the first CLI argument, or "" if none.
 - `pub func set_var(key: string, value: string) -> bool` — set_var: Sets an environment variable. Returns true on success.
 
-## `errors` (6)
+## `errors` (5)
 
 - `pub func fs_error_to_string(e: FsError) -> string` — fs_error_to_string: Convert FsError to a human-readable string.
 - `pub func json_error_to_string(e: JsonError) -> string` — json_error_to_string: Convert JsonError to a human-readable string.
 - `pub func collection_error_to_string(e: CollectionError) -> string` — collection_error_to_string: Convert CollectionError to a human-readable string.
-- `pub func net_error_to_string(e: NetError) -> string` — net_error_to_string: Convert NetError to a human-readable string.
 - `pub func math_error_to_string(e: MathError) -> string` — math_error_to_string: Convert MathError to a human-readable string.
 - `pub func app_error_to_string(e: AppError) -> string` — app_error_to_string: Convert AppError to a human-readable string.
 
@@ -193,21 +198,21 @@
 
 ## `maps` (15)
 
-- `pub func new() -> Record` — new: Creates an empty Record (map).
+- `pub func new() -> Result<Record, i32>` — new: Creates an empty Record (map).
 - `pub func get(m: Record, key: string) -> (bool, Any)` — get: Looks up key in map m. Returns (found, value).
-- `pub func set(m: Record, key: string, value: Any) -> Record` — set: Sets key to value in map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
+- `pub func set(m: Record, key: string, value: Any) -> Result<Record, i32>` — set: Sets key to value in map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
 - `pub func has_key(m: Record, key: string) -> bool` — has_key: Returns true if key exists in m.
-- `pub func remove(m: Record, key: string) -> Record` — remove: Removes key from map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
+- `pub func remove(m: Record, key: string) -> Result<Record, i32>` — remove: Removes key from map m, returns updated map. Preserves the original map on both VM and native backends by copying first.
 - `pub func size(m: Record) -> i32` — size: Returns the number of entries in map m.
 - `pub func from_list(pairs: List<(string, Any)>) -> Record` — from_list: Creates a map from a list of (key, value) pairs.
-- `pub func get_or_default(m: Record, key: string, default: Any) -> Any` — get_or_default: Looks up key, returns default if not found.
-- `pub func merge(a: Record, b: Record) -> Record` — merge: Returns a new map with all entries from a and b (b overwrites a).
+- `pub func get_or_default<T>(m: Record, key: string, default: T) -> T` — get_or_default: Looks up key, returns default if not found. 0.39.136: generic over the default's type — `get_or_default(m, k, 0)` now typechecks arithmetic from the default expression. This does NOT prove that an existing Map entry has type T: ordinary Map values currently erase their tags. The VM preserves the stored dynamic value, while native codegen rejects reachable DynamicAnyUnpack with E0722 until a checked tag/owner descriptor exists. Do not treat the generic signature as a runtime cast.
+- `pub func merge(a: Record, b: Record) -> Result<Record, i32>` — merge: Returns a new map with all entries from a and b (b overwrites a).
 - `pub func to_list(m: Record) -> List<(string, Any)>` — to_list: Converts a map to a list of (key, value) pairs.
-- `pub func filter_keys(m: Record, pred: func(string) -> bool) -> Record` — filter_keys: Returns a new map with only keys satisfying pred.
-- `pub func map_values(m: Record, f: func(Any) -> Any) -> Record` — map_values: Returns a new map with f applied to each value.
-- `pub func update(m: Record, key: string, f: func(Any) -> Any) -> Record` — update: Applies f to the value at key, returns updated map.
-- `pub func pick(m: Record, ks: List<string>) -> Record` — pick: Returns a new map with only the specified keys.
-- `pub func omit(m: Record, ks: List<string>) -> Record` — omit: Returns a new map without the specified keys.
+- `pub func filter_keys(m: Record, pred: func(string) -> bool) -> Result<Record, i32>` — filter_keys: Returns a new map with only keys satisfying pred.
+- `pub func map_values(m: Record, f: func(Any) -> Any) -> Result<Record, i32>` — map_values: Returns a new map with f applied to each value.
+- `pub func update(m: Record, key: string, f: func(Any) -> Any) -> Result<Record, i32>` — update: Applies f to the value at key, returns updated map.
+- `pub func pick(m: Record, ks: List<string>) -> Result<Record, i32>` — pick: Returns a new map with only the specified keys.
+- `pub func omit(m: Record, ks: List<string>) -> Result<Record, i32>` — omit: Returns a new map without the specified keys.
 
 ## `mymath` (61)
 
@@ -275,7 +280,7 @@
 
 ## `net` (14)
 
-- `pub func tcp_socket() -> i64` — tcp_socket: Creates a TCP socket. Returns fd or negative on error.
+- `pub func tcp_socket() -> Result<i64, NetError>` — tcp_socket: Creates a TCP socket. Maps a negative builtin fd to SocketCreate.
 - `pub func tcp_connect(host: string, port: i32) -> Result<i64, NetError>` — tcp_connect: Connects to host:port over TCP. Returns fd on success.
 - `pub func tcp_listen(port: i32, backlog: i32) -> Result<i64, NetError>` — tcp_listen: Listens on port with backlog. Returns fd on success.
 - `pub func tcp_accept(fd: i64) -> Result<i64, NetError>` — tcp_accept: Accepts a connection on a listening socket fd.
@@ -357,13 +362,13 @@
 
 ## `set` (7)
 
-- `pub func insert(s: Set, value: Any) -> Set` — insert: Returns a set with value added.
-- `pub func set_size(s: Set) -> i32` — set_size: Number of elements in the set.
-- `pub func set_is_empty(s: Set) -> bool` — set_is_empty: True when the set has no elements.
-- `pub func set_contains(s: Set, value: Any) -> bool` — set_contains: True when value is a member of the set.
-- `pub func set_insert(s: Set, value: Any) -> Set` — set_insert: Returns a set with value added.
-- `pub func set_remove(s: Set, value: Any) -> Set` — set_remove: Returns a set with value removed.
-- `pub func set_to_list(s: Set) -> List` — set_to_list: Converts the set to a list of elements.
+- `pub func insert<T>(s: Set<T>, value: T) -> Set<T>` — insert: Returns a set with value added.
+- `pub func set_size<T>(s: Set<T>) -> i32` — set_size: Number of elements in the set.
+- `pub func set_is_empty<T>(s: Set<T>) -> bool` — set_is_empty: True when the set has no elements.
+- `pub func set_contains<T>(s: Set<T>, value: T) -> bool` — set_contains: True when value is a member of the set.
+- `pub func set_insert<T>(s: Set<T>, value: T) -> Set<T>` — set_insert: Returns a set with value added.
+- `pub func set_remove<T>(s: Set<T>, value: T) -> Set<T>` — set_remove: Returns a set with value removed.
+- `pub func set_to_list<T>(s: Set<T>) -> List<T>` — set_to_list: Converts the set to a list of elements.
 
 ## `strings` (48)
 
@@ -422,7 +427,7 @@
 - `pub func render(template: string, lookup: func(string) -> string) -> string` — render: Replaces {{key}} with values from a lookup function.
 - `pub func lookup_with_default(vars: Record, key: string, default_val: string) -> string` — Returns the string value for key, or default_val when the key is absent.
 - `pub func render_with_defaults(template: string, vars: Record, default_val: string) -> string` — render_with_defaults: Like render, but returns default for unknown keys.
-- `pub func render_csv(template: string, rows: List<List<string>>) -> string` — render_csv: Renders CSV rows using {{col_0}}, {{col_1}}, etc.
+- `pub func render_csv(template: string, rows: List<List<string>>) -> Result<string, i32>` — render_csv: Renders CSV rows using {{col_0}}, {{col_1}}, etc.
 
 ## `testing` (7)
 

@@ -1,1 +1,5 @@
-func main() -> f64 { min(1.0, 2.0) }
+func min_f64_rejected() -> f64 { min(1.0, 2.0) }
+
+func main() -> i32 {
+    if min_f64_rejected() > 0.0 { 42 } else { 0 }
+}

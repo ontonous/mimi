@@ -1,9 +1,31 @@
 use std::template
+use std::maps
+
+func make_vars() -> Result<Record, i32> {
+    match new() {
+        Ok(vars) => match set(vars, "name", "Mimi") {
+            Ok(updated) => {
+                drop(vars)
+                Ok(updated)
+            },
+            Err(status) => {
+                drop(vars)
+                Err(status)
+            },
+        },
+        Err(status) => Err(status),
+    }
+}
 
 func main() -> i32 {
-    let vars = map_new()
-    let vars2 = map_set(vars, "name", "Mimi")
-    let result = simple_render("Hello {{name}}!", vars2)
-    // Verify the function returns the correct rendered string
-    if result == "Hello Mimi!" { 0 } else { 1 }
+    match make_vars() {
+        Ok(vars) => {
+            let result = simple_render("Hello {{name}}!", vars)
+            match render_csv("Hello {{col_0}}!", [["Mimi"]]) {
+                Ok(csv_result) => if result == "Hello Mimi!" && csv_result == "Hello Mimi!" { 0 } else { 1 }
+                Err(status) => status
+            }
+        }
+        Err(status) => status
+    }
 }

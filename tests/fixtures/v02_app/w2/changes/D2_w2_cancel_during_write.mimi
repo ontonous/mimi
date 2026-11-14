@@ -1,0 +1,214 @@
+// SEQ-W2/D2: a deterministic writer has already persisted chunk 1 to its
+// temporary output when cancellation arrives. The request moves the task into
+// CancelRequested; the snapshot/temp remain owned until the writer confirms
+// stop, cleanup completes, and the original task reaches Cancelled. The
+// retained snapshot is then submitted by RetryOwner as a new export task.
+
+type NodeId { store_id: i32, slot: i32, generation: i32 }
+type DocumentNode { id: NodeId, parent_slot: i32, kind: string, text: string, alive: bool }
+type Revision { document_id: i32, revision_id: i32, nodes: List<DocumentNode> }
+type CancelReceipt { task_id: i32, revision_id: i32, retry_owner: string, temporary_path: string }
+type CleanupFailure { task_id: i32, revision_id: i32, cleanup_owner: string, temporary_path: string, error: string }
+type CancelTerminal { Cancelled(CancelReceipt) | CancelFailed(CleanupFailure) }
+type RetryReceipt { task_id: i32, revision_id: i32, destination: string, contents: string, published: bool, cleanup_error: string, cleanup_owner: string, temporary_path: string }
+type RetryError { StageWrite(string) | StageRead(string) | ChecksumMismatch | PublishWrite(string) | Cleanup(string, string, string) }
+type RetryOutcome { RetryPublished(RetryReceipt) | RetryFailed(RetryError) }
+
+func serialize_revision(revision: Revision) -> string {
+    let mut contents = "document=" + to_string(revision.document_id) + "\n"
+    contents = contents + "revision=" + to_string(revision.revision_id) + "\n"
+    for node in revision.nodes {
+        if node.alive { contents = contents + to_string(node.id.slot) + ":" + node.kind + ":" + node.text + "\n" }
+    }
+    contents
+}
+
+func write_outcome(path: string, contents: string) -> (bool, string) {
+    match write_file(path, contents) {
+        Ok(_) => (true, ""),
+        Err(error) => (false, error),
+    }
+}
+
+func read_outcome(path: string) -> (bool, string) {
+    match read_file(path) {
+        Ok(contents) => (true, contents),
+        Err(error) => (false, error),
+    }
+}
+
+func retry_export(task_id: i32, revision: Revision, temporary_path: string, destination: string) -> RetryOutcome {
+    let contents = serialize_revision(revision)
+    let stage = write_outcome(temporary_path, contents)
+    if !stage.0 { return RetryFailed(StageWrite(stage.1)) }
+    let readback = read_outcome(temporary_path)
+    if !readback.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return RetryFailed(StageRead(readback.1)) }
+        return RetryFailed(Cleanup("read failed; temporary output retained", temporary_path, "RetryOwner"))
+    }
+    if readback.1 != contents {
+        let removed = remove_file(temporary_path)
+        if removed { return RetryFailed(ChecksumMismatch) }
+        return RetryFailed(Cleanup("checksum mismatch; temporary output retained", temporary_path, "RetryOwner"))
+    }
+    let published = write_outcome(destination, readback.1)
+    if !published.0 {
+        let removed = remove_file(temporary_path)
+        if removed { return RetryFailed(PublishWrite(published.1)) }
+        return RetryFailed(Cleanup("publish failed; temporary output retained", temporary_path, "RetryOwner"))
+    }
+    let removed = remove_file(temporary_path)
+    let cleanup_error = if removed { "" } else { "CleanupFailed: destination written; temporary output retained" }
+    let cleanup_owner = if removed { "" } else { "RetryOwner" }
+    RetryPublished(RetryReceipt {
+        task_id: task_id,
+        revision_id: revision.revision_id,
+        destination: destination,
+        contents: contents,
+        published: true,
+        cleanup_error: cleanup_error,
+        cleanup_owner: cleanup_owner,
+        temporary_path: temporary_path,
+    })
+}
+
+flow CancelledWrite {
+    state D2Writing { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, completed_chunks: i32, total_chunks: i32 }
+    state D2CancelRequested { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, completed_chunks: i32, total_chunks: i32, requester: string }
+    state D2CleanupPending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, completed_chunks: i32, total_chunks: i32, cleanup_owner: string }
+    state D2CleanupReady { task_id: i32, snapshot: Revision, temporary_path: string, destination: string, cleanup_owner: string }
+    state D2CancelSettled { task_id: i32, terminal: CancelTerminal }
+
+    transition request_cancel(D2Writing, requester: string) -> D2CancelRequested {
+        return D2CancelRequested {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            completed_chunks: self.completed_chunks,
+            total_chunks: self.total_chunks,
+            requester: requester,
+        }
+    }
+    transition handoff(D2CancelRequested, cleanup_owner: string) -> D2CleanupPending {
+        return D2CleanupPending {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            completed_chunks: self.completed_chunks,
+            total_chunks: self.total_chunks,
+            cleanup_owner: cleanup_owner,
+        }
+    }
+    transition acknowledge_stop(D2CleanupPending) -> D2CleanupReady {
+        return D2CleanupReady {
+            task_id: self.task_id,
+            snapshot: self.snapshot,
+            temporary_path: self.temporary_path,
+            destination: self.destination,
+            cleanup_owner: self.cleanup_owner,
+        }
+    }
+    transition settle_cleanup(D2CleanupReady, removed: bool) -> D2CancelSettled {
+        if removed {
+            return D2CancelSettled {
+                task_id: self.task_id,
+                terminal: Cancelled(CancelReceipt {
+                    task_id: self.task_id,
+                    revision_id: self.snapshot.revision_id,
+                    retry_owner: self.cleanup_owner,
+                    temporary_path: self.temporary_path,
+                }),
+            }
+        }
+        return D2CancelSettled {
+            task_id: self.task_id,
+                terminal: CancelFailed(CleanupFailure {
+                task_id: self.task_id,
+                revision_id: self.snapshot.revision_id,
+                cleanup_owner: self.cleanup_owner,
+                temporary_path: self.temporary_path,
+                error: "temporary output could not be removed",
+            }),
+        }
+    }
+}
+
+flow RetryTask {
+    state D2RetryPending { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
+    state D2RetryWriting { task_id: i32, snapshot: Revision, temporary_path: string, destination: string }
+    state D2RetrySettled { task_id: i32, outcome: RetryOutcome }
+
+    transition begin(D2RetryPending) -> D2RetryWriting {
+        return D2RetryWriting { task_id: self.task_id, snapshot: self.snapshot, temporary_path: self.temporary_path, destination: self.destination }
+    }
+    transition settle(D2RetryWriting, outcome: RetryOutcome) -> D2RetrySettled {
+        return D2RetrySettled { task_id: self.task_id, outcome: outcome }
+    }
+}
+
+func main() -> i32 {
+    let document_id = 7
+    let body_id = NodeId { store_id: document_id, slot: 1, generation: 1 }
+    let snapshot = Revision {
+        document_id: document_id,
+        revision_id: 1,
+        nodes: [DocumentNode { id: body_id, parent_slot: 0, kind: "paragraph", text: "A", alive: true }],
+    }
+    let cancelled_temp = "/tmp/mimi-v02-w2-d2-incomplete.tmp"
+    let cancelled_destination = "/tmp/mimi-v02-w2-d2-never-published.txt"
+
+    // Chunk 1 exists while the original writer is in Writing. Chunk 2 is
+    // deliberately never appended, and no destination write occurs.
+    let first_chunk = write_outcome(cancelled_temp, "header; revision=1\n")
+    if !first_chunk.0 { return 1 }
+    let writing = D2Writing {
+        task_id: 301,
+        snapshot: snapshot,
+        temporary_path: cancelled_temp,
+        destination: cancelled_destination,
+        completed_chunks: 1,
+        total_chunks: 2,
+    }
+    let requested = CancelledWrite::request_cancel(writing, "user")
+    let cleanup_owner = CancelledWrite::handoff(requested, "RetryOwner")
+    let partial_still_owned = file_exists(cleanup_owner.temporary_path)
+    let ready = CancelledWrite::acknowledge_stop(cleanup_owner)
+    let removed = remove_file(ready.temporary_path)
+    let settled = CancelledWrite::settle_cleanup(ready, removed)
+    let cancel_result = settled.terminal
+
+    let retry_temp = "/tmp/mimi-v02-w2-d2-retry.tmp"
+    let retry_destination = "/tmp/mimi-v02-w2-d2-published.txt"
+    let retry_writing = RetryTask::begin(D2RetryPending {
+        task_id: 302,
+        snapshot: snapshot,
+        temporary_path: retry_temp,
+        destination: retry_destination,
+    })
+    let retry_outcome = retry_export(302, snapshot, retry_temp, retry_destination)
+    let retry_settled = RetryTask::settle(retry_writing, retry_outcome)
+    let retry_result = retry_settled.outcome
+
+    let cancelled_and_retry_owned = match cancel_result {
+        Cancelled(receipt) => receipt.task_id == 301 && receipt.retry_owner == "RetryOwner" && partial_still_owned,
+        CancelFailed(_) => false,
+    }
+    let retry_published = match retry_result {
+        RetryPublished(receipt) => receipt.task_id == 302 && receipt.published && receipt.cleanup_error == "" && receipt.cleanup_owner == "" &&
+            receipt.contents == match read_file(receipt.destination) { Ok(text) => text, Err(_) => "" },
+        RetryFailed(_) => false,
+    }
+    let no_partial_publication = !file_exists(cancelled_destination)
+    remove_file(retry_destination)
+    remove_file(retry_temp)
+    if cancelled_and_retry_owned && retry_published && no_partial_publication {
+        println("Cancelled")
+        println("Retryable")
+        0
+    } else {
+        1
+    }
+}
