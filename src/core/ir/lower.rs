@@ -8863,12 +8863,28 @@ mod tests {
         let file = parse(
             r#"
 func main() -> i32 {
-    let empty = map_new()
-    let pair = map_get(empty, "missing")
-    let value = pair.1 as i32
-    drop(pair)
-    drop(empty)
-    value
+    let created = map_new()
+    match created {
+        Ok(root) => {
+            let changed = map_set(root, "answer", 42)
+            match changed {
+                Ok(updated) => {
+                    drop(root)
+                    let pair = map_get(updated, "answer")
+                    let found = pair.0
+                    let payload = unpack_i32(pair.1)
+                    drop(pair)
+                    drop(updated)
+                    if found { payload } else { 0 }
+                },
+                Err(status) => {
+                    drop(root)
+                    status
+                },
+            }
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -8876,10 +8892,28 @@ func main() -> i32 {
         let body = program
             .resolved_body(&NodeId("function:main".into()))
             .expect("resolved main body");
+        let ResolvedExprKind::Match {
+            arms: outer_arms, ..
+        } = &body.root.result.as_ref().expect("outer match").kind
+        else {
+            panic!("outer map_new match expected");
+        };
+        let ResolvedExprKind::Block(root_arm_block) = &outer_arms[0].body.kind else {
+            panic!("outer Ok arm block expected");
+        };
+        let ResolvedExprKind::Match {
+            arms: inner_arms, ..
+        } = &root_arm_block.result.as_ref().expect("inner match").kind
+        else {
+            panic!("inner map_set match expected");
+        };
+        let ResolvedExprKind::Block(ok_block) = &inner_arms[0].body.kind else {
+            panic!("Ok arm block expected");
+        };
         let ResolvedStmtKind::Bind {
             initializer: Some(initializer),
             ..
-        } = &body.root.statements[2].kind
+        } = &ok_block.statements[3].kind
         else {
             panic!("explicit unpack binding expected");
         };
@@ -9710,7 +9744,7 @@ func main() -> i32 {
     #[test]
     fn reference_binding_and_shared_read_are_explicit() {
         let file = parse(
-            "func read(value: shared i32) -> i32 { value }\nfunc main() -> i32 { arena { let ref value = 42; *value } }",
+            "func read(value: shared i32) -> i32 { value }\nfunc main() -> i32 { arena { let ref value = 42; unsafe { *value } } }",
         );
         let program = crate::core::check_program(&file).expect("check references");
         let read = program
@@ -9824,11 +9858,11 @@ func main() -> i32 {
     #[test]
     fn impl_method_call_closes_protocol_and_impl_callable_identities() {
         let file = parse(
-            "trait Desc { func describe() -> string }\ntype Dog { name: string }\nimpl Desc for Dog { func describe() -> string { self.name } }\nfunc main() -> string { let dog = Dog { name: \"Rex\" }; dog.describe() }",
+            "trait Desc { func describe() -> string }\ntype Dog { name: string }\nimpl Desc for Dog { func describe() -> string { self.name } }\nfunc describe_dog() -> string { let dog = Dog { name: \"Rex\" }; dog.describe() }\nfunc main() -> i32 { let _ = describe_dog(); 0 }",
         );
         let program = crate::core::check_program(&file).expect("check");
         let bodies = lower_checked_function_bodies(&file, &program).expect("lower impl call");
-        let main = &bodies[&NodeId("function:main".into())];
+        let main = &bodies[&NodeId("function:describe_dog".into())];
         let result = main.root.result.as_ref().expect("method result");
         let ResolvedExprKind::Call(call) = &result.kind else {
             panic!("resolved protocol method call expected");
@@ -10076,11 +10110,11 @@ func main() -> i32 { 0 }
     #[test]
     fn nested_callable_body_retains_lexical_captures_and_default_identity() {
         let file = parse(
-            "func main(base: i32) -> i32 { func add(value: i32 = 2) -> i32 { base + value }; add() }",
+            "func outer(base: i32) -> i32 { func add(value: i32 = 2) -> i32 { base + value }; add() }\nfunc main() -> i32 { outer(40) }",
         );
         let program = crate::core::check_program(&file).expect("check nested callable");
         let outer = program
-            .resolved_body(&NodeId("function:main".into()))
+            .resolved_body(&NodeId("function:outer".into()))
             .expect("outer body");
         let ResolvedStmtKind::NestedCallable(nested_owner) = &outer.root.statements[0].kind else {
             panic!("nested declaration expected");
