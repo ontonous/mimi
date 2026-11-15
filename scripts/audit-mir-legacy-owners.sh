@@ -598,8 +598,8 @@ direct_native_ffi_boundary_guard() {
             return
         fi
     done
-    boundary_line="$(printf '%s\n' "$context" | rg -n 'scalar_ffi_boundary_reason\(program\)' | head -n1 | cut -d: -f1)"
-    route_line="$(printf '%s\n' "$context" | rg -n 'try_compile_exact_migrated_mir_island\(program\)' | head -n1 | cut -d: -f1)"
+    boundary_line="$(printf '%s\n' "$context" | awk '!found && /scalar_ffi_boundary_reason\(program\)/ { found = NR } END { if (found) print found }')"
+    route_line="$(printf '%s\n' "$context" | awk '!found && /try_compile_exact_migrated_mir_island\(program\)/ { found = NR } END { if (found) print found }')"
     if [ -z "$boundary_line" ] || [ -z "$route_line" ] || [ "$boundary_line" -ge "$route_line" ]; then
         printf 'owner_audit_error=direct_native_ffi_boundary_guard_not_before_route_probe\n' >&2
         audit_failed=1
@@ -627,9 +627,9 @@ bytecode_vm_canonical_ffi_preflight_order() {
     local worker_execute_line
     local normal_execute_line
     structural_context="$(sed -n '/fn preflight_canonical_program_structure(/,/^    }/p' "$vm")"
-    ffi_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_canonical_ffi_program()?") { print NR; exit }')"
-    frame_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_bytecode_call_frames()?") { print NR; exit }')"
-    any_cfg_validation_line="$(printf '%s\n' "$structural_context" | awk 'index($0, "self.validate_canonical_managed_any_cfg_program()") { print NR; exit }')"
+    ffi_validation_line="$(printf '%s\n' "$structural_context" | awk '!found && index($0, "self.validate_canonical_ffi_program()?") { found = NR } END { if (found) print found }')"
+    frame_validation_line="$(printf '%s\n' "$structural_context" | awk '!found && index($0, "self.validate_bytecode_call_frames()?") { found = NR } END { if (found) print found }')"
+    any_cfg_validation_line="$(printf '%s\n' "$structural_context" | awk '!found && index($0, "self.validate_canonical_managed_any_cfg_program()") { found = NR } END { if (found) print found }')"
     if [ -z "$structural_context" ] || [ -z "$ffi_validation_line" ] \
         || [ -z "$frame_validation_line" ] || [ -z "$any_cfg_validation_line" ] \
         || [ "$ffi_validation_line" -ge "$frame_validation_line" ] \
@@ -639,12 +639,12 @@ bytecode_vm_canonical_ffi_preflight_order() {
         return
     fi
     execution_context="$(sed -n '/fn with_canonical_actor_execution/,/Counters are observational/p' "$vm")"
-    structure_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "self.preflight_canonical_program_structure()?") { print NR; exit }')"
-    begin_line="$(printf '%s\n' "$execution_context" | awk 'index($0, ".begin_execution(&self.program, self.max_children)?") { print NR; exit }')"
-    worker_symbol_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "self.preflight_canonical_ffi_symbols()?") { print NR; exit }')"
-    normal_symbol_line="$(printf '%s\n' "$execution_context" | awk 'index($0, "match self.preflight_canonical_ffi_symbols()") { print NR; exit }')"
-    worker_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$worker_symbol_line" 'NR > symbol_line && index($0, "return execute(self);") { print NR; exit }')"
-    normal_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$normal_symbol_line" 'NR > symbol_line && index($0, "Ok(()) => execute(self),") { print NR; exit }')"
+    structure_line="$(printf '%s\n' "$execution_context" | awk '!found && index($0, "self.preflight_canonical_program_structure()?") { found = NR } END { if (found) print found }')"
+    begin_line="$(printf '%s\n' "$execution_context" | awk '!found && index($0, ".begin_execution(&self.program, self.max_children)?") { found = NR } END { if (found) print found }')"
+    worker_symbol_line="$(printf '%s\n' "$execution_context" | awk '!found && index($0, "self.preflight_canonical_ffi_symbols()?") { found = NR } END { if (found) print found }')"
+    normal_symbol_line="$(printf '%s\n' "$execution_context" | awk '!found && index($0, "match self.preflight_canonical_ffi_symbols()") { found = NR } END { if (found) print found }')"
+    worker_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$worker_symbol_line" '!found && NR > symbol_line && index($0, "return execute(self);") { found = NR } END { if (found) print found }')"
+    normal_execute_line="$(printf '%s\n' "$execution_context" | awk -v symbol_line="$normal_symbol_line" '!found && NR > symbol_line && index($0, "Ok(()) => execute(self),") { found = NR } END { if (found) print found }')"
     if [ -z "$structure_line" ] || [ -z "$begin_line" ] \
         || [ -z "$worker_symbol_line" ] || [ -z "$normal_symbol_line" ] \
         || [ -z "$worker_execute_line" ] || [ -z "$normal_execute_line" ]; then
@@ -1303,11 +1303,11 @@ bytecode_direct_print_route_adapter_binding() {
     inner_handoff_pattern='compile_mir_program_inner\(program,\s*Some\(receipt\),\s*[A-Za-z_][A-Za-z_0-9]*\)'
     inner_call_count="$(printf '%s\n' "$adapter_context" | { rg -o -F 'compile_mir_program_inner(' || true; } | wc -l | tr -d '[:space:]')"
     local profile_line validator_line token_line receipt_line handoff_line
-    profile_line="$(printf '%s\n' "$adapter_context" | rg -n -m1 -U "$direct_print_profile_pattern" | cut -d: -f1 || true)"
-    validator_line="$(printf '%s\n' "$adapter_context" | rg -n -m1 -U "$direct_print_validator_pattern" | cut -d: -f1 || true)"
-    token_line="$(printf '%s\n' "$adapter_context" | rg -n -m1 -U "$direct_print_token_pattern" | cut -d: -f1 || true)"
-    receipt_line="$(printf '%s\n' "$adapter_context" | rg -n -m1 -U "$receipt_validation_pattern" | cut -d: -f1 || true)"
-    handoff_line="$(printf '%s\n' "$adapter_context" | rg -n -m1 -U "$inner_handoff_pattern" | cut -d: -f1 || true)"
+    profile_line="$(printf '%s\n' "$adapter_context" | rg -n -U "$direct_print_profile_pattern" | awk -F: 'NR == 1 { first = $1 } END { if (first != "") print first }' || true)"
+    validator_line="$(printf '%s\n' "$adapter_context" | rg -n -U "$direct_print_validator_pattern" | awk -F: 'NR == 1 { first = $1 } END { if (first != "") print first }' || true)"
+    token_line="$(printf '%s\n' "$adapter_context" | rg -n -U "$direct_print_token_pattern" | awk -F: 'NR == 1 { first = $1 } END { if (first != "") print first }' || true)"
+    receipt_line="$(printf '%s\n' "$adapter_context" | rg -n -U "$receipt_validation_pattern" | awk -F: 'NR == 1 { first = $1 } END { if (first != "") print first }' || true)"
+    handoff_line="$(printf '%s\n' "$adapter_context" | rg -n -U "$inner_handoff_pattern" | awk -F: 'NR == 1 { first = $1 } END { if (first != "") print first }' || true)"
     if [ "$inner_call_count" -ne 1 ] \
         || [ -z "$profile_line" ] || [ -z "$validator_line" ] \
         || [ -z "$token_line" ] || [ -z "$receipt_line" ] || [ -z "$handoff_line" ] \
@@ -2443,8 +2443,8 @@ mir_ffi_capability_order_binding() {
     local capability_line
     local execution_line
     context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
-    capability_line="$(printf '%s\n' "$context" | rg -n -F "$capability_pattern" | head -n 1 | cut -d: -f1 || true)"
-    execution_line="$(printf '%s\n' "$context" | rg -n -F "$execution_pattern" | head -n 1 | cut -d: -f1 || true)"
+    capability_line="$(printf '%s\n' "$context" | awk -v pat="$capability_pattern" '!found && index($0, pat) { found = NR } END { if (found) print found }')"
+    execution_line="$(printf '%s\n' "$context" | awk -v pat="$execution_pattern" '!found && index($0, pat) { found = NR } END { if (found) print found }')"
     if [ -z "$capability_line" ] || [ -z "$execution_line" ]; then
         printf 'owner_audit_error=mir_ffi_capability_order_missing=%s::%s\n' \
             "$source_file" "$start_function" >&2
@@ -2481,8 +2481,8 @@ mir_route_receipt_order_binding() {
     local receipt_line
     local adapter_line
     context="$(sed -n "/${start_function}/,/${end_function}/p" "$ROOT_DIR/$source_file")"
-    receipt_line="$(printf '%s\n' "$context" | rg -n -F "$receipt_pattern" | head -n 1 | cut -d: -f1 || true)"
-    adapter_line="$(printf '%s\n' "$context" | rg -n -F "$adapter_pattern" | head -n 1 | cut -d: -f1 || true)"
+    receipt_line="$(printf '%s\n' "$context" | awk -v pat="$receipt_pattern" '!found && index($0, pat) { found = NR } END { if (found) print found }')"
+    adapter_line="$(printf '%s\n' "$context" | awk -v pat="$adapter_pattern" '!found && index($0, pat) { found = NR } END { if (found) print found }')"
     if [ -z "$receipt_line" ] || [ -z "$adapter_line" ]; then
         printf 'owner_audit_error=mir_route_receipt_order_missing=%s::%s\n' \
             "$source_file" "$start_function" >&2
@@ -2853,7 +2853,7 @@ audit_original_legacy_owner_gates() {
     native_checked_context="$(sed -n '/pub fn compile_checked(/,/fn try_compile_exact_migrated_mir_island(/p' \
         "$ROOT_DIR/src/codegen/compile.rs")"
     if printf '%s\n' "$native_checked_context" \
-        | rg -q '\.legacy_body_file[[:space:]]*\(|\.compile_file_inner[[:space:]]*\(|\.compile_func_legacy[[:space:]]*\(|\.compile_generic_func[[:space:]]*\('; then
+        | rg '\.legacy_body_file[[:space:]]*\(|\.compile_file_inner[[:space:]]*\(|\.compile_func_legacy[[:space:]]*\(|\.compile_generic_func[[:space:]]*\(' >/dev/null; then
         printf 'owner_audit_error=CodegenLegacyRemainder_checked_native_boundary_reopened_AST_emitter\n' >&2
         audit_failed=1
     fi

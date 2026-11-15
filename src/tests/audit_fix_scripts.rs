@@ -252,22 +252,6 @@ fn extract_actor_script_region(script: &str, start: &str, end: &str) -> String {
     region[..end_index].to_owned()
 }
 
-fn extract_actor_python_heredoc(script: &str, command_marker: &str) -> String {
-    let marker_index = script
-        .find(command_marker)
-        .unwrap_or_else(|| panic!("Actor runner source is missing command: {command_marker}"));
-    let command = &script[marker_index..];
-    let body_start = command
-        .find("<<'PY'\n")
-        .map(|index| index + "<<'PY'\n".len())
-        .expect("find Actor runner Python heredoc opener");
-    let body = &command[body_start..];
-    let body_end = body
-        .find("\nPY")
-        .expect("find Actor runner Python heredoc terminator");
-    body[..body_end].to_owned()
-}
-
 fn actor_runner_host_target() -> String {
     let output = std::process::Command::new("rustc")
         .arg("-vV")
@@ -291,10 +275,16 @@ fn actor_runner_cargo_artifact_path_is_bound_to_isolated_host_target() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
         .expect("read Actor current-source runner");
-    let python = extract_actor_python_heredoc(
-        &script,
-        "if ! python3 - \"$gate_dir/stdout.bin\" \"$build_target_dir\" \"$host_target\" \"$gate_dir/mimi.path\" <<'PY'\n",
+    assert!(
+        script.contains("helper_path=\"$ROOT_DIR/scripts/actor_census_build_receipt.py\""),
+        "Actor runner must delegate artifact path validation to actor_census_build_receipt.py"
     );
+    assert!(
+        script.contains("--target-dir \"$build_target_dir\"")
+            && script.contains("--host-target \"$host_target\""),
+        "Actor runner must bind receipt validation to the isolated build_target_dir and native host_target"
+    );
+    let scripts_dir = root.join("scripts");
     let temp = ActorRunnerTempRoot::new();
     let target_root = temp.0.join("isolated-target");
     let host = actor_runner_host_target();
@@ -326,6 +316,17 @@ fn actor_runner_cargo_artifact_path_is_bound_to_isolated_host_target() {
     }
     let cargo_output = temp.0.join("cargo-output.jsonl");
     let path_file = temp.0.join("mimi.path");
+    let python = r#"
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import actor_census_build_receipt as helper
+stdout = pathlib.Path(sys.argv[2]).read_bytes()
+target_dir = pathlib.Path(sys.argv[3])
+host_target = sys.argv[4]
+path_out = pathlib.Path(sys.argv[5])
+exe, _digest = helper._parse_mimi_artifact(stdout, target_dir, host_target)
+path_out.write_text(f"{exe}\n", encoding="utf-8")
+"#;
     let run_path_check = |executable: &Path| {
         let event = serde_json::json!({
             "reason": "compiler-artifact",
@@ -336,7 +337,8 @@ fn actor_runner_cargo_artifact_path_is_bound_to_isolated_host_target() {
             .expect("write fake Cargo compiler-artifact event");
         std::process::Command::new("python3")
             .arg("-c")
-            .arg(&python)
+            .arg(python)
+            .arg(&scripts_dir)
             .arg(&cargo_output)
             .arg(&target_root)
             .arg(&host)
@@ -361,14 +363,23 @@ fn actor_runner_cargo_artifact_path_is_bound_to_isolated_host_target() {
         !escaped.status.success(),
         "shared-target artifact was accepted"
     );
-    assert!(String::from_utf8_lossy(&escaped.stderr).contains("escaped the isolated target"));
+    assert!(
+        String::from_utf8_lossy(&escaped.stderr).contains("escaped the fresh isolated target"),
+        "unexpected escaped-target error: {}",
+        String::from_utf8_lossy(&escaped.stderr)
+    );
 
     let wrong_target = run_path_check(&other_target_executable);
     assert!(
         !wrong_target.status.success(),
         "non-host target artifact was accepted"
     );
-    assert!(String::from_utf8_lossy(&wrong_target.stderr).contains("forced native-host target"));
+    assert!(
+        String::from_utf8_lossy(&wrong_target.stderr)
+            .contains("outside the forced host-target subtree"),
+        "unexpected wrong-target error: {}",
+        String::from_utf8_lossy(&wrong_target.stderr)
+    );
 }
 
 #[test]
@@ -518,25 +529,30 @@ fn actor_runner_memcheck_mkdir_failure_counts_as_gate_failure() {
 }
 
 #[test]
-fn actor_runner_census_schema_v6_is_required() {
+fn actor_runner_census_schema_v9_is_required() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = std::fs::read_to_string(root.join("scripts/verify-actor-two-fixture-current.sh"))
         .expect("read Actor current-source runner");
     let schema_check = extract_actor_script_region(
         &script,
-        "if report.get(\"schema_version\") != \"0.1.11-full-route-census-v6\":\n",
-        "\nif report.get(\"collection_mode\")",
+        "    if value.get(\"schema_version\") != \"0.1.11-full-route-census-v9\":\n",
+        "\n    if value.get(\"collection_mode\")",
     );
     for (schema, expected) in [
-        ("0.1.11-full-route-census-v6", ""),
+        ("0.1.11-full-route-census-v9", ""),
         (
-            "0.1.11-full-route-census-v5",
-            "unexpected census schema version",
+            "0.1.11-full-route-census-v8",
+            "strict full census report has an unexpected census schema version",
         ),
     ] {
         let report_schema = serde_json::to_string(schema).expect("encode test census schema");
         let python = format!(
-            "report = {{\"schema_version\": {report_schema}}}\nissues = []\n{schema_check}\nprint('\\n'.join(issues))\n"
+            "value = {{\"schema_version\": {report_schema}}}\nlabel = \"strict full census report\"\nissues = []\n{check}\nprint('\\n'.join(issues))\n",
+            check = schema_check
+                .lines()
+                .map(|line| line.strip_prefix("    ").unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         let output = std::process::Command::new("python3")
             .arg("-c")
@@ -551,7 +567,7 @@ fn actor_runner_census_schema_v6_is_required() {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout).trim(),
             expected,
-            "unexpected census schema v6 decision for {schema}"
+            "unexpected census schema v9 decision for {schema}"
         );
     }
 }
@@ -4143,8 +4159,8 @@ fn legacy_owner_path_roster_drift_fails_closed() {
     let source_script = std::fs::read_to_string(root.join("scripts/audit-mir-legacy-owners.sh"))
         .expect("read legacy owner audit script");
     let tampered_script = source_script.replacen(
-        "DefaultBytecodeAstCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|",
-        "UnknownBytecodeCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|",
+        "DefaultBytecodeAstCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|tests/legacy_owner_boundary_api.rs|default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts|",
+        "UnknownBytecodeCompatibility|default Legacy route in run/test/disasm; public raw-AST compiler API|tests/legacy_owner_boundary_api.rs|missing_bytecode_compatibility_route_probe|",
         1,
     );
     assert_ne!(
@@ -4183,7 +4199,7 @@ fn legacy_owner_path_roster_drift_fails_closed() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(stderr.contains(
-        "owner_audit_error=UnknownBytecodeCompatibility direct_route_probe_missing=tests/legacy_owner_boundary_api.rs::default_bytecode_compatibility_route_executes_its_named_legacy_disposition_without_artifacts"
+        "owner_audit_error=UnknownBytecodeCompatibility direct_route_probe_missing=tests/legacy_owner_boundary_api.rs::missing_bytecode_compatibility_route_probe"
     ), "tampered owner roster omitted the precise missing-probe diagnostic:\n{stderr}");
     assert!(
         stderr.contains("owner_audit_error=production_path_roster_mismatch expected=DefaultBytecodeAstCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice actual=UnknownBytecodeCompatibility,NativeCheckedCompatibilityBoundary,CheckedVerifierActorProofCompatibility,FfiVerifierOnlyOwnerSlice"),

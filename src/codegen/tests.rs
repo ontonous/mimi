@@ -2622,14 +2622,25 @@ fn compile_checked_rejects_contract_bearing_actor_without_legacy_owner() {
 fn compile_checked_rejects_map_any_borrowed_access_without_legacy_owner() {
     let source = r#"
         func main() -> i32 {
-            let original = map_new()
-            let map = map_set(original, "k", "borrowed text")
-            let found = map_get(map, "k")
-            let borrowed_values = values(map)
-            println(found.0)
-            println(borrowed_values.len())
-            drop(borrowed_values)
-            0
+            match map_new() {
+                Ok(original) => match map_set(original, "k", "borrowed text") {
+                    Ok(map) => {
+                        drop(original)
+                        let found = map_get(map, "k")
+                        let borrowed_values = values(map)
+                        println(found.0)
+                        println(borrowed_values.len())
+                        drop(borrowed_values)
+                        drop(map)
+                        0
+                    },
+                    Err(status) => {
+                        drop(original)
+                        status
+                    },
+                },
+                Err(status) => status,
+            }
         }
     "#;
     let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
@@ -2885,11 +2896,22 @@ fn compile_checked_fails_closed_on_reachable_map_any_unpack() {
 use std::maps
 
 func main() -> i32 {
-    let m = new()
-    let with_text = set(m, "key", "text")
-    let observed = get_or_default(with_text, "key", 0)
-    println(observed)
-    0
+    match new() {
+        Ok(m) => match set(m, "key", "text") {
+            Ok(with_text) => {
+                drop(m)
+                let observed = get_or_default(with_text, "key", 0)
+                println(observed)
+                drop(with_text)
+                0
+            },
+            Err(status) => {
+                drop(m)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#,
     );
