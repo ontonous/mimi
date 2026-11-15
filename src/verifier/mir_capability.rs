@@ -15063,12 +15063,11 @@ func main() -> i32 { 0 }
         .expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("unsupported Option<List<string>> must fail before capability gate");
-        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
-            panic!("unsupported Option<List<string>> reached an unexpected MIR stage");
-        };
-        assert!(errors.iter().any(|error| error.message.contains("List")));
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Option<List<string>> lowers before verifier capability check");
+        let errors = validate_mir_capabilities(&program)
+            .expect_err("unsupported Option<List<string>> must fail verifier capability gate");
+        assert!(errors.iter().any(|error| error.contains("List")));
     }
 
     #[test]

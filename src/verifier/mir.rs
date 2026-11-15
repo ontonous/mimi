@@ -36548,12 +36548,13 @@ func predicate(x: i32, y: i32) -> bool {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let program = MirProgram::from_checked_program(&checked).expect("typed contracts");
-        let mut functions = program.functions().clone();
-        let function = functions
-            .values_mut()
+        let mut untyped = MirProgram::from_checked_program(&checked).expect("typed contracts");
+        let mut function = untyped
+            .functions()
+            .values()
             .find(|function| function.owner.0.ends_with("predicate"))
-            .expect("predicate");
+            .expect("predicate")
+            .clone();
         let contract = function
             .contracts
             .iter_mut()
@@ -36563,8 +36564,7 @@ func predicate(x: i32, y: i32) -> bool {
         let owner = function.owner.clone();
         // Older hand-built predicates retain structural admission, but a
         // missing checked arithmetic width never receives a proof verdict.
-        let untyped = MirProgram::with_type_catalog(functions, program.type_catalog().clone())
-            .expect("legacy scalar-kind structural admission");
+        untyped.replace_function_for_test_only(function);
         let results = verify_program(&untyped, "untyped-div-contract".into())
             .expect("unsupported proof domain is a verdict");
         let result = results
@@ -38395,7 +38395,7 @@ func predicate(x: i32, y: i32) -> bool {
         let source = r#"
             func read(value: i32) -> i32 {
                 ensures: result == value
-                *(&value)
+                unsafe { *(&value) }
             }
 
             func main() -> i32 { 0 }
@@ -38522,7 +38522,7 @@ func predicate(x: i32, y: i32) -> bool {
 
     #[test]
     fn verifier_gate_rejects_mutable_borrow_before_symbolic_consumption() {
-        let source = "func main() -> i32 { let value = 41; (&value); 42 }";
+        let source = "func main() -> i32 { let value = 41; unsafe { *(&value) } }";
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
@@ -38983,12 +38983,19 @@ func predicate(x: i32, y: i32) -> bool {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        let error = MirProgram::from_checked_program(&checked)
-            .expect_err("unsupported Option<List<string>> must fail before verifier");
-        let crate::core::mir::reference::MirProgramBuildError::Validation(errors) = error else {
-            panic!("unsupported Option<List<string>> reached an unexpected MIR stage");
-        };
-        assert!(errors.iter().any(|error| error.message.contains("List")));
+        let program = MirProgram::from_checked_program(&checked)
+            .expect("Option<List<string>> lowers before verifier capability check");
+        let errors = crate::verifier::validate_mir_capabilities(&program)
+            .expect_err("unsupported Option<List<string>> must fail verifier capability gate");
+        assert!(errors.iter().any(|error| error.contains("List")));
+        let results = verify_program(&program, "unsupported-non-copy-variant".into())
+            .expect("unsupported Option<List<string>> surfaces as verifier NITS result");
+        assert!(
+            results.iter().any(|result| {
+                result.status == VerifStatus::NotInTrustedSubset && result.message.contains("List")
+            }),
+            "expected NotInTrustedSubset mentioning List, got {results:?}"
+        );
     }
 
     #[test]
@@ -45753,6 +45760,7 @@ mod ffi_ieee_binary64_verifier_tests {
         let program = canonical(
             r#"
                 #[repr(C)] type FloatPair { value: f64 }
+                func touch(pair: FloatPair) -> FloatPair { pair }
                 func main() -> i64 { 0 }
             "#,
         );
@@ -46493,7 +46501,7 @@ mod ffi_loop_call_worklist_verifier_tests {
                     func at_least_one(value: i32) -> i32 requires: value >= 1;
                 }
                 func caller() -> i32 {
-                    var i = 0
+                    let mut i = 0
                     while i < 1 {
                         invariant: i >= 1
                         i = 0
@@ -46523,7 +46531,7 @@ mod ffi_loop_call_worklist_verifier_tests {
                     func at_least_one(value: i32) -> i32 requires: value >= 1;
                 }
                 func helper() -> i32 {
-                    var i = 0
+                    let mut i = 0
                     while i < 1 {
                         invariant: i >= 1
                         i = 0

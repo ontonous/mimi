@@ -226,8 +226,12 @@ pub(crate) fn direct_variant_projection_fixture() -> DirectVariantProjectionFixt
             ownership: MirOwnershipSummary::default(),
         },
     );
-    let program = MirProgram::with_type_catalog(functions, catalog)
-        .expect("direct variant projection program validation");
+    let mut program = canonical;
+    program.replace_function_for_test_only(
+        functions
+            .remove(&NodeId("function:project".into()))
+            .expect("direct variant projection function"),
+    );
     DirectVariantProjectionFixture {
         program,
         function: NodeId("function:project".into()),
@@ -363,8 +367,12 @@ pub(crate) fn direct_variant_move_projection_fixture() -> DirectVariantMoveProje
             ownership: MirOwnershipSummary::default(),
         },
     );
-    let program = MirProgram::with_type_catalog(functions, catalog)
-        .expect("direct variant move projection program validation");
+    let mut program = canonical;
+    program.replace_function_for_test_only(
+        functions
+            .remove(&NodeId("function:project".into()))
+            .expect("direct variant move projection function"),
+    );
     DirectVariantMoveProjectionFixture {
         program,
         function: NodeId("function:project".into()),
@@ -482,8 +490,12 @@ pub(crate) fn direct_record_move_drop_fixture() -> DirectRecordMoveDropFixture {
             ownership: MirOwnershipSummary::default(),
         },
     );
-    let program = MirProgram::with_type_catalog(functions, catalog)
-        .expect("record move/drop program validation");
+    let mut program = canonical;
+    program.replace_function_for_test_only(
+        functions
+            .remove(&NodeId("function:project".into()))
+            .expect("direct record move/drop function"),
+    );
     DirectRecordMoveDropFixture {
         program,
         function: NodeId("function:project".into()),

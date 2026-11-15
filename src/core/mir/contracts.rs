@@ -6666,10 +6666,15 @@ fn lower_proof_worklist_inner(
         });
     fn block_has_exact_ffi_loop(block: &crate::core::ir::TypedProofBlock) -> bool {
         block.operations.iter().any(|operation| match operation {
-            crate::core::ir::TypedProofOperation::Loop { body, receipt, .. } => {
+            crate::core::ir::TypedProofOperation::Loop {
+                body,
+                stationary,
+                receipt,
+                ..
+            } => {
                 receipt
                     .as_ref()
-                    .is_some_and(|receipt| receipt.ffi_call_path.is_some())
+                    .is_some_and(|receipt| *stationary || receipt.ffi_call_path.is_some())
                     || block_has_exact_ffi_loop(body)
             }
             crate::core::ir::TypedProofOperation::Branch {

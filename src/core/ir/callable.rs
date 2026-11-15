@@ -2204,6 +2204,180 @@ impl ProofPointBuilder<'_> {
         };
         self.scope
             .push(TypedProofScopeFrame::Block(block.node_id.clone()));
+        self.block_statements(block, consumed_loop_invariants, &mut output);
+        if let Some(result) = &block.result {
+            let call_start = self.calls.len();
+            let operation = self.expression(result, &block.node_id);
+            let exact_new_result_match = self.exact_new_result_match(result);
+            self.append_current_scope_calls(&mut output, call_start);
+            if operation.is_none()
+                && !exact_new_result_match
+                && expression_contains_proof_root(result)
+            {
+                self.defer(
+                    &result.node_id,
+                    "block result embeds a proof root without an evaluation-order receipt",
+                );
+            } else if operation.is_none()
+                && !exact_new_result_match
+                && self.proof_requested
+                && !proof_expression_is_pure(result)
+                && !standalone_checked_call(result)
+            {
+                self.defer(
+                    &result.node_id,
+                    "block result call/effect needs a typed return-value receipt",
+                );
+            }
+            if let Some(operation) = operation {
+                output.operations.push(operation);
+            } else if proof_expression_is_pure(result) {
+                output.operations.push(TypedProofOperation::Eval {
+                    point: block.node_id.clone(),
+                    expression: result.as_ref().clone(),
+                });
+            }
+        }
+        self.scope.pop();
+        output
+    }
+
+    fn bind_arm_block(
+        &mut self,
+        bind_point: &NodeId,
+        local: &ResolvedLocalId,
+        block: &ResolvedBlock,
+    ) -> TypedProofBlock {
+        let mut output = TypedProofBlock {
+            id: block.node_id.clone(),
+            operations: Vec::new(),
+        };
+        self.scope
+            .push(TypedProofScopeFrame::Block(block.node_id.clone()));
+        self.block_statements(block, &BTreeSet::new(), &mut output);
+        if let Some(result) = &block.result {
+            self.bind_initializer_operations(bind_point, local, result, &mut output);
+        }
+        self.scope.pop();
+        output
+    }
+
+    fn build_branch_operation(
+        &mut self,
+        statement: &NodeId,
+        branch_expression: NodeId,
+        condition: &ResolvedExpr,
+        then_block: &ResolvedBlock,
+        else_block: &ResolvedBlock,
+        mut build_arm: impl FnMut(&mut Self, &ResolvedBlock) -> TypedProofBlock,
+    ) -> TypedProofOperation {
+        // Direct calls inside `condition` stay at the enclosing `self.scope` so
+        // callers wrapping `call_start..` append them before pushing `Branch`.
+        self.expression_calls(self.owner, statement, condition, None);
+        if expression_contains_proof_root(condition)
+            || (self.proof_requested
+                && !proof_expression_is_pure(condition)
+                && !standalone_checked_call(condition))
+        {
+            self.defer(
+                &condition.node_id,
+                "branch condition embeds a proof root or effect without an evaluation receipt",
+            );
+        }
+        self.scope.push(TypedProofScopeFrame::Branch {
+            statement: statement.clone(),
+            expression: branch_expression.clone(),
+            then_arm: true,
+        });
+        self.guards.push(TypedCallGuard {
+            condition: condition.clone(),
+            when: true,
+        });
+        let then_block = build_arm(self, then_block);
+        self.guards.pop();
+        self.scope.pop();
+        self.scope.push(TypedProofScopeFrame::Branch {
+            statement: statement.clone(),
+            expression: branch_expression.clone(),
+            then_arm: false,
+        });
+        self.guards.push(TypedCallGuard {
+            condition: condition.clone(),
+            when: false,
+        });
+        let else_block = build_arm(self, else_block);
+        self.guards.pop();
+        self.scope.pop();
+        TypedProofOperation::Branch {
+            point: statement.clone(),
+            expression: branch_expression,
+            condition: condition.clone(),
+            then_block,
+            else_block,
+        }
+    }
+
+    fn bind_initializer_operations(
+        &mut self,
+        point: &NodeId,
+        local: &ResolvedLocalId,
+        initializer: &ResolvedExpr,
+        output: &mut TypedProofBlock,
+    ) {
+        match &initializer.kind {
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let call_start = self.calls.len();
+                let branch = self.build_branch_operation(
+                    point,
+                    initializer.node_id.clone(),
+                    condition,
+                    then_block,
+                    else_block,
+                    |builder, arm| builder.bind_arm_block(point, local, arm),
+                );
+                self.append_current_scope_calls(output, call_start);
+                output.operations.push(branch);
+            }
+            ResolvedExprKind::Block(inner) | ResolvedExprKind::Scope { body: inner, .. } => {
+                let inner_block = self.bind_arm_block(point, local, inner);
+                output
+                    .operations
+                    .push(TypedProofOperation::Scope(inner_block));
+            }
+            _ => {
+                let call_start = self.calls.len();
+                self.expression_calls(self.owner, point, initializer, None);
+                self.append_current_scope_calls(output, call_start);
+                if !expression_contains_proof_root(initializer)
+                    && proof_expression_is_pure(initializer)
+                {
+                    output.operations.push(TypedProofOperation::Bind {
+                        point: point.clone(),
+                        local: local.clone(),
+                        initializer: initializer.clone(),
+                    });
+                } else if expression_contains_proof_root(initializer)
+                    || (self.proof_requested && !standalone_checked_call(initializer))
+                {
+                    self.defer(
+                        point,
+                        "binding initializer embeds a proof root or effect without a typed evaluation receipt",
+                    );
+                }
+            }
+        }
+    }
+
+    fn block_statements(
+        &mut self,
+        block: &ResolvedBlock,
+        consumed_loop_invariants: &BTreeSet<NodeId>,
+        output: &mut TypedProofBlock,
+    ) {
         for statement in &block.statements {
             match &statement.kind {
                 ResolvedStmtKind::Contract { kind, condition }
@@ -2281,35 +2455,27 @@ impl ProofPointBuilder<'_> {
                     pattern,
                     initializer: Some(initializer),
                 } => {
-                    let call_start = self.calls.len();
-                    self.expression_calls(self.owner, &statement.node_id, initializer, None);
-                    self.append_current_scope_calls(&mut output, call_start);
                     if let super::ResolvedPatternKind::Binding {
                         local,
                         by_reference: None,
                     } = &pattern.kind
                     {
-                        if !expression_contains_proof_root(initializer)
-                            && proof_expression_is_pure(initializer)
-                        {
-                            output.operations.push(TypedProofOperation::Bind {
-                                point: statement.node_id.clone(),
-                                local: local.clone(),
-                                initializer: initializer.clone(),
-                            });
-                        } else if expression_contains_proof_root(initializer)
-                            || (self.proof_requested && !standalone_checked_call(initializer))
-                        {
+                        self.bind_initializer_operations(
+                            &statement.node_id,
+                            local,
+                            initializer,
+                            output,
+                        );
+                    } else {
+                        let call_start = self.calls.len();
+                        self.expression_calls(self.owner, &statement.node_id, initializer, None);
+                        self.append_current_scope_calls(output, call_start);
+                        if block_has_proof_roots(block) {
                             self.defer(
-                            &statement.node_id,
-                            "binding initializer embeds a proof root or effect without a typed evaluation receipt",
-                        );
+                                &statement.node_id,
+                                "destructuring/reference binding before a proof point needs a typed binding receipt",
+                            );
                         }
-                    } else if block_has_proof_roots(block) {
-                        self.defer(
-                            &statement.node_id,
-                            "destructuring/reference binding before a proof point needs a typed binding receipt",
-                        );
                     }
                 }
                 ResolvedStmtKind::While { condition, body } => {
@@ -2389,7 +2555,7 @@ impl ProofPointBuilder<'_> {
                     let call_start = self.calls.len();
                     let operation = self.expression(expression, &statement.node_id);
                     let exact_new_result_match = self.exact_new_result_match(expression);
-                    self.append_current_scope_calls(&mut output, call_start);
+                    self.append_current_scope_calls(output, call_start);
                     if let Some(operation) = operation {
                         output.operations.push(operation);
                     } else if proof_expression_is_pure(expression) {
@@ -2418,7 +2584,7 @@ impl ProofPointBuilder<'_> {
                     if let Some(value) = value {
                         self.expression_calls(self.owner, &statement.node_id, value, None);
                     }
-                    self.append_current_scope_calls(&mut output, call_start);
+                    self.append_current_scope_calls(output, call_start);
                     output.operations.push(TypedProofOperation::Break {
                         point: statement.node_id.clone(),
                         target_loop: self.nearest_loop(),
@@ -2430,7 +2596,7 @@ impl ProofPointBuilder<'_> {
                     if let Some(value) = value {
                         self.expression_calls(self.owner, &statement.node_id, value, None);
                     }
-                    self.append_current_scope_calls(&mut output, call_start);
+                    self.append_current_scope_calls(output, call_start);
                     output.operations.push(TypedProofOperation::Return {
                         point: statement.node_id.clone(),
                         value: value.clone(),
@@ -2450,7 +2616,7 @@ impl ProofPointBuilder<'_> {
                 } => {
                     let call_start = self.calls.len();
                     self.expression_calls(self.owner, &statement.node_id, value, None);
-                    self.append_current_scope_calls(&mut output, call_start);
+                    self.append_current_scope_calls(output, call_start);
                     output.operations.push(TypedProofOperation::Assign {
                         point: statement.node_id.clone(),
                         target: target.clone(),
@@ -2591,41 +2757,6 @@ impl ProofPointBuilder<'_> {
                 }
             }
         }
-        if let Some(result) = &block.result {
-            let call_start = self.calls.len();
-            let operation = self.expression(result, &block.node_id);
-            let exact_new_result_match = self.exact_new_result_match(result);
-            self.append_current_scope_calls(&mut output, call_start);
-            if operation.is_none()
-                && !exact_new_result_match
-                && expression_contains_proof_root(result)
-            {
-                self.defer(
-                    &result.node_id,
-                    "block result embeds a proof root without an evaluation-order receipt",
-                );
-            } else if operation.is_none()
-                && !exact_new_result_match
-                && self.proof_requested
-                && !proof_expression_is_pure(result)
-                && !standalone_checked_call(result)
-            {
-                self.defer(
-                    &result.node_id,
-                    "block result call/effect needs a typed return-value receipt",
-                );
-            }
-            if let Some(operation) = operation {
-                output.operations.push(operation);
-            } else if proof_expression_is_pure(result) {
-                output.operations.push(TypedProofOperation::Eval {
-                    point: block.node_id.clone(),
-                    expression: result.as_ref().clone(),
-                });
-            }
-        }
-        self.scope.pop();
-        output
     }
 
     fn expression(
@@ -2683,65 +2814,23 @@ impl ProofPointBuilder<'_> {
                 condition,
                 then_block,
                 else_block,
-            } => {
-                let branch_expression = expression.node_id.clone();
-                self.expression_calls(self.owner, statement, condition, None);
-                // A direct checked scalar call is an executable MIR point:
-                // its callee precondition and result are discharged by the
-                // ordinary call explorer.  Do not turn that call into a
-                // synthetic branch-boundary merely because the callee owns a
-                // contract.  When body-level proof worklists are active,
-                // nested expression/effect forms still require a dedicated
-                // evaluation receipt.
-                if expression_contains_proof_root(condition)
-                    || (self.proof_requested
-                        && !proof_expression_is_pure(condition)
-                        && !standalone_checked_call(condition))
-                {
-                    self.defer(
-                        &condition.node_id,
-                        "branch condition embeds a proof root or effect without an evaluation receipt",
-                    );
-                }
-                self.scope.push(TypedProofScopeFrame::Branch {
-                    statement: statement.clone(),
-                    expression: branch_expression.clone(),
-                    then_arm: true,
-                });
-                self.guards.push(TypedCallGuard {
-                    condition: *condition.clone(),
-                    when: true,
-                });
-                let then_block = self.block(then_block, &BTreeSet::new());
-                self.guards.pop();
-                self.scope.pop();
-                self.scope.push(TypedProofScopeFrame::Branch {
-                    statement: statement.clone(),
-                    expression: branch_expression.clone(),
-                    then_arm: false,
-                });
-                self.guards.push(TypedCallGuard {
-                    condition: *condition.clone(),
-                    when: false,
-                });
-                let else_block = self.block(else_block, &BTreeSet::new());
-                self.guards.pop();
-                self.scope.pop();
-                Some(TypedProofOperation::Branch {
-                    point: statement.clone(),
-                    expression: branch_expression,
-                    condition: *condition.clone(),
-                    then_block,
-                    else_block,
-                })
-            }
+            } => Some(self.build_branch_operation(
+                statement,
+                expression.node_id.clone(),
+                condition,
+                then_block,
+                else_block,
+                |builder, arm| builder.block(arm, &BTreeSet::new()),
+            )),
             ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => Some(
                 TypedProofOperation::Scope(self.block(block, &BTreeSet::new())),
             ),
             _ => {
                 self.expression_calls(self.owner, statement, expression, None);
                 if expression_contains_proof_root(expression)
-                    || (self.proof_requested && !proof_expression_is_pure(expression))
+                    || (self.proof_requested
+                        && !proof_expression_is_pure(expression)
+                        && !standalone_checked_call(expression))
                 {
                     self.defer(
                         &expression.node_id,
@@ -2983,7 +3072,8 @@ fn stationary_loop_body(block: &ResolvedBlock) -> bool {
                 kind: ContractKind::Invariant,
                 ..
             }
-            | ResolvedStmtKind::Math(_) => {}
+            | ResolvedStmtKind::Math(_)
+            | ResolvedStmtKind::Continue => {}
             ResolvedStmtKind::Scope { body, .. } if stationary_loop_body(body) => {}
             _ => return false,
         }
