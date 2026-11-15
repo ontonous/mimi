@@ -1052,6 +1052,22 @@ impl CheckedProgram {
                 site.effects = vec!["unknown".into()];
             }
         }
+        // Silent Transition (clause 5.1): extern FFI calls are cross-boundary
+        // operations alongside channel/session/actor ops, so stay transitions
+        // that invoke extern FFI cannot elide TransitionEpoch.
+        let ffi_caller_owners: BTreeSet<&str> = program
+            .call_sites
+            .values()
+            .filter(|site| site.kind == ResolvedCallKind::Extern)
+            .map(|site| site.owner.as_str())
+            .collect();
+        if !ffi_caller_owners.is_empty() {
+            for transition in program.transitions.values_mut() {
+                if ffi_caller_owners.contains(transition.node_id.0.as_str()) {
+                    transition.silent_transition = false;
+                }
+            }
+        }
 
         // Override declaration snapshots only with mandatory-finalized checker
         // artifacts. Raw checker types are not a backend input.

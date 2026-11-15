@@ -8067,7 +8067,11 @@ fn ffi_execution_owner(
             .strip_prefix("function:")
             .is_some_and(|tail| !tail.is_empty() && !tail.contains('/') && !tail.contains("::"))
     };
-    if is_top_level(ffi_caller) {
+    let is_verifier_only_flow_transition = program.purpose()
+        == crate::core::mir::reference::MirProgramPurpose::VerifierOnly
+        && ffi_caller.0.starts_with("transition:")
+        && program.transitions().contains_key(ffi_caller);
+    if is_top_level(ffi_caller) || is_verifier_only_flow_transition {
         if !program.functions().contains_key(ffi_caller) {
             return Err(format!(
                 "canonical MIR FFI caller '{}' is absent from the function table",
