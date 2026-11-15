@@ -1762,6 +1762,13 @@ fn scan_scalar_collection_once(
                 }
             }
         }
+        if callable
+            .contracts
+            .iter()
+            .any(|contract| contract.kind == crate::core::ir::ContractKind::Invariant)
+        {
+            scanner.mixed = true;
+        }
         scanner.visit_block(&callable.body.root, concrete);
         if concrete {
             for value in callable.body.default_values.values() {
@@ -2675,7 +2682,10 @@ impl<'a> ScalarCollectionAdmissionScanner<'a> {
                     self.visit_block(body, concrete);
                 }
                 ResolvedStmtKind::Drop(_) => {}
-                ResolvedStmtKind::Contract { condition, .. } => {
+                ResolvedStmtKind::Contract { kind, condition } => {
+                    if *kind == crate::core::ir::ContractKind::Invariant {
+                        self.mixed = true;
+                    }
                     self.visit_expr(condition, concrete)
                 }
                 ResolvedStmtKind::Math(expressions) => {

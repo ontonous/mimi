@@ -11842,10 +11842,7 @@ fn has_transitive_call_definedness_obligation(
                     callee: crate::core::ir::ResolvedCallee::Function(target),
                     ..
                 }
-                | MirInstructionKind::ClosureInvoke { callee: target, .. }
-                | MirInstructionKind::FlowTransition {
-                    transition: target, ..
-                } => target.clone(),
+                | MirInstructionKind::ClosureInvoke { callee: target, .. } => target.clone(),
                 _ => continue,
             };
             let Some(callee) = program.functions().get(&target) else {
