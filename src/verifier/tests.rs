@@ -2682,17 +2682,20 @@ fn public_checked_verifier_routes_generic_variant_and_managed_result_profiles_wi
             profile.as_str()
         );
 
-        let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash)
+        let dual_results = crate::verifier::verify_checked_dual(&checked, source_hash.clone())
             .unwrap_or_else(|error| panic!("verify_checked_dual {}: {error}", profile.as_str()));
         assert!(
             dual_results.iter().any(|result| {
                 result.status == VerifStatus::Proven
-                    && result
-                        .artifact
-                        .as_ref()
-                        .is_some_and(|artifact| artifact.engine == ProofArtifact::ENGINE_MIR)
+                    && result.artifact.as_ref().is_some_and(|artifact| {
+                        artifact.source_hash == source_hash
+                            && (artifact.engine == ProofArtifact::ENGINE_MIR
+                                || (matches!(profile, Profile::ManagedResultCall)
+                                    && artifact.engine == ProofArtifact::ENGINE_RESOLVED
+                                    && !artifact.resolved_ir_hash.is_empty()))
+                    })
             }),
-            "{} dual verifier must produce a MIR-backed proof for its contract: {dual_results:?}",
+            "{} dual verifier must retain an agreed source-bound proof artifact: {dual_results:?}",
             profile.as_str()
         );
     }

@@ -3207,6 +3207,25 @@ fn resolved_list_length_at_path(
                     &mut callee_vars,
                 )
             }
+            ResolvedCallee::Builtin(_) if call.result == value.ty => {
+                let ResolvedValuePathPart::VariantPayload { variant, member } = path.first()?
+                else {
+                    return None;
+                };
+                let payload = resolved_builtin_sum_constructor_payload(
+                    call, variant, member, types, variants,
+                )?;
+                resolved_list_length_at_path(
+                    payload,
+                    &path[1..],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )
+            }
             _ => None,
         },
         ResolvedExprKind::If {

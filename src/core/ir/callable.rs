@@ -2690,10 +2690,13 @@ impl ProofPointBuilder<'_> {
                 // its callee precondition and result are discharged by the
                 // ordinary call explorer.  Do not turn that call into a
                 // synthetic branch-boundary merely because the callee owns a
-                // contract.  Nested expression/effect forms still require a
-                // dedicated evaluation receipt.
+                // contract.  When body-level proof worklists are active,
+                // nested expression/effect forms still require a dedicated
+                // evaluation receipt.
                 if expression_contains_proof_root(condition)
-                    || (!proof_expression_is_pure(condition) && !standalone_checked_call(condition))
+                    || (self.proof_requested
+                        && !proof_expression_is_pure(condition)
+                        && !standalone_checked_call(condition))
                 {
                     self.defer(
                         &condition.node_id,
