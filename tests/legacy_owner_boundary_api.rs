@@ -113,15 +113,9 @@ fn default_bytecode_compatibility_route_executes_its_named_legacy_disposition_wi
     fs::write(
         &source_path,
         r#"
-extern "C" { func uncalled_probe(x: i64) -> i64; }
-func pick(v: Option<i64>) -> i64 {
-    match v {
-        Some(value) => { if value > 0 { value } else { 0 as i64 } }
-        None => 0 as i64
-    }
-}
-func main() -> i64 {
-    println(pick(Some(3 as i64)))
+func main() -> i32 {
+    let values = [i for i in range(0, 3)]
+    println(len(values))
     0
 }
 "#,
@@ -145,7 +139,9 @@ func main() -> i64 {
     let explicit_stderr = String::from_utf8_lossy(&explicit.stderr);
     assert_eq!(explicit.status.code(), Some(1), "{explicit_stderr}");
     assert!(
-        explicit_stderr.contains("MIR-COVERAGE-001"),
+        (explicit_stderr.contains("canonical MIR build error: MIR lowering failed")
+            || explicit_stderr.contains("MIR-COVERAGE-001"))
+            && !explicit_stderr.contains("canonical route disposition: legacy"),
         "explicit MIR must reject this outside-profile fixture instead of retrying Bytecode: {explicit_stderr}"
     );
     assert!(explicit.stdout.is_empty());

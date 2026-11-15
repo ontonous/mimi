@@ -5009,8 +5009,10 @@ impl BodyLowerer<'_> {
                 "dyn method receiver lowered to a different type than the checked node type",
             )]);
         }
+        let mut operands = Vec::with_capacity(1 + arguments.len());
+        operands.push(receiver);
         for argument in arguments {
-            self.lower_expr(argument, &format!("{role}.argument"))?;
+            operands.push(self.lower_expr(argument, &format!("{role}.argument"))?);
         }
         // The call-site type is authoritative; the placeholder expression's
         // type is set by the caller from node_types. Only require the entry
@@ -5021,7 +5023,10 @@ impl BodyLowerer<'_> {
                 "dyn method call has no checker-finalized type",
             )]
         })?;
-        Ok(Some(ResolvedExprKind::Literal(ResolvedLiteral::Unit)))
+        // Keep lowered receiver/argument subexpressions attached to the body tree
+        // so BodyValidator does not report resolved_calls entries as unreachable
+        // before checker dynamic-protocol boundary diagnostics fire.
+        Ok(Some(ResolvedExprKind::Tuple(operands)))
     }
 
     /// 条款 11 escape hatch: `unsafe_cast_protocol(x)` lowers as an identity
