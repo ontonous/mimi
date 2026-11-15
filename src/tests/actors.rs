@@ -18,8 +18,8 @@ actor Counter runs CounterFlow {}
 func main() -> i32 {
     let c = Counter.spawn();
     c.increment();
-    let state = c.get();
-    state.count
+    let st = c.get();
+    st.count
 }
 "#;
     let v = run_source(src);
@@ -64,8 +64,8 @@ func main() -> i32 {
     let calc = Calculator.spawn();
     calc.add(10);
     calc.add(20);
-    let state = calc.get();
-    state.value
+    let st = calc.get();
+    st.value
 }
 "#;
     let v = run_source(src);
@@ -111,8 +111,8 @@ func main() -> i32 {
     let a = Accumulator.spawn();
     a.add(5);
     a.add(10);
-    let state = a.get();
-    state.total
+    let st = a.get();
+    st.total
 }
 "#;
     assert_eq!(run_source(src), interp::Value::Int(15));
@@ -245,8 +245,8 @@ actor Greeter {
 }
 
 func main() -> i32 {
-    let actor = Greeter.spawn();
-    if actor.greet("mimi") == "hi mimi" { 0 } else { 1 }
+    let greeter = Greeter.spawn();
+    if greeter.greet("mimi") == "hi mimi" { 0 } else { 1 }
 }
 "#;
     check_source(src).expect("stateless Actor service may omit runs Flow");
