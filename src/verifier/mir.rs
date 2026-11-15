@@ -25289,13 +25289,20 @@ fn eval_instruction(
                         let field = fields.get(&receipt.projection.field).ok_or_else(|| {
                             "MIR String-field borrow selected field is absent".to_string()
                         })?;
-                        let SymbolicValue::Opaque { ty } = field else {
-                            return Err(
-                                "MIR String-field borrow selected field is not an opaque String"
-                                    .into(),
-                            );
-                        };
-                        catalog.validate_owned_string(ty)?;
+                        match field {
+                            SymbolicValue::String(_) => {
+                                catalog.validate_owned_string(&receipt.projection.field_ty)?;
+                            }
+                            SymbolicValue::Opaque { ty } if ty == &receipt.projection.field_ty => {
+                                catalog.validate_owned_string(ty)?;
+                            }
+                            _ => {
+                                return Err(
+                                    "MIR String-field borrow selected field is not an opaque String"
+                                        .into(),
+                                );
+                            }
+                        }
                     } else {
                         let source_ty = function
                             .values
@@ -31258,6 +31265,21 @@ fn merge_symbolic_variants(
     })
 }
 
+fn merge_symbolic_string_with_opaque(
+    condition: &Bool,
+    known: SymbolicString,
+    known_when_true: bool,
+) -> Result<SymbolicValue, String> {
+    let known = known.as_z3()?;
+    let opaque = Z3String::fresh_const("opaque_string");
+    let merged = if known_when_true {
+        condition.ite(&known, &opaque)
+    } else {
+        condition.ite(&opaque, &known)
+    };
+    Ok(SymbolicValue::String(SymbolicString::Symbol(merged)))
+}
+
 fn merge_symbolic_scalars(
     condition: &Bool,
     when_true: SymbolicValue,
@@ -31279,6 +31301,12 @@ fn merge_symbolic_scalars(
             Ok(SymbolicValue::String(SymbolicString::Symbol(
                 condition.ite(&when_true, &when_false),
             )))
+        }
+        (SymbolicValue::String(known), SymbolicValue::Opaque { .. }) => {
+            merge_symbolic_string_with_opaque(condition, known, true)
+        }
+        (SymbolicValue::Opaque { .. }, SymbolicValue::String(known)) => {
+            merge_symbolic_string_with_opaque(condition, known, false)
         }
         (SymbolicValue::Opaque { ty: when_true }, SymbolicValue::Opaque { ty: when_false })
             if when_true == when_false =>

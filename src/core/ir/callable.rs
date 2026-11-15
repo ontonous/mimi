@@ -2470,7 +2470,12 @@ impl ProofPointBuilder<'_> {
                         let call_start = self.calls.len();
                         self.expression_calls(self.owner, &statement.node_id, initializer, None);
                         self.append_current_scope_calls(output, call_start);
-                        if block_has_proof_roots(block) {
+                        // A typed `session_pair::<P>()` two-endpoint destructuring
+                        // bind is lowered as a single canonical SessionPairBind MIR
+                        // operation with its own residual contract receipt.
+                        if block_has_proof_roots(block)
+                            && !is_typed_session_pair_bind(pattern, initializer)
+                        {
                             self.defer(
                                 &statement.node_id,
                                 "destructuring/reference binding before a proof point needs a typed binding receipt",
@@ -3079,6 +3084,40 @@ fn stationary_loop_body(block: &ResolvedBlock) -> bool {
         }
     }
     block.result.is_none()
+}
+
+fn is_typed_session_pair_bind(
+    pattern: &super::ResolvedPattern,
+    initializer: &ResolvedExpr,
+) -> bool {
+    let super::ResolvedPatternKind::Tuple(elements) = &pattern.kind else {
+        return false;
+    };
+    let [lo, hi] = elements.as_slice() else {
+        return false;
+    };
+    if !matches!(
+        (&lo.kind, &hi.kind),
+        (
+            super::ResolvedPatternKind::Binding {
+                by_reference: None,
+                ..
+            },
+            super::ResolvedPatternKind::Binding {
+                by_reference: None,
+                ..
+            }
+        )
+    ) {
+        return false;
+    }
+    matches!(
+        &initializer.kind,
+        ResolvedExprKind::Call(call)
+            if matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "session_pair")
+                && !call.type_arguments.is_empty()
+                && call.arguments.is_empty()
+    )
 }
 
 fn proof_expression_is_pure(expression: &ResolvedExpr) -> bool {

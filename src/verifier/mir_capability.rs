@@ -5033,6 +5033,37 @@ fn ffi_call_path_receipt_has_exact_terminal_call(
         })
 }
 
+/// Returns whether `program` references any Map/Any descriptor or ownership action.
+pub(super) fn mir_program_touches_map_or_any(program: &MirProgram) -> bool {
+    program.type_catalog().iter().any(|(_, descriptor)| {
+        matches!(
+            descriptor.kind,
+            MirTypeKind::MapRoot
+                | MirTypeKind::MapAnyOwnerV1
+                | MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+                | MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+                | MirTypeKind::OrdinaryMapOwnedAnyV2
+                | MirTypeKind::OrdinaryMapOwnedAnyV2Payload
+                | MirTypeKind::OrdinaryMapOwnedAnyV2Values
+                | MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+                | MirTypeKind::ManagedAnyI32StringV1
+                | MirTypeKind::DynamicAny
+        )
+    }) || program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+            || function.ownership.has_checker_map_root_actions()
+            || function.ownership.has_checker_map_any_owner_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+    })
+}
+
 struct CapabilityGate<'a> {
     program: &'a MirProgram,
     allow_typed_ffi_verifier_proofs: bool,
@@ -5252,6 +5283,10 @@ impl<'a> CapabilityGate<'a> {
             self.values_result_crosscall_profile,
         )
         .ok()
+    }
+
+    fn program_touches_map_or_any(&self) -> bool {
+        mir_program_touches_map_or_any(self.program)
     }
 
     fn has_values_local_index_i32_result_branch_receipt(&self, function: &MirFunction) -> bool {
@@ -9999,7 +10034,7 @@ impl<'a> CapabilityGate<'a> {
                     ));
                 }
                 if let Some(receipt) = string_field_contract {
-                    if !self.allow_direct_print {
+                    if !self.allow_direct_print && self.program_touches_map_or_any() {
                         self.error(format!(
                             "{subject} String-field borrow output requires exact Checker/MIR route validation"
                         ));

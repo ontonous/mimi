@@ -846,8 +846,16 @@ func preserve(xs: List<i32>) -> List<i32> {
 "#;
     let results = verify_source(src).expect("verification should parse");
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::NotInTrustedSubset);
     assert!(results[0].status.is_inconclusive());
-    assert!(results[0].message.contains("could not encode ensures"));
+    assert!(
+        results[0].message.contains("MIR-COVERAGE-001")
+            && results[0]
+                .message
+                .contains("outside the canonical aggregate contract"),
+        "unexpected deferral message: {}",
+        results[0].message
+    );
 }
 
 #[test]
@@ -861,8 +869,16 @@ func first(xs: List<i32>) -> i32 {
 "#;
     let results = verify_source(src).expect("verification should parse");
     assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, VerifStatus::NotInTrustedSubset);
     assert!(results[0].status.is_inconclusive());
-    assert!(results[0].message.contains("could not encode requires"));
+    assert!(
+        results[0].message.contains("MIR-COVERAGE-001")
+            && results[0]
+                .message
+                .contains("outside the canonical aggregate contract"),
+        "unexpected deferral message: {}",
+        results[0].message
+    );
 }
 
 #[test]
@@ -1103,16 +1119,10 @@ extern "C" {
 func main() -> i64 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:187 unwrap failed");
-    let ext: Vec<_> = results
-        .iter()
-        .filter(|r| r.func_name.contains("extern"))
-        .collect();
-    assert_eq!(ext.len(), 1, "extern func should be verified");
-    assert_eq!(
-        ext[0].status,
-        VerifStatus::Disproven, // P2.3: Sat means a concrete counterexample exists.
-        "extern ensures should be inconsistent: {}",
-        ext[0].message
+    assert!(
+        results.is_empty(),
+        "uncalled extern without Mimi proof obligations must not fabricate results: {:?}",
+        results
     );
 }
 
@@ -1129,23 +1139,17 @@ extern "C" {
 func main() -> i64 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs:206 unwrap failed");
-    let ext: Vec<_> = results
-        .iter()
-        .filter(|r| r.func_name.contains("extern"))
-        .collect();
-    assert_eq!(ext.len(), 1, "extern func should be verified");
-    assert_eq!(
-        ext[0].status,
-        VerifStatus::Disproven, // P2.3: Sat means a concrete counterexample exists.
-        "extern requires+ensures should be inconsistent: {}",
-        ext[0].message
+    assert!(
+        results.is_empty(),
+        "uncalled extern without Mimi proof obligations must not fabricate results: {:?}",
+        results
     );
 }
 
 #[test]
 fn verify_extern_unsatisfiable_requires() {
     require_z3!();
-    let src = r#"
+    let uncalled_src = r#"
 extern "C" {
     func impossible(x: i64) -> i64
         requires: x > 0 && x < 0;
@@ -1153,24 +1157,35 @@ extern "C" {
 
 func main() -> i64 { 0 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs:224 unwrap failed");
-    let ext: Vec<_> = results
-        .iter()
-        .filter(|r| r.func_name.contains("extern"))
-        .collect();
-    assert_eq!(ext.len(), 1);
-    assert_eq!(
-        ext[0].status,
-        VerifStatus::Failed,
-        "contradictory requires should fail: {}",
-        ext[0].message
+    let uncalled_results =
+        verify_source(uncalled_src).expect("src/verifier/tests.rs:224 unwrap failed");
+    assert!(
+        uncalled_results.is_empty(),
+        "uncalled extern without Mimi proof obligations must not fabricate results: {:?}",
+        uncalled_results
     );
-    assert!(ext[0].message.contains("unsatisfiable"));
-    let diagnostic = ext[0].diagnostic.as_ref().expect("extern diagnostic");
-    assert_eq!(diagnostic.span.start_line, 3);
-    assert_eq!(diagnostic.span.start_col, 5);
-    assert!(diagnostic.span.end_line >= diagnostic.span.start_line);
-    assert!(diagnostic.span.end_col > 0);
+
+    let called_src = r#"
+extern "C" {
+    func impossible(x: i64) -> i64
+        requires: x > 0 && x < 0;
+}
+
+func main() -> i64 { impossible(1) }
+"#;
+    let ffi_results = verify_ffi_source(called_src).expect("FFI call site verification");
+    assert_eq!(
+        ffi_results.len(),
+        1,
+        "expected 1 FFI result: {ffi_results:?}"
+    );
+    let call_site = &ffi_results[0];
+    assert_eq!(
+        call_site.status,
+        VerifStatus::Disproven,
+        "calling unsatisfiable extern requires must be Disproven: {}",
+        call_site.message
+    );
 }
 
 #[test]
@@ -2807,8 +2822,8 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
         assert!(profile.is_admitted(route.admission), "{}", profile.as_str());
         assert!(profile.is_materialized(&route), "{}", profile.as_str());
         let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-        let (exact_mir_results, typed_receipt) =
-            verify_exact_typed_mir_request_for_test(&checked, &source_hash);
+        let exact_mir_bundle = (has_proof && !matches!(profile, Profile::SessionChannel))
+            .then(|| verify_exact_typed_mir_request_for_test(&checked, &source_hash));
 
         for dual in [false, true] {
             let results = if dual {
@@ -2823,8 +2838,8 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
                     if dual { "dual" } else { "single" }
                 )
             });
-            if has_proof {
-                let exact_mir = exact_mir_result_for_test(&exact_mir_results, "unwrap_copy");
+            if let Some((exact_mir_results, typed_receipt)) = exact_mir_bundle.as_ref() {
+                let exact_mir = exact_mir_result_for_test(exact_mir_results, "unwrap_copy");
                 assert_eq!(
                     exact_mir.status,
                     VerifStatus::Proven,
@@ -2832,7 +2847,7 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
                     profile.as_str(),
                     exact_mir.message
                 );
-                assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+                assert_single_exact_mir_artifact(exact_mir, &source_hash, typed_receipt);
                 let result = results
                     .iter()
                     .find(|result| result.func_name == "unwrap_copy")
@@ -2850,11 +2865,25 @@ fn public_checked_verifier_tripwires_copy_variant_and_session_profiles() {
                         result,
                         exact_mir,
                         &source_hash,
-                        &typed_receipt,
+                        typed_receipt,
                     );
                 } else {
-                    assert_single_exact_mir_artifact(result, &source_hash, &typed_receipt);
+                    assert_single_exact_mir_artifact(result, &source_hash, typed_receipt);
                 }
+            } else if has_proof {
+                let result = results
+                    .iter()
+                    .find(|result| result.func_name == "main")
+                    .unwrap_or_else(|| panic!("{} omitted main: {results:?}", profile.as_str()));
+                assert_eq!(result.status, VerifStatus::Proven, "{}", result.message);
+                let receipt_profile =
+                    if profile == crate::core::mir::CanonicalMirRouteProfile::SessionChannel {
+                        "verifier-mir-v1"
+                    } else {
+                        profile.as_str()
+                    };
+                let route_receipt = route.program.route_receipt(receipt_profile);
+                assert_route_mir_artifact(result, &source_hash, &route_receipt);
             } else {
                 assert!(
                     results.is_empty(),
@@ -8361,12 +8390,19 @@ func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: string_len");
     let v = results.iter().find(|r| r.func_name == "validate");
-    assert!(v.is_some(), "validate should be verified");
+    assert!(v.is_some(), "validate should be present");
+    let v = v.unwrap();
     assert_eq!(
-        v.unwrap().status,
-        VerifStatus::Verified,
-        "len(s) > 0 should imply result > 0: {:?}",
-        v.unwrap()
+        v.status,
+        VerifStatus::NotInTrustedSubset,
+        "body len(s) call remains deferred in canonical MIR: {:?}",
+        v
+    );
+    assert!(
+        v.message.contains("MIR-COVERAGE-001")
+            && v.message.contains("is not a materialized MIR function"),
+        "expected MIR len deferral message, got: {}",
+        v.message
     );
 }
 
@@ -8407,7 +8443,7 @@ fn verify_is_z3_available_not_panics() {
 #[test]
 fn verify_rule_ensures_combo() {
     require_z3!();
-    // 4.4: rule annotations should be extractable and verifiable.
+    // 4.4: prose `rule "..."` annotations carry no formal proof obligations in 0.1.8+.
     let src = r#"
 func abs(x: i32) -> i32 {
     rule "ensures: result >= 0"
@@ -8416,13 +8452,10 @@ func abs(x: i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: rule_ensures");
-    let abs_result = results.iter().find(|r| r.func_name == "abs");
-    assert!(abs_result.is_some(), "abs function should be verified");
-    // Should at least produce a deterministic status.
     assert!(
-        abs_result.unwrap().status == VerifStatus::Proven
-            || abs_result.unwrap().status == VerifStatus::Disproven
-            || abs_result.unwrap().status.is_inconclusive()
+        results.is_empty(),
+        "prose rule annotation without formal contracts should produce no fabricated obligations: {:?}",
+        results
     );
 }
 
@@ -8549,9 +8582,13 @@ func main() -> i64 { 0 }
         "unencodable callee requires must not verify the caller: {}",
         caller.message
     );
+    assert_eq!(caller.status, VerifStatus::NotInTrustedSubset);
     assert!(
-        caller.message.contains("cannot be encoded"),
-        "failure must name the unencodable precondition: {}",
+        caller.message.contains("MIR-COVERAGE-001")
+            && caller
+                .message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "failure must name the canonical contract profile deferral: {}",
         caller.message
     );
 }
@@ -8696,11 +8733,13 @@ func main() -> i32 { 0 }
         "an unencodable callee postcondition must not verify the caller: {}",
         caller.message
     );
+    assert_eq!(caller.status, VerifStatus::NotInTrustedSubset);
     assert!(
-        caller
-            .message
-            .contains("call to 'pos' has a postcondition that cannot be encoded for verification"),
-        "failure must name the exact unencodable callee postcondition: {}",
+        caller.message.contains("MIR-COVERAGE-001")
+            && caller
+                .message
+                .contains("outside the canonical MIR verifier contract"),
+        "failure must name the canonical verifier contract boundary: {}",
         caller.message
     );
     assert!(
@@ -8745,7 +8784,7 @@ func main() -> i32 { 0 }
 #[test]
 fn verify_assign_updates_let_subst() {
     require_z3!();
-    // V-C2: assignment must update flat let substitution.
+    // V-C2: mutable local assignment stays fail-closed in canonical MIR until snapshot receipts land.
     let src = r#"
 func f() -> i32 {
     ensures: result == 2
@@ -8758,11 +8797,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("assign subst");
     let f = results.iter().find(|r| r.func_name == "f");
     assert!(f.is_some(), "f present: {:?}", results);
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "y=2 should make ensures result==2 hold: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "mutable local assignment without snapshot receipt must fail closed: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("assignment needs mutable invariant preservation"),
+        "expected canonical assignment boundary message, got: {}",
+        f.message
     );
 }
 
@@ -8934,11 +8981,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: spawn_await");
     let f = results.iter().find(|r| r.func_name == "add_pair");
     assert!(f.is_some(), "add_pair should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "spawn/await body should be verifiable: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "spawn/await remains deferred without effectful callable MIR proof model: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("effectful callable needs its typed proof model"),
+        "expected canonical effectful boundary, got: {}",
+        f.message
     );
 }
 
@@ -8959,19 +9014,27 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: spawn_await_violation");
     let f = results.iter().find(|r| r.func_name == "bad_add");
     assert!(f.is_some(), "bad_add should be present");
+    let f = f.unwrap();
+    assert_ne!(f.status, VerifStatus::Proven);
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Failed,
-        "spawn/await with wrong func should fail: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "spawn/await wrong func stays fail-closed without AST fallback: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("effectful callable needs its typed proof model"),
+        "expected canonical effectful boundary, got: {}",
+        f.message
     );
 }
 
 #[test]
 fn verify_spawn_no_await_passes() {
     require_z3!();
-    // Spawn without await (discard the future) — the function result
-    // still comes from a separate return expression.
+    // Spawn without await (discard the future) remains fail-closed under canonical MIR.
     let src = r#"
 func compute_discard(x: i32) -> i32 {
     ensures: result == x
@@ -8986,11 +9049,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: spawn_discard");
     let f = results.iter().find(|r| r.func_name == "compute_discard");
     assert!(f.is_some(), "compute_discard should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "spawn-discard body should be verifiable: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "spawn-discard stays fail-closed without effectful proof model: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("effectful callable needs its typed proof model"),
+        "expected canonical effectful boundary, got: {}",
+        f.message
     );
 }
 
@@ -8999,7 +9070,7 @@ func main() -> i32 { 0 }
 #[test]
 fn verify_string_eq_param_requires_nonempty() {
     require_z3!();
-    // String param with equality in requires controls a numeric return.
+    // Non-FFI String equality in requires stays outside the canonical MIR contract profile.
     let src = r#"
 func greet_len(name: string) -> i32 {
     requires: name == "hello"
@@ -9011,11 +9082,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: string_eq_requires");
     let f = results.iter().find(|r| r.func_name == "greet_len");
     assert!(f.is_some(), "greet_len should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "string == literal in requires should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "string == literal in requires defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "expected String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9033,18 +9112,26 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: string_eq_violation");
     let f = results.iter().find(|r| r.func_name == "bad_len");
     assert!(f.is_some(), "bad_len should be present");
+    let f = f.unwrap();
+    assert_ne!(f.status, VerifStatus::Proven);
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Failed,
-        "string requires + wrong ensures should fail: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "string == literal defers fail-closed in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "expected String contract boundary, got: {}",
+        f.message
     );
 }
 
 #[test]
 fn verify_string_eq_in_ensures_with_requires() {
     require_z3!();
-    // String equality with a require ensures the body path.
     let src = r#"
 func is_same(a: string, b: string) -> i32 {
     requires: a == b
@@ -9056,11 +9143,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: string_eq_ensures");
     let f = results.iter().find(|r| r.func_name == "is_same");
     assert!(f.is_some(), "is_same should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "string == in requires + ensures should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "string == requires defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "expected String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9078,11 +9173,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: string_nonempty");
     let f = results.iter().find(|r| r.func_name == "id_nonempty");
     assert!(f.is_some(), "id_nonempty should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "string != '' in requires should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "string != '' defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "expected String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9122,11 +9225,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: char_at");
     let f = results.iter().find(|r| r.func_name == "first_char_check");
     assert!(f.is_some(), "first_char_check should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "char_at in requires should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "char_at in requires defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("String predicates are outside this canonical MIR contract profile"),
+        "expected String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9135,9 +9246,8 @@ func main() -> i32 { 0 }
 #[test]
 fn verify_lambda_in_body_not_crash() {
     require_z3!();
-    // Lambda in function body — should not crash, may be Unknown since
-    // closures can't be encoded as Z3 terms. The key assertion is that
-    // verification completes without panic and the result is not Unknown.
+    // Lambda in function body — must not crash or fabricate obligations when contractless,
+    // and must fail closed when a contract is declared.
     let src = r#"
 func make_adder(x: i32) -> func(i32) -> i32 {
     fn(y: i32) -> i32 { x + y }
@@ -9145,14 +9255,29 @@ func make_adder(x: i32) -> func(i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: lambda");
-    let f = results.iter().find(|r| r.func_name == "make_adder");
-    assert!(f.is_some(), "make_adder should be present");
-    // Lambda bodies can't be encoded as int/real; result is Unknown
-    assert_ne!(
-        f.unwrap().status,
-        VerifStatus::Failed,
-        "lambda body should not produce false positive: {:?}",
-        f.unwrap()
+    assert!(
+        results.is_empty(),
+        "contractless lambda body should produce no fabricated obligations: {:?}",
+        results
+    );
+
+    let guarded_src = r#"
+func make_adder(x: i32) -> func(i32) -> i32 {
+    ensures: true
+    fn(y: i32) -> i32 { x + y }
+}
+func main() -> i32 { 0 }
+"#;
+    let guarded = verify_source(guarded_src).expect("src/verifier/tests.rs: guarded lambda");
+    let f = guarded
+        .iter()
+        .find(|r| r.func_name == "make_adder")
+        .expect("make_adder should be present");
+    assert_eq!(
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "lambda body with contract must stay fail-closed without AST fallback: {:?}",
+        f
     );
 }
 
@@ -9167,13 +9292,30 @@ func make_list(n: i32) -> i32 {
 func main() -> i32 { 0 }
 "#;
     let results = verify_source(src).expect("src/verifier/tests.rs: comprehension");
-    let f = results.iter().find(|r| r.func_name == "make_list");
-    assert!(f.is_some(), "make_list should be present");
-    assert_ne!(
-        f.unwrap().status,
-        VerifStatus::Failed,
-        "comprehension body should not crash: {:?}",
-        f.unwrap()
+    assert!(
+        results.is_empty(),
+        "contractless comprehension body should produce no fabricated obligations: {:?}",
+        results
+    );
+
+    let guarded_src = r#"
+func make_list(n: i32) -> i32 {
+    ensures: result >= 0
+    let xs = [i for i in range(0, n)]
+    len(xs)
+}
+func main() -> i32 { 0 }
+"#;
+    let guarded = verify_source(guarded_src).expect("src/verifier/tests.rs: guarded comprehension");
+    let f = guarded
+        .iter()
+        .find(|r| r.func_name == "make_list")
+        .expect("make_list should be present");
+    assert_eq!(
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "comprehension body with contract must stay fail-closed without AST fallback: {:?}",
+        f
     );
 }
 
@@ -9197,11 +9339,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: multi_spawn");
     let f = results.iter().find(|r| r.func_name == "sum_pair");
     assert!(f.is_some(), "sum_pair should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "multiple spawn/await should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "multiple spawn/await remains deferred without effectful MIR proof model: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("effectful callable needs its typed proof model"),
+        "expected canonical effectful boundary, got: {}",
+        f.message
     );
 }
 
@@ -9221,11 +9371,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: contains");
     let f = results.iter().find(|r| r.func_name == "check_prefix");
     assert!(f.is_some(), "check_prefix should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "contains in requires should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "contains in requires defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("outside the canonical MIR verifier contract"),
+        "expected canonical String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9243,11 +9401,19 @@ func main() -> i32 { 0 }
     let results = verify_source(src).expect("src/verifier/tests.rs: starts_ends");
     let f = results.iter().find(|r| r.func_name == "both_ends");
     assert!(f.is_some(), "both_ends should be present");
+    let f = f.unwrap();
     assert_eq!(
-        f.unwrap().status,
-        VerifStatus::Verified,
-        "starts_with/ends_with in requires should verify: {:?}",
-        f.unwrap()
+        f.status,
+        VerifStatus::NotInTrustedSubset,
+        "starts_with/ends_with in requires defers cleanly in canonical MIR: {:?}",
+        f
+    );
+    assert!(
+        f.message.contains("MIR-COVERAGE-001")
+            && f.message
+                .contains("outside the canonical MIR verifier contract"),
+        "expected canonical String contract boundary, got: {}",
+        f.message
     );
 }
 
@@ -9476,23 +9642,13 @@ func cross_block(x: i32) -> i32 {
 }
 func main() -> i32 { 0 }
 "#;
-    let results = verify_source(src).expect("src/verifier/tests.rs: nll_cross_block");
-    let f = results.iter().find(|r| r.func_name == "cross_block");
-    assert!(f.is_some(), "cross_block should be present");
-    // The key assertion: borrow of x doesn't prevent verification
+    let err = verify_source(src)
+        .expect_err("raw reference operator `&` must fail check_program in safe source");
     assert!(
-        matches!(
-            f.unwrap().status,
-            VerifStatus::Proven
-                | VerifStatus::NotInTrustedSubset
-                | VerifStatus::SolverUnknown
-                | VerifStatus::Timeout
-                | VerifStatus::InfrastructureError
-                | VerifStatus::RuntimeOnlyContract
-                | VerifStatus::NoObligations
+        err.contains(
+            "raw reference/pointer type or operator `&` is forbidden in ordinary safe source"
         ),
-        "NLL cross-block should not cause false failure: {:?}",
-        f.unwrap().status,
+        "unexpected error for `&x`: {err}"
     );
 }
 
@@ -9782,11 +9938,9 @@ func half(x: i64) -> i64 {
 
 #[test]
 fn verify_i64_overflow_on_ast_fallback_path() {
-    // H2: the AST fallback path (functions with calls are rejected by the
-    // VIR trusted-subset gate) previously had NO i64 definedness — the
-    // `!returns_i32` branch asserted the unbounded model. The parameterized
-    // `int_definedness_obligations` must now bound i64 there too. The callee
-    // forces the AST path while keeping the arithmetic in the outer function.
+    // H2: AST verifier fallback is retired in 0.1.11. Calling helper(x) inside `ensures`
+    // is outside the canonical MIR contract profile and must fail closed as NotInTrustedSubset
+    // rather than proving Proven or opening an AST fallback path.
     require_z3!();
     let src = r#"
 func helper(x: i64) -> i64 {
@@ -9805,13 +9959,21 @@ func increment(x: i64) -> i64 {
         .iter()
         .find(|r| r.func_name == "increment")
         .expect("must have a result for 'increment'");
+    assert_ne!(increment.status, VerifStatus::Proven);
     assert_eq!(
         increment.status,
-        VerifStatus::Failed,
-        "i64 overflow on the AST path must be rejected: {}",
+        VerifStatus::NotInTrustedSubset,
+        "call expression in ensures must fail closed without AST fallback: {}",
         increment.message
     );
-    assert!(increment.message.contains("integer overflow"));
+    assert!(
+        increment.message.contains("MIR-COVERAGE-001")
+            && increment
+                .message
+                .contains("outside the canonical MIR verifier contract"),
+        "expected canonical MIR contract deferral, got: {}",
+        increment.message
+    );
 }
 
 #[test]

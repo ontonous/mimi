@@ -2488,19 +2488,20 @@ fn mir_program_has_ordinary_map_owned_any_v2_values_result_crosscall_string_call
 fn mir_program_has_record_unit_string_field_output(
     program: &crate::core::mir::reference::MirProgram,
 ) -> bool {
-    program.functions().values().any(|function| {
-        function.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                matches!(
-                    &instruction.kind,
-                    crate::core::mir::MirInstructionKind::BuiltinCall {
-                        string_field_contract: Some(_),
-                        ..
-                    }
-                )
+    mir_capability::mir_program_touches_map_or_any(program)
+        && program.functions().values().any(|function| {
+            function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        crate::core::mir::MirInstructionKind::BuiltinCall {
+                            string_field_contract: Some(_),
+                            ..
+                        }
+                    )
+                })
             })
         })
-    })
 }
 
 fn validate_ordinary_map_owned_any_v2_receipt_binding(
@@ -3435,7 +3436,15 @@ fn deferred_verification_results(
     use std::collections::BTreeMap;
 
     let mut reasons = BTreeMap::<crate::core::NodeId, Vec<&str>>::new();
+    let mut request_reasons = Vec::<&str>::new();
     for boundary in boundaries {
+        if boundary.owner.0 == "verification:request" || boundary.owner.0 == "verification:consumer"
+        {
+            if !request_reasons.contains(&boundary.reason.as_str()) {
+                request_reasons.push(boundary.reason.as_str());
+            }
+            continue;
+        }
         reasons
             .entry(boundary.owner.clone())
             .or_default()
@@ -3462,10 +3471,24 @@ fn deferred_verification_results(
         {
             continue;
         }
-        reasons
-            .entry(owner.clone())
-            .or_default()
-            .push("the request contains an unresolved checker boundary");
+        let owner_reasons = reasons.entry(owner.clone()).or_default();
+        if !request_reasons.is_empty() {
+            for reason in &request_reasons {
+                if !owner_reasons.contains(reason) {
+                    owner_reasons.push(reason);
+                }
+            }
+        } else if owner_reasons.is_empty() {
+            owner_reasons.push("the request contains an unresolved checker boundary");
+        }
+    }
+    if reasons.is_empty() {
+        for boundary in boundaries {
+            reasons
+                .entry(boundary.owner.clone())
+                .or_default()
+                .push(boundary.reason.as_str());
+        }
     }
     reasons
         .into_iter()
@@ -3480,6 +3503,12 @@ fn deferred_verification_results(
                             .then(|| format!("{}::{}", transition.id.flow.0, transition.id.event))
                     })
                 })
+                .or_else(|| {
+                    program
+                        .ffi_declarations()
+                        .get(&owner)
+                        .map(|declaration| format!("extern {}", declaration.symbol))
+                })
                 .unwrap_or_else(|| owner.0.clone());
             let reason = reasons.join("; ");
             let message = format!(
@@ -3492,6 +3521,12 @@ fn deferred_verification_results(
                 .node_meta()
                 .get(&owner)
                 .map(|meta| meta.origin.user_span())
+                .or_else(|| {
+                    program
+                        .ffi_declarations()
+                        .get(&owner)
+                        .map(|declaration| declaration.span)
+                })
                 .or_else(|| program.entry_span())
                 .unwrap_or(crate::span::Span::UNKNOWN);
             VerificationResult {
