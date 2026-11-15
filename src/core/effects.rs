@@ -1304,12 +1304,12 @@ fn scan_expr(expression: &Expr, effects: &mut DirectEffects, env: &ScanEnv<'_>) 
     }
 }
 
-/// Methods resolved by the checker as closed, effect-free Option/Result and
-/// List operations.  Callback-bearing methods (`map`, `and_then`, `map_err`)
-/// are intentionally excluded because their closure bodies carry their own
-/// effect summary and must be analyzed through the normal call path.  List
-/// transforms consume/return values but do not mutate shared state, so their
-/// ownership permission is not an effect facet.
+/// Methods resolved by the checker as closed, effect-free Option/Result,
+/// List, and Set operations.  Callback-bearing methods (`map`, `and_then`,
+/// `map_err`) are intentionally excluded because their closure bodies carry their
+/// own effect summary and must be analyzed through the normal call path.  List
+/// and Set transforms consume/return values but do not mutate shared state, so
+/// their ownership permission is not an effect facet.
 pub(crate) fn is_pure_builtin_method(name: &str) -> bool {
     matches!(
         name,
@@ -1323,6 +1323,12 @@ pub(crate) fn is_pure_builtin_method(name: &str) -> bool {
             | "len"
             | "reverse"
             | "concat"
+            | "size"
+            | "is_empty"
+            | "contains"
+            | "insert"
+            | "remove"
+            | "to_list"
     )
 }
 

@@ -34,7 +34,7 @@ use crate::verifier::checked_power::{
     encode_checked_integer_power, CheckedPowerWidth, POWER_PROFILE_0_1_11_COMPAT,
 };
 use crate::verifier::ctx::Z3VarMap;
-use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
+use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real, Set as Z3Set};
 
 pub(crate) type ResolvedFlowStateFieldCatalog =
     BTreeMap<NodeId, BTreeMap<NodeId, crate::core::ir::ResolvedTypeId>>;
@@ -1758,6 +1758,18 @@ pub(crate) fn resolved_drop_is_value_neutral(
                 vars.get_list_len(&local_var_key(&local.id, &local.display_name))
                     .is_some()
             }
+            Some(ResolvedType::Nominal {
+                item,
+                arguments,
+                is_linear,
+            }) if item.as_str() == "builtin:type:Set"
+                && !*is_linear
+                && arguments.len() == 1
+                && resolved_set_element_sort(&arguments[0], types).is_some() =>
+            {
+                vars.get_set_var(&local_var_key(&local.id, &local.display_name))
+                    .is_some()
+            }
             _ => false,
         }
     })
@@ -1800,7 +1812,10 @@ fn value_neutral_collection_element(
             item,
             arguments,
             is_linear,
-        }) if item.as_str() == "builtin:type:List" && !*is_linear && arguments.len() == 1 => {
+        }) if (item.as_str() == "builtin:type:List" || item.as_str() == "builtin:type:Set")
+            && !*is_linear
+            && arguments.len() == 1 =>
+        {
             value_neutral_collection_element(&arguments[0], types)
         }
         _ => false,
@@ -2105,6 +2120,11 @@ fn copy_known_value_path_facts_between(
         .iter()
         .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
         .collect::<Vec<_>>();
+    let set_vars = source_vars
+        .set_vars
+        .iter()
+        .filter_map(|(key, value)| remap(key).map(|target| (target, value.clone())))
+        .collect::<Vec<_>>();
 
     for (key, value) in ints {
         target_vars.insert_int(key, value);
@@ -2126,6 +2146,9 @@ fn copy_known_value_path_facts_between(
     }
     for (key, value) in list_lengths {
         target_vars.insert_list_len(key, value);
+    }
+    for (key, value) in set_vars {
+        target_vars.insert_set_var(key, value);
     }
 }
 
@@ -2907,6 +2930,25 @@ fn bind_value_at_path(
             vars.insert_list_len(target_key, length);
             Some(())
         }
+        ResolvedType::Nominal { item, .. }
+            if item.as_str() == "builtin:type:Set" && &source_type == target_type =>
+        {
+            if resolved_set_value_supported(target_type, types).is_none() {
+                return None;
+            }
+            let state = resolved_set_state_at_path(
+                value,
+                source_path,
+                target_type,
+                source_body,
+                types,
+                callables,
+                variants,
+                vars,
+            )?;
+            vars.insert_set_var(target_key, state);
+            Some(())
+        }
         _ => None,
     }
 }
@@ -2967,6 +3009,340 @@ fn resolved_builtin_call_is_closed(
         && call.arguments.len() == 1
 }
 
+fn resolved_set_builtin_call_is_closed(
+    call: &crate::core::ir::ResolvedCall,
+    expected_arity: usize,
+    expected_permission: Option<crate::core::ir::Permission>,
+) -> bool {
+    call.permission == expected_permission
+        && call.effects.is_empty()
+        && call.session.is_empty()
+        && call.type_arguments.is_empty()
+        && call.arguments.len() == expected_arity
+        && call.arguments.iter().all(|argument| {
+            argument.conversion.kind == CheckedConversionKind::Identity
+                && argument.conversion.from == argument.value.ty
+                && argument.conversion.to == argument.value.ty
+                && argument.value.effects.is_empty()
+        })
+}
+
+fn resolved_set_element_sort(
+    ty: &crate::core::ir::ResolvedTypeId,
+    types: &ResolvedTypeTable,
+) -> Option<z3::Sort> {
+    match types.get(ty) {
+        Some(ResolvedType::Primitive(PrimitiveType::I32 | PrimitiveType::I64)) => {
+            Some(z3::Sort::int())
+        }
+        Some(ResolvedType::Primitive(PrimitiveType::Bool)) => Some(z3::Sort::bool()),
+        _ => None,
+    }
+}
+
+fn resolved_set_value_supported(
+    ty: &crate::core::ir::ResolvedTypeId,
+    types: &ResolvedTypeTable,
+) -> Option<crate::core::ir::ResolvedTypeId> {
+    let Some(ResolvedType::Nominal {
+        item,
+        arguments,
+        is_linear,
+    }) = types.get(ty)
+    else {
+        return None;
+    };
+    (item.as_str() == "builtin:type:Set"
+        && !*is_linear
+        && arguments.len() == 1
+        && resolved_set_element_sort(&arguments[0], types).is_some())
+    .then(|| arguments[0].clone())
+}
+
+enum ResolvedSetElement {
+    Int(Z3Int),
+    Bool(Z3Bool),
+}
+
+impl ResolvedSetElement {
+    fn from_expr(
+        expr: &ResolvedExpr,
+        element_ty: &crate::core::ir::ResolvedTypeId,
+        body: &ResolvedBody,
+        types: &ResolvedTypeTable,
+        callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
+        variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+        vars: &mut Z3VarMap,
+    ) -> Option<Self> {
+        if expr.ty != *element_ty {
+            return None;
+        }
+        match types.get(element_ty) {
+            Some(ResolvedType::Primitive(PrimitiveType::I32 | PrimitiveType::I64)) => {
+                resolved_to_z3_int_with_catalog(expr, body, types, callables, variants, vars)
+                    .map(Self::Int)
+            }
+            Some(ResolvedType::Primitive(PrimitiveType::Bool)) => {
+                resolved_to_z3_bool_with_catalog(expr, body, types, callables, variants, vars)
+                    .map(Self::Bool)
+            }
+            _ => None,
+        }
+    }
+
+    fn member(&self, set: &Z3Set) -> Z3Bool {
+        match self {
+            Self::Int(value) => set.member(value),
+            Self::Bool(value) => set.member(value),
+        }
+    }
+
+    fn add(&self, set: &Z3Set) -> Z3Set {
+        match self {
+            Self::Int(value) => set.add(value),
+            Self::Bool(value) => set.add(value),
+        }
+    }
+
+    fn del(&self, set: &Z3Set) -> Z3Set {
+        match self {
+            Self::Int(value) => set.del(value),
+            Self::Bool(value) => set.del(value),
+        }
+    }
+}
+
+fn resolved_set_state_at_path(
+    value: &ResolvedExpr,
+    path: &[ResolvedValuePathPart],
+    expected_type: &crate::core::ir::ResolvedTypeId,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    vars: &mut Z3VarMap,
+) -> Option<(Z3Set, Z3Int)> {
+    let element_ty = resolved_set_value_supported(expected_type, types)?;
+    if path.is_empty() {
+        if value.ty != *expected_type {
+            return None;
+        }
+        return match &value.kind {
+            ResolvedExprKind::Set(items) => {
+                let sort = resolved_set_element_sort(&element_ty, types)?;
+                let mut set = Z3Set::empty(&sort);
+                let mut size = Z3Int::from_i64(0);
+                for item in items {
+                    let elem = ResolvedSetElement::from_expr(
+                        item,
+                        &element_ty,
+                        body,
+                        types,
+                        callables,
+                        variants,
+                        vars,
+                    )?;
+                    let present = elem.member(&set);
+                    let increment = present.ite(&Z3Int::from_i64(0), &Z3Int::from_i64(1));
+                    size = Z3Int::add(&[&size, &increment]);
+                    set = elem.add(&set);
+                }
+                Some((set, size))
+            }
+            ResolvedExprKind::Load(_) | ResolvedExprKind::Project { .. } => {
+                let key = value_base_key(value, body)?;
+                vars.get_set_var(&key).cloned()
+            }
+            ResolvedExprKind::Call(call) if matches!(&call.callee, ResolvedCallee::Function(_)) => {
+                let (tail, callee_body, mut callee_vars) = inline_pure_call_tail(
+                    call,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                    &mut BTreeSet::new(),
+                )?;
+                resolved_set_state_at_path(
+                    &tail,
+                    &[],
+                    expected_type,
+                    &callee_body,
+                    types,
+                    callables,
+                    variants,
+                    &mut callee_vars,
+                )
+            }
+            ResolvedExprKind::Call(call)
+                if matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(b)
+                        if matches!(
+                            b.as_str(),
+                            "builtin.method.set.insert" | "builtin.method.set.remove"
+                        )
+                ) =>
+            {
+                if !resolved_set_builtin_call_is_closed(
+                    call,
+                    2,
+                    Some(crate::core::ir::Permission::View),
+                ) {
+                    return None;
+                }
+                let (set, size) = resolved_set_state_at_path(
+                    &call.arguments[0].value,
+                    &[],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )?;
+                let elem = ResolvedSetElement::from_expr(
+                    &call.arguments[1].value,
+                    &element_ty,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )?;
+                let present = elem.member(&set);
+                let is_insert = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(b) if b.as_str() == "builtin.method.set.insert"
+                );
+                if is_insert {
+                    let delta = present.ite(&Z3Int::from_i64(0), &Z3Int::from_i64(1));
+                    Some((elem.add(&set), Z3Int::add(&[&size, &delta])))
+                } else {
+                    let delta = present.ite(&Z3Int::from_i64(1), &Z3Int::from_i64(0));
+                    Some((elem.del(&set), Z3Int::sub(&[&size, &delta])))
+                }
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let condition = resolved_to_z3_bool_with_catalog(
+                    condition, body, types, callables, variants, vars,
+                )?;
+                let (then_set, then_size) = resolved_block_tail_set_state(
+                    then_block,
+                    &[],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )?;
+                let (else_set, else_size) = resolved_block_tail_set_state(
+                    else_block,
+                    &[],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )?;
+                Some((
+                    condition.ite(&then_set, &else_set),
+                    condition.ite(&then_size, &else_size),
+                ))
+            }
+            ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+                resolved_block_tail_set_state(
+                    block,
+                    &[],
+                    expected_type,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )
+            }
+            _ => None,
+        };
+    }
+
+    match &value.kind {
+        ResolvedExprKind::Load(_) => {
+            let base = value_base_key(value, body)?;
+            vars.get_set_var(&append_value_path(&base, path)).cloned()
+        }
+        ResolvedExprKind::Project {
+            value: base,
+            projection,
+        } => {
+            let first = match projection {
+                ResolvedValueProjection::Field(field) => {
+                    ResolvedValuePathPart::Field(field.clone())
+                }
+                ResolvedValueProjection::Tuple(index) => ResolvedValuePathPart::Tuple(*index),
+                ResolvedValueProjection::Index(_) | ResolvedValueProjection::Dereference => {
+                    return None;
+                }
+            };
+            let mut combined = vec![first];
+            combined.extend_from_slice(path);
+            resolved_set_state_at_path(
+                base,
+                &combined,
+                expected_type,
+                body,
+                types,
+                callables,
+                variants,
+                vars,
+            )
+        }
+        ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+            resolved_block_tail_set_state(
+                block,
+                path,
+                expected_type,
+                body,
+                types,
+                callables,
+                variants,
+                vars,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn resolved_block_tail_set_state(
+    block: &ResolvedBlock,
+    path: &[ResolvedValuePathPart],
+    expected_type: &crate::core::ir::ResolvedTypeId,
+    body: &ResolvedBody,
+    types: &ResolvedTypeTable,
+    callables: &BTreeMap<NodeId, crate::core::ir::ResolvedCallable>,
+    variants: &BTreeMap<NodeId, ResolvedVariantSchema>,
+    vars: &mut Z3VarMap,
+) -> Option<(Z3Set, Z3Int)> {
+    let mut scoped_vars = vars.clone();
+    resolved_block_stmts_with_catalog(block, body, types, callables, variants, &mut scoped_vars)?;
+    resolved_set_state_at_path(
+        block.result.as_deref()?,
+        path,
+        expected_type,
+        body,
+        types,
+        callables,
+        variants,
+        &mut scoped_vars,
+    )
+}
+
 fn resolved_list_value_supported(
     ty: &crate::core::ir::ResolvedTypeId,
     types: &ResolvedTypeTable,
@@ -3007,6 +3383,31 @@ fn resolved_list_length_at_path(
             ResolvedExprKind::Load(_) | ResolvedExprKind::Project { .. } => {
                 let key = value_base_key(value, body)?;
                 vars.get_list_len(&key).cloned()
+            }
+            ResolvedExprKind::Call(call)
+                if matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(builtin) if builtin.as_str() == "builtin.method.set.to_list"
+                ) =>
+            {
+                if !resolved_set_builtin_call_is_closed(
+                    call,
+                    1,
+                    Some(crate::core::ir::Permission::View),
+                ) {
+                    return None;
+                }
+                resolved_set_state_at_path(
+                    &call.arguments[0].value,
+                    &[],
+                    &call.arguments[0].value.ty,
+                    body,
+                    types,
+                    callables,
+                    variants,
+                    vars,
+                )
+                .map(|(_, size)| size)
             }
             ResolvedExprKind::Call(call) if matches!(&call.callee, ResolvedCallee::Function(_)) => {
                 let (tail, callee_body, mut callee_vars) = inline_pure_call_tail(
@@ -4069,7 +4470,9 @@ fn resolved_builtin_int_call(
     };
     let expected_permission = match builtin.as_str() {
         "len" => None,
-        "builtin.method.list.len" => Some(crate::core::ir::Permission::View),
+        "builtin.method.list.len" | "builtin.method.set.size" | "builtin.method.set.len" => {
+            Some(crate::core::ir::Permission::View)
+        }
         "builtin.method.option.unwrap"
         | "builtin.method.result.unwrap"
         | "builtin.method.result.unwrap_err"
@@ -4104,6 +4507,24 @@ fn resolved_builtin_int_call(
                 variants,
                 vars,
             )
+        }
+        "builtin.method.set.size" | "builtin.method.set.len" => {
+            if !resolved_set_builtin_call_is_closed(call, 1, expected_permission)
+                || z3_type_category(&expr.ty, types) != Z3TypeCategory::Int
+            {
+                return None;
+            }
+            resolved_set_state_at_path(
+                &call.arguments[0].value,
+                &[],
+                &call.arguments[0].value.ty,
+                body,
+                types,
+                callables,
+                variants,
+                vars,
+            )
+            .map(|(_, size)| size)
         }
         "builtin.method.option.unwrap"
         | "builtin.method.result.unwrap"
@@ -4295,6 +4716,53 @@ fn resolved_builtin_bool_call(
             variants,
             vars,
         );
+    }
+    if builtin.as_str() == "builtin.method.set.is_empty" {
+        if !resolved_set_builtin_call_is_closed(call, 1, Some(crate::core::ir::Permission::View)) {
+            return None;
+        }
+        let (_, size) = resolved_set_state_at_path(
+            &call.arguments[0].value,
+            &[],
+            &call.arguments[0].value.ty,
+            body,
+            types,
+            callables,
+            variants,
+            vars,
+        )?;
+        return Some(size.eq(Z3Int::from_i64(0)));
+    }
+    if matches!(builtin.as_str(), "builtin.method.set.contains" | "contains") {
+        let expected_permission = if builtin.as_str() == "contains" {
+            None
+        } else {
+            Some(crate::core::ir::Permission::View)
+        };
+        if !resolved_set_builtin_call_is_closed(call, 2, expected_permission) {
+            return None;
+        }
+        let element_ty = resolved_set_value_supported(&call.arguments[0].value.ty, types)?;
+        let (set, _) = resolved_set_state_at_path(
+            &call.arguments[0].value,
+            &[],
+            &call.arguments[0].value.ty,
+            body,
+            types,
+            callables,
+            variants,
+            vars,
+        )?;
+        let elem = ResolvedSetElement::from_expr(
+            &call.arguments[1].value,
+            &element_ty,
+            body,
+            types,
+            callables,
+            variants,
+            vars,
+        )?;
+        return Some(elem.member(&set));
     }
     if call.permission != Some(crate::core::ir::Permission::View)
         || !resolved_builtin_call_is_closed(call, Some(crate::core::ir::Permission::View))
@@ -8726,6 +9194,64 @@ fn collect_resolved_call_definedness(
                 stationary_loops,
                 context,
             )?;
+            return Some(());
+        }
+        let set_op_shape = match name {
+            "builtin.method.set.size"
+            | "builtin.method.set.len"
+            | "builtin.method.set.is_empty"
+            | "builtin.method.set.to_list" => Some((1, Some(crate::core::ir::Permission::View))),
+            "builtin.method.set.contains"
+            | "builtin.method.set.insert"
+            | "builtin.method.set.remove" => Some((2, Some(crate::core::ir::Permission::View))),
+            "contains"
+                if call.arguments.first().is_some_and(|argument| {
+                    resolved_set_value_supported(&argument.value.ty, types).is_some()
+                }) =>
+            {
+                Some((2, None))
+            }
+            _ => None,
+        };
+        if let Some((expected_arity, expected_permission)) = set_op_shape {
+            if !resolved_set_builtin_call_is_closed(call, expected_arity, expected_permission)
+                || resolved_set_value_supported(&call.arguments[0].value.ty, types).is_none()
+            {
+                return None;
+            }
+            let result_ok = match name {
+                "builtin.method.set.size" | "builtin.method.set.len" => matches!(
+                    types.get(&call.result),
+                    Some(ResolvedType::Primitive(
+                        PrimitiveType::I32 | PrimitiveType::I64
+                    ))
+                ),
+                "builtin.method.set.is_empty" | "builtin.method.set.contains" | "contains" => {
+                    matches!(
+                        types.get(&call.result),
+                        Some(ResolvedType::Primitive(PrimitiveType::Bool))
+                    )
+                }
+                "builtin.method.set.to_list" => resolved_list_value_supported(&call.result, types),
+                "builtin.method.set.insert" | "builtin.method.set.remove" => {
+                    call.result == call.arguments[0].value.ty
+                }
+                _ => false,
+            };
+            if !result_ok {
+                return None;
+            }
+            for argument in &call.arguments {
+                collect_expr_i32_definedness_scoped(
+                    &argument.value,
+                    caller_body,
+                    types,
+                    caller_vars,
+                    obligations,
+                    stationary_loops,
+                    context,
+                )?;
+            }
             return Some(());
         }
         if unwrap_variant.is_some() || is_total_predicate || is_fallback_unwrap {
@@ -13248,13 +13774,13 @@ fn verify_contracts_from_resolved_in_context(
             return Some(status_msg(VerifStatus::Proven, ""));
         }
         let is_entry_owner = callable.owner.0 == "function:main";
-        if had_definedness_obligations && !is_entry_owner {
-            // A source-contract-free helper was checked solely because a
-            // caller depends on it. Successful definedness-only VCs are internal
-            // proof support, not a public obligation result for this non-entry callee.
+        if had_definedness_obligations && (!is_entry_owner || !had_call_precondition_obligations) {
+            // A source-contract-free callable with only definedness VCs (or a
+            // non-entry helper whose callee definedness was checked internally)
+            // matches canonical MIR by omitting a separate public obligation result.
             return None;
         }
-        if had_call_precondition_obligations || had_definedness_obligations {
+        if had_call_precondition_obligations {
             return Some(status_msg(VerifStatus::Proven, ""));
         }
         return Some(status_msg(VerifStatus::NoObligations, ""));

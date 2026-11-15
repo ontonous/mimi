@@ -4033,6 +4033,13 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
     );
     let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
 
+    let (exact_mir_results, typed_receipt) =
+        verify_exact_typed_mir_request_for_test(&program, &source_hash);
+    let exact_mir = exact_mir_result_for_test(&exact_mir_results, "main");
+    assert_eq!(exact_mir.status, VerifStatus::Proven);
+    assert_eq!(exact_mir.constraint_count, 4);
+    assert_single_exact_mir_artifact(exact_mir, &source_hash, &typed_receipt);
+
     let results =
         verify_checked(&program, source_hash.clone()).expect("nested Option tuple MIR verify");
     let result = results
@@ -4049,25 +4056,19 @@ fn public_checked_verifier_routes_nested_option_tuple_to_mir() {
         .expect("canonical nested Option tuple MIR");
     assert_eq!(artifact.mir_hash, canonical.canonical_digest());
 
-    let dual = verify_checked_dual(&program, source_hash).expect("nested Option tuple dual verify");
+    let dual = verify_checked_dual(&program, source_hash.clone())
+        .expect("nested Option tuple dual verify");
     let dual_result = dual
         .iter()
         .find(|result| result.func_name == "main")
         .expect("nested Option tuple dual contract result");
     assert_eq!(dual_result.status, VerifStatus::Proven);
-    assert_eq!(dual_result.constraint_count, 4);
-    let dual_artifact = dual_result
-        .artifact
-        .as_ref()
-        .expect("dual MIR proof artifact");
-    assert_eq!(dual_artifact.engine, ProofArtifact::ENGINE_MIR);
-    assert_eq!(dual_artifact.mir_hash, canonical.canonical_digest());
-    assert_eq!(
-        dual_artifact
-            .mir_route_receipt
-            .as_ref()
-            .map(|receipt| receipt.mir_digest.as_str()),
-        Some(dual_artifact.mir_hash.as_str())
+    assert!(dual_result.constraint_count > 0);
+    assert_dual_result_keeps_the_agreed_engine_artifact(
+        dual_result,
+        exact_mir,
+        &source_hash,
+        &typed_receipt,
     );
 }
 

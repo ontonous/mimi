@@ -16,7 +16,7 @@ use crate::core::mir::reference::MirProgram;
 use crate::core::mir::MirTerminator;
 use crate::core::{CheckedProgram, PrimitiveType, ResolvedTypeId};
 
-use super::islands::has_mixed_coverage;
+use super::islands::has_scalar_collection_mixed_coverage;
 
 /// Stable name for the bounded non-generic nested tuple variant island.
 pub const NON_COPY_OPTION_NESTED_TUPLE_VARIANT_ISLAND: &str =
@@ -37,7 +37,8 @@ pub fn classify_option_nested_tuple_variant_admission(
     program: &CheckedProgram,
 ) -> OptionNestedTupleVariantAdmission {
     let mut candidate = false;
-    let mut mixed = has_mixed_coverage(program);
+    let empty_stdout_callees = BTreeSet::new();
+    let mut mixed = has_scalar_collection_mixed_coverage(program, &empty_stdout_callees);
 
     for callable in program.callables().values() {
         if super::islands::is_prelude_origin(program, &callable.body.root.origin)
@@ -45,10 +46,17 @@ pub fn classify_option_nested_tuple_variant_admission(
         {
             continue;
         }
-        let closed = nested_tuple_body_is_closed(program, &callable.body.root);
+        let effects_are_admitted_stdout = callable.signature.effects.is_empty()
+            || super::verification::callable_effect_model_is_scalar_stdout_only(
+                callable,
+                program,
+                &empty_stdout_callees,
+            );
+        let closed =
+            nested_tuple_body_is_closed(program, &callable.body.root, effects_are_admitted_stdout);
         candidate |= block_has_option_nested_tuple_switch(program, &callable.body.root);
         if !closed
-            || !callable.signature.effects.is_empty()
+            || !effects_are_admitted_stdout
             || callable.signature.parameters.iter().any(|parameter| {
                 matches!(
                     parameter.permission,
@@ -281,8 +289,9 @@ fn tuple_contains_owned_string(program: &CheckedProgram, ty: &ResolvedTypeId) ->
 fn nested_tuple_body_is_closed(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
+    allow_stdout_effects: bool,
 ) -> bool {
-    nested_tuple_body_walk(program, block, true)
+    nested_tuple_body_walk(program, block, true, allow_stdout_effects)
 }
 
 /// Nested-block entry: block-parameter merges are outside the R6-1049
@@ -290,14 +299,16 @@ fn nested_tuple_body_is_closed(
 fn nested_tuple_body_is_closed_nested(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
+    allow_stdout_effects: bool,
 ) -> bool {
-    nested_tuple_body_walk(program, block, false)
+    nested_tuple_body_walk(program, block, false, allow_stdout_effects)
 }
 
 fn nested_tuple_body_walk(
     program: &CheckedProgram,
     block: &crate::core::ir::ResolvedBlock,
     admits_assign: bool,
+    allow_stdout_effects: bool,
 ) -> bool {
     block.statements.iter().all(|statement| {
         if !statement.backend_requirements.is_empty() {
@@ -309,9 +320,9 @@ fn nested_tuple_body_walk(
                 initializer,
             } => {
                 nested_tuple_pattern_is_closed(pattern)
-                    && initializer
-                        .as_ref()
-                        .map_or(true, |value| nested_tuple_expr_is_closed(program, value))
+                    && initializer.as_ref().map_or(true, |value| {
+                        nested_tuple_expr_is_closed(program, value, allow_stdout_effects)
+                    })
             }
             ResolvedStmtKind::Assign { value, .. } => {
                 // R6-1049: the construction-proven root-level scalar-assign
@@ -319,22 +330,22 @@ fn nested_tuple_body_walk(
                 // closed; nested-block assigns stay outside the face.
                 admits_assign
                     && super::islands::resolved_assign_is_admitted_scalar_shape(program, statement)
-                    && nested_tuple_expr_is_closed(program, value)
+                    && nested_tuple_expr_is_closed(program, value, allow_stdout_effects)
             }
             ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
                 value.as_ref().map_or(true, |expression| {
-                    nested_tuple_expr_is_closed(program, expression)
+                    nested_tuple_expr_is_closed(program, expression, allow_stdout_effects)
                 })
             }
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
-            } => nested_tuple_expr_is_closed(program, value),
+            } => nested_tuple_expr_is_closed(program, value, allow_stdout_effects),
             ResolvedStmtKind::Drop(_) => true,
             _ => false,
         }
     }) && block.result.as_ref().map_or(true, |expression| {
-        nested_tuple_expr_is_closed(program, expression)
+        nested_tuple_expr_is_closed(program, expression, allow_stdout_effects)
     })
 }
 
@@ -353,8 +364,15 @@ fn nested_tuple_pattern_is_closed(pattern: &ResolvedPattern) -> bool {
     }
 }
 
-fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedExpr) -> bool {
-    if !expression.effects.is_empty() || !expression.backend_requirements.is_empty() {
+fn nested_tuple_expr_is_closed(
+    program: &CheckedProgram,
+    expression: &ResolvedExpr,
+    allow_stdout_effects: bool,
+) -> bool {
+    let effects_ok = expression.effects.is_empty()
+        || (allow_stdout_effects
+            && super::verification::effect_ids_are_stdout_only(&expression.effects));
+    if !effects_ok || !expression.backend_requirements.is_empty() {
         return false;
     }
     match &expression.kind {
@@ -363,9 +381,21 @@ fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedEx
         | ResolvedExprKind::Constant(_) => true,
         ResolvedExprKind::Call(call) => {
             let allowed = match &call.callee {
-                ResolvedCallee::Builtin(name) => {
-                    matches!(name.as_str(), "Some" | "None" | "println")
-                }
+                ResolvedCallee::Builtin(name) => match name.as_str() {
+                    "Some" | "None" => {
+                        call.effects.is_empty()
+                            && call.permission.is_none()
+                            && call.session.is_empty()
+                    }
+                    "println" => {
+                        allow_stdout_effects
+                            && (call.effects.is_empty()
+                                || super::verification::effect_ids_are_stdout_only(&call.effects))
+                            && call.permission.is_none()
+                            && call.session.is_empty()
+                    }
+                    _ => false,
+                },
                 ResolvedCallee::Function(_) => {
                     call.type_arguments.is_empty()
                         && call.permission.is_none()
@@ -375,14 +405,13 @@ fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedEx
                 _ => false,
             };
             allowed
-                && call
-                    .arguments
-                    .iter()
-                    .all(|argument| nested_tuple_expr_is_closed(program, &argument.value))
+                && call.arguments.iter().all(|argument| {
+                    nested_tuple_expr_is_closed(program, &argument.value, allow_stdout_effects)
+                })
         }
         ResolvedExprKind::Binary { left, right, .. } => {
-            nested_tuple_expr_is_closed(program, left)
-                && nested_tuple_expr_is_closed(program, right)
+            nested_tuple_expr_is_closed(program, left, allow_stdout_effects)
+                && nested_tuple_expr_is_closed(program, right, allow_stdout_effects)
         }
         ResolvedExprKind::Unary { operand, op } => {
             !matches!(
@@ -390,16 +419,16 @@ fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedEx
                 crate::core::ir::ResolvedUnaryOp::BorrowShared
                     | crate::core::ir::ResolvedUnaryOp::BorrowMutable
                     | crate::core::ir::ResolvedUnaryOp::Dereference
-            ) && nested_tuple_expr_is_closed(program, operand)
+            ) && nested_tuple_expr_is_closed(program, operand, allow_stdout_effects)
         }
         ResolvedExprKind::Cast { value, .. } | ResolvedExprKind::Old(value) => {
-            nested_tuple_expr_is_closed(program, value)
+            nested_tuple_expr_is_closed(program, value, allow_stdout_effects)
         }
         ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
-            nested_tuple_body_is_closed_nested(program, block)
+            nested_tuple_body_is_closed_nested(program, block, allow_stdout_effects)
         }
         ResolvedExprKind::Match { scrutinee, arms } => {
-            nested_tuple_expr_is_closed(program, scrutinee)
+            nested_tuple_expr_is_closed(program, scrutinee, allow_stdout_effects)
                 && if arms.iter().any(|arm| {
                     matches!(
                         &arm.pattern.kind,
@@ -413,13 +442,13 @@ fn nested_tuple_expr_is_closed(program: &CheckedProgram, expression: &ResolvedEx
                     arms.iter().all(|arm| {
                         arm.guard.is_none()
                             && nested_tuple_pattern_is_closed(&arm.pattern)
-                            && nested_tuple_expr_is_closed(program, &arm.body)
+                            && nested_tuple_expr_is_closed(program, &arm.body, allow_stdout_effects)
                     })
                 }
         }
         ResolvedExprKind::Tuple(values) => values
             .iter()
-            .all(|value| nested_tuple_expr_is_closed(program, value)),
+            .all(|value| nested_tuple_expr_is_closed(program, value, allow_stdout_effects)),
         _ => false,
     }
 }

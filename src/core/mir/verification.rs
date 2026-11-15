@@ -658,6 +658,12 @@ pub fn prepare_verification_request(program: &CheckedProgram) -> MirVerification
 const STDOUT_EFFECT_NAME: &str = "shared.modify";
 const SHARED_BINDING_ORIGIN_RULE: &str = "resolved_body.shared_binding";
 
+pub(super) fn effect_ids_are_stdout_only(effects: &[crate::core::ir::EffectId]) -> bool {
+    effects
+        .iter()
+        .all(|effect| effect.as_str() == STDOUT_EFFECT_NAME)
+}
+
 /// Admit an otherwise unsupported effect summary only when its complete typed
 /// body accounts for every effect as a direct `println` or an exact checked
 /// Flow transition. MIR gives `println` a dedicated `StdoutLine` contract, and

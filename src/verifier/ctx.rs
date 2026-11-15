@@ -2,7 +2,7 @@ use crate::diagnostic::Diagnostic;
 use std::collections::HashMap;
 use std::time::Instant;
 use z3::ast::String as Z3String;
-use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real};
+use z3::ast::{Bool as Z3Bool, Int as Z3Int, Real as Z3Real, Set as Z3Set};
 use z3::SatResult;
 use z3::Solver;
 
@@ -564,6 +564,8 @@ pub(crate) struct Z3VarMap {
     /// List length variables: xs_len = Z3Int for each list param.
     /// Used to model length-preserving list operations like sort().
     pub(crate) list_len: HashMap<String, Z3Int>,
+    /// Closed scalar Set states: `(elements, size)` for each Set binding.
+    pub(crate) set_vars: HashMap<String, (Z3Set, Z3Int)>,
 }
 
 impl Z3VarMap {
@@ -576,6 +578,7 @@ impl Z3VarMap {
             string_len: HashMap::new(),
             string_vars: HashMap::new(),
             list_len: HashMap::new(),
+            set_vars: HashMap::new(),
         }
     }
 
@@ -635,6 +638,15 @@ impl Z3VarMap {
     #[inline]
     pub(crate) fn get_list_len(&self, name: &str) -> Option<&Z3Int> {
         self.list_len.get(name)
+    }
+
+    pub(crate) fn insert_set_var(&mut self, name: impl Into<String>, var: (Z3Set, Z3Int)) {
+        self.set_vars.insert(name.into(), var);
+    }
+
+    #[inline]
+    pub(crate) fn get_set_var(&self, name: &str) -> Option<&(Z3Set, Z3Int)> {
+        self.set_vars.get(name)
     }
 
     /// Register a Z3 string theory variable for a string parameter.

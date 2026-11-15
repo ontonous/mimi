@@ -4918,7 +4918,7 @@ pub(super) fn has_mixed_coverage(program: &CheckedProgram) -> bool {
     has_mixed_coverage_with_record_protocol(program, None)
 }
 
-fn has_scalar_collection_mixed_coverage(
+pub(super) fn has_scalar_collection_mixed_coverage(
     program: &CheckedProgram,
     admitted_direct_stdout_callees: &BTreeSet<NodeId>,
 ) -> bool {
