@@ -7000,12 +7000,14 @@ fn block_has_checked_integer_operation(
                     || block_has_checked_integer_operation(then_block, body, types)
                     || block_has_checked_integer_operation(else_block, body, types)
             }
-            ResolvedExprKind::Match { .. } => {
-                // Even a typed, finite sum match carries a totality VC in the
-                // Resolved proof route. Select its caller when this helper is
-                // only reachable through a direct call so a missing tag or
-                // guard path cannot disappear as NoObligations.
-                true
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                expr_has(scrutinee, body, types)
+                    || arms.iter().any(|arm| {
+                        arm.guard
+                            .as_ref()
+                            .is_some_and(|guard| expr_has(guard, body, types))
+                            || expr_has(&arm.body, body, types)
+                    })
             }
             ResolvedExprKind::Range { start, end } => {
                 expr_has(start, body, types) || expr_has(end, body, types)
@@ -7095,13 +7097,17 @@ fn block_has_checked_integer_operation(
             .is_some_and(|expr| expr_has(expr, body, types))
 }
 
-/// One definedness verification condition for checked i32 arithmetic.
+/// One definedness or call-precondition verification condition for checked scalar semantics.
 pub(crate) struct ResolvedIntDefinedness {
     pub(crate) condition: Z3Bool,
     pub(crate) failure: &'static str,
     /// A failed source-width premise is a verifier model gap, not a runtime
     /// counterexample. Keep it fail-closed as NITS instead of E0800/E0802.
     pub(crate) modeling_gap: bool,
+    /// True only for a callee `requires` obligation at a direct call site.
+    /// Definedness obligations keep non-entry contract-free helpers hidden once
+    /// discharged, whereas comparison-only call preconditions surface `Proven`.
+    pub(crate) is_call_precondition: bool,
 }
 
 /// Bounds for a checked (trap-semantics) integer type. SD-7: integer
@@ -7248,11 +7254,13 @@ fn collect_expr_i32_definedness_scoped(
                     failure:
                         "integer power operand escaped its typed source range (verifier model gap)",
                     modeling_gap: true,
+                    is_call_precondition: false,
                 });
                 obligations.push(ResolvedIntDefinedness {
                     condition: encoding.defined,
                     failure: "integer power may trap (E0800 negative or >u32 exponent; E0802 checked i64 overflow)",
                     modeling_gap: false,
+                    is_call_precondition: false,
                 });
                 return Some(());
             }
@@ -7275,6 +7283,7 @@ fn collect_expr_i32_definedness_scoped(
                             condition: Z3Bool::and(&[&value.ge(&lo), &value.le(&hi)]),
                             failure: "integer overflow is not excluded by preconditions",
                             modeling_gap: false,
+                            is_call_precondition: false,
                         });
                     }
                     ResolvedBinaryOp::Divide | ResolvedBinaryOp::Remainder => {
@@ -7286,6 +7295,7 @@ fn collect_expr_i32_definedness_scoped(
                             condition: Z3Bool::and(&[&r.ne(&zero), &min_overflow.not()]),
                             failure: "integer operation is undefined (zero divisor or MIN / -1)",
                             modeling_gap: false,
+                            is_call_precondition: false,
                         });
                     }
                     _ => {}
@@ -7311,6 +7321,7 @@ fn collect_expr_i32_definedness_scoped(
                             condition: value.ne(&Z3Int::from_i64(lo)),
                             failure: "integer overflow is not excluded by preconditions",
                             modeling_gap: false,
+                            is_call_precondition: false,
                         });
                     }
                 }
@@ -7635,6 +7646,7 @@ fn collect_expr_i32_definedness_scoped(
                 condition: remaining.not(),
                 failure: "match may be non-exhaustive",
                 modeling_gap: false,
+                is_call_precondition: false,
             });
         }
         ResolvedExprKind::Call(call) => {
@@ -8751,6 +8763,7 @@ fn collect_resolved_call_definedness(
                     condition: tag,
                     failure: "variant unwrap may select a missing payload",
                     modeling_gap: false,
+                    is_call_precondition: false,
                 });
             }
             return Some(());
@@ -8869,6 +8882,7 @@ fn collect_resolved_call_definedness(
                 condition: predicate.clone(),
                 failure: "call may violate precondition",
                 modeling_gap: false,
+                is_call_precondition: true,
             });
             prior_requires.push(predicate);
         }
@@ -13054,7 +13068,12 @@ fn verify_contracts_from_resolved_in_context(
             "could not encode i32 definedness obligations (fail-closed)",
         ));
     }
-    let had_definedness_obligations = !obligations.is_empty();
+    let had_definedness_obligations = obligations
+        .iter()
+        .any(|obligation| !obligation.is_call_precondition);
+    let had_call_precondition_obligations = obligations
+        .iter()
+        .any(|obligation| obligation.is_call_precondition);
     context.assert_type_premises(session);
     for obligation in obligations {
         let (result, _model) = session.check_scope(obligation.condition.not());
@@ -13209,11 +13228,15 @@ fn verify_contracts_from_resolved_in_context(
         if !requires.is_empty() {
             return Some(status_msg(VerifStatus::Proven, ""));
         }
-        if had_definedness_obligations {
+        let is_entry_owner = callable.owner.0 == "function:main";
+        if had_definedness_obligations && !is_entry_owner {
             // A source-contract-free helper was checked solely because a
-            // caller depends on it. Successful call-site VCs are internal
-            // proof support, not a public obligation result for this callee.
+            // caller depends on it. Successful definedness-only VCs are internal
+            // proof support, not a public obligation result for this non-entry callee.
             return None;
+        }
+        if had_call_precondition_obligations || had_definedness_obligations {
+            return Some(status_msg(VerifStatus::Proven, ""));
         }
         return Some(status_msg(VerifStatus::NoObligations, ""));
     }
