@@ -5558,6 +5558,10 @@ fn verify_ffi_checked_body_with_source_hash_and_z3_override(
                     program,
                     &called_contract_names,
                     &error,
+                ) || scalar_ffi_requires_helper_call_is_the_only_construction_boundary(
+                    program,
+                    &called_contract_names,
+                    &error,
                 ) =>
             {
                 // This narrow verifier adapter is explicitly non-executable.
@@ -5687,6 +5691,32 @@ fn scalar_ffi_singleton_for_slice_is_the_only_construction_boundary(
     // Mirror the ScalarFfi route's known prelude exclusion and retain the
     // typed build diagnostics instead of deciding from a rendered error
     // string. Any additional unsupported shape keeps the hard route failure.
+    let Some(errors) = scalar_ffi_construction_lowering_errors(program, route_error) else {
+        return false;
+    };
+    !errors.is_empty()
+        && errors.len() == expected_for_nodes.len()
+        && errors.iter().all(|error| {
+            error.message == "structured control flow is not lowered by MIR Phase 0"
+                && expected_for_nodes.contains(&error.node_id)
+        })
+}
+
+fn scalar_ffi_construction_lowering_errors(
+    program: &crate::core::CheckedProgram,
+    route_error: &crate::core::mir::CanonicalMirRouteMaterializationError,
+) -> Option<Vec<crate::core::mir::lower::MirLoweringError>> {
+    if !matches!(
+        route_error,
+        crate::core::mir::CanonicalMirRouteMaterializationError::Complete {
+            profile: crate::core::mir::CanonicalMirRouteProfile::ScalarFfi,
+            stage: crate::core::mir::CanonicalMirRouteFailureStage::Construction,
+            ..
+        }
+    ) {
+        return None;
+    }
+
     let excluded_sources = program
         .source_registry()
         .records()
@@ -5704,14 +5734,71 @@ fn scalar_ffi_singleton_for_slice_is_the_only_construction_boundary(
     };
     let Err(crate::core::mir::reference::MirProgramBuildError::Lowering(errors)) = ordinary_build
     else {
+        return None;
+    };
+    Some(errors)
+}
+
+/// Permit the verifier-only FFI owner slice after a complete ScalarFfi route
+/// failed construction only when every lowering rejection is a root `Requires`
+/// contract calling a Mimi helper inside an FFI caller owner. Standard
+/// `ScalarFfi` materialization, default dispatch, and execution backends keep
+/// their existing hard failure.
+fn scalar_ffi_requires_helper_call_is_the_only_construction_boundary(
+    program: &crate::core::CheckedProgram,
+    called_contract_names: &std::collections::BTreeSet<String>,
+    route_error: &crate::core::mir::CanonicalMirRouteMaterializationError,
+) -> bool {
+    let Some(errors) = scalar_ffi_construction_lowering_errors(program, route_error) else {
         return false;
     };
-    !errors.is_empty()
-        && errors.len() == expected_for_nodes.len()
-        && errors.iter().all(|error| {
-            error.message == "structured control flow is not lowered by MIR Phase 0"
-                && expected_for_nodes.contains(&error.node_id)
+    if errors.is_empty() {
+        return false;
+    }
+
+    let ffi_owners = program
+        .call_sites_sorted()
+        .into_iter()
+        .filter(|site| {
+            site.kind == crate::core::ResolvedCallKind::Extern
+                && called_contract_names.contains(&site.callee)
+                && !ffi_site_is_declaration_root_call(program, site)
         })
+        .map(|site| crate::core::NodeId(site.owner.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    if ffi_owners.is_empty() {
+        return false;
+    }
+
+    errors.iter().all(|error| {
+        error.message.contains("contract expression shape Call(")
+            && error
+                .message
+                .contains("is outside the canonical MIR verifier contract")
+            && ffi_owners.iter().any(|owner| {
+                program.callable(owner).is_some_and(|callable| {
+                    callable.contracts.iter().any(|contract| {
+                        contract.kind == crate::core::ir::ContractKind::Requires
+                            && contract.node_id == error.node_id
+                            && matches!(
+                                &contract.condition.kind,
+                                crate::core::ir::ResolvedExprKind::Call(call)
+                                    if matches!(
+                                        &call.callee,
+                                        crate::core::ir::ResolvedCallee::Function(_)
+                                    )
+                            )
+                            && callable.body.root.statements.iter().any(|statement| {
+                                statement.node_id == contract.node_id
+                                    && matches!(
+                                        &statement.kind,
+                                        crate::core::ir::ResolvedStmtKind::Contract { .. }
+                                    )
+                            })
+                    })
+                })
+            })
+    })
 }
 
 /// Return declaration-default FFI call nodes that are declarations only. A

@@ -36,7 +36,7 @@ fn ffi_requires_accepts_one_private_pure_helper_and_keeps_verifier_only_receipt_
         .expect("verifier-only pure helper FFI proof");
     let result = results
         .iter()
-        .find(|result| result.func_name == "function:caller")
+        .find(|result| result.func_name == "caller calls host_i32")
         .expect("one FFI caller result");
     assert_eq!(result.status, VerifStatus::Proven, "{result:?}");
     let artifact = result.artifact.as_ref().expect("proof artifact");
@@ -166,7 +166,7 @@ fn ffi_requires_pure_helper_can_disprove_a_weaker_caller_assumption() {
     .expect("pure helper counterexample proof");
     let result = results
         .iter()
-        .find(|result| result.func_name == "function:caller")
+        .find(|result| result.func_name == "caller calls host_i32")
         .expect("one FFI caller result");
     assert_eq!(result.status, VerifStatus::Disproven, "{result:?}");
     assert!(result.artifact.is_some(), "counterexample is definitive");
@@ -214,6 +214,7 @@ fn ffi_requires_helper_admission_fails_closed_for_recursion_effects_generics_and
                 extern "C" { func host_i32(value: i32) -> i32 requires: value > 0; }
                 func predicate(value: i32) -> bool { value > 0 }
                 func caller(value: i32) -> i32 {
+                    requires: predicate(value)
                     predicate(value);
                     host_i32(value)
                 }
@@ -230,7 +231,7 @@ fn ffi_requires_helper_admission_fails_closed_for_recursion_effects_generics_and
         .unwrap_or_else(|error| panic!("{label}: checked FFI adapter failed: {error}"));
         let result = results
             .iter()
-            .find(|result| result.func_name == "function:caller")
+            .find(|result| result.func_name == "caller calls host_i32")
             .unwrap_or_else(|| panic!("{label}: no owner-scoped result: {results:?}"));
         assert_eq!(
             result.status,
