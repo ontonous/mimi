@@ -1078,6 +1078,7 @@ impl<'a> Checker<'a> {
         for item in &self.file.items {
             self.check_item(item);
         }
+        self.check_safe_reference_operators();
         // 0.31.46: sort warnings by span for deterministic output.
         self.warnings.sort_by(|a, b| {
             a.span

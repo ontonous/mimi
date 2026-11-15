@@ -61,7 +61,6 @@ impl<'a> Checker<'a> {
         self.check_main_entry_signatures();
         self.check_actor_method_field_writes();
         self.check_actor_root_flow_initialization();
-        self.check_safe_reference_operators();
         // E-01..E-03: infer the finite effect summary after every callable
         // declaration is visible.  The pass is conservative for extern and
         // dynamic calls (they carry `unknown`) and therefore never turns an
@@ -243,36 +242,38 @@ impl<'a> Checker<'a> {
     /// source. The explicit low-level contexts are lexical `unsafe { ... }`
     /// blocks and `extern "C" func` wrapper signatures/bodies. Extern import
     /// declarations do not create an unsafe source context.
-    fn check_safe_reference_operators(&mut self) {
-        let items = self.file.items.clone();
-        let mut violations = Vec::new();
-        for item in &items {
+    pub(crate) fn check_safe_reference_operators(&mut self) {
+        let mut collector = SafeReferenceCollector {
+            expr_types: &self.zonked_expr_types,
+            violations: Vec::new(),
+        };
+        for item in &self.file.items {
             match item {
                 Item::Func(function) => {
                     collect_callable_signature_types(
                         &function.params,
                         function.ret.as_ref(),
                         function.extern_abi.as_deref() == Some("C"),
-                        &mut violations,
+                        &mut collector,
                     );
                     collect_safe_reference_operators(
                         &function.body,
                         function.extern_abi.as_deref() == Some("C"),
-                        &mut violations,
+                        &mut collector,
                     );
                 }
                 Item::Actor(actor) => {
                     for field in &actor.fields {
-                        collect_safe_type_operators(&field.ty, false, &mut violations);
+                        collect_safe_type_operators(&field.ty, false, &mut collector.violations);
                     }
                     for method in &actor.methods {
                         collect_callable_signature_types(
                             &method.params,
                             method.ret.as_ref(),
                             false,
-                            &mut violations,
+                            &mut collector,
                         );
-                        collect_safe_reference_operators(&method.body, false, &mut violations);
+                        collect_safe_reference_operators(&method.body, false, &mut collector);
                     }
                 }
                 Item::Impl(implementation) => {
@@ -281,35 +282,39 @@ impl<'a> Checker<'a> {
                         .iter()
                         .chain(&implementation.type_args)
                     {
-                        collect_safe_type_operators(ty, false, &mut violations);
+                        collect_safe_type_operators(ty, false, &mut collector.violations);
                     }
                     for method in &implementation.methods {
                         collect_callable_signature_types(
                             &method.params,
                             method.ret.as_ref(),
                             false,
-                            &mut violations,
+                            &mut collector,
                         );
-                        collect_safe_reference_operators(&method.body, false, &mut violations);
+                        collect_safe_reference_operators(&method.body, false, &mut collector);
                     }
                 }
                 Item::Type(definition) => match &definition.kind {
                     TypeDefKind::Alias(ty) | TypeDefKind::Newtype(ty) => {
-                        collect_safe_type_operators(ty, false, &mut violations)
+                        collect_safe_type_operators(ty, false, &mut collector.violations)
                     }
                     TypeDefKind::Record(fields) | TypeDefKind::Union(fields) => {
-                        collect_field_types(fields, false, &mut violations)
+                        collect_field_types(fields, false, &mut collector.violations)
                     }
                     TypeDefKind::Enum(variants) => {
                         for variant in variants {
                             match &variant.payload {
                                 Some(VariantPayload::Tuple(types)) => {
                                     for ty in types {
-                                        collect_safe_type_operators(ty, false, &mut violations);
+                                        collect_safe_type_operators(
+                                            ty,
+                                            false,
+                                            &mut collector.violations,
+                                        );
                                     }
                                 }
                                 Some(VariantPayload::Record(fields)) => {
-                                    collect_field_types(fields, false, &mut violations);
+                                    collect_field_types(fields, false, &mut collector.violations);
                                 }
                                 None => {}
                             }
@@ -322,31 +327,31 @@ impl<'a> Checker<'a> {
                             &method.params,
                             method.ret.as_ref(),
                             false,
-                            &mut violations,
+                            &mut collector,
                         );
                     }
                 }
                 Item::Flow(flow) => {
                     for state in &flow.states {
                         if let Some(fields) = &state.payload {
-                            collect_field_types(fields, false, &mut violations);
+                            collect_field_types(fields, false, &mut collector.violations);
                         }
                     }
                     if let Some(fault_type) = &flow.fault_type {
-                        collect_safe_type_operators(fault_type, false, &mut violations);
+                        collect_safe_type_operators(fault_type, false, &mut collector.violations);
                     }
                     for transition in &flow.transitions {
                         collect_callable_signature_types(
                             &transition.params,
                             None,
                             false,
-                            &mut violations,
+                            &mut collector,
                         );
                         if let Some(fails) = &transition.fails {
-                            collect_safe_type_operators(fails, false, &mut violations);
+                            collect_safe_type_operators(fails, false, &mut collector.violations);
                         }
                         if let Some(body) = &transition.body {
-                            collect_safe_reference_operators(body, false, &mut violations);
+                            collect_safe_reference_operators(body, false, &mut collector);
                         }
                     }
                 }
@@ -355,41 +360,45 @@ impl<'a> Checker<'a> {
                     // not create a source-level unsafe context.
                     for function in &extern_block.funcs {
                         for parameter in &function.params {
-                            collect_safe_type_operators(&parameter.ty, false, &mut violations);
+                            collect_safe_type_operators(
+                                &parameter.ty,
+                                false,
+                                &mut collector.violations,
+                            );
                         }
                         if let Some(ret) = &function.ret {
-                            collect_safe_type_operators(ret, false, &mut violations);
+                            collect_safe_type_operators(ret, false, &mut collector.violations);
                         }
                         if let Some(requires) = &function.requires {
                             collect_safe_reference_operators_in_expr(
                                 requires,
                                 false,
-                                &mut violations,
+                                &mut collector,
                             );
                         }
                         if let Some(ensures) = &function.ensures {
                             collect_safe_reference_operators_in_expr(
                                 ensures,
                                 false,
-                                &mut violations,
+                                &mut collector,
                             );
                         }
                     }
                 }
                 Item::Const { ty, value, .. } => {
                     if let Some(ty) = ty {
-                        collect_safe_type_operators(ty, false, &mut violations);
+                        collect_safe_type_operators(ty, false, &mut collector.violations);
                     }
-                    collect_safe_reference_operators_in_expr(value, false, &mut violations);
+                    collect_safe_reference_operators_in_expr(value, false, &mut collector);
                 }
                 Item::Session(session) => {
-                    collect_session_type_operators(&session.body, &mut violations);
+                    collect_session_type_operators(&session.body, &mut collector.violations);
                 }
                 Item::Cap(_) => {}
             }
         }
 
-        for (operator, span) in violations {
+        for (operator, span) in collector.violations {
             self.errors.push(
                 Diagnostic::error_code(
                     crate::diagnostic::codes::E0449,
@@ -3728,16 +3737,38 @@ fn collect_actor_field_writes_in_expr(
     }
 }
 
+struct SafeReferenceCollector<'a> {
+    expr_types: &'a std::collections::BTreeMap<
+        crate::core::NodeId,
+        std::collections::BTreeMap<
+            crate::core::resolved::ExpressionTypeKey,
+            crate::core::phase::ZonkedTy,
+        >,
+    >,
+    violations: Vec<(&'static str, Span)>,
+}
+
+impl SafeReferenceCollector<'_> {
+    fn is_safe_shared_expr(&self, expr: &Expr) -> bool {
+        let key = crate::core::resolved::expression_type_key(expr);
+        self.expr_types.values().any(|owner_types| {
+            owner_types
+                .get(&key)
+                .is_some_and(|ty| matches!(ty.as_type().unlocated(), Type::Shared(_)))
+        })
+    }
+}
+
 fn collect_safe_reference_operators(
     block: &Block,
     unsafe_context: bool,
-    output: &mut Vec<(&'static str, Span)>,
+    output: &mut SafeReferenceCollector<'_>,
 ) {
     for statement in block {
         match statement.unlocated() {
             Stmt::Let { ty, init, .. } => {
                 if let Some(ty) = ty {
-                    collect_safe_type_operators(ty, unsafe_context, output);
+                    collect_safe_type_operators(ty, unsafe_context, &mut output.violations);
                 }
                 if let Some(expression) = init {
                     collect_safe_reference_operators_in_expr(expression, unsafe_context, output);
@@ -3800,12 +3831,21 @@ fn collect_safe_reference_operators(
                 }
             }
             Stmt::Assign { target, value } => {
+                // `*shared_var = value` mutates a reference-counted shared cell
+                // in place cleanly without raw pointers or `&mut` references.
+                if let Expr::Unary(UnOp::Deref, inner) = target.unlocated() {
+                    if !unsafe_context && output.is_safe_shared_expr(inner) {
+                        collect_safe_reference_operators_in_expr(inner, unsafe_context, output);
+                        collect_safe_reference_operators_in_expr(value, unsafe_context, output);
+                        continue;
+                    }
+                }
                 collect_safe_reference_operators_in_expr(target, unsafe_context, output);
                 collect_safe_reference_operators_in_expr(value, unsafe_context, output);
             }
             Stmt::SharedLet { ty, init, .. } => {
                 if let Some(ty) = ty {
-                    collect_safe_type_operators(ty, unsafe_context, output);
+                    collect_safe_type_operators(ty, unsafe_context, &mut output.violations);
                 }
                 collect_safe_reference_operators_in_expr(init, unsafe_context, output)
             }
@@ -3835,16 +3875,16 @@ fn collect_callable_signature_types(
     params: &[Param],
     ret: Option<&Type>,
     allow_ffi_wrapper: bool,
-    output: &mut Vec<(&'static str, Span)>,
+    output: &mut SafeReferenceCollector<'_>,
 ) {
     for parameter in params {
-        collect_safe_type_operators(&parameter.ty, allow_ffi_wrapper, output);
+        collect_safe_type_operators(&parameter.ty, allow_ffi_wrapper, &mut output.violations);
         if let Some(default) = &parameter.default_value {
             collect_safe_reference_operators_in_expr(default, false, output);
         }
     }
     if let Some(ret) = ret {
-        collect_safe_type_operators(ret, allow_ffi_wrapper, output);
+        collect_safe_type_operators(ret, allow_ffi_wrapper, &mut output.violations);
     }
 }
 
@@ -3931,7 +3971,7 @@ fn collect_safe_type_operators(
 fn collect_safe_reference_operators_in_expr(
     expression: &Expr,
     unsafe_context: bool,
-    output: &mut Vec<(&'static str, Span)>,
+    output: &mut SafeReferenceCollector<'_>,
 ) {
     match expression.unlocated() {
         Expr::Unary(operator, inner) => {
@@ -3944,7 +3984,7 @@ fn collect_safe_reference_operators_in_expr(
             if !unsafe_context {
                 if let Some(operator) = restricted_operator {
                     let span = expression.meta().map_or(Span::UNKNOWN, |meta| meta.span);
-                    output.push((operator, span));
+                    output.violations.push((operator, span));
                 }
             }
             collect_safe_reference_operators_in_expr(inner, unsafe_context, output);
@@ -4024,7 +4064,7 @@ fn collect_safe_reference_operators_in_expr(
         }
         Expr::Turbofish(_, type_arguments, arguments) => {
             for ty in type_arguments {
-                collect_safe_type_operators(ty, unsafe_context, output);
+                collect_safe_type_operators(ty, unsafe_context, &mut output.violations);
             }
             for argument in arguments {
                 collect_safe_reference_operators_in_expr(argument, unsafe_context, output);
@@ -4050,9 +4090,11 @@ fn collect_safe_reference_operators_in_expr(
         }
         Expr::Cast(inner, ty) => {
             collect_safe_reference_operators_in_expr(inner, unsafe_context, output);
-            collect_safe_type_operators(ty, unsafe_context, output);
+            collect_safe_type_operators(ty, unsafe_context, &mut output.violations);
         }
-        Expr::TypeInfo(ty) => collect_safe_type_operators(ty, unsafe_context, output),
+        Expr::TypeInfo(ty) => {
+            collect_safe_type_operators(ty, unsafe_context, &mut output.violations)
+        }
         Expr::Literal(Lit::FString(parts)) => {
             for part in parts {
                 if let FStringPart::Interp(expression) = part {

@@ -226,6 +226,7 @@ impl<'a> Checker<'a> {
 fn extract_acc(checker: &mut Checker) -> FlowAcc {
     // v0.31.2: Finalize zonked function types before extraction.
     checker.finalize_zonked_func_types();
+    checker.check_safe_reference_operators();
     let mut seen: HashSet<super::DiagnosticDedupKey> = HashSet::new();
     let mut deduped: Vec<Diagnostic> = Vec::with_capacity(checker.errors.len());
     for e in std::mem::take(&mut checker.errors) {

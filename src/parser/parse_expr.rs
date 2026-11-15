@@ -11,13 +11,23 @@ impl Parser {
         expr.with_meta(self.consumed_meta(start_pos, origin))
     }
 
+    pub(super) fn wrap_expr_if_unlocated(&self, start_pos: usize, expr: Expr) -> Expr {
+        // Preserve exact inner spans on pass-through groupings `(expr)` so
+        // operators like `&value` inside `*(&value)` retain their own spans.
+        if matches!(expr, Expr::Located { .. }) {
+            expr
+        } else {
+            self.parsed_expr_from(start_pos, expr)
+        }
+    }
+
     pub(crate) fn parse_expr(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let start_pos = self.pos;
         self.check_depth()?;
         self.inc_depth();
         let result = self.parse_expr_inner(min_prec, start_pos);
         self.dec_depth();
-        result.map(|expr| self.parsed_expr_from(start_pos, expr))
+        result.map(|expr| self.wrap_expr_if_unlocated(start_pos, expr))
     }
 
     fn parse_expr_inner(&mut self, min_prec: u8, start_pos: usize) -> Result<Expr, ParseError> {
@@ -93,7 +103,7 @@ impl Parser {
         self.inc_depth();
         let result = self.parse_expr_without_range_inner(start_pos);
         self.dec_depth();
-        result.map(|expr| self.parsed_expr_from(start_pos, expr))
+        result.map(|expr| self.wrap_expr_if_unlocated(start_pos, expr))
     }
 
     fn parse_expr_without_range_inner(&mut self, start_pos: usize) -> Result<Expr, ParseError> {
@@ -148,7 +158,7 @@ impl Parser {
         self.inc_depth();
         let result = self.parse_unary_inner();
         self.dec_depth();
-        result.map(|expr| self.parsed_expr_from(start_pos, expr))
+        result.map(|expr| self.wrap_expr_if_unlocated(start_pos, expr))
     }
 
     /// 0.36.51 (Phase D soft-keyword policy): `not` is both a unary boolean
@@ -473,8 +483,7 @@ impl Parser {
                     return Ok(self.parsed_expr_from(start_pos, Expr::Tuple(elems)));
                 }
                 self.expect(TokenKind::RParen, "`)`")?;
-                let grouped = self.parsed_expr_from(start_pos, e);
-                return self.parse_postfix(grouped, start_pos);
+                return self.parse_postfix(e, start_pos);
             }
             TokenKind::LBracket => self.parse_bracket_primary()?,
             TokenKind::Match => {
