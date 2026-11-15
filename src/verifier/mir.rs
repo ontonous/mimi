@@ -7755,14 +7755,18 @@ fn verify_ffi_program_inner_for_ensures(
                     let (term, defined, string_length_bridge) =
                         if let Some((guard, defined, bridge)) = direct_char_at0_guard {
                             (SymbolicValue::Bool(guard), defined, Some(bridge))
-                        } else if let Some(guard) = string_guard {
+                        } else if let Some((guard, bridge)) = string_guard {
                             // The verifier-only FFI caller profiles share one
-                            // exact positive-scalar-length atom with the
-                            // declaration-side direct or checked-record-field
-                            // `len(...) > 0` evaluator. The guarded char_at0
-                            // profile additionally retains its exact String.at(0)
-                            // equality and definedness condition.
-                            (SymbolicValue::Bool(guard), Bool::from_bool(true), None)
+                            // exact positive-scalar-length atom with
+                            // declaration-side `len(...) > 0` while bridging
+                            // emptiness to the SMT String view (`s != ""`) so
+                            // empty-literal and zero-length String predicates
+                            // imply each other across caller/callee boundaries.
+                            (
+                                SymbolicValue::Bool(guard),
+                                Bool::from_bool(true),
+                                Some(bridge),
+                            )
                         } else {
                             let (term, defined) = checked_contract_term_with_float_domain(
                                 contract,
@@ -15109,16 +15113,35 @@ fn hydrate_ffi_string_record_parameters(
     Ok(())
 }
 
+/// Shared helper aligning validated FFI direct nonempty/zero-length String
+/// caller guards onto `positive_scalar_length_term()` and bridging that
+/// scalar atom to the SMT String emptiness predicate (`value != ""`).
+fn direct_string_empty_guard_with_bridge(
+    value: &SymbolicString,
+    is_nonempty: bool,
+) -> Result<(Bool, Bool), String> {
+    let positive_scalar_length = value.positive_scalar_length_term();
+    let nonempty_string = value.as_z3()?.eq(&symbolic_string_literal("")?).not();
+    let bridge = positive_scalar_length.eq(&nonempty_string);
+    let guard = if is_nonempty {
+        positive_scalar_length
+    } else {
+        positive_scalar_length.not()
+    };
+    Ok((guard, bridge))
+}
+
 /// Map only the validated FFI caller guard `parameter != ""` (in either
-/// operand order) onto the verifier's exact nonempty String atom. This keeps
-/// it aligned with the matching `len(parameter) > 0` declaration predicate
-/// without admitting general String equalities or changing runtime routes.
+/// operand order) onto the verifier's exact nonempty String atom and bridge it
+/// to the SMT String emptiness test. This keeps it aligned with both
+/// `parameter != ""` and `len(parameter) > 0` declaration predicates without
+/// admitting general String equalities or changing runtime routes.
 fn direct_nonempty_string_parameter_guard_term(
     contract: &MirContract,
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     values: &BTreeMap<MirValueId, SymbolicValue>,
-) -> Result<Option<Bool>, String> {
+) -> Result<Option<(Bool, Bool)>, String> {
     if contract.kind != MirContractKind::Requires {
         return Ok(None);
     }
@@ -15152,19 +15175,20 @@ fn direct_nonempty_string_parameter_guard_term(
             "validated FFI nonempty String guard parameter '{parameter}' has no symbolic String value"
         ));
     };
-    Ok(Some(value.positive_scalar_length_term()))
+    Ok(Some(direct_string_empty_guard_with_bridge(value, true)?))
 }
 
 /// Map the validated direct String length zero-test caller profile onto the
 /// same exact nonempty atom used by the typed extern `len(value) > 0`
-/// predicate. Checker TypeDesc validation and the canonical caller parameter
-/// identity are rechecked by `direct_string_length_parameter_requires`.
+/// predicate and bridge it to SMT String emptiness. Checker TypeDesc
+/// validation and the canonical caller parameter identity are rechecked by
+/// `direct_string_length_parameter_requires`.
 fn direct_string_length_parameter_guard_term(
     contract: &MirContract,
     function: &MirFunction,
     catalog: &crate::core::mir::types::MirTypeCatalog,
     values: &BTreeMap<MirValueId, SymbolicValue>,
-) -> Result<Option<Bool>, String> {
+) -> Result<Option<(Bool, Bool)>, String> {
     let Some((parameter, is_nonempty)) =
         crate::core::mir::direct_string_length_parameter_requires(contract, function, catalog)
     else {
@@ -15175,12 +15199,10 @@ fn direct_string_length_parameter_guard_term(
             "validated FFI String length guard parameter '{parameter}' has no symbolic String value"
         ));
     };
-    let positive_scalar_length = value.positive_scalar_length_term();
-    Ok(Some(if is_nonempty {
-        positive_scalar_length
-    } else {
-        positive_scalar_length.not()
-    }))
+    Ok(Some(direct_string_empty_guard_with_bridge(
+        value,
+        is_nonempty,
+    )?))
 }
 
 /// Map the exact checked caller context

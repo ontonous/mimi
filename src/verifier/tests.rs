@@ -2166,11 +2166,6 @@ fn scalar_ffi_proofs_include_runtime_predicate_definedness() {
 #[test]
 fn verify_ffi_string_empty_violation() {
     require_z3!();
-    // Keep this compatibility-oracle case: proving an unconstrained symbolic
-    // String can be empty requires the historical whole-string domain. The
-    // checked verifier deliberately defers symbolic String facts at the
-    // native String/foreign-ingress boundary; the paired public-API test below
-    // records that boundary explicitly.
     let src = r#"
 extern "C" {
     func strlen(s: string) -> i64
@@ -2190,7 +2185,7 @@ func caller(s: string) -> i64 {
 }
 
 #[test]
-fn checked_ffi_unconstrained_symbolic_string_is_an_explicit_boundary() {
+fn checked_ffi_unconstrained_symbolic_string_disproves_and_unsupported_caller_defers() {
     require_z3!();
     let source = r#"
 extern "C" {
@@ -2208,37 +2203,83 @@ func caller(s: string) -> i64 {
         .into_iter()
         .find(|site| site.owner == "function:caller" && site.callee == "strlen")
         .expect("checker-owned symbolic String callsite");
-    let results = verify_ffi_checked(&checked).expect("checked String FFI boundary");
+    let results = verify_ffi_checked(&checked).expect("checked String FFI verification");
     assert_eq!(
         results.len(),
         1,
         "one obligation remains visible: {results:?}"
     );
+    assert_eq!(results[0].status, VerifStatus::Disproven, "{results:?}");
+    let artifact = results[0]
+        .artifact
+        .as_ref()
+        .expect("counterexample keeps canonical MIR owner-slice artifact");
+    assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
     assert_eq!(
-        results[0].status,
+        artifact
+            .mir_route_receipt
+            .as_ref()
+            .map(|receipt| receipt.profile.as_str()),
+        Some("verifier-ffi-owner-slice-v1")
+    );
+    assert_eq!(
+        results[0].diagnostic.as_ref().unwrap().span,
+        call_site.origin.user_span(),
+        "the counterexample belongs to the actual checked callsite"
+    );
+
+    // Unsupported caller-side String equality predicates keep the explicit boundary.
+    let deferred_source = r#"
+extern "C" {
+    func strlen(s: string) -> i64
+        requires: s != "";
+}
+func caller(s: string) -> i64 {
+    requires: s != "ok"
+    strlen(s)
+}
+"#;
+    let deferred_file =
+        parse_memory_source(deferred_source, "checked-ffi-unsupported-string-caller")
+            .expect("parse");
+    let deferred_checked = crate::core::check_program(&deferred_file).expect("check");
+    let deferred_call_site = deferred_checked
+        .call_sites_sorted()
+        .into_iter()
+        .find(|site| site.owner == "function:caller" && site.callee == "strlen")
+        .expect("checker-owned deferred String callsite");
+    let deferred_results =
+        verify_ffi_checked(&deferred_checked).expect("checked String FFI boundary");
+    assert_eq!(
+        deferred_results.len(),
+        1,
+        "one obligation remains visible: {deferred_results:?}"
+    );
+    assert_eq!(
+        deferred_results[0].status,
         VerifStatus::NotInTrustedSubset,
-        "{results:?}"
+        "{deferred_results:?}"
     );
     assert!(
-        results[0].artifact.is_none(),
+        deferred_results[0].artifact.is_none(),
         "deferred proofs have no artifact"
     );
     assert!(
-        results[0]
+        deferred_results[0]
             .message
             .contains("String-valued FFI caller predicates"),
-        "the deferral must state its semantic boundary: {results:?}"
+        "the deferral must state its semantic boundary: {deferred_results:?}"
     );
     assert_eq!(
-        results[0]
+        deferred_results[0]
             .diagnostic
             .as_ref()
             .and_then(|diagnostic| diagnostic.code.as_deref()),
         Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
     );
     assert_eq!(
-        results[0].diagnostic.as_ref().unwrap().span,
-        call_site.origin.user_span(),
+        deferred_results[0].diagnostic.as_ref().unwrap().span,
+        deferred_call_site.origin.user_span(),
         "the explicit boundary belongs to the actual checked callsite"
     );
 }
