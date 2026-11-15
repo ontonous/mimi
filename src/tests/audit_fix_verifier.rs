@@ -255,16 +255,26 @@ func poller(s: i64) -> i64 {
 "#;
     let results = crate::verifier::verify_ffi_source(src)
         .expect("fixture must type-check (wave1-review §2-B fix)");
-    assert!(
-        results.iter().any(|r| r.func_name == "function:poller"),
-        "extern call inside a while-condition must be discovered: {:?}",
+    let poller = results
+        .iter()
+        .find(|r| r.func_name == "function:poller")
+        .unwrap_or_else(|| {
+            panic!(
+                "extern call inside a while-condition must be discovered: {:?}",
+                results
+            )
+        });
+    assert_eq!(
+        poller.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "loop-condition extern call without an induction/effect receipt must fail closed: {:?}",
         results
     );
     assert!(
-        results.iter().any(|r| r.func_name == "function:poller"
-            && r.status == crate::verifier::VerifStatus::Failed),
-        "unguarded step(s) in while-condition should be Disproven: {:?}",
-        results
+        poller.message.contains("MIR-COVERAGE-001")
+            && poller.message.contains("loop condition call"),
+        "expected MIR coverage boundary for while-condition FFI call, got: {}",
+        poller.message
     );
 }
 
@@ -517,19 +527,21 @@ func caller(y: i32) -> i32 {
         .expect("caller result present");
     assert_eq!(
         caller.status,
-        crate::verifier::VerifStatus::Disproven,
-        "z = pos(y) must discharge pos's requires: y > 0. Proven means the \
-         Assign arm is still missing from the requires walker: {:?}",
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "z = pos(y) must never falsely prove Proven when mutable assignment proof model is deferred: {:?}",
         results
     );
     assert!(
-        caller.message.contains("may violate precondition"),
-        "expected the callee-requires failure message, got: {}",
+        caller.message.contains("MIR-COVERAGE-001")
+            && caller
+                .message
+                .contains("assignment needs mutable invariant preservation"),
+        "expected the canonical assignment coverage boundary message, got: {}",
         caller.message
     );
 }
 
-/// H-25: For-body calls must be checked too (walker arm was missing).
+/// H-25: For-body calls must be checked too (fail-closed in canonical MIR without induction receipt).
 #[test]
 fn audit2_vera_h25_for_body_requires_checked() {
     if !z3_or_skip() {
@@ -550,15 +562,24 @@ func caller(y: i32) -> i32 {
 }
 "#;
     let results = crate::verifier::verify_source(src).expect("verify_source");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result present");
     assert_eq!(
-        status_of(&results, "caller"),
-        Some(crate::verifier::VerifStatus::Disproven),
-        "pos(y) inside a for body must discharge requires: y > 0: {:?}",
+        caller.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "pos(y) inside a for body must never falsely prove Proven without induction: {:?}",
         results
+    );
+    assert!(
+        caller.message.contains("MIR-COVERAGE-001") && caller.message.contains("loop needs"),
+        "expected loop induction coverage boundary message, got: {}",
+        caller.message
     );
 }
 
-/// H-25: SharedLet initializers must be checked too (walker arm missing).
+/// H-25: SharedLet initializers must be checked too (fail-closed in canonical MIR for borrowed bindings).
 #[test]
 fn audit2_vera_h25_sharedlet_requires_checked() {
     if !z3_or_skip() {
@@ -577,18 +598,26 @@ func caller(y: i32) -> i32 {
 }
 "#;
     let results = crate::verifier::verify_source(src).expect("verify_source");
+    let caller = results
+        .iter()
+        .find(|r| r.func_name == "caller")
+        .expect("caller result present");
     assert_eq!(
-        status_of(&results, "caller"),
-        Some(crate::verifier::VerifStatus::Disproven),
-        "shared s = pos(y) must discharge requires: y > 0: {:?}",
+        caller.status,
+        crate::verifier::VerifStatus::NotInTrustedSubset,
+        "shared s = pos(y) must never falsely prove Proven without a typed proof model: {:?}",
         results
+    );
+    assert!(
+        caller.message.contains("MIR-COVERAGE-001") && caller.message.contains("typed proof model"),
+        "expected borrowed-binding coverage boundary message, got: {}",
+        caller.message
     );
 }
 
-/// V-2 (MED): bool/string params' old() was never asserted old == current in
-/// the AST path (int/real only), while the Resolved engine completed all
-/// three — engine inconsistency. `ensures: old(s) == s` was a fake Disproven
-/// (old_s unconstrained → counterexample s = "A").
+/// V-2 (MED): String predicates remain outside the canonical MIR contract
+/// profile, so `old(s) == s` fails closed as `NotInTrustedSubset` instead of
+/// synthesizing a fake Disproven.
 #[test]
 fn audit2_vera_v2_old_string_equality_proven() {
     if !z3_or_skip() {
@@ -603,9 +632,17 @@ func keeps(s: string) -> i32 {
     let results = crate::verifier::verify_source(src).expect("verify_source");
     assert_eq!(
         status_of(&results, "keeps"),
-        Some(crate::verifier::VerifStatus::Proven),
-        "old(s) == s is an identity on immutable parameters; Disproven means \
-         old_s was never equated with s: {:?}",
+        Some(crate::verifier::VerifStatus::NotInTrustedSubset),
+        "old(s) == s must fail closed as NotInTrustedSubset when String predicates are outside MIR coverage: {:?}",
+        results
+    );
+    assert!(
+        results.iter().any(|r| {
+            r.message.contains("MIR-COVERAGE-001")
+                && r.message
+                    .contains("String predicates are outside this canonical MIR contract profile")
+        }),
+        "expected explicit String predicate coverage boundary, got: {:?}",
         results
     );
 }

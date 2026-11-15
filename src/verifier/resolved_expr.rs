@@ -14664,6 +14664,16 @@ func bad_body_power(x: i32) -> Box {
     Box { n: value }
 }
 
+func unencodable_body_cast(x: i32) -> Box {
+    requires: true
+    ensures: true
+    if (x as i64) > 0 {
+        Box { n: 1 }
+    } else {
+        Box { n: 0 }
+    }
+}
+
 func safe_short_circuit(x: i32) -> Box {
     requires: true
     ensures: x == 0 or (x != 0 and x / x == 1)
@@ -14712,8 +14722,23 @@ func main() -> i32 { 0 }
                 .map(|(status, _)| status);
         assert_eq!(
             status,
+            Some(crate::verifier::ctx::VerifStatus::Disproven),
+            "checked integer power trap must be Disproven even with nominal-result encoding"
+        );
+
+        let owner = NodeId("function:unencodable_body_cast".into());
+        let callable = program
+            .callables()
+            .get(&owner)
+            .expect("unencodable cast callable");
+        let mut session = crate::verifier::ctx::SolverSession::new(5000).expect("solver");
+        let status =
+            verify_contracts_from_resolved(callable, program.resolved_types(), &mut session)
+                .map(|(status, _)| status);
+        assert_eq!(
+            status,
             Some(crate::verifier::ctx::VerifStatus::NotInTrustedSubset),
-            "integer power may trap and must not be skipped with nominal-result encoding"
+            "unencodable cast in body must not be skipped with nominal-result encoding"
         );
     }
 

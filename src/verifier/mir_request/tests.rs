@@ -250,8 +250,7 @@ func positive(value: i32) -> i32 {
 
 #[test]
 fn typed_request_keeps_called_contractless_extern_deferred_without_artifact() {
-    assert_extern_declaration_boundary(
-        r#"
+    let source = r#"
 extern "C" {
     func foreign(value: i32) -> i32;
 }
@@ -260,11 +259,48 @@ func positive(value: i32) -> i32 {
     ensures: result > 0
     foreign(value)
 }
-"#,
-        "foreign",
-        false,
-        true,
-    );
+"#;
+    let (_, checked, source_hash) = build_checked(source);
+    let declaration = checked
+        .ffi_declarations()
+        .values()
+        .find(|declaration| declaration.symbol == "foreign")
+        .expect("checker-owned extern descriptor for foreign");
+    assert!(!declaration.has_declared_contract());
+    assert!(checked.call_sites_sorted().into_iter().any(|site| {
+        matches!(
+            site.resolved_callee.as_ref(),
+            Some(crate::core::ResolvedCallee::Extern(owner))
+                if owner == &declaration.declaration
+        )
+    }));
+
+    // The generic MIR verification preparation defers called externs as an
+    // FFI compatibility boundary instead of fabricating postconditions.
+    let crate::core::mir::verification::MirVerificationPreparation::Deferred(boundaries) =
+        crate::core::mir::verification::prepare_verification_request(&checked)
+    else {
+        panic!("extern declaration obligation must defer generic MIR preparation");
+    };
+    assert!(boundaries.iter().any(|boundary| {
+        boundary.owner == declaration.declaration
+            && boundary.reason.contains("FFI compatibility owner")
+    }));
+
+    // Closed scalar C ABI externs are admitted onto the canonical ScalarFfi MIR
+    // route with an unconstrained symbolic return value, so positive's
+    // ensures: result > 0 is disproven on MIR rather than trusted or deferred.
+    assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
+    if require_solver() {
+        let results = verify_checked(&checked, source_hash).expect("scalar FFI MIR verification");
+        let positive = result(&results, "positive");
+        assert_eq!(positive.status, VerifStatus::Disproven, "{positive:#?}");
+        let artifact = positive
+            .artifact
+            .as_ref()
+            .expect("scalar FFI verification emits a canonical MIR proof artifact");
+        assert_eq!(artifact.engine, ProofArtifact::ENGINE_MIR);
+    }
 }
 
 #[test]
@@ -664,11 +700,32 @@ fn nested_requires_is_not_a_callable_entry_assumption() {
     if !require_solver() {
         return;
     }
-    let source = r#"
+    let nested_requires = r#"
 func guarded(x: i32) -> i32 {
     ensures: x > 0
     x + {
         requires: x > 0
+        0
+    }
+}
+"#;
+    let file = crate::verifier::parse_memory_source(nested_requires, "nested-requires-rejected")
+        .expect("parse nested requires");
+    let diagnostics = crate::core::check_program(&file)
+        .expect_err("checker rejects nested requires before verifier routing");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some(crate::diagnostic::codes::E0503)
+                && diagnostic.message.contains("requires")
+        }),
+        "{diagnostics:?}"
+    );
+
+    let source = r#"
+func guarded(x: i32) -> i32 {
+    ensures: x > 0
+    x + {
+        invariant: x > 0
         0
     }
 }
@@ -689,7 +746,7 @@ func guarded(x: i32) -> i32 {
     assert_eq!(guarded.status, VerifStatus::NotInTrustedSubset);
     assert!(guarded.artifact.is_none());
 
-    let deferred = verify_checked(&checked, "nested-requires-entry-scope".into())
+    let deferred = verify_checked(&checked, "nested-invariant-entry-scope".into())
         .expect("typed coverage boundary remains callable");
     let guarded = result(&deferred, "guarded");
     assert_eq!(guarded.status, VerifStatus::NotInTrustedSubset);
@@ -700,10 +757,28 @@ func guarded(x: i32) -> i32 {
 
 #[test]
 fn typed_request_does_not_hoist_nested_contracts_or_claim_loop_induction() {
+    let rejected_sources = [
+        ("nested_call", "func identity(x: i32) -> i32 { x }\nfunc nested_call(x: i32) -> i32 { invariant: x >= 0\n identity({ ensures: false\n x }) }"),
+        ("nested_binary", "func nested_binary(x: i32) -> i32 { invariant: x >= 0\n x + { requires: false\n 0 } }"),
+        ("nested", "func nested(x: i32) -> i32 { invariant: x >= 0\n if true { ensures: result > 0\n x } else { x } }"),
+    ];
+    for (name, source) in rejected_sources {
+        let file =
+            crate::verifier::parse_memory_source(source, name).expect("parse nested contract");
+        let diagnostics = crate::core::check_program(&file)
+            .expect_err("checker must reject nested requires/ensures with E0503");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code.as_deref() == Some(crate::diagnostic::codes::E0503)),
+            "{name}: {diagnostics:?}"
+        );
+    }
+
     let sources = [
-        "func identity(x: i32) -> i32 { x }\nfunc nested_call(x: i32) -> i32 { invariant: x >= 0\n identity({ ensures: false\n x }) }",
-        "func nested_binary(x: i32) -> i32 { invariant: x >= 0\n x + { requires: false\n 0 } }",
-        "func nested(x: i32) -> i32 { invariant: x >= 0\n if true { ensures: result > 0\n x } else { x } }",
+        "func identity(x: i32) -> i32 { x }\nfunc nested_call(x: i32) -> i32 { invariant: x >= 0\n identity({ invariant: false\n x }) }",
+        "func nested_binary(x: i32) -> i32 { invariant: x >= 0\n x + { invariant: false\n 0 } }",
+        "func nested(x: i32) -> i32 { invariant: x >= 0\n if true { invariant: false\n x } else { x } }",
         "func looped(x: i32) -> i32 { invariant: x >= 0\n while false { println(x) }\n x }",
     ];
     for source in sources {

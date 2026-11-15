@@ -376,16 +376,18 @@ func main() -> i32 { 0 }
         r#"
 func main() -> i32 {
     let y = 1
-    match y {
+    let value = match y {
         2 => 0
         _ => 1 / (y - 1)
     }
+    println(value)
+    0
 }
 "#,
     );
     assert!(
-        runtime.is_err() && runtime.unwrap_err().contains("E0801"),
-        "division by zero must trap with E0801"
+        runtime.as_ref().is_err_and(|err| err.contains("E0801")),
+        "division by zero must trap with E0801, got {runtime:?}"
     );
 
     let results =
@@ -545,7 +547,10 @@ func main() -> i32 { 0 }
         artifact.semantics_version,
         crate::verifier::ProofArtifact::SEMANTICS_VERSION
     );
-    assert_eq!(artifact.integer_model, "checked_i32");
+    assert_eq!(
+        artifact.integer_model,
+        "checked_i32_i64_power_i64_then_i32_wrap_0_1_11"
+    );
     assert_eq!(artifact.float_model, "f64_rejected");
     assert!(
         artifact.solver_version.starts_with("z3 "),

@@ -2386,7 +2386,9 @@ mod tests {
     #[test]
     fn resolved_not_in_trusted_subset_never_carries_a_proof_artifact() {
         let source = r#"
-func helper(x: i32) -> i32 { x + 1 }
+func helper(x: i32) -> i32 {
+    if (x as i64) > 0 { x } else { 0 }
+}
 func caller(x: i32) -> i32 {
     requires: x >= 0
     ensures: result >= 0
