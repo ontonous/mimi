@@ -432,7 +432,7 @@ func impossible(x: i32) -> i32 {
 
 #[test]
 fn verify_result_count() {
-    let src = r#"
+    let contract_free = r#"
 func f1(x: i32) -> i32 {
     x
 }
@@ -445,7 +445,25 @@ func f3(x: i32) -> i32 {
     x
 }
 "#;
-    let results = verify_source(src);
+    assert_eq!(verify_source(contract_free).len(), 0);
+
+    let with_contracts = r#"
+func f1(x: i32) -> i32 {
+    ensures: result == x
+    x
+}
+
+func f2(x: i32) -> i32 {
+    ensures: result == x
+    x
+}
+
+func f3(x: i32) -> i32 {
+    ensures: result == x
+    x
+}
+"#;
+    let results = verify_source(with_contracts);
     assert_eq!(results.len(), 3);
 }
 

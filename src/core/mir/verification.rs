@@ -1307,6 +1307,18 @@ impl Scanner<'_> {
                     kind: crate::core::ir::ResolvedScopeKind::Lexical,
                     body,
                 } => self.block(body),
+                ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    self.expression(initializer);
+                    self.block(then_block);
+                    if let Some(else_block) = else_block {
+                        self.block(else_block);
+                    }
+                }
                 ResolvedStmtKind::Drop(_) => {}
                 ResolvedStmtKind::Math(expressions) => {
                     if !self.proof_math_nodes.contains(&statement.node_id) {

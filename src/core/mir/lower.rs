@@ -15880,6 +15880,20 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                         let _ = self.lower_expr(expression);
                     }
                 }
+                ResolvedStmtKind::IfLet {
+                    pattern,
+                    initializer,
+                    then_block,
+                    else_block,
+                } => {
+                    self.lower_if_let_stmt(
+                        &statement.node_id,
+                        pattern,
+                        initializer,
+                        then_block,
+                        else_block.as_ref(),
+                    );
+                }
                 ResolvedStmtKind::Return { value, conversion } => {
                     let value = value.as_ref().map(|value| {
                         if conversion.as_ref().is_some_and(|conversion| {
@@ -20471,25 +20485,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         for (block_id, join_edge, body, nested_record) in arm_blocks {
             self.switch_to(block_id);
             if let Some(setup) = nested_record {
-                self.emit(
-                    &setup.node,
-                    "match.nested.record.project",
-                    MirInstructionKind::Project {
-                        result: setup.result,
-                        base: setup.base.clone(),
-                        projection: setup.projection,
-                        list_index_contract: None,
-                    },
-                );
-                // The outer SwitchMove transfers the nested record payload to
-                // this arm. The pattern only reads a Copy field, so release
-                // the complete record after the projection; no partial move
-                // or backend-private residual is introduced.
-                self.emit(
-                    &setup.node,
-                    "match.nested.record.drop",
-                    MirInstructionKind::Drop { value: setup.base },
-                );
+                self.emit_nested_record_switch_setup(setup);
             }
             let value = self.lower_expr(body);
             if !self.current_is_terminated() {
@@ -21945,6 +21941,238 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
     /// branch using an empty edge; native and bytecode consumers therefore do
     /// not need a backend-private representation for Unit just to implement
     /// ordinary guard statements.
+    fn emit_nested_record_switch_setup(&mut self, setup: NestedRecordMatchSetup) {
+        self.emit(
+            &setup.node,
+            "match.nested.record.project",
+            MirInstructionKind::Project {
+                result: setup.result,
+                base: setup.base.clone(),
+                projection: setup.projection,
+                list_index_contract: None,
+            },
+        );
+        // The outer SwitchMove transfers the nested record payload to
+        // this arm. The pattern only reads a Copy field, so release
+        // the complete record after the projection; no partial move
+        // or backend-private residual is introduced.
+        self.emit(
+            &setup.node,
+            "match.nested.record.drop",
+            MirInstructionKind::Drop { value: setup.base },
+        );
+    }
+
+    fn collect_stmt_carried_join_locals(
+        &mut self,
+        node: &NodeId,
+        outer_locals: &HashMap<ResolvedLocalId, MirValueId>,
+        blocks: &[&ResolvedBlock],
+        prefix: &str,
+        missing_target_error: &str,
+    ) -> Vec<(ResolvedLocalId, MirValueId)> {
+        let mut assigned = BTreeSet::new();
+        for block in blocks {
+            collect_assigned_locals(block, &mut assigned);
+        }
+        assigned
+            .into_iter()
+            .filter(|local| outer_locals.contains_key(local))
+            .filter_map(|local| {
+                let Some(definition) = self.body.locals.get(&local) else {
+                    self.error(node, missing_target_error);
+                    return None;
+                };
+                let value =
+                    match MirValueId::new(format!("{prefix}.join.local:{}:{}", node.0, local.0 .0))
+                    {
+                        Ok(value) => value,
+                        Err(error) => {
+                            self.error(node, error.to_string());
+                            return None;
+                        }
+                    };
+                self.insert_value(value.clone(), definition.ty.clone(), node);
+                Some((local, value))
+            })
+            .collect()
+    }
+
+    fn lower_if_let_stmt(
+        &mut self,
+        node: &NodeId,
+        pattern: &ResolvedPattern,
+        initializer: &ResolvedExpr,
+        then_block: &ResolvedBlock,
+        else_block: Option<&ResolvedBlock>,
+    ) {
+        if !matches!(
+            &pattern.kind,
+            ResolvedPatternKind::Constructor { .. } | ResolvedPatternKind::Literal(_)
+        ) {
+            self.error(
+                node,
+                "if-let pattern requires variant or literal MIR switch lowering",
+            );
+            return;
+        }
+        let consume_scrutinee = self.type_catalog.is_some_and(|catalog| {
+            catalog
+                .get(&initializer.ty)
+                .is_some_and(|descriptor| descriptor.ownership != super::types::MirOwnership::Copy)
+        });
+        let scrutinee = if consume_scrutinee {
+            self.lower_consuming_expr(initializer)
+        } else {
+            self.lower_expr(initializer)
+        };
+        let Some(scrutinee_ty) = self.values.get(&scrutinee).map(|value| value.ty.clone()) else {
+            self.error(node, "if-let scrutinee has no canonical MIR type");
+            return;
+        };
+        let Some(case) = self.lower_switch_case(&pattern.kind, node) else {
+            return;
+        };
+        let Some(then_id) = self.block_id("if_let.stmt.then", node) else {
+            return;
+        };
+        let Some(else_id) = self.block_id("if_let.stmt.else", node) else {
+            return;
+        };
+        let Some(join_id) = self.block_id("if_let.stmt.join", node) else {
+            return;
+        };
+        let Some(then_edge) = self.edge_id("if_let.stmt.then", node) else {
+            return;
+        };
+        let Some(else_edge) = self.edge_id("if_let.stmt.else", node) else {
+            return;
+        };
+        let Some(then_join_edge) = self.edge_id("if_let.stmt.then.join", node) else {
+            return;
+        };
+        let Some(else_join_edge) = self.edge_id("if_let.stmt.else.join", node) else {
+            return;
+        };
+
+        let outer_locals = self.locals.clone();
+        let Some(lowered_bindings) = self.lower_switch_bindings(pattern, node, &scrutinee_ty)
+        else {
+            self.locals = outer_locals;
+            return;
+        };
+        let then_locals = self.locals.clone();
+        self.locals = outer_locals.clone();
+
+        let branch_blocks: Vec<&ResolvedBlock> = else_block
+            .into_iter()
+            .chain(std::iter::once(then_block))
+            .collect();
+        let carried = self.collect_stmt_carried_join_locals(
+            node,
+            &outer_locals,
+            &branch_blocks,
+            "if_let.stmt",
+            "if-let assignment target is absent from the typed local catalog",
+        );
+        let join_parameters = carried
+            .iter()
+            .map(|(_, value)| MirBlockParameter {
+                value: value.clone(),
+            })
+            .collect::<Vec<_>>();
+        let then_parameters = lowered_bindings
+            .bindings
+            .iter()
+            .map(|binding| MirBlockParameter {
+                value: binding.parameter.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        self.add_block(then_id.clone(), then_parameters);
+        self.add_block(else_id.clone(), Vec::new());
+        self.add_block(join_id.clone(), join_parameters);
+        let switch_arms = vec![
+            MirSwitchArm {
+                edge: then_edge,
+                target: then_id.clone(),
+                arguments: Vec::new(),
+                bindings: lowered_bindings.bindings,
+                case,
+            },
+            MirSwitchArm {
+                edge: else_edge,
+                target: else_id.clone(),
+                arguments: Vec::new(),
+                bindings: Vec::new(),
+                case: MirSwitchCase::Default,
+            },
+        ];
+        let terminator = if consume_scrutinee {
+            MirTerminator::SwitchMove {
+                scrutinee,
+                arms: switch_arms,
+            }
+        } else {
+            MirTerminator::Switch {
+                scrutinee,
+                arms: switch_arms,
+            }
+        };
+        self.terminate(terminator);
+
+        self.switch_to(then_id);
+        self.locals = then_locals;
+        if let Some(setup) = lowered_bindings.nested_record {
+            self.emit_nested_record_switch_setup(setup);
+        }
+        self.lower_block_expr(then_block);
+        if !self.current_is_terminated() {
+            let arguments = carried
+                .iter()
+                .map(|(local, _)| {
+                    self.locals
+                        .get(local)
+                        .cloned()
+                        .unwrap_or_else(|| outer_locals[local].clone())
+                })
+                .collect();
+            self.terminate(MirTerminator::Goto {
+                edge: then_join_edge,
+                target: join_id.clone(),
+                arguments,
+            });
+        }
+
+        self.switch_to(else_id);
+        self.locals = outer_locals.clone();
+        if let Some(else_block) = else_block {
+            self.lower_block_expr(else_block);
+        }
+        if !self.current_is_terminated() {
+            let arguments = carried
+                .iter()
+                .map(|(local, _)| {
+                    self.locals
+                        .get(local)
+                        .cloned()
+                        .unwrap_or_else(|| outer_locals[local].clone())
+                })
+                .collect();
+            self.terminate(MirTerminator::Goto {
+                edge: else_join_edge,
+                target: join_id.clone(),
+                arguments,
+            });
+        }
+
+        self.locals = outer_locals;
+        for (local, value) in &carried {
+            self.locals.insert(local.clone(), value.clone());
+        }
+        self.switch_to(join_id);
+    }
+
     fn lower_if_stmt(&mut self, node: &NodeId, expression: &ResolvedExpr) {
         let ResolvedExprKind::If {
             condition,
@@ -21982,34 +22210,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         };
 
         let outer_locals = self.locals.clone();
-        let mut assigned = BTreeSet::new();
-        collect_assigned_locals(then_block, &mut assigned);
-        collect_assigned_locals(else_block, &mut assigned);
-        let carried = assigned
-            .into_iter()
-            .filter(|local| outer_locals.contains_key(local))
-            .filter_map(|local| {
-                let Some(definition) = self.body.locals.get(&local) else {
-                    self.error(
-                        node,
-                        "if assignment target is absent from the typed local catalog",
-                    );
-                    return None;
-                };
-                let value = match MirValueId::new(format!(
-                    "if.stmt.join.local:{}:{}",
-                    node.0, local.0 .0
-                )) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        self.error(node, error.to_string());
-                        return None;
-                    }
-                };
-                self.insert_value(value.clone(), definition.ty.clone(), node);
-                Some((local, value))
-            })
-            .collect::<Vec<_>>();
+        let carried = self.collect_stmt_carried_join_locals(
+            node,
+            &outer_locals,
+            &[then_block, else_block],
+            "if.stmt",
+            "if assignment target is absent from the typed local catalog",
+        );
         let join_parameters = carried
             .iter()
             .map(|(_, value)| MirBlockParameter {
@@ -22427,6 +22634,20 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     } else {
                         self.lower_expr(expression);
                     }
+                }
+                ResolvedStmtKind::IfLet {
+                    pattern,
+                    initializer,
+                    then_block,
+                    else_block,
+                } => {
+                    self.lower_if_let_stmt(
+                        &statement.node_id,
+                        pattern,
+                        initializer,
+                        then_block,
+                        else_block.as_ref(),
+                    );
                 }
                 ResolvedStmtKind::While { condition, body } => {
                     self.lower_while_stmt(&statement.node_id, condition, body);

@@ -2979,8 +2979,12 @@ pub(crate) fn validate_contracts(
                 || aggregate_string_length_parameter_requires(contract, function, catalog)
                     .is_some()
                 || aggregate_string_literal_equality_requires(contract, function, catalog));
+        let supported_ordinary_string_length_guard = contract.kind == MirContractKind::Requires
+            && !has_extern_call
+            && direct_string_length_scalar_requires(&contract.condition, function, catalog);
         if contract_contains_string_expression(&contract.condition, function, catalog)
             && !supported_ffi_string_guard
+            && !supported_ordinary_string_length_guard
         {
             let message = if contract.kind == MirContractKind::Requires && has_extern_call {
                 "String-valued FFI caller predicates remain outside the trusted subset except for direct parameter != empty-literal guards, direct len(parameter) > 0 / == 0 guards, guarded direct char_at(parameter, 0) equality to one non-NUL Unicode scalar, one direct repr(C) String-field length guard, and one exact String-literal equality over a checked repr(C) field path in a scalar conjunction; foreign String ingress validates UTF-8"
@@ -3030,6 +3034,49 @@ pub(crate) fn validate_contracts(
         }
     }
     errors
+}
+
+/// Recognize ordinary non-FFI `requires` predicates whose only String operation
+/// is `len(parameter)` over a direct checked String parameter combined cleanly
+/// with scalar arithmetic/comparisons. String literals, `char_at`, locals, and
+/// FFI caller guards keep their dedicated stricter gates.
+fn direct_string_length_scalar_requires(
+    expression: &MirContractExpr,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+) -> bool {
+    match expression {
+        MirContractExpr::StringLength(operand) => matches!(
+            operand.as_ref(),
+            MirContractExpr::Value(parameter)
+                if function.parameters.contains(parameter)
+                    && function
+                        .values
+                        .get(parameter)
+                        .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
+        ),
+        MirContractExpr::Value(value) | MirContractExpr::Old(value) => !function
+            .values
+            .get(value)
+            .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok()),
+        MirContractExpr::Result => catalog.validate_owned_string(&function.result).is_err(),
+        MirContractExpr::Project { base, .. } => {
+            expression_type(expression, function, catalog)
+                .is_ok_and(|ty| catalog.validate_owned_string(&ty).is_err())
+                && direct_string_length_scalar_requires(base, function, catalog)
+        }
+        MirContractExpr::Unary { operand, .. } => {
+            direct_string_length_scalar_requires(operand, function, catalog)
+        }
+        MirContractExpr::Binary { left, right, .. } => {
+            direct_string_length_scalar_requires(left, function, catalog)
+                && direct_string_length_scalar_requires(right, function, catalog)
+        }
+        MirContractExpr::Int(_) | MirContractExpr::Bool(_) | MirContractExpr::Float(_) => true,
+        MirContractExpr::String(_)
+        | MirContractExpr::StringCharAt0(_)
+        | MirContractExpr::Unsupported(_) => false,
+    }
 }
 
 /// Recognize the closed FFI caller profile `len(parameter) > 0` or
