@@ -337,21 +337,11 @@ pub fn validate_mir_native_computed_string_key_owner_chain_route(
         .diagnostic()]
     })?;
     reject_verifier_only_program(program)?;
-    if let Err(messages) = program.validate_ffi_source_census() {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("FFI source census", message).diagnostic())
-            .collect());
-    }
-    if let Err(messages) = validate_scalar_export_receipts(program) {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("scalar export receipt", message).diagnostic())
-            .collect());
-    }
-    NativeMirValidator::with_computed_string_key_owner_chain_authorization(program)
-        .validate()
-        .map_err(|errors| errors.into_iter().map(NativeMirError::diagnostic).collect())
+    validate_native_validator_with_ffi_preflight(
+        program,
+        true,
+        NativeMirValidator::with_computed_string_key_owner_chain_authorization(program),
+    )
 }
 
 /// Validate the exact CheckedProgram/MIR MapSetDropControl result-branch
@@ -436,24 +426,44 @@ pub fn validate_mir_native_map_set_drop_control_result_route(
         .map_err(|errors| errors.into_iter().map(NativeMirError::diagnostic).collect())
 }
 
+fn validate_native_validator_with_ffi_preflight(
+    program: &MirProgram,
+    include_scalar_export_receipts: bool,
+    validator: NativeMirValidator<'_>,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut errors = Vec::new();
+    if let Err(messages) = program.validate_ffi_source_census() {
+        errors.extend(
+            messages
+                .into_iter()
+                .map(|message| NativeMirError::new("FFI source census", message).diagnostic()),
+        );
+    }
+    if include_scalar_export_receipts {
+        if let Err(messages) = validate_scalar_export_receipts(program) {
+            errors.extend(
+                messages.into_iter().map(|message| {
+                    NativeMirError::new("scalar export receipt", message).diagnostic()
+                }),
+            );
+        }
+    }
+    if let Err(validator_errors) = validator.validate() {
+        errors.extend(validator_errors.into_iter().map(NativeMirError::diagnostic));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 fn validate_mir_native_with_checked_get_bool(
     program: &MirProgram,
     checked_get_bool_authorized: bool,
     dynamic_keys_get_authorized: bool,
 ) -> Result<(), Vec<Diagnostic>> {
     reject_verifier_only_program(program)?;
-    if let Err(messages) = program.validate_ffi_source_census() {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("FFI source census", message).diagnostic())
-            .collect());
-    }
-    if let Err(messages) = validate_scalar_export_receipts(program) {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("scalar export receipt", message).diagnostic())
-            .collect());
-    }
     let validator = if checked_get_bool_authorized {
         NativeMirValidator::with_checked_get_bool_authorization(program)
     } else if dynamic_keys_get_authorized {
@@ -461,46 +471,29 @@ fn validate_mir_native_with_checked_get_bool(
     } else {
         NativeMirValidator::new(program)
     };
-    validator
-        .validate()
-        .map_err(|errors| errors.into_iter().map(NativeMirError::diagnostic).collect())
+    validate_native_validator_with_ffi_preflight(program, true, validator)
 }
 
 fn validate_mir_native_with_direct_tuple_get_l1_authorization(
     program: &MirProgram,
 ) -> Result<(), Vec<Diagnostic>> {
     reject_verifier_only_program(program)?;
-    if let Err(messages) = program.validate_ffi_source_census() {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("FFI source census", message).diagnostic())
-            .collect());
-    }
-    let validator = NativeMirValidator::with_direct_tuple_get_l1_authorization(program);
-    validator
-        .validate()
-        .map_err(|errors| errors.into_iter().map(NativeMirError::diagnostic).collect())
+    validate_native_validator_with_ffi_preflight(
+        program,
+        false,
+        NativeMirValidator::with_direct_tuple_get_l1_authorization(program),
+    )
 }
 
 fn validate_mir_native_with_direct_print_result_authorization(
     program: &MirProgram,
 ) -> Result<(), Vec<Diagnostic>> {
     reject_verifier_only_program(program)?;
-    if let Err(messages) = program.validate_ffi_source_census() {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("FFI source census", message).diagnostic())
-            .collect());
-    }
-    if let Err(messages) = validate_scalar_export_receipts(program) {
-        return Err(messages
-            .into_iter()
-            .map(|message| NativeMirError::new("scalar export receipt", message).diagnostic())
-            .collect());
-    }
-    NativeMirValidator::with_direct_print_result_authorization(program)
-        .validate()
-        .map_err(|errors| errors.into_iter().map(NativeMirError::diagnostic).collect())
+    validate_native_validator_with_ffi_preflight(
+        program,
+        true,
+        NativeMirValidator::with_direct_print_result_authorization(program),
+    )
 }
 
 /// Preflight the nested Result DirectPrint profile against the exact checked

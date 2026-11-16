@@ -15860,6 +15860,82 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                                 },
                             );
                         }
+                    } else if matches!(pattern.kind, ResolvedPatternKind::Wildcard) {
+                        if self.value_contains_managed_any(&value) {
+                            let drop_instruction = self.managed_any_instruction(
+                                &statement.node_id,
+                                None,
+                                value,
+                                super::MirManagedAnyOperation::Drop,
+                            );
+                            self.emit(&statement.node_id, "drop.managed-any", drop_instruction);
+                        } else if let Some(catalog) = self.type_catalog {
+                            if let Some(descriptor) =
+                                self.values.get(&value).and_then(|v| catalog.get(&v.ty))
+                            {
+                                if matches!(
+                                    descriptor.ownership,
+                                    super::types::MirOwnership::Copy
+                                        | super::types::MirOwnership::SharedBorrow
+                                        | super::types::MirOwnership::WeakBorrow
+                                ) {
+                                    // Discarded copy/borrowed value needs no destination move or drop.
+                                } else if descriptor.ownership == super::types::MirOwnership::Move
+                                    && descriptor.glue.supports_drop()
+                                    && !matches!(
+                                        descriptor.glue.drop,
+                                        super::types::MirGlueKind::OrdinaryMapOwnedAnyV2
+                                            | super::types::MirGlueKind::OrdinaryMapOwnedAnyV2Values
+                                    )
+                                {
+                                    self.emit(
+                                        &statement.node_id,
+                                        "bind.wildcard.drop",
+                                        MirInstructionKind::Drop { value },
+                                    );
+                                } else {
+                                    self.error(
+                                        &statement.node_id,
+                                        "wildcard bind pattern cannot discard non-droppable or linear value in MIR Phase 0",
+                                    );
+                                }
+                            } else {
+                                self.error(
+                                    &statement.node_id,
+                                    "wildcard bind pattern value has no canonical TypeDesc in MIR Phase 0",
+                                );
+                            }
+                        } else {
+                            let is_copy_primitive = self.values.get(&value).is_some_and(|v| {
+                                [
+                                    PrimitiveType::I8,
+                                    PrimitiveType::I16,
+                                    PrimitiveType::I32,
+                                    PrimitiveType::I64,
+                                    PrimitiveType::I128,
+                                    PrimitiveType::U8,
+                                    PrimitiveType::U16,
+                                    PrimitiveType::U32,
+                                    PrimitiveType::U64,
+                                    PrimitiveType::U128,
+                                    PrimitiveType::Isize,
+                                    PrimitiveType::Usize,
+                                    PrimitiveType::F32,
+                                    PrimitiveType::F64,
+                                    PrimitiveType::Bool,
+                                    PrimitiveType::Char,
+                                    PrimitiveType::Unit,
+                                ]
+                                .into_iter()
+                                .any(|primitive| v.ty == primitive_type_id(primitive))
+                            });
+                            if !is_copy_primitive {
+                                self.error(
+                                    &statement.node_id,
+                                    "only a direct binding pattern is supported in MIR Phase 0",
+                                );
+                            }
+                        }
                     } else {
                         self.error(
                             &statement.node_id,

@@ -2053,8 +2053,18 @@ fn compile_test_bytecode_program(
                 core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE
             ));
         }
-        let mir = core::mir::reference::MirProgram::from_checked_program(checked)
-            .map_err(|error| error.to_string())?;
+        let excluded_sources = checked
+            .source_registry()
+            .records()
+            .iter()
+            .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+            .map(|record| record.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mir = core::mir::reference::MirProgram::from_checked_program_excluding_sources(
+            checked,
+            &excluded_sources,
+        )
+        .map_err(|error| error.to_string())?;
         let receipt = mir.route_receipt("test-source-bytecode-scalar-ffi-v1");
         return interp::bytecode::compile_mir_program_with_route_receipt(&mir, &receipt).map_err(
             |errors| {

@@ -3439,6 +3439,14 @@ fn validate_ffi_call_contract_receipt_with_policy(
             );
         }
     }
+    if policy == FfiCallContractReceiptPolicy::ScalarExecution {
+        if contract.requires_deferred {
+            errors.push(SCALAR_FFI_DEFERRED_REQUIRES_ERROR.into());
+        }
+        if contract.ensures_deferred {
+            errors.push(SCALAR_FFI_DEFERRED_ENSURES_ERROR.into());
+        }
+    }
     if policy != FfiCallContractReceiptPolicy::CanonicalMir
         && policy != FfiCallContractReceiptPolicy::ScalarRequiresVerifier
         && (contract.block_no_panic
@@ -3815,9 +3823,6 @@ fn validate_ffi_call_contract_receipt_with_policy(
             "extern call FFI result ABI conversion receipt is present for a unit call".into(),
         );
     }
-    if let Err(message) = contracts::validate_ffi_mir_contracts(function, type_catalog, contract) {
-        errors.push(message);
-    }
     if enforce_scalar_abi {
         if let Err(message) = contracts::validate_ffi_requires(function, type_catalog, contract) {
             errors.push(message);
@@ -3825,6 +3830,9 @@ fn validate_ffi_call_contract_receipt_with_policy(
         if let Err(message) = contracts::validate_ffi_ensures(function, type_catalog, contract) {
             errors.push(message);
         }
+    }
+    if let Err(message) = contracts::validate_ffi_mir_contracts(function, type_catalog, contract) {
+        errors.push(message);
     }
     if policy == FfiCallContractReceiptPolicy::ReprCRecordVerifier {
         if let Err(message) =
@@ -3976,6 +3984,43 @@ pub(crate) fn validate_ffi_receipt_table(
             })
             .collect::<Vec<_>>(),
     );
+    errors
+}
+
+const SCALAR_FFI_DEFERRED_REQUIRES_ERROR: &str =
+    "extern requires Deferred contract is outside the executable scalar FFI route";
+const SCALAR_FFI_DEFERRED_ENSURES_ERROR: &str =
+    "extern ensures Deferred contract is outside the executable scalar FFI route";
+
+/// Validate an executable-shaped scalar FFI call receipt for verifier-only
+/// MIR proof consumers: enforces every `ScalarExecution` declaration, parameter
+/// mode, witness, and endpoint invariant except the runtime prohibition on
+/// IEEE-754 float contract leaves (modeled via `FullIeee754` in verifier passes).
+pub(crate) fn validate_ffi_call_contract_scalar_verifier_receipt(
+    type_catalog: &types::MirTypeCatalog,
+    function: &MirFunction,
+    instruction: &MirInstructionId,
+    callee: &NodeId,
+    result: Option<&MirValueId>,
+    arguments: &[MirValueId],
+    contract: &MirFfiCallContract,
+) -> Vec<String> {
+    let mut errors = validate_ffi_call_contract_receipt(
+        type_catalog,
+        function,
+        instruction,
+        callee,
+        result,
+        arguments,
+        contract,
+    );
+    errors.retain(|message| {
+        message != "extern requires float leaves are outside the runtime FFI predicate contract"
+            && message
+                != "extern ensures float leaves are outside the runtime FFI predicate contract"
+            && message != SCALAR_FFI_DEFERRED_REQUIRES_ERROR
+            && message != SCALAR_FFI_DEFERRED_ENSURES_ERROR
+    });
     errors
 }
 

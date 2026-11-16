@@ -1516,7 +1516,7 @@ fn scalar_ffi_f32_direct_literal_bits_match_three_consumers() {
     let checked = crate::core::check_program(&file).expect("check direct f32 literal FFI fixture");
     let mir =
         MirProgram::from_checked_program(&checked).expect("materialize direct f32 literal FFI MIR");
-    let owner = crate::core::NodeId("function:ffi_result_conversion_case".into());
+    let owner = crate::core::NodeId("function:main".into());
     // The checker-owned FFI source witness seals the conversion instruction
     // together with the call receipt.  Exercise the real narrowing conversion
     // emitted for the literal instead of replacing it with an unreceipted MIR
@@ -1760,6 +1760,7 @@ fn scalar_ffi_result_conversion_matches_three_consumers() {
         .expect("result conversion receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
     let receipt = mir
         .ffi_calls()
         .get(&instruction_id)
@@ -1871,7 +1872,7 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
         .expect("check integer narrow result conversion FFI fixture");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize integer narrow result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:ffi_nonfinite_result_case".into());
+    let owner = crate::core::NodeId("function:main".into());
     let (instruction_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -1916,6 +1917,7 @@ fn scalar_ffi_integer_narrow_result_conversion_matches_three_consumers() {
         .expect("integer narrow result receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
     let receipt = mir
         .ffi_calls()
         .get(&instruction_id)
@@ -2091,6 +2093,7 @@ fn scalar_ffi_integer_narrow_result_range_failure_matches_consumers() {
         .expect("integer narrow range receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct OutOfRangeResultOracle;
     impl MirReferenceFfiResolver for OutOfRangeResultOracle {
@@ -2247,6 +2250,7 @@ fn scalar_ffi_float_to_integer_result_nonfinite_failure_matches_consumers() {
         .expect("non-finite result conversion receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct NonFiniteResultOracle;
     impl MirReferenceFfiResolver for NonFiniteResultOracle {
@@ -2579,6 +2583,7 @@ fn scalar_ffi_float_narrow_result_conversion_matches_three_consumers() {
         .expect("floating narrow result conversion receipt")
         .result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
     let receipt = mir
         .ffi_calls()
         .get(&instruction_id)
@@ -2690,7 +2695,7 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
         .expect("check mixed argument/result conversion FFI fixture");
     let mut mir = MirProgram::from_checked_program(&checked)
         .expect("materialize mixed argument/result conversion FFI MIR");
-    let owner = crate::core::NodeId("function:ffi_f64_i32_range_case".into());
+    let owner = crate::core::NodeId("function:main".into());
     let (instruction_id, argument_id, result_id) = mir
         .ffi_calls()
         .iter()
@@ -2754,6 +2759,7 @@ fn scalar_ffi_mixed_argument_and_result_conversions_match_three_consumers() {
     );
     receipt.result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct MixedConversionOracle;
     impl MirReferenceFfiResolver for MixedConversionOracle {
@@ -3489,8 +3495,8 @@ func main() -> i64 {
         .message
         .contains("extern ensures contract disproven"));
     assert_eq!(
-        verification[0].constraint_count, 3,
-        "failed requires must retain the canonical path/definedness summary while short-circuiting ensures"
+        verification[0].constraint_count, 6,
+        "failed requires must retain the canonical argument-definedness + requires summary while short-circuiting ensures"
     );
     assert_eq!(
         verification[0]
@@ -13930,7 +13936,11 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
 
     let results = crate::verifier::verify_mir(&mir, "imported-alias-proof".into())
         .expect("verify imported alias proof MIR");
-    assert_eq!(results.len(), 2, "wrapper and extern requires obligations");
+    assert_eq!(
+        results.len(),
+        3,
+        "caller call-precondition, wrapper, and extern requires obligations: {results:?}"
+    );
     assert!(results
         .iter()
         .all(|result| result.status == VerifStatus::Proven));
@@ -13949,8 +13959,8 @@ fn scalar_ffi_imported_alias_verifier_artifact_matches_route_receipt() {
     assert!(
         results
             .iter()
-            .all(|result| result.func_name != "function:main"),
-        "a successful caller with no declared contract has no separate verdict"
+            .any(|result| result.func_name == "function:main"),
+        "caller-side direct-call precondition obligation surfaces Proven for main: {results:?}"
     );
     assert!(results.iter().all(|result| {
         result.artifact.as_ref().is_some_and(|artifact| {
@@ -14058,10 +14068,10 @@ fn scalar_ffi_imported_alias_negative_verifier_artifact_matches_route_receipt() 
 
 #[test]
 fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
-    for (declaration, expected) in [
-        ("func foreign(x: i64 ...) -> i64;", "variadic"),
-        ("#[errno] func foreign(x: i64) -> i64;", "errno"),
-        ("func foreign(&x: i64) -> i64;", "parameter mode"),
+    for (declaration, expected, route_only) in [
+        ("func foreign(x: i64 ...) -> i64;", "variadic", true),
+        ("#[errno] func foreign(x: i64) -> i64;", "errno", true),
+        ("func foreign(&x: i64) -> i64;", "parameter mode", true),
     ] {
         let source =
             format!("extern \"C\" {{ {declaration} }} func main() -> i64 {{ foreign(42 as i64) }}");
@@ -14072,6 +14082,13 @@ fn scalar_ffi_materialization_rejects_unrepresented_declaration_semantics() {
             .parse_file()
             .expect("parse declaration");
         let checked = crate::core::check_program(&file).expect("check declaration");
+        if route_only {
+            let error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+                .expect_err("variadic extern declaration must remain outside scalar FFI route")
+                .to_string();
+            assert!(error.contains(expected), "{declaration}: {error}");
+            continue;
+        }
         let error = match MirProgram::from_checked_program(&checked) {
             Err(crate::core::mir::reference::MirProgramBuildError::Validation(errors)) => {
                 assert!(errors.iter().any(|error| {
@@ -14438,13 +14455,31 @@ func main() -> i64 {
         .expect("parse unit-result FFI result reference");
     let checked =
         crate::core::check_program(&file).expect("check unit-result FFI result reference");
-    let errors = MirProgram::from_checked_program(&checked)
-        .expect_err("unit FFI result must not enter scalar postcondition arithmetic");
-    let message = format!("{errors:?}");
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("canonical MIR records unit-result FFI ensures as Deferred without scalar AST");
+    let receipt = mir.ffi_calls().values().next().expect("unit FFI receipt");
     assert!(
-        message.contains("ABI Unit is outside the canonical scalar verifier contract"),
-        "{message}"
+        receipt.ensures.is_none() && receipt.ensures_deferred,
+        "unit FFI result must not enter scalar postcondition arithmetic: {receipt:?}"
     );
+    crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("executable ScalarFfi route must reject deferred unit ensures");
+    compile_mir_program(&mir).expect_err("bytecode adapter must reject deferred unit ensures");
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "scalar_ffi_unit_ensures_rej");
+    generator
+        .compile_mir_native(&mir)
+        .expect_err("native adapter must reject deferred unit ensures");
+    if crate::verifier::is_z3_available() {
+        let verified = crate::verifier::verify_mir(&mir, "scalar-ffi-unit-ensures-rej".into())
+            .expect("verify_mir surfaces Deferred unit ensures cleanly");
+        assert!(
+            verified
+                .iter()
+                .any(|result| result.status == crate::verifier::VerifStatus::NotInTrustedSubset),
+            "Deferred unit ensures must be NotInTrustedSubset, never Proven: {verified:?}"
+        );
+    }
 }
 
 #[test]
@@ -19995,12 +20030,18 @@ fn scalar_ffi_checked_apis_reject_uncovered_graph_without_legacy() {
         let checked = crate::core::check_program(&super::parse_prod(source))
             .expect("check unsupported graph");
         assert!(crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
-        for result in [
+        for (api_idx, result) in [
             crate::verifier::verify_checked(&checked, String::new()),
             crate::verifier::verify_checked_dual(&checked, String::new()),
             crate::verifier::verify_ffi_checked(&checked),
-        ] {
-            assert!(result.is_err(), "unsupported graph must fail closed");
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                result.is_err(),
+                "unsupported graph must fail closed (api={api_idx}): {source} -> {result:?}"
+            );
         }
         let context = inkwell::context::Context::create();
         let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_ffi_route");
@@ -20143,22 +20184,43 @@ fn scalar_ffi_materialization_rejects_unrepresented_no_panic_semantics() {
     "#;
     let checked =
         crate::core::check_program(&super::parse(source)).expect("no_panic declaration fixture");
-    let error = MirProgram::from_checked_program(&checked)
-        .expect_err("no_panic protection must not be silently dropped from MIR");
-    let message = error.to_string();
-    match error {
-        crate::core::mir::reference::MirProgramBuildError::Validation(errors) => assert!(
-            errors.iter().any(|error| {
-                error.diagnostic_code()
-                    == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
-            }),
-            "no_panic declaration lost its stable route code: {errors:?}"
-        ),
-        other => panic!("no_panic declaration returned unexpected MIR error: {other:?}"),
+    let route_error = crate::core::mir::materialize_canonical_mir_route(&checked, None)
+        .expect_err("no_panic protection must remain outside scalar FFI route");
+    match route_error {
+        crate::core::mir::CanonicalMirRouteMaterializationError::Compatibility {
+            message, ..
+        } => {
+            assert!(
+                message.contains("no_panic FFI protection"),
+                "unexpected no_panic route diagnostic: {message}"
+            );
+        }
+        other => panic!("no_panic declaration returned unexpected route error: {other:?}"),
     }
+    let context = inkwell::context::Context::create();
+    let mut generator = crate::codegen::CodeGenerator::new(&context, "rejected_no_panic_ffi");
+    let diagnostics = generator
+        .compile_checked(&checked)
+        .expect_err("no_panic protection must fail closed at the native FFI boundary");
     assert!(
-        message.contains("unsupported no_panic FFI protection semantics"),
-        "unexpected no_panic materialization diagnostic: {message}"
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref()
+                == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+                && diagnostic.message.contains("no_panic FFI protection")
+        }),
+        "no_panic declaration lost its stable route code: {diagnostics:?}"
+    );
+    let mir = MirProgram::from_checked_program(&checked)
+        .expect("checker-backed MIR preserves no_panic declaration metadata for validators");
+    let bytecode_errors = compile_mir_program(&mir).expect_err(
+        "no_panic declaration must remain rejected by scalar execution bytecode consumer",
+    );
+    assert!(
+        bytecode_errors.iter().any(|error| {
+            error.to_diagnostic().code.as_deref()
+                == Some(crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE)
+        }),
+        "no_panic bytecode consumer lost its stable route code: {bytecode_errors:?}"
     );
 }
 
@@ -21971,6 +22033,7 @@ func main() -> i64 {
     );
     receipt.result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct OutOfRangeMixedOracle;
     impl MirReferenceFfiResolver for OutOfRangeMixedOracle {
@@ -22170,6 +22233,7 @@ func main() -> i64 {
     );
     receipt.result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct OutOfRangeOracle;
     impl MirReferenceFfiResolver for OutOfRangeOracle {
@@ -22467,6 +22531,7 @@ func main() -> i64 {
     );
     overflow.result_conversion = Some(result_conversion);
     mir.replace_ffi_calls_for_test_only(receipts);
+    mir.reseal_ffi_source_witnesses_for_test_only(&owner);
 
     struct MixedRangeOracle;
     impl MirReferenceFfiResolver for MixedRangeOracle {
@@ -30103,7 +30168,7 @@ fn ffi_checked_typed_string_requires_preserve_positive_and_negative() {
                 .mir_route_receipt
                 .as_ref()
                 .map(|receipt| receipt.profile.as_str()),
-            Some("verifier-ffi-mir-v1")
+            Some("verifier-ffi-owner-slice-v1")
         );
     }
 }
@@ -30146,8 +30211,14 @@ fn ffi_checked_typed_aggregate_requires_preserve_positive_and_negative() {
         .find(|result| result.func_name.contains("caller_negative"))
         .expect("negative aggregate caller result");
     assert_eq!(negative.status, crate::verifier::VerifStatus::Failed);
-    assert_eq!(positive.artifact.as_ref().unwrap().engine, "resolved_ffi");
-    assert_eq!(negative.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert_eq!(
+        positive.artifact.as_ref().unwrap().engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
+    assert_eq!(
+        negative.artifact.as_ref().unwrap().engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
 }
 
 #[test]
@@ -30182,7 +30253,7 @@ fn ffi_checked_verifies_ensures_only_foreign_call_through_mir() {
             .mir_route_receipt
             .as_ref()
             .map(|receipt| receipt.profile.as_str()),
-        Some("scalar-ffi-v1")
+        Some("verify-ffi-v1")
     );
     assert_eq!(crate::core::mir::test_route_materialization_count(), 1);
 }
@@ -30211,12 +30282,17 @@ fn ffi_checked_rejects_called_contract_with_unsupported_abi_metadata() {
 
 #[test]
 fn ffi_checked_typed_requires_and_unmodeled_ensures_keep_distinct_results() {
+    if !crate::verifier::is_z3_available() {
+        return;
+    }
     let source = r#"
         extern "C" {
-            func foreign(value: i64) -> i64 requires: value >= 0 ensures: true;
+            func foreign(value: string) -> f32 requires: value != "" ensures: result > 0.0;
         }
-        extern "C" func internal_export(value: i64) -> i64 { value + 1 }
-        func main() -> i64 { foreign(7) }
+        func main() -> i64 {
+            let _ = foreign("ok");
+            0
+        }
     "#;
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("noncanonical scalar FFI ensures fixture");
@@ -30254,7 +30330,10 @@ fn ffi_checked_typed_requires_and_unmodeled_ensures_keep_distinct_results() {
         .iter()
         .find(|result| !result.func_name.ends_with("Ensures"))
         .expect("typed Requires result");
-    assert_eq!(requires.artifact.as_ref().unwrap().engine, "resolved_ffi");
+    assert_eq!(
+        requires.artifact.as_ref().unwrap().engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
 }
 
 #[test]
@@ -30262,13 +30341,41 @@ fn ffi_checked_unmodeled_ensures_only_does_not_claim_a_false_proof() {
     if !crate::verifier::is_z3_available() {
         return;
     }
-    let source = r#"
+    let modeled_source = r#"
         extern "C" {
             func foreign(value: string) -> i64 ensures: result >= 0;
         }
         func main() -> i64 { foreign("ok") }
     "#;
-    let checked = crate::core::check_program(&super::parse_prod(source))
+    let modeled_checked = crate::core::check_program(&super::parse_prod(modeled_source))
+        .expect("modeled string-to-i64 ensures-only FFI fixture");
+    assert!(!crate::core::mir::classify_canonical_mir_route_admission(&modeled_checked).scalar_ffi);
+    let modeled_results = crate::verifier::verify_ffi_checked(&modeled_checked)
+        .expect("modeled Ensures obligation surfaces canonical counterexample");
+    assert_eq!(
+        modeled_results.len(),
+        1,
+        "modeled ensures-only result: {modeled_results:?}"
+    );
+    assert_eq!(
+        modeled_results[0].status,
+        crate::verifier::VerifStatus::Disproven
+    );
+    assert_eq!(
+        modeled_results[0].artifact.as_ref().unwrap().engine,
+        crate::verifier::ProofArtifact::ENGINE_MIR
+    );
+
+    let unmodeled_source = r#"
+        extern "C" {
+            func foreign(value: string) -> f32 ensures: result > 0.0;
+        }
+        func main() -> i64 {
+            let _ = foreign("ok");
+            0
+        }
+    "#;
+    let checked = crate::core::check_program(&super::parse_prod(unmodeled_source))
         .expect("noncanonical scalar ensures-only FFI fixture");
     assert!(!crate::core::mir::classify_canonical_mir_route_admission(&checked).scalar_ffi);
 
@@ -30551,7 +30658,7 @@ fn ffi_checked_typed_requires_keep_only_called_contract_externs() {
             func guarded(value: string) -> i64 requires: value != "";
             func plain(value: string) -> i64;
         }
-        func main() -> i64 { guarded("ok") + plain("ok") }
+        func main() -> i64 { let _ = guarded("ok"); plain("ok") }
     "#;
     let checked = crate::core::check_program(&super::parse_prod(source))
         .expect("mixed called contract/uncontracted string FFI fixture");
@@ -30564,14 +30671,14 @@ fn ffi_checked_typed_requires_keep_only_called_contract_externs() {
     let artifact = results[0]
         .artifact
         .as_ref()
-        .expect("String verifier MIR artifact");
+        .unwrap_or_else(|| panic!("String verifier MIR artifact: {results:?}"));
     assert_eq!(artifact.engine, crate::verifier::ProofArtifact::ENGINE_MIR);
     assert_eq!(
         artifact
             .mir_route_receipt
             .as_ref()
             .map(|receipt| receipt.profile.as_str()),
-        Some("verifier-ffi-mir-v1")
+        Some("verifier-ffi-owner-slice-v1")
     );
 }
 

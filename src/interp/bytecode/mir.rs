@@ -15528,7 +15528,7 @@ fn materialize_canonical_ffi(
             });
             continue;
         }
-        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt_at_mir_boundary(
+        let receipt_errors = crate::core::mir::validate_ffi_call_contract_receipt(
             program.type_catalog(),
             function,
             instruction,
@@ -15538,6 +15538,22 @@ fn materialize_canonical_ffi(
             receipt,
         );
         if !receipt_errors.is_empty() {
+            if let Err(message) =
+                scalar_ffi_arguments(program, &receipt.parameter_types, instruction)
+            {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message,
+                });
+            }
+            if let Err(message) =
+                scalar_ffi_type(program, &receipt.result_type, instruction, "result")
+            {
+                errors.push(MirBytecodeError {
+                    function: receipt.caller.clone(),
+                    message,
+                });
+            }
             errors.extend(receipt_errors.into_iter().map(|message| MirBytecodeError {
                 function: receipt.caller.clone(),
                 message: format!("canonical FFI receipt '{}' {message}", instruction),

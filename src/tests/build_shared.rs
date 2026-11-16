@@ -618,14 +618,18 @@ fn ffi_m004_computed_const_rejected() {
 extern "C" const BAD: i32 = 2 + 3
 func main() -> i32 { return 0 }
 "#;
-    let file = parse_and_check(src);
-    let program = crate::core::check_program(&file).expect("invalid shared const checked program");
-    let context = inkwell::context::Context::create();
-    let mut gen = codegen::CodeGenerator::new(&context, "m004bad");
-    gen.shared = true;
-    let err = gen.compile_checked(&program).err();
+    let tokens = lexer::Lexer::new(src)
+        .tokenize()
+        .expect("lex invalid shared const");
+    let file = parser::Parser::new(tokens)
+        .parse_file()
+        .expect("parse invalid shared const");
+    let diags = crate::core::check(&file)
+        .expect_err("computed `extern \"C\" const` initializer must be rejected");
     assert!(
-        err.is_some(),
-        "computed `extern \"C\" const` initializer must be rejected"
+        diags
+            .iter()
+            .any(|diag| diag.code.as_deref() == Some("NATIVE-DATA-EXPORT-001")),
+        "expected NATIVE-DATA-EXPORT-001 diagnostic, got: {diags:?}"
     );
 }

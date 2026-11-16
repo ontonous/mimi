@@ -2394,14 +2394,22 @@ pub(crate) fn validate_ffi_mir_contracts(
                                 && result_kind == ContractValueKind::Bool
                         }
                         MirContractBinaryOp::Equal | MirContractBinaryOp::NotEqual => {
-                            let exact_non_integer_type = operand_types[0] == operand_types[1]
+                            let same_non_int_exact = operand_types[0] == operand_types[1]
                                 && matches!(
                                     left_kind,
-                                    ContractValueKind::Bool
-                                        | ContractValueKind::Float
-                                        | ContractValueKind::String
+                                    ContractValueKind::Bool | ContractValueKind::String
                                 );
-                            (integer_common.is_some() || exact_non_integer_type)
+                            let both_f64 = left_kind == ContractValueKind::Float
+                                && right_kind == ContractValueKind::Float;
+                            let mixed_float_int = matches!(
+                                (left_kind, right_kind),
+                                (ContractValueKind::Float, ContractValueKind::Int)
+                                    | (ContractValueKind::Int, ContractValueKind::Float)
+                            );
+                            (integer_common.is_some()
+                                || same_non_int_exact
+                                || both_f64
+                                || mixed_float_int)
                                 && result_kind == ContractValueKind::Bool
                         }
                         MirContractBinaryOp::Less
@@ -2409,10 +2417,14 @@ pub(crate) fn validate_ffi_mir_contracts(
                         | MirContractBinaryOp::LessEqual
                         | MirContractBinaryOp::GreaterEqual => {
                             let integer_comparison = integer_common.is_some();
-                            let same_float_type = operand_types[0] == operand_types[1]
-                                && left_kind == ContractValueKind::Float
+                            let both_f64 = left_kind == ContractValueKind::Float
                                 && right_kind == ContractValueKind::Float;
-                            (integer_comparison || same_float_type)
+                            let mixed_float_int = matches!(
+                                (left_kind, right_kind),
+                                (ContractValueKind::Float, ContractValueKind::Int)
+                                    | (ContractValueKind::Int, ContractValueKind::Float)
+                            );
+                            (integer_comparison || both_f64 || mixed_float_int)
                                 && result_kind == ContractValueKind::Bool
                         }
                     };

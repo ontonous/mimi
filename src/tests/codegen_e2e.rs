@@ -6163,14 +6163,14 @@ double __mimi_extern_c_fabs(double x) { return fabs(x); }
         }
         func main() -> i32 {
             let h = __mimi_extern_c_hypot(3.0, 4.0)
-            println(h as i32)
+            println(h)
             let a = __mimi_extern_c_fabs(-2.5)
-            println(a as i32)
+            println(a)
             0
         }
     "#,
         c_src,
     )
     .expect("XPU FFI float failed");
-    assert_eq!(stdout.trim(), "5\n2");
+    assert_eq!(stdout.trim(), "5\n2.5");
 }

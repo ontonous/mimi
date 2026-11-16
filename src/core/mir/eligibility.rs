@@ -141,6 +141,7 @@ pub(crate) fn is_scalar_ffi_candidate_excluding_sources(
         };
         if block.abi != "C"
             || block.no_panic
+            || declaration.no_panic
             || block.returns_errno
             || declaration.returns_errno
             || declaration.variadic
@@ -210,7 +211,7 @@ pub fn scalar_ffi_boundary_reason(program: &CheckedProgram) -> Option<String> {
                 declaration.name, block.abi
             ));
         }
-        if block.no_panic {
+        if block.no_panic || declaration.no_panic {
             return Some(format!(
                 "extern declaration '{}' enables no_panic FFI protection outside canonical scalar FFI",
                 declaration.name

@@ -9595,6 +9595,15 @@ fn resolve_named_call_callee(
             );
         }
     }
+    if let Some((arity, ret)) = externs.get(name) {
+        return (
+            name.to_string(),
+            ResolvedCallKind::Extern,
+            Some(*arity),
+            Vec::new(),
+            Some(ret.clone()),
+        );
+    }
     // Keep the same precedence as Checker::check_call: language builtins are
     // resolved before flattened stdlib functions with the same surface name.
     if crate::core::builtins::is_builtin_callable(name)

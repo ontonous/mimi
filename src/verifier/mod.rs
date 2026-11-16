@@ -5430,7 +5430,7 @@ fn verify_ffi_checked_body_with_source_hash_and_z3_override(
         // built once during checking; a merged or otherwise malformed
         // declaration directory must not be hidden by that earlier snapshot
         // or by a later empty/no-obligation result.
-        program
+        let signature = program
             .extern_func_signature_for_call(&site.callee, site.argc)
             .map_err(|error| format!("TOOL-RESOLUTION-001: {error}"))?;
         let declarations = program
@@ -5449,6 +5449,25 @@ fn verify_ffi_checked_body_with_source_hash_and_z3_override(
         declaration
             .validate(program)
             .map_err(|errors| format!("TOOL-RESOLUTION-001: {errors:?}"))?;
+        if let Some(signature) = signature {
+            let block = program
+                .extern_block_for_signature(&signature.node_id)
+                .map_err(|error| format!("TOOL-RESOLUTION-001: {error}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "TOOL-RESOLUTION-001: extern declaration '{}' has no checker-owned ABI block",
+                        signature.name
+                    )
+                })?;
+            if declaration.has_declared_contract() && block.abi != "C" {
+                return Err(format!(
+                    "{}: extern declaration '{}' ABI '{}' is outside the canonical C ABI",
+                    crate::core::mir::MIR_FFI_DECLARATION_BOUNDARY_ERROR_CODE,
+                    signature.name,
+                    block.abi
+                ));
+            }
+        }
         if site.argc != declaration.fixed_parameter_ids.len() {
             return Err(format!(
                 "TOOL-RESOLUTION-001: extern call '{}' expects {} arguments, got {}",
@@ -10334,7 +10353,20 @@ fn verify_closed_mir_profile(
             let mut generator = crate::codegen::CodeGenerator::new(&context, "verifier_empty_root_root_queries_v1");
             generator.compile_checked_mir_native_with_empty_root_root_queries_v1_route(program, &canonical, &receipt).map_err(|e| format!("MIR-COVERAGE-001: MapEmptyRootRootQueriesV1 native: {e:?}"))?;
         }
-        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi => {}
+        crate::core::mir::CanonicalMirRouteProfile::ScalarFfi => {
+            let receipt = canonical.route_receipt(profile.as_str());
+            crate::interp::bytecode::compile_mir_program_with_route_receipt(&canonical, &receipt)
+                .map_err(|errors| {
+                    format!(
+                        "MIR-CAPABILITY-001: ScalarFfi AST-free bytecode consumer rejected the route: {errors:?}"
+                    )
+                })?;
+            crate::codegen::mir::validate_mir_native(&canonical).map_err(|errors| {
+                format!(
+                    "MIR-CAPABILITY-001: ScalarFfi native consumer rejected the route: {errors:?}"
+                )
+            })?;
+        }
         crate::core::mir::CanonicalMirRouteProfile::ScalarExport => {
             if canonical.export_declarations().is_empty() {
                 return Err(

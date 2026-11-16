@@ -767,8 +767,8 @@ func main() -> i64 { 0 }
         .is_canonical_ffi_verifier_record(record_id));
     let original_abi_text = original.abi_canonical_text();
     assert!(original_abi_text.contains("repr_c=true"));
-    assert!(original_abi_text.contains("field:low"));
-    assert!(original_abi_text.contains("field:high"));
+    assert!(original_abi_text.contains("name=low"));
+    assert!(original_abi_text.contains("name=high"));
 
     let validate_forged = |descriptor: types::MirTypeDesc| {
         let mut catalog = program.type_catalog().clone();
@@ -868,17 +868,21 @@ func main() -> i64 { 0 }
             "{name} must be outside the record proof profile ({reason})"
         );
     }
-    assert!(catalog.iter().any(|(id, descriptor)| {
+    assert!(catalog.iter().any(|(_, descriptor)| {
         descriptor.kind == MirTypeKind::Nominal
-            && matches!(&descriptor.layout, MirLayout::Enum { .. })
-            && id.as_str().ends_with("Choice")
+            && matches!(
+                &descriptor.layout,
+                MirLayout::Enum { nominal, .. } if nominal.as_str().ends_with("Choice")
+            )
     }));
     let choice = catalog
         .iter()
         .find_map(|(id, descriptor)| {
             (descriptor.kind == MirTypeKind::Nominal
-                && matches!(&descriptor.layout, MirLayout::Enum { .. })
-                && id.as_str().ends_with("Choice"))
+                && matches!(
+                    &descriptor.layout,
+                    MirLayout::Enum { nominal, .. } if nominal.as_str().ends_with("Choice")
+                ))
             .then_some(id.clone())
         })
         .expect("enum TypeDesc");

@@ -30,7 +30,9 @@ use crate::core::mir::{
 use crate::verifier::ctx::{
     ProofArtifact, SolverSession, TrustedSubsetDomain, VerifStatus, VerificationResult,
 };
-use z3::ast::{Ast, Bool, Float, Int, RoundingMode, Set as Z3Set, String as Z3String};
+use z3::ast::{
+    Ast, Bool, Float, Int, Real as Z3Real, RoundingMode, Set as Z3Set, String as Z3String,
+};
 use z3::{SatResult, Solver, Sort};
 
 #[derive(Debug, Clone)]
@@ -7459,6 +7461,16 @@ fn validate_ffi_call_receipt_for_mir_verifier(
             arguments,
             contract,
         )
+    } else if crate::core::mir::ffi_call_uses_scalar_requires_verifier_policy(contract) {
+        crate::core::mir::validate_ffi_call_contract_verifier_scalar_requires_receipt(
+            catalog,
+            function,
+            instruction,
+            callee,
+            result,
+            arguments,
+            contract,
+        )
     } else if has_string_endpoint {
         crate::core::mir::validate_ffi_call_contract_verifier_receipt(
             catalog,
@@ -7470,7 +7482,7 @@ fn validate_ffi_call_receipt_for_mir_verifier(
             contract,
         )
     } else {
-        crate::core::mir::validate_ffi_call_contract_receipt(
+        crate::core::mir::validate_ffi_call_contract_scalar_verifier_receipt(
             catalog,
             function,
             instruction,
@@ -7569,94 +7581,136 @@ fn verify_ffi_program_inner_for_ensures(
                 errors.join("; ")
             )
         })?;
-    program.validate_ffi_source_census().map_err(|errors| {
+    let structural_error: Option<String> = (|| -> Result<(), String> {
+        let mut deferred_symbol_safety: Option<String> = None;
+        for message in
+            crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+        {
+            // The shared table owns ordering, while the public verifier retains
+            // its historical symbol-qualified diagnostic for an attached unsafe
+            // receipt.  Do not apply this refinement to orphan/key failures: the
+            // table error must remain the first classification there.
+            if message.contains("FFI symbol is not manifest-safe") {
+                if deferred_symbol_safety.is_none() {
+                    if let Some((symbol, safety)) =
+                        program.ffi_calls().values().find_map(|contract| {
+                            crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
+                                .err()
+                                .map(|safety| (contract.symbol.as_str(), safety))
+                        })
+                    {
+                        deferred_symbol_safety = Some(format!(
+                            "canonical MIR verifier FFI symbol '{symbol}' {}",
+                            safety.strip_prefix("FFI symbol ").unwrap_or(&safety)
+                        ));
+                    } else {
+                        deferred_symbol_safety = Some(format!("canonical MIR verifier {message}"));
+                    }
+                }
+                continue;
+            }
+            return Err(format!("canonical MIR verifier {message}"));
+        }
+        if let Some(error) = deferred_symbol_safety {
+            return Err(error);
+        }
+        if let Some((symbol, message)) = program.ffi_calls().values().find_map(|contract| {
+            crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
+                .err()
+                .map(|message| (contract.symbol.as_str(), message))
+        }) {
+            return Err(format!(
+                "canonical MIR verifier FFI symbol '{symbol}' {}",
+                message.strip_prefix("FFI symbol ").unwrap_or(&message)
+            ));
+        }
+        // Receipt-table integrity is the first whole-program boundary.  Keep the
+        // standalone symbol scan after it so orphaned receipts are classified as
+        // orphaned consistently with the other consumers; attached receipts are
+        // still covered by the shared table's manifest-safety check.
+        if let Some(message) =
+            crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls())
+                .into_iter()
+                .next()
+        {
+            return Err(format!("canonical MIR verifier {message}"));
+        }
+        for function in program.functions().values() {
+            for block in function.blocks.values() {
+                for instruction in &block.instructions {
+                    let crate::core::mir::MirInstructionKind::Call {
+                        result,
+                        callee: crate::core::ir::ResolvedCallee::Extern(callee),
+                        arguments,
+                        ..
+                    } = &instruction.kind
+                    else {
+                        continue;
+                    };
+                    let contract = program.ffi_calls().get(&instruction.id).ok_or_else(|| {
+                        format!(
+                            "MIR verifier extern call '{}' has no canonical FFI contract",
+                            instruction.id
+                        )
+                    })?;
+                    for message in validate_ffi_call_receipt_for_mir_verifier(
+                        program,
+                        function,
+                        &instruction.id,
+                        callee,
+                        result.as_ref(),
+                        arguments,
+                        contract,
+                    ) {
+                        if message.contains("FFI symbol is not manifest-safe") {
+                            if deferred_symbol_safety.is_none() {
+                                if let Some((symbol, safety)) =
+                                    crate::core::mir::validate_ffi_symbol_manifest_safety(
+                                        &contract.symbol,
+                                    )
+                                    .err()
+                                    .map(|safety| (contract.symbol.as_str(), safety))
+                                {
+                                    deferred_symbol_safety = Some(format!(
+                                        "canonical MIR verifier FFI symbol '{symbol}' {}",
+                                        safety.strip_prefix("FFI symbol ").unwrap_or(&safety)
+                                    ));
+                                } else {
+                                    deferred_symbol_safety = Some(format!(
+                                        "MIR verifier extern call '{}' {message}",
+                                        instruction.id
+                                    ));
+                                }
+                            }
+                            continue;
+                        }
+                        return Err(format!(
+                            "MIR verifier extern call '{}' {message}",
+                            instruction.id
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    })()
+    .err();
+    let census_result = program.validate_ffi_source_census().map_err(|errors| {
         format!(
             "canonical MIR FFI verifier checked-source census rejected: {}",
             errors.join("; ")
         )
-    })?;
-    if let Some(message) =
-        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
-            .into_iter()
-            .next()
-    {
-        // The shared table owns ordering, while the public verifier retains
-        // its historical symbol-qualified diagnostic for an attached unsafe
-        // receipt.  Do not apply this refinement to orphan/key failures: the
-        // table error must remain the first classification there.
-        if message.contains("FFI symbol is not manifest-safe") {
-            if let Some((symbol, safety)) = program.ffi_calls().values().find_map(|contract| {
-                crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
-                    .err()
-                    .map(|safety| (contract.symbol.as_str(), safety))
-            }) {
-                return Err(format!(
-                    "canonical MIR verifier FFI symbol '{symbol}' {}",
-                    safety.strip_prefix("FFI symbol ").unwrap_or(&safety)
-                ));
+    });
+    if let Some(mut err) = structural_error {
+        if let Err(census_err) = census_result {
+            if !err.is_empty() {
+                err.push_str("; ");
             }
+            err.push_str(&census_err);
         }
-        return Err(format!("canonical MIR verifier {message}"));
+        return Err(err);
     }
-    // Receipt-table integrity is the first whole-program boundary.  Keep the
-    // standalone symbol scan after it so orphaned receipts are classified as
-    // orphaned consistently with the other consumers; attached receipts are
-    // still covered by the shared table's manifest-safety check.
-    if let Some((symbol, message)) = program.ffi_calls().values().find_map(|contract| {
-        crate::core::mir::validate_ffi_symbol_manifest_safety(&contract.symbol)
-            .err()
-            .map(|message| (contract.symbol.as_str(), message))
-    }) {
-        return Err(format!(
-            "canonical MIR verifier FFI symbol '{symbol}' {}",
-            message.strip_prefix("FFI symbol ").unwrap_or(&message)
-        ));
-    }
-    if let Some(message) =
-        crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls())
-            .into_iter()
-            .next()
-    {
-        return Err(format!("canonical MIR verifier {message}"));
-    }
-    for function in program.functions().values() {
-        for block in function.blocks.values() {
-            for instruction in &block.instructions {
-                let crate::core::mir::MirInstructionKind::Call {
-                    result,
-                    callee: crate::core::ir::ResolvedCallee::Extern(callee),
-                    arguments,
-                    ..
-                } = &instruction.kind
-                else {
-                    continue;
-                };
-                let contract = program.ffi_calls().get(&instruction.id).ok_or_else(|| {
-                    format!(
-                        "MIR verifier extern call '{}' has no canonical FFI contract",
-                        instruction.id
-                    )
-                })?;
-                if let Some(message) = validate_ffi_call_receipt_for_mir_verifier(
-                    program,
-                    function,
-                    &instruction.id,
-                    callee,
-                    result.as_ref(),
-                    arguments,
-                    contract,
-                )
-                .into_iter()
-                .next()
-                {
-                    return Err(format!(
-                        "MIR verifier extern call '{}' {message}",
-                        instruction.id
-                    ));
-                }
-            }
-        }
-    }
+    census_result?;
     if !program
         .ffi_calls()
         .values()
@@ -8151,10 +8205,10 @@ fn ffi_execution_owner(
         .values()
         .filter(|call| call.caller == *ffi_caller)
         .count()
-        != 1
+        == 0
     {
         return Err(format!(
-            "canonical MIR FFI helper '{}' must own exactly one extern call receipt",
+            "canonical MIR FFI helper '{}' must own at least one extern call receipt",
             ffi_caller.0
         ));
     }
@@ -34821,6 +34875,53 @@ fn ffi_contract_term(
     )
 }
 
+fn contract_binary_float_int(
+    op: MirContractBinaryOp,
+    float_val: &Float,
+    int_val: &Int,
+    int_on_left: bool,
+) -> Result<SymbolicValue, String> {
+    let op = if int_on_left {
+        match op {
+            MirContractBinaryOp::Less => MirContractBinaryOp::Greater,
+            MirContractBinaryOp::Greater => MirContractBinaryOp::Less,
+            MirContractBinaryOp::LessEqual => MirContractBinaryOp::GreaterEqual,
+            MirContractBinaryOp::GreaterEqual => MirContractBinaryOp::LessEqual,
+            other => other,
+        }
+    } else {
+        op
+    };
+    let is_nan = float_val.is_nan();
+    let is_inf = float_val.is_infinite();
+    let is_neg = float_val.is_negative();
+    let is_finite = Bool::and(&[&is_nan.not(), &is_inf.not()]);
+    let float_real = float_val.to_real();
+    let int_real = Z3Real::from_int(int_val);
+    let result = match op {
+        MirContractBinaryOp::Equal => Bool::and(&[&is_finite, &float_real.eq(&int_real)]),
+        MirContractBinaryOp::NotEqual => Bool::and(&[&is_finite, &float_real.eq(&int_real)]).not(),
+        MirContractBinaryOp::Less => is_nan.ite(
+            &Bool::from_bool(false),
+            &is_inf.ite(&is_neg, &float_real.lt(&int_real)),
+        ),
+        MirContractBinaryOp::LessEqual => is_nan.ite(
+            &Bool::from_bool(false),
+            &is_inf.ite(&is_neg, &float_real.le(&int_real)),
+        ),
+        MirContractBinaryOp::Greater => is_nan.ite(
+            &Bool::from_bool(false),
+            &is_inf.ite(&is_neg.not(), &float_real.gt(&int_real)),
+        ),
+        MirContractBinaryOp::GreaterEqual => is_nan.ite(
+            &Bool::from_bool(false),
+            &is_inf.ite(&is_neg.not(), &float_real.ge(&int_real)),
+        ),
+        _ => return Err("contract operands have incompatible symbolic kinds".into()),
+    };
+    Ok(SymbolicValue::Bool(result))
+}
+
 fn contract_binary(
     op: MirContractBinaryOp,
     left: SymbolicValue,
@@ -34901,6 +35002,12 @@ fn contract_binary(
                     "contract float arithmetic is outside the canonical verifier contract".into(),
                 ),
             }
+        }
+        (SymbolicValue::Float(left), SymbolicValue::Int(right)) => {
+            contract_binary_float_int(op, &left, &right, false)
+        }
+        (SymbolicValue::Int(left), SymbolicValue::Float(right)) => {
+            contract_binary_float_int(op, &right, &left, true)
         }
         _ => Err("contract operands have incompatible symbolic kinds".into()),
     }

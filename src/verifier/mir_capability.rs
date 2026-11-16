@@ -3013,6 +3013,12 @@ fn validate_mir_capabilities_with_options_and_keys_snapshot_and_computed_string_
         }
     }
     if !structural_errors.is_empty() {
+        let mut errors =
+            validate_ffi_capability_preflight(program, allow_typed_ffi_verifier_proofs);
+        if !errors.is_empty() {
+            errors.extend(structural_errors);
+            return Err(errors);
+        }
         return Err(structural_errors);
     }
     let has_unmodeled_set_get_i32_result = program.functions().values().any(|function| {
@@ -10371,97 +10377,17 @@ impl<'a> CapabilityGate<'a> {
         subject: &str,
     ) {
         if let ResolvedCallee::Extern(owner) = callee {
-            let Some(contract) = self.program.ffi_calls().get(instruction_id) else {
-                self.error(format!(
-                    "{subject} extern callee '{}' has no canonical FFI contract",
-                    owner.0
-                ));
-                return;
-            };
-            let catalog = self.program.type_catalog();
-            let has_string_endpoint = contract
-                .parameter_types
-                .iter()
-                .take(
-                    contract
-                        .fixed_argument_count
-                        .min(contract.parameter_types.len()),
-                )
-                .any(|ty| catalog.validate_owned_string(ty).is_ok())
-                || (result.is_some()
-                    && catalog.validate_owned_string(&contract.result_type).is_ok());
-            let is_record_candidate = |ty: &crate::core::ResolvedTypeId| {
-                catalog.get(ty).is_some_and(|descriptor| {
-                    matches!(
-                        &descriptor.layout,
-                        crate::core::mir::types::MirLayout::Record { .. }
-                    )
-                })
-            };
-            let has_record_endpoint = contract
-                .parameter_types
-                .iter()
-                .take(
-                    contract
-                        .fixed_argument_count
-                        .min(contract.parameter_types.len()),
-                )
-                .any(is_record_candidate)
-                || (result.is_some() && is_record_candidate(&contract.result_type));
-            let uses_scalar_requires_policy =
-                crate::core::mir::ffi_call_uses_scalar_requires_verifier_policy(contract);
-            let receipt_errors = if self.allow_typed_ffi_verifier_proofs && has_record_endpoint {
-                crate::core::mir::validate_ffi_call_contract_verifier_record_receipt(
-                    catalog,
-                    function,
-                    instruction_id,
-                    owner,
-                    result,
-                    arguments,
-                    contract,
-                )
-            } else if self.allow_typed_ffi_verifier_proofs && uses_scalar_requires_policy {
-                crate::core::mir::validate_ffi_call_contract_verifier_scalar_requires_receipt(
-                    catalog,
-                    function,
-                    instruction_id,
-                    owner,
-                    result,
-                    arguments,
-                    contract,
-                )
-            } else if self.allow_typed_ffi_verifier_proofs && has_string_endpoint {
-                crate::core::mir::validate_ffi_call_contract_verifier_receipt(
-                    catalog,
-                    function,
-                    instruction_id,
-                    owner,
-                    result,
-                    arguments,
-                    contract,
-                )
-            } else {
-                crate::core::mir::validate_ffi_call_contract_receipt(
-                    catalog,
-                    function,
-                    instruction_id,
-                    owner,
-                    result,
-                    arguments,
-                    contract,
-                )
-            };
-            for message in &receipt_errors {
-                self.error(format!("{subject} {message}"));
-            }
-            if !receipt_errors.is_empty() {
-                return;
-            }
-            if result.is_none() {
-                self.error(format!(
-                    "{subject} extern call has no canonical result value identity"
-                ));
-            }
+            validate_extern_call_capabilities(
+                self.program,
+                self.allow_typed_ffi_verifier_proofs,
+                function,
+                instruction_id,
+                result,
+                owner,
+                arguments,
+                subject,
+                |message| self.error(message),
+            );
             return;
         }
         let owner = match callee {
@@ -11608,6 +11534,179 @@ impl<'a> CapabilityGate<'a> {
 
     fn error(&mut self, message: String) {
         self.errors.insert(message);
+    }
+}
+
+fn validate_ffi_capability_preflight(
+    program: &MirProgram,
+    allow_typed_ffi_verifier_proofs: bool,
+) -> Vec<String> {
+    let has_extern_call = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Call {
+                        callee: ResolvedCallee::Extern(_),
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    if !has_extern_call && program.ffi_calls().is_empty() {
+        return Vec::new();
+    }
+    let mut errors = std::collections::BTreeSet::new();
+    for message in
+        crate::core::mir::validate_ffi_receipt_table(program.functions(), program.ffi_calls())
+    {
+        errors.insert(message);
+    }
+    for message in crate::core::mir::validate_ffi_symbol_declaration_shapes(program.ffi_calls()) {
+        errors.insert(message);
+    }
+    for function in program.functions().values() {
+        for block in function.blocks.values() {
+            for instruction in &block.instructions {
+                if let MirInstructionKind::Call {
+                    result,
+                    callee: ResolvedCallee::Extern(owner),
+                    arguments,
+                    ..
+                } = &instruction.kind
+                {
+                    validate_extern_call_capabilities(
+                        program,
+                        allow_typed_ffi_verifier_proofs,
+                        function,
+                        &instruction.id,
+                        result.as_ref(),
+                        owner,
+                        arguments,
+                        instruction.id.as_str(),
+                        |message| {
+                            errors.insert(message);
+                        },
+                    );
+                }
+            }
+        }
+    }
+    errors.into_iter().collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_extern_call_capabilities(
+    program: &MirProgram,
+    allow_typed_ffi_verifier_proofs: bool,
+    function: &MirFunction,
+    instruction_id: &crate::core::mir::MirInstructionId,
+    result: Option<&MirValueId>,
+    owner: &crate::core::NodeId,
+    arguments: &[MirValueId],
+    subject: &str,
+    mut record_error: impl FnMut(String),
+) {
+    let Some(contract) = program.ffi_calls().get(instruction_id) else {
+        record_error(format!(
+            "{subject} extern callee '{}' has no canonical FFI contract",
+            owner.0
+        ));
+        return;
+    };
+    let catalog = program.type_catalog();
+    let has_string_endpoint = contract
+        .parameter_types
+        .iter()
+        .take(
+            contract
+                .fixed_argument_count
+                .min(contract.parameter_types.len()),
+        )
+        .any(|ty| catalog.validate_owned_string(ty).is_ok())
+        || (result.is_some() && catalog.validate_owned_string(&contract.result_type).is_ok());
+    let is_record_candidate = |ty: &crate::core::ResolvedTypeId| {
+        catalog.get(ty).is_some_and(|descriptor| {
+            matches!(
+                &descriptor.layout,
+                crate::core::mir::types::MirLayout::Record { .. }
+            )
+        })
+    };
+    let has_record_endpoint = contract
+        .parameter_types
+        .iter()
+        .take(
+            contract
+                .fixed_argument_count
+                .min(contract.parameter_types.len()),
+        )
+        .any(is_record_candidate)
+        || (result.is_some() && is_record_candidate(&contract.result_type));
+    let uses_scalar_requires_policy =
+        crate::core::mir::ffi_call_uses_scalar_requires_verifier_policy(contract);
+    let receipt_errors = if allow_typed_ffi_verifier_proofs && has_record_endpoint {
+        crate::core::mir::validate_ffi_call_contract_verifier_record_receipt(
+            catalog,
+            function,
+            instruction_id,
+            owner,
+            result,
+            arguments,
+            contract,
+        )
+    } else if allow_typed_ffi_verifier_proofs && uses_scalar_requires_policy {
+        crate::core::mir::validate_ffi_call_contract_verifier_scalar_requires_receipt(
+            catalog,
+            function,
+            instruction_id,
+            owner,
+            result,
+            arguments,
+            contract,
+        )
+    } else if allow_typed_ffi_verifier_proofs && has_string_endpoint {
+        crate::core::mir::validate_ffi_call_contract_verifier_receipt(
+            catalog,
+            function,
+            instruction_id,
+            owner,
+            result,
+            arguments,
+            contract,
+        )
+    } else if allow_typed_ffi_verifier_proofs {
+        crate::core::mir::validate_ffi_call_contract_scalar_verifier_receipt(
+            catalog,
+            function,
+            instruction_id,
+            owner,
+            result,
+            arguments,
+            contract,
+        )
+    } else {
+        crate::core::mir::validate_ffi_call_contract_receipt(
+            catalog,
+            function,
+            instruction_id,
+            owner,
+            result,
+            arguments,
+            contract,
+        )
+    };
+    for message in &receipt_errors {
+        record_error(format!("{subject} {message}"));
+    }
+    if !receipt_errors.is_empty() {
+        return;
+    }
+    if result.is_none() {
+        record_error(format!(
+            "{subject} extern call has no canonical result value identity"
+        ));
     }
 }
 

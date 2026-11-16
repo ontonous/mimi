@@ -43689,6 +43689,34 @@ fn materialize_canonical_mir_route_impl(
                 })?;
             }
         }
+        for (instruction, receipt) in canonical.ffi_calls() {
+            let Some(function) = canonical.functions().get(&receipt.caller) else {
+                return Err(CanonicalMirRouteMaterializationError::Complete {
+                    profile: CanonicalMirRouteProfile::ScalarFfi,
+                    stage: CanonicalMirRouteFailureStage::Coverage,
+                    message: format!(
+                        "scalar FFI call receipt references missing caller '{}'",
+                        receipt.caller.0
+                    ),
+                });
+            };
+            let errors = crate::core::mir::validate_ffi_call_contract_receipt(
+                canonical.type_catalog(),
+                function,
+                instruction,
+                &receipt.callee,
+                receipt.result.as_ref(),
+                &receipt.arguments,
+                receipt,
+            );
+            if !errors.is_empty() {
+                return Err(CanonicalMirRouteMaterializationError::Complete {
+                    profile: CanonicalMirRouteProfile::ScalarFfi,
+                    stage: CanonicalMirRouteFailureStage::Coverage,
+                    message: errors.join("; "),
+                });
+            }
+        }
     }
     if admission.collection_complete() && !materialized_collection_candidate {
         return Err(CanonicalMirRouteMaterializationError::Complete {

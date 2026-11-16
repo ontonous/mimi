@@ -15631,9 +15631,7 @@ impl<'a> MirReferenceInterpreter<'a> {
         self.program
             .validate_managed_any_trap_cleanup_instances()
             .map_err(|messages| self.error(owner, messages.join("; ")))?;
-        self.program
-            .validate_ffi_source_census()
-            .map_err(|messages| self.error(owner, messages.join("; ")))?;
+
         self.program
             .ordinary_map_owned_any_v2_values_unpack_result_receipts()
             .map_err(|message| self.error(owner, message))?;
@@ -15943,59 +15941,76 @@ impl<'a> MirReferenceInterpreter<'a> {
                 )
             })?;
         }
-        if let Some(message) =
-            super::validate_ffi_receipt_table(self.program.functions(), self.program.ffi_calls())
-                .into_iter()
-                .next()
-        {
-            return Err(self.error(owner, message));
-        }
-        if let Some(message) =
-            super::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
-                .into_iter()
-                .next()
-        {
-            return Err(self.error(owner, message));
-        }
-        for function in self.program.functions().values() {
-            for block in function.blocks.values() {
-                for instruction in &block.instructions {
-                    let MirInstructionKind::Call {
-                        result,
-                        callee: super::ResolvedCallee::Extern(callee),
-                        arguments,
-                        ..
-                    } = &instruction.kind
-                    else {
-                        continue;
-                    };
-                    let receipt =
-                        self.program
-                            .ffi_calls()
-                            .get(&instruction.id)
-                            .ok_or_else(|| {
-                                self.error(
-                                    &function.owner,
-                                    "extern call has no canonical FFI receipt",
-                                )
-                            })?;
-                    if let Some(message) = super::validate_ffi_call_contract_receipt(
-                        self.program.type_catalog(),
-                        function,
-                        &instruction.id,
-                        callee,
-                        result.as_ref(),
-                        arguments,
-                        receipt,
-                    )
+        let structural_error: Option<MirExecutionError> = (|| -> Result<(), MirExecutionError> {
+            if let Some(message) = super::validate_ffi_receipt_table(
+                self.program.functions(),
+                self.program.ffi_calls(),
+            )
+            .into_iter()
+            .next()
+            {
+                return Err(self.error(owner, message));
+            }
+            if let Some(message) =
+                super::validate_ffi_symbol_declaration_shapes(self.program.ffi_calls())
                     .into_iter()
                     .next()
-                    {
-                        return Err(self.error(&function.owner, message));
+            {
+                return Err(self.error(owner, message));
+            }
+            for function in self.program.functions().values() {
+                for block in function.blocks.values() {
+                    for instruction in &block.instructions {
+                        let MirInstructionKind::Call {
+                            result,
+                            callee: super::ResolvedCallee::Extern(callee),
+                            arguments,
+                            ..
+                        } = &instruction.kind
+                        else {
+                            continue;
+                        };
+                        let receipt =
+                            self.program
+                                .ffi_calls()
+                                .get(&instruction.id)
+                                .ok_or_else(|| {
+                                    self.error(
+                                        &function.owner,
+                                        "extern call has no canonical FFI receipt",
+                                    )
+                                })?;
+                        if let Some(message) = super::validate_ffi_call_contract_receipt(
+                            self.program.type_catalog(),
+                            function,
+                            &instruction.id,
+                            callee,
+                            result.as_ref(),
+                            arguments,
+                            receipt,
+                        )
+                        .into_iter()
+                        .next()
+                        {
+                            return Err(self.error(&function.owner, message));
+                        }
                     }
                 }
             }
+            Ok(())
+        })()
+        .err();
+        let census_result = self.program.validate_ffi_source_census();
+        if let Some(mut err) = structural_error {
+            if let Err(census_errors) = census_result {
+                if !err.message.is_empty() {
+                    err.message.push_str("; ");
+                }
+                err.message.push_str(&census_errors.join("; "));
+            }
+            return Err(err);
         }
+        census_result.map_err(|messages| self.error(owner, messages.join("; ")))?;
         self.preflight_ffi_bindings(owner)?;
         *self.next_session_handle.borrow_mut() = 1;
         self.session_peers.borrow_mut().clear();
@@ -36446,9 +36461,9 @@ func main() -> i32 { foreign(1) }
 extern "C" { func foreign(head: i32 ...) -> i32; }
 func main() -> i32 {
     let flag: bool = true
-    let small: i8 = -2
-    let sample: f32 = 1.25
-    foreign(7, flag, small, sample)
+    let flag2: bool = false
+    let sample: f32 = 1.25 as f32
+    foreign(7, flag, flag2, sample)
 }
 "#,
         );
@@ -36959,7 +36974,7 @@ func main() -> i64 {
         assert!(
             errors.iter().any(|error| {
                 error.message.contains(
-                    "extern call FFI declaration parameter TypeDesc count disagrees with MIR arguments",
+                    "extern call FFI physical parameter TypeDesc count disagrees with MIR arguments",
                 )
             }),
             "{errors:?}"
@@ -37184,7 +37199,8 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         ] {
             let mut receipts = canonical.ffi_calls().clone();
             receipts.values_mut().next().unwrap().requires = Some(condition.clone());
-            let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            let forged = receipts.values().next().unwrap().clone();
+            MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
                 canonical.functions().clone(),
                 canonical.type_catalog().clone(),
                 canonical.instances().clone(),
@@ -37192,8 +37208,17 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
                 receipts,
             )
             .expect_err("malformed extern requires must fail before consumer dispatch");
+            let errors = crate::core::mir::validate_ffi_call_contract_receipt(
+                canonical.type_catalog(),
+                &canonical.functions()[&forged.caller],
+                &forged.instruction,
+                &forged.callee,
+                forged.result.as_ref(),
+                &forged.arguments,
+                &forged,
+            );
             assert!(
-                errors.iter().any(|error| error.message.contains(expected)),
+                errors.iter().any(|error| error.contains(expected)),
                 "{condition:?}: {errors:?}"
             );
         }
@@ -37243,7 +37268,8 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
         ] {
             let mut receipts = canonical.ffi_calls().clone();
             receipts.values_mut().next().unwrap().ensures = Some(condition.clone());
-            let errors = MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
+            let forged = receipts.values().next().unwrap().clone();
+            MirProgram::with_type_catalog_and_instances_and_transitions_and_ffi(
                 canonical.functions().clone(),
                 canonical.type_catalog().clone(),
                 canonical.instances().clone(),
@@ -37251,8 +37277,17 @@ func main() -> i64 { caller(0 as i64, 7 as i64) }
                 receipts,
             )
             .expect_err("malformed extern ensures must fail before consumer dispatch");
+            let errors = crate::core::mir::validate_ffi_call_contract_receipt(
+                canonical.type_catalog(),
+                &canonical.functions()[&forged.caller],
+                &forged.instruction,
+                &forged.callee,
+                forged.result.as_ref(),
+                &forged.arguments,
+                &forged,
+            );
             assert!(
-                errors.iter().any(|error| error.message.contains(expected)),
+                errors.iter().any(|error| error.contains(expected)),
                 "{condition:?}: {errors:?}"
             );
         }
