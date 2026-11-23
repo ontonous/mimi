@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const ROUTE_PROFILE: &str = "ordinary-map-owned-any-v2-values-crosscall-string-caller-v2";
+const ROUTE_PROFILE: &str =
+    "ordinary-map-owned-any-v2-values-result-crosscall-string-caller-v4-two-entry-index1";
 const ROUTE_ADMISSION_PREFIX: &str = "MIMI_ROUTE_CENSUS route-admission ";
 const NATIVE_BUILD_PREFIX: &str = "MIMI_ROUTE_CENSUS canonical-native-build ";
 const VERIFIER_PROVENANCE_PREFIX: &str = "canonical MIR verifier provenance: ";

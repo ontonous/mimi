@@ -255,6 +255,62 @@ impl OwnedAnyV2Root {
         }
     }
 
+    /// Check key presence through the production Contains ABI without altering root ownership.
+    pub(crate) fn contains_key(&self, key: &str) -> Result<bool, String> {
+        let key_len = i64::try_from(key.len())
+            .map_err(|_| "ordinary Map Contains key length exceeds the runtime ABI".to_string())?;
+        let mut contains = -1_i32;
+        // SAFETY: `self` owns this live handle, `key` is valid UTF-8 for this call,
+        // and `contains` is writable.
+        let status = unsafe {
+            super::map_any_snapshot::mimi_ordinary_map_owned_any_v2_contains(
+                self.handle(),
+                key.as_ptr(),
+                key_len,
+                &mut contains,
+            )
+        };
+        if status == super::map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK
+            && matches!(contains, 0 | 1)
+        {
+            Ok(contains == 1)
+        } else {
+            Err(format!(
+                "ordinary Map Contains failed (status={status}, contains={contains})"
+            ))
+        }
+    }
+
+    /// Remove `key` through the production Remove ABI, returning a fresh unique root.
+    pub(crate) fn remove(&self, key: &str) -> Result<Self, String> {
+        let key_len = i64::try_from(key.len())
+            .map_err(|_| "ordinary Map Remove key length exceeds the runtime ABI".to_string())?;
+        let mut new_handle = 0_i64;
+        // SAFETY: `self` owns this live handle, `key` is valid UTF-8 for this call,
+        // and `new_handle` is a writable output slot.
+        let status = unsafe {
+            super::map_any_snapshot::mimi_ordinary_map_owned_any_v2_remove(
+                self.handle(),
+                key.as_ptr(),
+                key_len,
+                &mut new_handle,
+            )
+        };
+        if status == super::map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_OK && new_handle != 0 {
+            Ok(Self {
+                handle: Some(new_handle),
+            })
+        } else {
+            if new_handle != 0 {
+                Self::retire_unpublished_handle(new_handle);
+            }
+            Err(format!(
+                "ordinary Map Remove returned a noncanonical status/output pair (status={status}, handle_published={})",
+                new_handle != 0
+            ))
+        }
+    }
+
     /// Derive a new root with one canonical Core `i32` value. This borrows the
     /// source root and does not consume or mutate it; only exact Set capacity
     /// `(status=2, out=0)` is recoverable.
@@ -353,6 +409,72 @@ impl OwnedAnyV2Root {
             "ordinary Map GetAny returned a noncanonical status/output pair (status={status}, found={found}, token_published={})",
             token != 0
         ))
+    }
+
+    /// Execute the production GetStringResult ABI for one String entry in an
+    /// active V2 runtime root. Always releases the runtime-allocated buffer
+    /// before returning the owned Rust `String`.
+    pub(crate) fn get_string_result_value(
+        &self,
+        key: &str,
+        type_id: &[u8],
+        descriptor_hash: &[u8; 32],
+    ) -> Result<String, String> {
+        let key_len = i64::try_from(key.len()).map_err(|_| {
+            "ordinary Map GetStringResult key length exceeds runtime ABI".to_string()
+        })?;
+        let type_id_len = i64::try_from(type_id.len()).map_err(|_| {
+            "ordinary Map GetStringResult TypeDesc length exceeds runtime ABI".to_string()
+        })?;
+        let mut out_data = std::ptr::null_mut();
+        let mut out_len = 0_i64;
+        // SAFETY: `self` owns this live root; `key`, `type_id`, and `descriptor_hash`
+        // remain valid for the duration of the call; `out_data`/`out_len` are writable.
+        let status = unsafe {
+            super::map_any_snapshot::mimi_ordinary_map_owned_any_v2_get_string_result(
+                self.handle(),
+                key.as_ptr(),
+                key_len,
+                if type_id.is_empty() {
+                    std::ptr::null()
+                } else {
+                    type_id.as_ptr()
+                },
+                type_id_len,
+                descriptor_hash.as_ptr(),
+                &mut out_data,
+                &mut out_len,
+            )
+        };
+        if status != super::map_any_snapshot::ORDINARY_MAP_OWNED_ANY_V2_GET_STRING_OK {
+            if !out_data.is_null() {
+                super::mimi_free(out_data.cast());
+            }
+            return Err(format!(
+                "ordinary Map GetStringResult failed with status {status}"
+            ));
+        }
+        if out_data.is_null() || out_len < 0 {
+            if !out_data.is_null() {
+                super::mimi_free(out_data.cast());
+            }
+            return Err("ordinary Map GetStringResult returned invalid pointer/length".into());
+        }
+        let Ok(length) = usize::try_from(out_len) else {
+            super::mimi_free(out_data.cast());
+            return Err("ordinary Map GetStringResult output length exceeds address space".into());
+        };
+        if length > isize::MAX as usize {
+            super::mimi_free(out_data.cast());
+            return Err("ordinary Map GetStringResult output length exceeds address space".into());
+        }
+        // SAFETY: OK status returns a registered owned allocation of `length` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(out_data.cast::<u8>(), length) };
+        let result = std::str::from_utf8(bytes)
+            .map(str::to_owned)
+            .map_err(|_| "ordinary Map GetStringResult returned non-UTF-8 bytes".to_string());
+        super::mimi_free(out_data.cast());
+        result
     }
 
     /// Derive a new root with one canonical Mimi String value. The source root,

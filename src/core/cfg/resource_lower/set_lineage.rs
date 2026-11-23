@@ -193,7 +193,29 @@ pub(super) fn collect(
     {
         return None;
     }
-    let [created_stmt] = body.root.statements.as_slice() else {
+    let mut leading_contracts = Vec::new();
+    let mut executable = Vec::new();
+    let mut executable_started = false;
+    for statement in &body.root.statements {
+        match &statement.kind {
+            ResolvedStmtKind::Contract { kind, .. } if !executable_started => {
+                if !matches!(
+                    kind,
+                    crate::core::ir::ContractKind::Requires
+                        | crate::core::ir::ContractKind::Ensures
+                ) {
+                    return None;
+                }
+                leading_contracts.push(statement);
+            }
+            ResolvedStmtKind::Contract { .. } => return None,
+            _ => {
+                executable_started = true;
+                executable.push(statement);
+            }
+        }
+    }
+    let [created_stmt] = executable.as_slice() else {
         return None;
     };
     let (created_local, new_expr) = immutable_binding(created_stmt, body)?;
@@ -324,7 +346,7 @@ pub(super) fn collect(
     if !load(outer_err_result, outer_status, &i32_ty) {
         return None;
     }
-    let locals = [
+    let mut locals = [
         created_local.clone(),
         old_local.clone(),
         outer_status.clone(),
@@ -335,7 +357,29 @@ pub(super) fn collect(
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
-    if locals.len() != 7 || body.locals.keys().cloned().collect::<BTreeSet<_>>() != locals {
+    let contract_result =
+        ResolvedLocalId(NodeId(format!("{}/contract-result/local", body.owner.0)));
+    let has_ensures = leading_contracts.iter().any(|statement| {
+        matches!(
+            &statement.kind,
+            ResolvedStmtKind::Contract {
+                kind: crate::core::ir::ContractKind::Ensures,
+                ..
+            }
+        )
+    });
+    if has_ensures {
+        let result_local = body.locals.get(&contract_result)?;
+        if result_local.ty != i32_ty || result_local.mutable {
+            return None;
+        }
+        locals.insert(contract_result);
+    } else if body.locals.contains_key(&contract_result) {
+        return None;
+    }
+    if locals.len() != 7 + usize::from(has_ensures)
+        || body.locals.keys().cloned().collect::<BTreeSet<_>>() != locals
+    {
         return None;
     }
     if cfg.reachable.len() != cfg.blocks.len()
@@ -346,7 +390,7 @@ pub(super) fn collect(
     }
     let outer_dispatch = cfg.blocks.iter().find_map(|(id,b)| matches!(&b.terminator, Terminator::Match { scrutinee, .. } if scrutinee == &outer_scrutinee.node_id).then_some(id.clone()))?;
     let inner_dispatch = cfg.blocks.iter().find_map(|(id,b)| matches!(&b.terminator, Terminator::Match { scrutinee, .. } if scrutinee == &inner_scrutinee.node_id).then_some(id.clone()))?;
-    if outer_dispatch != cfg.entry || outer_dispatch == inner_dispatch || cfg.blocks.len() != 7 {
+    if outer_dispatch == inner_dispatch || cfg.blocks.len() < 7 {
         return None;
     }
     let (outer_ok_edge, outer_ok_block) = edge_for_arm(cfg, &outer_dispatch, outer_ok)?;
@@ -388,9 +432,7 @@ pub(super) fn collect(
         inner_join.clone(),
         outer_join.clone(),
     ]);
-    if expected_blocks.len() != 7
-        || cfg.blocks.keys().cloned().collect::<BTreeSet<_>>() != expected_blocks
-    {
+    if expected_blocks.len() != 7 {
         return None;
     }
     let expected_edges = BTreeSet::from([
@@ -403,7 +445,27 @@ pub(super) fn collect(
         inner_to_outer_join_edge.clone(),
         outer_err_join_edge.clone(),
     ]);
-    if cfg.edges.keys().cloned().collect::<BTreeSet<_>>() != expected_edges {
+    let core_edges = cfg
+        .edges
+        .values()
+        .filter(|edge| expected_blocks.contains(&edge.from))
+        .map(|edge| edge.id.clone())
+        .collect::<BTreeSet<_>>();
+    if core_edges != expected_edges {
+        return None;
+    }
+    let contract_nodes = super::new_result::direct_contract_expression_nodes(body);
+    let proof_nodes = contract_nodes.clone();
+    if !super::new_result::proof_prelude_is_closed(
+        cfg,
+        &expected_blocks,
+        &outer_dispatch,
+        &proof_nodes,
+    ) || !super::new_result::proof_nodes_have_exact_point_multiplicity(
+        cfg,
+        &proof_nodes,
+        &contract_nodes,
+    ) {
         return None;
     }
     // The AST shape above is closed. Require every checked CFG point to name
@@ -440,6 +502,7 @@ pub(super) fn collect(
         source_nodes.insert(statement.node_id.clone());
     }
     source_nodes.insert(outer.node_id.clone());
+    source_nodes.extend(proof_nodes);
     let points = cfg
         .blocks
         .values()
@@ -517,8 +580,8 @@ pub(super) fn collect(
             &[place],
         )
     };
-    if !empty_point(&cfg.entry, new_expr, CfgPointKind::Expression)
-        || !binding_point(&cfg.entry, created_stmt, created_local)
+    if !empty_point(&outer_dispatch, new_expr, CfgPointKind::Expression)
+        || !binding_point(&outer_dispatch, created_stmt, created_local)
         || !load_point(
             &outer_dispatch,
             outer_scrutinee,
@@ -614,7 +677,7 @@ pub(super) fn collect(
         inner_ok_result: inner_ok_body.result.as_deref()?.node_id.clone(),
         inner_err_result: inner_err_result.node_id.clone(),
         outer_err_result: outer_err_result.node_id.clone(),
-        entry: cfg.entry.clone(),
+        entry: outer_dispatch.clone(),
         outer_ok_block: outer_ok_block.clone(),
         outer_err_block: outer_err_block.clone(),
         inner_dispatch_block: inner_dispatch.clone(),

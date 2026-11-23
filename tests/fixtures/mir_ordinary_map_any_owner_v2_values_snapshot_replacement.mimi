@@ -39,6 +39,7 @@ func main() -> i32 {
         drop(empty)
         drop(with_a)
         drop(root)
+        drop(snapshot)
         status
         },
     }

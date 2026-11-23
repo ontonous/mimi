@@ -6091,6 +6091,13 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_direct_print_island(
     validate_ordinary_map_owned_any_v2_island_with_direct_print_negate(program, true)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OrdinaryMapOwnedAnyV2RootResultBranchMode {
+    None,
+    ValuesLocalIndexI32,
+    MapSetDropControl,
+}
+
 fn validate_ordinary_map_owned_any_v2_island_with_direct_print_negate(
     program: &MirProgram,
     allow_direct_print_i32_negate: bool,
@@ -6103,7 +6110,7 @@ fn validate_ordinary_map_owned_any_v2_island_with_direct_print_negate(
         false,
         false,
         false,
-        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
         false,
     )
 }
@@ -6117,7 +6124,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_persistent_root_alias_replaceme
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, false, false, false, false, false, true,
+        program,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        true,
     )
 }
 
@@ -6129,7 +6144,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_zero_miss_i32_island(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, true, false, false, false, false, false, false,
+        program,
+        false,
+        true,
+        false,
+        false,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        false,
     )
 }
 
@@ -6141,7 +6164,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_island(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, true, false, false, false, false, false,
+        program,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        false,
     )
 }
 
@@ -6153,7 +6184,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_keys_snapshot_island(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, false, true, false, false, false, false,
+        program,
+        false,
+        false,
+        false,
+        true,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        false,
     )
 }
 
@@ -6164,7 +6203,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_dynamic_keys_get_island(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, false, true, true, false, false, false,
+        program,
+        false,
+        false,
+        false,
+        true,
+        true,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        false,
     )
 }
 
@@ -6176,7 +6223,15 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, false, false, false, true, false, false,
+        program,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::None,
+        false,
     )
 }
 
@@ -6186,7 +6241,33 @@ pub(crate) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_b
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
     validate_ordinary_map_owned_any_v2_island_with_profile(
-        program, false, false, true, false, false, false, true, false,
+        program,
+        false,
+        false,
+        true,
+        false,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::ValuesLocalIndexI32,
+        false,
+    )
+}
+
+/// The three-path Result MapSetDropControl route has an independent Checker
+/// branch receipt and dedicated TypeDesc/instruction envelope.
+pub(crate) fn validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_island(
+    program: &MirProgram,
+) -> Result<(), Vec<String>> {
+    validate_ordinary_map_owned_any_v2_island_with_profile(
+        program,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        OrdinaryMapOwnedAnyV2RootResultBranchMode::MapSetDropControl,
+        false,
     )
 }
 
@@ -6240,15 +6321,7 @@ fn persistent_root_alias_replacement_field_moves(
     {
         return Err("PersistentRootAliasReplacement Checker field-read receipt is missing, mixed, or duplicated".into());
     }
-    let block = function
-        .blocks
-        .get(&function.entry)
-        .ok_or_else(|| "PersistentRootAliasReplacement main entry block is absent".to_string())?;
-    if function.blocks.len() != 1 {
-        return Err(
-            "PersistentRootAliasReplacement field proof requires one straight-line block".into(),
-        );
-    }
+    let instructions = super::linear_result_branch_v1_ok_spine(function, program.type_catalog())?;
 
     let get_any_receipts = program.ordinary_map_owned_any_v2_get_any_result_receipts()?;
     let unpack_receipts = program.ordinary_map_owned_any_v2_unpack_result_receipts()?;
@@ -6470,10 +6543,9 @@ fn persistent_root_alias_replacement_field_moves(
         let expected_field_value =
             super::MirValueId::new(format!("expr:{}", read.field_projection.0))
                 .map_err(|error| error.to_string())?;
-        let move_projections = function
-            .blocks
-            .values()
-            .flat_map(|block| &block.instructions)
+        let move_projections = instructions
+            .iter()
+            .copied()
             .filter(|instruction| instruction.id == expected_projection)
             .collect::<Vec<_>>();
         let [move_projection] = move_projections.as_slice() else {
@@ -6517,9 +6589,9 @@ fn persistent_root_alias_replacement_field_moves(
             .map_err(|error| error.to_string())?;
         let expected_peer = super::MirValueId::new(format!("expr:{}", read.peer_literal.0))
             .map_err(|error| error.to_string())?;
-        let binaries = block
-            .instructions
+        let binaries = instructions
             .iter()
+            .copied()
             .filter(|instruction| instruction.id == expected_equality)
             .collect::<Vec<_>>();
         let [binary] = binaries.as_slice() else {
@@ -6541,9 +6613,9 @@ fn persistent_root_alias_replacement_field_moves(
         let peer_constant_id =
             super::MirInstructionId::new(format!("inst:const:{}", read.peer_literal.0))
                 .map_err(|error| error.to_string())?;
-        let peer_constants = block
-            .instructions
+        let peer_constants = instructions
             .iter()
+            .copied()
             .filter(|instruction| instruction.id == peer_constant_id)
             .filter(|instruction| {
                 matches!(
@@ -6579,17 +6651,17 @@ fn persistent_root_alias_replacement_field_moves(
         let expected_peer_drop =
             super::MirInstructionId::new(format!("inst:{peer_drop_role}:{}", read.equality.0))
                 .map_err(|error| error.to_string())?;
-        let field_drops = block
-            .instructions
+        let field_drops = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 instruction.id == expected_field_drop
                     && matches!(&instruction.kind, I::Drop { value } if value == &expected_field_value)
             })
             .collect::<Vec<_>>();
-        let peer_drops = block
-            .instructions
+        let peer_drops = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 instruction.id == expected_peer_drop
                     && matches!(&instruction.kind, I::Drop { value } if value == &expected_peer)
@@ -6601,22 +6673,19 @@ fn persistent_root_alias_replacement_field_moves(
                 read.equality.0
             ));
         }
-        let binary_position = block
-            .instructions
+        let binary_position = instructions
             .iter()
             .position(|instruction| instruction.id == expected_equality)
             .ok_or_else(|| {
                 "PersistentRootAliasReplacement equality Binary is absent".to_string()
             })?;
-        let field_drop_position = block
-            .instructions
+        let field_drop_position = instructions
             .iter()
             .position(|instruction| instruction.id == expected_field_drop)
             .ok_or_else(|| {
                 "PersistentRootAliasReplacement field String Drop is absent".to_string()
             })?;
-        let peer_drop_position = block
-            .instructions
+        let peer_drop_position = instructions
             .iter()
             .position(|instruction| instruction.id == expected_peer_drop)
             .ok_or_else(|| {
@@ -6642,9 +6711,9 @@ fn persistent_root_alias_replacement_field_moves(
                 .map_err(|error| error.to_string())?;
         let expected_print_result = super::MirValueId::new(format!("expr:{}", read.print_call.0))
             .map_err(|error| error.to_string())?;
-        let prints = block
-            .instructions
+        let prints = instructions
             .iter()
+            .copied()
             .filter(|instruction| instruction.id == expected_print)
             .filter(|instruction| matches!(
                 &instruction.kind,
@@ -6665,28 +6734,25 @@ fn persistent_root_alias_replacement_field_moves(
                 read.equality.0
             ));
         }
-        let print_position = block
-            .instructions
+        let print_position = instructions
             .iter()
             .position(|instruction| instruction.id == expected_print)
             .ok_or_else(|| "PersistentRootAliasReplacement println(bool) is absent".to_string())?;
-        let pair_drops = block
-            .instructions
+        let pair_drops = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 instruction.id == pair_drop_id
                     && matches!(&instruction.kind, I::Drop { value } if value == &expected_pair)
             })
             .collect::<Vec<_>>();
-        let pair_drop_position = block
-            .instructions
+        let pair_drop_position = instructions
             .iter()
             .position(|instruction| instruction.id == pair_drop_id)
             .ok_or_else(|| {
                 "PersistentRootAliasReplacement GetAny pair Drop is absent".to_string()
             })?;
-        let field_move_position = block
-            .instructions
+        let field_move_position = instructions
             .iter()
             .position(|instruction| instruction.id == expected_projection)
             .ok_or_else(|| {
@@ -6702,33 +6768,33 @@ fn persistent_root_alias_replacement_field_moves(
                 read.field_projection.0
             ));
         }
-        let binary_uses = block
-            .instructions
+        let binary_uses = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 super::mir_instruction_value_uses(&instruction.kind).contains(&expected_field_value)
             })
             .map(|instruction| instruction.id.clone())
             .collect::<BTreeSet<_>>();
-        let peer_uses = block
-            .instructions
+        let peer_uses = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 super::mir_instruction_value_uses(&instruction.kind).contains(&expected_peer)
             })
             .map(|instruction| instruction.id.clone())
             .collect::<BTreeSet<_>>();
-        let payload_uses = block
-            .instructions
+        let payload_uses = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 super::mir_instruction_value_uses(&instruction.kind).contains(&expected_unpack)
             })
             .map(|instruction| instruction.id.clone())
             .collect::<BTreeSet<_>>();
-        let equality_uses = block
-            .instructions
+        let equality_uses = instructions
             .iter()
+            .copied()
             .filter(|instruction| {
                 super::mir_instruction_value_uses(&instruction.kind)
                     .contains(&expected_equality_value)
@@ -6778,7 +6844,7 @@ fn validate_ordinary_map_owned_any_v2_island_with_profile(
     allow_keys_snapshot: bool,
     allow_dynamic_arg0: bool,
     allow_computed_string_key_owner_chain: bool,
-    allow_values_local_index_i32_result_branch: bool,
+    root_result_branch_mode: OrdinaryMapOwnedAnyV2RootResultBranchMode,
     allow_persistent_root_alias_replacement: bool,
 ) -> Result<(), Vec<String>> {
     let mut receipted_field_moves = BTreeSet::new();
@@ -6988,7 +7054,8 @@ fn validate_ordinary_map_owned_any_v2_island_with_profile(
         })
         .collect::<Vec<_>>();
     if !set_any_result_locations.is_empty() {
-        if allow_values_local_index_i32_result_branch {
+        if root_result_branch_mode == OrdinaryMapOwnedAnyV2RootResultBranchMode::ValuesLocalIndexI32
+        {
             if let [(function, _)] = set_any_result_locations.as_slice() {
                 let main = NodeId("function:main".into());
                 let branch = function
@@ -7022,6 +7089,30 @@ fn validate_ordinary_map_owned_any_v2_island_with_profile(
                 receipt_errors.insert(
                     "ValuesLocalIndexI32 Result requires exactly one SetAnyResult instruction"
                         .into(),
+                );
+            }
+        } else if root_result_branch_mode
+            == OrdinaryMapOwnedAnyV2RootResultBranchMode::MapSetDropControl
+        {
+            if let [(function, _)] = set_any_result_locations.as_slice() {
+                let main = NodeId("function:main".into());
+                let branch = function
+                    .ownership
+                    .checker_ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()
+                    .and_then(|cfg| cfg.map_set_drop_control_result_branch_receipt.as_ref());
+                if function.owner != main
+                    || function.ownership.checker_managed_any.is_some()
+                    || branch.is_none()
+                {
+                    receipt_errors.insert(
+                        "MapSetDropControlResult SetAnyResult has no exact main Checker branch receipt"
+                            .into(),
+                    );
+                }
+            } else {
+                receipt_errors.insert(
+                    "MapSetDropControlResult requires exactly one SetAnyResult instruction".into(),
                 );
             }
         } else if !allow_computed_string_key_owner_chain {
@@ -7124,7 +7215,7 @@ fn validate_ordinary_map_owned_any_v2_island_with_profile(
         allow_keys_snapshot,
         allow_dynamic_arg0,
         allow_computed_string_key_owner_chain,
-        allow_values_local_index_i32_result_branch,
+        root_result_branch_mode,
         allow_persistent_root_alias_replacement,
     };
     validator.validate();
@@ -7148,7 +7239,7 @@ struct OrdinaryMapOwnedAnyV2IslandValidator<'a> {
     allow_keys_snapshot: bool,
     allow_dynamic_arg0: bool,
     allow_computed_string_key_owner_chain: bool,
-    allow_values_local_index_i32_result_branch: bool,
+    root_result_branch_mode: OrdinaryMapOwnedAnyV2RootResultBranchMode,
     allow_persistent_root_alias_replacement: bool,
 }
 
@@ -7204,8 +7295,8 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                 && function.owner == main
                 && function.proof_worklist.is_none()
                 && has_exact_values_local_index_i32_ensures(function);
-            let exact_values_local_index_i32_result_branch_contract = self
-                .allow_values_local_index_i32_result_branch
+            let exact_values_local_index_i32_result_branch_contract = self.root_result_branch_mode
+                == OrdinaryMapOwnedAnyV2RootResultBranchMode::ValuesLocalIndexI32
                 && function.owner == main
                 && function.proof_worklist.is_some()
                 && has_exact_values_local_index_i32_ensures(function)
@@ -7271,7 +7362,22 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                     ));
                 }
             }
+            let fn_has_linear_result_branch_v1 = self
+                .function_result_branch_v1_operations(function)
+                .is_some();
             for value in function.values.values() {
+                if !self.allow_computed_string_key_owner_chain
+                    && self.root_result_branch_mode
+                        == OrdinaryMapOwnedAnyV2RootResultBranchMode::None
+                    && !fn_has_linear_result_branch_v1
+                    && value.ty == super::types::ordinary_map_owned_any_v2_root_result_type_id()
+                {
+                    self.error(format!(
+                        "function '{}' value TypeDesc '{}' requires ResultBranchV1 flow receipt",
+                        function.owner.0,
+                        value.ty.as_str()
+                    ));
+                }
                 self.validate_type(&value.ty, &format!("function '{}' value", function.owner.0));
             }
             self.validate_type(
@@ -7288,6 +7394,35 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
         if !self.saw_v2_instruction {
             self.error("ordinary Map/Any owner-v2 island contains no V2 operation".into());
         }
+    }
+
+    fn function_result_branch_v1_operations<'a>(
+        &self,
+        function: &'a MirFunction,
+    ) -> Option<&'a [crate::core::ownership::OrdinaryMapOwnedAnyV2ResultBranchReceipt]> {
+        let receipt = function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?;
+        let flow = receipt.flow.as_ref()?;
+        let branches = super::ordinary_map_owned_any_v2_flow_result_branches(flow)?;
+        if branches.is_empty() {
+            return None;
+        }
+        let valid = match &flow.proof {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(_) => {
+                super::linear_result_branch_v1_spines(function, self.program.type_catalog()).is_ok()
+            }
+            crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(_) => {
+                super::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                    self.program.type_catalog(),
+                    function,
+                )
+                .is_ok()
+            }
+            _ => false,
+        };
+        valid.then_some(branches)
     }
 
     fn validate_type(&mut self, ty: &ResolvedTypeId, subject: &str) {
@@ -7310,12 +7445,18 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
             return;
         }
 
+        let allow_root_result = self.allow_computed_string_key_owner_chain
+            || self.root_result_branch_mode != OrdinaryMapOwnedAnyV2RootResultBranchMode::None
+            || self.program.functions().values().any(|function| {
+                self.function_result_branch_v1_operations(function)
+                    .is_some()
+            });
         let v2_operation_type = ty == &super::types::ordinary_map_owned_any_v2_type_id()
             || ty == &super::types::ordinary_map_owned_any_v2_payload_type_id()
             || ty == &super::types::ordinary_map_owned_any_v2_get_result_type_id()
             || ty == &super::types::ordinary_map_owned_any_v2_values_type_id()
             || ty == &super::types::ordinary_map_owned_any_v2_values_element_type_id()
-            || (self.allow_values_local_index_i32_result_branch
+            || (allow_root_result
                 && ty == &super::types::ordinary_map_owned_any_v2_root_result_type_id());
         if v2_operation_type {
             let glue_operations =
@@ -7347,7 +7488,7 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                     ok,
                     error,
                     variants,
-                } if self.allow_values_local_index_i32_result_branch
+                } if allow_root_result
                     && ty == &super::types::ordinary_map_owned_any_v2_root_result_type_id() =>
                 {
                     let root_type = super::types::ordinary_map_owned_any_v2_type_id();
@@ -7443,8 +7584,16 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
         }
         match instruction {
             I::OrdinaryMapOwnedAnyV2New { result } => {
+                let is_result_branch_v1 = self
+                    .function_result_branch_v1_operations(function)
+                    .is_some_and(|branches| {
+                        branches
+                            .iter()
+                            .any(|b| format!("expr:{}", b.operation_point.0) == result.as_str())
+                    });
                 if self.allow_computed_string_key_owner_chain
-                    || self.allow_values_local_index_i32_result_branch
+                    || self.root_result_branch_mode != OrdinaryMapOwnedAnyV2RootResultBranchMode::None
+                    || is_result_branch_v1
                 {
                     self.require_type(
                         function,
@@ -7484,7 +7633,7 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                 value,
             } => {
                 if !self.allow_computed_string_key_owner_chain
-                    && !self.allow_values_local_index_i32_result_branch
+                    && self.root_result_branch_mode == OrdinaryMapOwnedAnyV2RootResultBranchMode::None
                 {
                     self.error(format!(
                         "{subject} SetAnyResult requires the exact ComputedStringKeyOwnerChain branch receipt"
@@ -7568,7 +7717,19 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                 self.require_string(function, key, subject);
             }
             I::OrdinaryMapOwnedAnyV2Set { result, source, key, value } => {
-                self.require_type(function, result, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
+                let is_result_branch_v1 = self
+                    .function_result_branch_v1_operations(function)
+                    .is_some_and(|branches| {
+                        branches
+                            .iter()
+                            .any(|b| format!("expr:{}", b.operation_point.0) == result.as_str())
+                    });
+                let expected_result_type = if is_result_branch_v1 {
+                    super::types::ordinary_map_owned_any_v2_root_result_type_id()
+                } else {
+                    super::types::ordinary_map_owned_any_v2_type_id()
+                };
+                self.require_type(function, result, &expected_result_type, subject);
                 self.require_type(function, source, &super::types::ordinary_map_owned_any_v2_type_id(), subject);
                 self.require_string(function, key, subject);
                 self.value_type(function, value, subject);
@@ -8078,32 +8239,103 @@ impl OrdinaryMapOwnedAnyV2IslandValidator<'_> {
                 }
             }
             MirTerminator::SwitchMove { scrutinee, arms }
-                if self.allow_values_local_index_i32_result_branch =>
+                if self.allow_computed_string_key_owner_chain
+                    || self.root_result_branch_mode
+                        != OrdinaryMapOwnedAnyV2RootResultBranchMode::None
+                    || function
+                        .ownership
+                        .checker_ordinary_map_owned_any_v2_cfg_receipt
+                        .as_ref()
+                        .and_then(|receipt| receipt.flow.as_ref())
+                        .and_then(super::ordinary_map_owned_any_v2_flow_result_branches)
+                        .is_some_and(|branches| !branches.is_empty()) =>
             {
-                let branch = function
-                    .ownership
-                    .checker_managed_any
-                    .as_ref()
-                    .and_then(|seal| seal.v2_values_local_index_i32_result_branch.as_ref());
-                let checker_branch = function
-                    .ownership
-                    .checker_ordinary_map_owned_any_v2_cfg_receipt
-                    .as_ref()
-                    .and_then(|receipt| {
-                        receipt.values_local_index_i32_result_branch_receipt.as_ref()
-                    });
-                let matches_seal = branch.is_some()
-                    && branch == checker_branch
-                    && branch.is_some_and(|branch| {
-                        branch.owner == function.owner
-                            && (scrutinee.as_str()
-                                == format!("expr:{}", branch.map_new_operation.0)
-                                || scrutinee.as_str()
-                                    == format!("expr:{}", branch.map_set_operation.0))
-                    });
+                let matches_linear_result_branch = || {
+                    self.function_result_branch_v1_operations(function)
+                        .is_some_and(|branches| {
+                            branches.iter().any(|branch| {
+                                format!("expr:{}", branch.operation_point.0) == scrutinee.as_str()
+                            })
+                        })
+                };
+                let matches_seal = match self.root_result_branch_mode {
+                    OrdinaryMapOwnedAnyV2RootResultBranchMode::ValuesLocalIndexI32 => {
+                        let branch = function
+                            .ownership
+                            .checker_managed_any
+                            .as_ref()
+                            .and_then(|seal| seal.v2_values_local_index_i32_result_branch.as_ref());
+                        let checker_branch = function
+                            .ownership
+                            .checker_ordinary_map_owned_any_v2_cfg_receipt
+                            .as_ref()
+                            .and_then(|receipt| {
+                                receipt.values_local_index_i32_result_branch_receipt.as_ref()
+                            });
+                        branch.is_some()
+                            && branch == checker_branch
+                            && branch.is_some_and(|branch| {
+                                branch.owner == function.owner
+                                    && (scrutinee.as_str()
+                                        == format!("expr:{}", branch.map_new_operation.0)
+                                        || scrutinee.as_str()
+                                            == format!("expr:{}", branch.map_set_operation.0))
+                            })
+                    }
+                    OrdinaryMapOwnedAnyV2RootResultBranchMode::MapSetDropControl => {
+                        let checker_branch = function
+                            .ownership
+                            .checker_ordinary_map_owned_any_v2_cfg_receipt
+                            .as_ref()
+                            .and_then(|receipt| {
+                                receipt.map_set_drop_control_result_branch_receipt.as_ref()
+                            });
+                        function.ownership.checker_managed_any.is_none()
+                            && checker_branch.is_some_and(|branch| {
+                                branch.owner == function.owner
+                                    && (scrutinee.as_str()
+                                        == format!("expr:{}", branch.map_new_operation.0)
+                                        || scrutinee.as_str()
+                                            == format!("expr:{}", branch.map_set_operation.0))
+                            })
+                    }
+                    OrdinaryMapOwnedAnyV2RootResultBranchMode::None
+                        if self.allow_computed_string_key_owner_chain =>
+                    {
+                        let seal = function.ownership.checker_managed_any.as_ref();
+                        let managed_cfg = function.ownership.checker_managed_any_cfg_receipt.as_ref();
+                        let checker_branch = function
+                            .ownership
+                            .checker_ordinary_map_owned_any_v2_cfg_receipt
+                            .as_ref()
+                            .and_then(|receipt| {
+                                let mut branches = receipt.result_receipts.iter().filter_map(|r| {
+                                    r.computed_string_key_owner_chain
+                                        .as_deref()
+                                        .and_then(|chain| chain.result_branch.as_deref())
+                                });
+                                let branch = branches.next()?;
+                                branches.next().is_none().then_some(branch)
+                            });
+                        matches!((seal, managed_cfg, checker_branch), (Some(seal), Some(managed_cfg), Some(branch))
+                            if seal.owner == function.owner
+                                && managed_cfg.owner == function.owner
+                                && seal.source_cfg.as_ref() == Some(managed_cfg)
+                                && branch.owner == function.owner
+                                && branch.cfg == *managed_cfg
+                                && (scrutinee.as_str()
+                                    == format!("expr:{}", branch.map_new_operation.0)
+                                    || scrutinee.as_str()
+                                        == format!("expr:{}", branch.map_set_operation.0)))
+                            || matches_linear_result_branch()
+                    }
+                    OrdinaryMapOwnedAnyV2RootResultBranchMode::None => {
+                        matches_linear_result_branch()
+                    }
+                };
                 if !matches_seal {
                     self.error(format!(
-                        "{subject} SwitchMove has no exact Values Result branch Checker seal"
+                        "{subject} SwitchMove has no exact Values/MapSetDropControl/ComputedStringKeyOwnerChain Result branch Checker seal"
                     ));
                     return;
                 }

@@ -2141,6 +2141,10 @@ pub(crate) struct OrdinaryMapOwnedAnyV2CfgReceipt {
     /// rescanning surface or Resolved AST.
     pub(crate) persistent_root_alias_replacement_receipt:
         Option<OrdinaryMapOwnedAnyV2PersistentRootAliasReplacementReceipt>,
+    /// Exact source evidence for an entry-closed Map/Any prefix followed by
+    /// a pure scalar branch tail when preceded by one or more `ResultBranchV1`
+    /// steps (such as `match map_new()` / `match map_set()`).
+    pub(crate) result_branch_scalar_tail: Option<OrdinaryMapOwnedAnyV2ScalarTailReceipt>,
     /// A V2-owned source-CFG and live-owner proof for either the carried-owner
     /// two-arm diamond or the settled-owner control-flow tail. It is
     /// intentionally independent of the V1 Map receipt: every live root and
@@ -2148,6 +2152,19 @@ pub(crate) struct OrdinaryMapOwnedAnyV2CfgReceipt {
     /// MIR validation. In the settled-owner form, `arm_edges` names every
     /// branch edge in the acyclic tail, and every owner set is empty.
     pub(crate) flow: Option<OrdinaryMapOwnedAnyV2CfgFlowReceipt>,
+}
+
+impl OrdinaryMapOwnedAnyV2CfgReceipt {
+    pub(crate) fn settled_scalar_tail(&self) -> Option<&OrdinaryMapOwnedAnyV2ScalarTailReceipt> {
+        self.result_branch_scalar_tail.as_ref().or_else(|| {
+            match self.flow.as_ref().map(|flow| &flow.proof) {
+                Some(OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail)) => {
+                    Some(tail)
+                }
+                _ => None,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2781,12 +2798,17 @@ pub(crate) struct OrdinaryMapOwnedAnyV2DynamicKeysGetReceipt {
     pub(crate) key_concat_suffix: NodeId,
     pub(crate) key_drop_point: NodeId,
     pub(crate) key_suffix_utf8: Vec<u8>,
+    pub(crate) new_binding_point: NodeId,
+    pub(crate) set_binding_point: NodeId,
+    pub(crate) new_err_local: ResolvedLocalId,
+    pub(crate) set_err_local: ResolvedLocalId,
     pub(crate) new_action: OrdinaryMapOwnedAnyV2Action,
     pub(crate) set_action: OrdinaryMapOwnedAnyV2Action,
     pub(crate) miss_get_action: OrdinaryMapOwnedAnyV2Action,
     pub(crate) keys_action: OrdinaryMapOwnedAnyV2Action,
     pub(crate) hit_get_action: OrdinaryMapOwnedAnyV2Action,
     pub(crate) root_drops: [OrdinaryMapOwnedAnyV2Action; 2],
+    pub(crate) err_root_drops: Vec<OrdinaryMapOwnedAnyV2Action>,
     pub(crate) miss_result: OrdinaryMapOwnedAnyV2ResultReceipt,
     pub(crate) miss_found: OrdinaryMapOwnedAnyV2FoundObservationReceipt,
     pub(crate) miss_unpack: OrdinaryMapOwnedAnyV2UnpackReceipt,
@@ -3025,41 +3047,76 @@ pub(crate) enum OrdinaryMapOwnedAnyV2CfgFlowProof {
     OwnerBearingDiamondV1,
     SettledScalarBranchTailV1(OrdinaryMapOwnedAnyV2ScalarTailReceipt),
     BranchLocalPersistentSetDiamondV1(OrdinaryMapOwnedAnyV2PersistentSetDiamondReceipt),
+    ResultBranchV1(Vec<OrdinaryMapOwnedAnyV2ResultBranchReceipt>),
 }
 
-/// Exact Checker proof for one branch-local persistent Map Set lifecycle in
-/// each arm of a four-block `if` diamond. Each arm transforms the carried
-/// base root into a distinct child, observes that child once with `map_size`,
-/// then explicitly drops it before the edge. The base root alone crosses the
-/// split and is explicitly dropped in the common join.
+pub(crate) type OrdinaryMapOwnedAnyV2ResultBranchPathReceipt =
+    OrdinaryMapOwnedGetResultBranchPathReceipt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryMapOwnedAnyV2ResultBranchReceipt {
+    pub(crate) kind: OrdinaryMapOwnedAnyV2ActionKind,
+    pub(crate) operation_point: NodeId,
+    pub(crate) result_node: NodeId,
+    pub(crate) result_type: ResolvedTypeId,
+    pub(crate) match_node: NodeId,
+    pub(crate) scrutinee_node: NodeId,
+    pub(crate) ok_arm: NodeId,
+    pub(crate) ok_variant: NodeId,
+    pub(crate) ok_pattern: NodeId,
+    pub(crate) ok_binding: Option<ResolvedLocalId>,
+    pub(crate) ok_payload_type: ResolvedTypeId,
+    pub(crate) err_arm: NodeId,
+    pub(crate) err_variant: NodeId,
+    pub(crate) err_pattern: NodeId,
+    pub(crate) err_binding: Option<ResolvedLocalId>,
+    pub(crate) err_payload_type: ResolvedTypeId,
+    pub(crate) input_root: Option<ResolvedLocalId>,
+    pub(crate) output_root: ResolvedLocalId,
+    pub(crate) ok: OrdinaryMapOwnedAnyV2ResultBranchPathReceipt,
+    pub(crate) err: OrdinaryMapOwnedAnyV2ResultBranchPathReceipt,
+}
+
+/// Exact Checker proof for the Result-wrapped branch-local persistent Map Set
+/// diamond: `match map_new()` introduces one base root into an `if` split, each
+/// `if` arm evaluates `match map_set(base, key, payload)`, observes its `Ok`
+/// child once with `map_size`, drops `child` and `base`, and drops `base` in
+/// the `Err` arm, while outer `Err` runs without any live Map root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrdinaryMapOwnedAnyV2PersistentSetDiamondReceipt {
     pub(crate) owner: NodeId,
+    pub(crate) entry_match_split: crate::core::cfg::BasicBlockId,
+    pub(crate) outer_err_block: crate::core::cfg::BasicBlockId,
+    pub(crate) outer_join: crate::core::cfg::BasicBlockId,
     pub(crate) split: crate::core::cfg::BasicBlockId,
     pub(crate) join: crate::core::cfg::BasicBlockId,
+    pub(crate) if_join_to_outer_edge: crate::core::cfg::EdgeId,
     pub(crate) base_local: ResolvedLocalId,
     pub(crate) base_new: OrdinaryMapOwnedAnyV2Action,
-    pub(crate) base_drop: OrdinaryMapOwnedAnyV2Action,
     /// Both Set calls clone this exact concrete record local. The per-arm
     /// payload load node is retained in each branch receipt as well.
     pub(crate) payload_local: ResolvedLocalId,
     pub(crate) payload_type: ResolvedTypeId,
+    pub(crate) result_branches: Vec<OrdinaryMapOwnedAnyV2ResultBranchReceipt>,
     pub(crate) arms:
         BTreeMap<crate::core::cfg::EdgeId, OrdinaryMapOwnedAnyV2PersistentSetArmReceipt>,
 }
 
-/// The three source actions and exact edge/block identities for one arm.
-/// Keeping full action records binds the arm's Set/size/Drop operation ids,
-/// Map locals, root identities, payload/key operands, and persistent source
-/// edge into this proof instead of relying only on owner-set equality.
+/// The three Result-wrapped source actions, explicit base settlement drops,
+/// and exact edge/block identities for one arm of the `if` diamond.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrdinaryMapOwnedAnyV2PersistentSetArmReceipt {
     pub(crate) edge: crate::core::cfg::EdgeId,
     pub(crate) block: crate::core::cfg::BasicBlockId,
+    pub(crate) ok_block: crate::core::cfg::BasicBlockId,
+    pub(crate) err_block: crate::core::cfg::BasicBlockId,
+    pub(crate) match_join: crate::core::cfg::BasicBlockId,
     pub(crate) join_edge: crate::core::cfg::EdgeId,
     pub(crate) set: OrdinaryMapOwnedAnyV2Action,
     pub(crate) size: OrdinaryMapOwnedAnyV2Action,
     pub(crate) drop: OrdinaryMapOwnedAnyV2Action,
+    pub(crate) ok_base_drop: OrdinaryMapOwnedAnyV2Action,
+    pub(crate) err_base_drop: OrdinaryMapOwnedAnyV2Action,
     pub(crate) payload_load: NodeId,
 }
 
@@ -3069,6 +3126,7 @@ pub(crate) struct OrdinaryMapOwnedAnyV2PersistentSetArmReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrdinaryMapOwnedAnyV2ScalarTailReceipt {
     pub(crate) owner: NodeId,
+    pub(crate) split_block: crate::core::cfg::BasicBlockId,
     pub(crate) first_condition: NodeId,
     pub(crate) first_condition_rank: usize,
     pub(crate) nodes: BTreeMap<NodeId, OrdinaryMapOwnedAnyV2ScalarTailNode>,
@@ -3092,6 +3150,7 @@ pub(crate) struct OrdinaryMapOwnedAnyV2ScalarTailReceipt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrdinaryMapOwnedAnyV2ScalarTailStringDrop {
     pub(crate) ty: ResolvedTypeId,
+    pub(crate) point_block: crate::core::cfg::BasicBlockId,
     pub(crate) point: NodeId,
     pub(crate) place_index: usize,
     pub(crate) point_rank: usize,
@@ -3113,6 +3172,7 @@ pub(crate) enum OrdinaryMapOwnedAnyV2ScalarTailNodeKind {
     Unary(crate::core::ir::ResolvedUnaryOp, NodeId),
     Binary(crate::core::ir::ResolvedBinaryOp, NodeId, NodeId),
     Join,
+    StatementJoin,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

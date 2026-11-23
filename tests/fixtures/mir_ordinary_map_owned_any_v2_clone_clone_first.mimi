@@ -41,6 +41,7 @@ func main() -> i32 {
         Err(status) => {
         drop(empty)
         drop(source)
+        drop(cloned)
         status
         },
     }

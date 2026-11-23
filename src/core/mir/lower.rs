@@ -49,6 +49,15 @@ struct LoweredSwitchBindings {
     nested_record: Option<NestedRecordMatchSetup>,
 }
 
+struct OrdinaryMapOwnedAnyV2ResultBranchTarget {
+    result_node: NodeId,
+    scrutinee_node: NodeId,
+    result_type: crate::core::ResolvedTypeId,
+    input_root: Option<ResolvedLocalId>,
+    output_root: ResolvedLocalId,
+    expect_source_metadata: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirLoweringError {
     pub node_id: NodeId,
@@ -301,7 +310,26 @@ fn lower_body_impl(
         }]);
     }
 
-    let entry = MirBlockId::new("bb.entry").map_err(|error| {
+    let entry_name = resource_analysis
+        .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+        .and_then(|cfg| {
+            let mut branches = cfg.result_receipts.iter().filter_map(|result| {
+                result
+                    .computed_string_key_owner_chain
+                    .as_deref()?
+                    .result_branch
+                    .as_deref()
+            });
+            let first = branches.next()?;
+            (branches.next().is_none()
+                && first.owner == body.owner
+                && first.cfg.owner == body.owner
+                && resource_analysis.and_then(|analysis| analysis.managed_any_cfg_receipt.as_ref())
+                    == Some(&first.cfg))
+            .then(|| first.cfg.entry.0 .0.clone())
+        })
+        .unwrap_or_else(|| "bb.entry".to_string());
+    let entry = MirBlockId::new(entry_name).map_err(|error| {
         vec![MirLoweringError {
             node_id: body.owner.clone(),
             message: error.to_string(),
@@ -432,6 +460,9 @@ fn lower_body_impl(
     let values_crosscall_string_caller_receipt = lowerer
         .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_body()
         .cloned();
+    let values_result_producer_caller_receipt = lowerer
+        .ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_body()
+        .cloned();
     let map_root_caller_receipt =
         lowerer.ordinary_map_owned_any_v2_map_root_caller_receipt_for_body();
     let map_root_get_any_caller_receipt =
@@ -490,6 +521,7 @@ fn lower_body_impl(
                     values_crosscall_string_caller_receipt.map(Box::new),
                     ordinary_map_owned_any_v2_values_result_producer_receipt(analysis)
                         .map(Box::new),
+                    values_result_producer_caller_receipt.map(Box::new),
                     map_root_caller_receipt.map(Box::new),
                     map_root_get_any_caller_receipt.map(Box::new),
                 )
@@ -578,6 +610,10 @@ fn lower_callable_with_checked_callables(
         .ownership
         .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
         .take();
+    let values_result_producer_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt
+        .take();
     let map_root_caller_receipt = function
         .ownership
         .checker_ordinary_map_owned_any_v2_map_root_caller_receipt
@@ -593,6 +629,7 @@ fn lower_callable_with_checked_callables(
         values_caller_receipt,
         values_crosscall_string_caller_receipt,
         values_result_producer_receipt,
+        values_result_producer_caller_receipt,
         map_root_caller_receipt,
         map_root_get_any_caller_receipt,
     );
@@ -930,6 +967,10 @@ fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_an
         .ownership
         .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
         .take();
+    let values_result_producer_caller_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt
+        .take();
     let map_root_caller_receipt = function
         .ownership
         .checker_ordinary_map_owned_any_v2_map_root_caller_receipt
@@ -945,6 +986,7 @@ fn lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_an
         values_caller_receipt,
         values_crosscall_string_caller_receipt,
         values_result_producer_receipt,
+        values_result_producer_caller_receipt,
         map_root_caller_receipt,
         map_root_get_any_caller_receipt,
     );
@@ -1063,6 +1105,68 @@ pub(crate) fn lower_program_with_type_catalog_and_nested(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_concrete_callable_for_program(
+    program: &CheckedProgram,
+    owner: &NodeId,
+    callable: &crate::core::ResolvedCallable,
+    type_catalog: &MirTypeCatalog,
+    call_parameter_permissions: &BTreeMap<NodeId, Option<crate::core::ir::Permission>>,
+    nested_callable_declarations: &BTreeMap<NodeId, NodeId>,
+    closure_callable_bindings: &BTreeMap<
+        crate::core::ir::ResolvedLocalId,
+        super::closure_callable::MirClosureCallableBindingV1,
+    >,
+    nested_callable_capture_slots: &BTreeMap<
+        NodeId,
+        Vec<super::nested_callable::MirNestedCallableCaptureSlot>,
+    >,
+    excluded_sources: Option<&HashSet<crate::span::SourceId>>,
+) -> Result<MirFunction, Vec<MirLoweringError>> {
+    // The Result-branch Values producer is an executable Checker-CFG
+    // island of its own. Generic lowering cannot safely reinterpret its
+    // source List<DynamicAny> result as the V2 Values owner, so project
+    // the exact branch receipt before the ordinary body lowerer runs.
+    if let Some(analysis) = program.resource_analyses().get(owner) {
+        if let Some(receipt) = ordinary_map_owned_any_v2_values_result_producer_receipt(analysis)
+            .filter(|receipt| receipt.owner == *owner)
+        {
+            return ordinary_map_owned_any_v2_values_result_producer_function(
+                callable,
+                analysis,
+                type_catalog,
+                &receipt,
+            )
+            .map_err(|message| {
+                vec![MirLoweringError {
+                    node_id: owner.clone(),
+                    message,
+                }]
+            });
+        }
+    }
+    // Recoverable transitions lower their returns through the canonical
+    // Result envelope. Multi-target transitions (no `fails`) return a
+    // checker-owned FlowStateSet union, whose canonical identity lives in
+    // the transition's interned signature — the checked callable's own
+    // signature result is a unit placeholder for those transitions.
+    let transition_result = transition_lowering_result(program, owner, callable);
+    lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+        callable,
+        type_catalog,
+        Some(call_parameter_permissions),
+        transition_result,
+        nested_callable_declarations,
+        closure_callable_bindings,
+        nested_callable_capture_slots,
+        program.callables(),
+        excluded_sources,
+        None,
+        None,
+        Some(program.constants()),
+    )
+}
+
 pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
     program: &CheckedProgram,
     type_catalog: &MirTypeCatalog,
@@ -1092,7 +1196,6 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
         .collect::<BTreeMap<_, _>>();
     let mut lowered = BTreeMap::new();
     let mut errors = Vec::new();
-    let empty_nested = BTreeMap::new();
     for (owner, callable) in program.callables() {
         if is_comptime_callable(program, owner) {
             continue;
@@ -1104,53 +1207,20 @@ pub(crate) fn lower_program_with_type_catalog_and_nested_and_closures(
         if !is_concrete_callable(callable) {
             continue;
         }
-        // The Result-branch Values producer is an executable Checker-CFG
-        // island of its own. Generic lowering cannot safely reinterpret its
-        // source List<DynamicAny> result as the V2 Values owner, so project
-        // the exact branch receipt before the ordinary body lowerer runs.
-        if let Some(analysis) = program.resource_analyses().get(owner) {
-            if let Some(receipt) =
-                ordinary_map_owned_any_v2_values_result_producer_receipt(analysis)
-                    .filter(|receipt| receipt.owner == *owner)
-            {
-                match ordinary_map_owned_any_v2_values_result_producer_function(
-                    callable,
-                    analysis,
-                    type_catalog,
-                    &receipt,
-                ) {
-                    Ok(function) => {
-                        lowered.insert(owner.clone(), function);
-                    }
-                    Err(message) => errors.push(MirLoweringError {
-                        node_id: owner.clone(),
-                        message,
-                    }),
-                }
-                continue;
-            }
-        }
-        // Recoverable transitions lower their returns through the canonical
-        // Result envelope. Multi-target transitions (no `fails`) return a
-        // checker-owned FlowStateSet union, whose canonical identity lives in
-        // the transition's interned signature — the checked callable's own
-        // signature result is a unit placeholder for those transitions.
-        let transition_result = transition_lowering_result(program, owner, callable);
-        match lower_callable_with_type_catalog_and_permissions_for_transition_and_nested_and_closures_and_directory_and_ffi_helper(
+        match lower_concrete_callable_for_program(
+            program,
+            owner,
             callable,
             type_catalog,
-            Some(&call_parameter_permissions),
-            transition_result,
+            &call_parameter_permissions,
             nested_callable_declarations
                 .get(owner)
-                .unwrap_or(&empty_nested),
-            closure_callable_bindings.get(owner).unwrap_or(&BTreeMap::new()),
+                .unwrap_or(&BTreeMap::new()),
+            closure_callable_bindings
+                .get(owner)
+                .unwrap_or(&BTreeMap::new()),
             nested_callable_capture_slots,
-            program.callables(),
             None,
-            None,
-            None,
-            Some(program.constants()),
         ) {
             Ok(function) => {
                 lowered.insert(owner.clone(), function);
@@ -9172,6 +9242,34 @@ fn ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
         CallerProfile::V1 | CallerProfile::V2 => return false,
     };
     let index = if set_count == 1 { 0 } else { 1 };
+    let index1_temporaries_exact = if receipt.profile_version == CallerProfile::V4 {
+        receipt.producer_set_temporary_settlements.len() == 4
+            && receipt
+                .producer_set_temporary_settlements
+                .iter()
+                .all(|settlement| {
+                    producer
+                        .resources
+                        .ordinary_map_owned_any_v2_actions
+                        .iter()
+                        .any(|action| {
+                            action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                                && action.point == settlement.set_operation
+                                && match settlement.role {
+                                    crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::Key => {
+                                        action.key.as_ref() == Some(&settlement.source_node)
+                                            && action.key_type.as_ref() == Some(&settlement.owner_type)
+                                    }
+                                    crate::core::ownership::OrdinaryMapOwnedAnyV2SetTemporaryRole::PayloadClone => {
+                                        action.value.as_ref() == Some(&settlement.source_node)
+                                            && action.value_type.as_ref() == Some(&settlement.owner_type)
+                                    }
+                                }
+                        })
+                })
+    } else {
+        receipt.producer_set_temporary_settlements.is_empty()
+    };
     producer_cfg.owner == producer.owner
         && producer_result.owner == producer.owner
         && producer_result.profile_version == expected
@@ -9193,6 +9291,7 @@ fn ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
             .all(|pair| pair[0] < pair[1])
         && (receipt.profile_version != CallerProfile::V4
             || receipt.producer_sorted_keys == ["a", "b"])
+        && index1_temporaries_exact
         && producer_result.surface_return_type == receipt.call_result_type
         && producer.signature.result == producer_result.surface_return_type
         && producer.body.root.ty == producer_result.surface_return_type
@@ -9210,6 +9309,9 @@ fn ownership_summary(
     >,
     values_result_producer_receipt: Option<
         Box<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt>,
+    >,
+    values_result_producer_caller_receipt: Option<
+        Box<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerReceipt>,
     >,
     map_root_caller_receipt: Option<
         Box<crate::core::OrdinaryMapOwnedAnyV2MapRootProducerCallerReceipt>,
@@ -9796,17 +9898,8 @@ fn ownership_summary(
             values_crosscall_string_caller_receipt,
         checker_ordinary_map_owned_any_v2_values_result_producer_receipt:
             values_result_producer_receipt,
-        checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt: analysis
-            .ordinary_map_owned_any_v2_cfg_receipt
-            .as_ref()
-            .and_then(|cfg| {
-                let producer = cfg.values_result_producer_receipt.as_ref()?;
-                let caller = cfg.values_result_producer_caller_receipt.as_ref()?;
-                (cfg.owner == caller.caller_owner
-                    && caller.producer_result == *producer
-                    && caller.producer_target == producer.owner)
-                    .then(|| Box::new(caller.clone()))
-            }),
+        checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt:
+            values_result_producer_caller_receipt,
         checker_ordinary_map_owned_any_v2_map_root_caller_receipt: map_root_caller_receipt,
         checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt:
             map_root_get_any_caller_receipt,
@@ -9857,30 +9950,32 @@ struct LoopTargets {
 /// The set is later intersected with locals that already exist at the entry
 /// point: body-local bindings are initialized afresh each iteration and are
 /// not loop-carried values.
-fn collect_assigned_locals(block: &ResolvedBlock, output: &mut BTreeSet<ResolvedLocalId>) {
-    fn collect_expression(expression: &ResolvedExpr, output: &mut BTreeSet<ResolvedLocalId>) {
-        match &expression.kind {
-            ResolvedExprKind::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_assigned_locals(then_block, output);
-                collect_assigned_locals(else_block, output);
-            }
-            ResolvedExprKind::Block(block)
-            | ResolvedExprKind::Comptime(block)
-            | ResolvedExprKind::Scope { body: block, .. } => {
-                collect_assigned_locals(block, output);
-            }
-            ResolvedExprKind::Match { arms, .. } => {
-                for arm in arms {
-                    collect_expression(&arm.body, output);
-                }
-            }
-            _ => {}
+fn collect_assigned_locals_expr(expression: &ResolvedExpr, output: &mut BTreeSet<ResolvedLocalId>) {
+    match &expression.kind {
+        ResolvedExprKind::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_assigned_locals(then_block, output);
+            collect_assigned_locals(else_block, output);
         }
+        ResolvedExprKind::Block(block)
+        | ResolvedExprKind::Comptime(block)
+        | ResolvedExprKind::Scope { body: block, .. } => {
+            collect_assigned_locals(block, output);
+        }
+        ResolvedExprKind::Match { arms, .. } => {
+            for arm in arms {
+                collect_assigned_locals_expr(&arm.body, output);
+            }
+        }
+        _ => {}
     }
+}
+
+fn collect_assigned_locals(block: &ResolvedBlock, output: &mut BTreeSet<ResolvedLocalId>) {
+    let collect_expression = collect_assigned_locals_expr;
 
     for statement in &block.statements {
         match &statement.kind {
@@ -11836,6 +11931,113 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         .filter(|checked| checked == branch)
     }
 
+    fn computed_string_key_owner_chain_result_match_cfg(
+        &self,
+        match_node: &NodeId,
+        arms: &[crate::core::ir::MatchArm],
+    ) -> Result<Option<(MirBlockId, Vec<(MirBlockId, MirEdgeId, MirEdgeId)>)>, String> {
+        use crate::core::cfg::{EdgeKind, Terminator};
+
+        let Some(analysis) = self.resource_analysis else {
+            return Ok(None);
+        };
+        let Some(owner_cfg) = analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref() else {
+            return Ok(None);
+        };
+        let matches = owner_cfg
+            .result_receipts
+            .iter()
+            .filter_map(|result| {
+                let chain = result.computed_string_key_owner_chain.as_deref()?;
+                let branch = chain.result_branch.as_deref()?;
+                (*match_node == branch.map_new_match || *match_node == branch.map_set_match)
+                    .then_some(branch)
+            })
+            .collect::<Vec<_>>();
+        let [branch] = matches.as_slice() else {
+            return Ok(None);
+        };
+        let operation = if *match_node == branch.map_new_match {
+            &branch.map_new_operation
+        } else {
+            &branch.map_set_operation
+        };
+        let Some(branch) = self
+            .ordinary_map_owned_any_v2_computed_string_key_owner_chain_result_branch_for_operation(
+                operation,
+            )?
+        else {
+            return Ok(None);
+        };
+        let dispatches = branch
+            .cfg
+            .reachable_blocks
+            .iter()
+            .filter(|(block_id, block)| {
+                branch.cfg.match_arms.contains_key(*block_id)
+                    && matches!(&block.terminator, Terminator::Match { scrutinee, .. } if scrutinee == operation)
+            })
+            .map(|(block_id, _)| block_id.clone())
+            .collect::<Vec<_>>();
+        let [dispatch_id] = dispatches.as_slice() else {
+            return Err(
+                "computed String-key owner-chain match has no unique Checker dispatch block".into(),
+            );
+        };
+        let source_arms = branch.cfg.match_arms.get(dispatch_id).ok_or_else(|| {
+            "computed String-key owner-chain match lacks CFG arm table".to_string()
+        })?;
+
+        let mut join_target = None;
+        let mut arm_ids = Vec::with_capacity(arms.len());
+        for arm in arms {
+            let matching_source_arms = source_arms
+                .iter()
+                .filter(|candidate| candidate.source_arm == arm.node_id && !candidate.guarded)
+                .collect::<Vec<_>>();
+            let [source_arm] = matching_source_arms.as_slice() else {
+                return Err(
+                    "computed String-key owner-chain arm lacks unique Checker CFG arm".into(),
+                );
+            };
+            let arm_edge = branch
+                .cfg
+                .reachable_edges
+                .get(&source_arm.edge)
+                .ok_or_else(|| "computed String-key owner-chain arm edge is absent".to_string())?;
+            let join_edges = branch
+                .cfg
+                .reachable_edges
+                .values()
+                .filter(|edge| {
+                    edge.kind == EdgeKind::Fallthrough && edge.source.node == arm.node_id
+                })
+                .collect::<Vec<_>>();
+            let [join_edge] = join_edges.as_slice() else {
+                return Err("computed String-key owner-chain arm lacks unique join edge".into());
+            };
+            if let Some(prev) = &join_target {
+                if *prev != join_edge.to {
+                    return Err(
+                        "computed String-key owner-chain arms do not share one join block".into(),
+                    );
+                }
+            } else {
+                join_target = Some(join_edge.to.clone());
+            }
+            let block_id = MirBlockId::new(arm_edge.to.0 .0.clone()).map_err(|e| e.to_string())?;
+            let edge_id =
+                MirEdgeId::new(source_arm.edge.0 .0.clone()).map_err(|e| e.to_string())?;
+            let join_edge_id =
+                MirEdgeId::new(join_edge.id.0 .0.clone()).map_err(|e| e.to_string())?;
+            arm_ids.push((block_id, edge_id, join_edge_id));
+        }
+        let join_block =
+            join_target.ok_or_else(|| "computed String-key match has no join".to_string())?;
+        let join_id = MirBlockId::new(join_block.0 .0.clone()).map_err(|e| e.to_string())?;
+        Ok(Some((join_id, arm_ids)))
+    }
+
     fn ordinary_map_owned_any_v2_values_local_index_i32_result_branch_for_local(
         &self,
         local: &ResolvedLocalId,
@@ -12117,6 +12319,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 }]
             })?
             .is_some();
+        let v2_result_branch_root = self.ordinary_map_owned_any_v2_result_branch_has_root(local);
         if let Some(value) = self.locals.get(local) {
             if computed_map_root
                 && self.values.get(value).map(|value| &value.ty)
@@ -12127,7 +12330,10 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     message: "computed String-key Result Ok binding already has a non-canonical MIR root type".into(),
                 }]);
             }
-            if owned_get_result_root
+            if !computed_map_root
+                && !values_result_root
+                && !v2_result_branch_root
+                && owned_get_result_root
                 && self.values.get(value).map(|value| &value.ty)
                     != Some(&super::types::ordinary_map_owned_get_i32_string_v1_type_id())
             {
@@ -12138,13 +12344,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                             .into(),
                 }]);
             }
-            if values_result_root
+            if (values_result_root || v2_result_branch_root)
                 && self.values.get(value).map(|value| &value.ty)
                     != Some(&super::types::ordinary_map_owned_any_v2_type_id())
             {
                 return Err(vec![MirLoweringError {
                     node_id: local.0.clone(),
-                    message: "ValuesLocalIndexI32 Result Ok binding already has a non-canonical MIR root type".into(),
+                    message: "ordinary Map/Any V2 Result Ok binding already has a non-canonical MIR root type".into(),
                 }]);
             }
             return Ok(value.clone());
@@ -12166,12 +12372,10 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 message: error.to_string(),
             }]
         })?;
-        let ty = if computed_map_root {
+        let ty = if computed_map_root || values_result_root || v2_result_branch_root {
             super::types::ordinary_map_owned_any_v2_type_id()
         } else if owned_get_result_root {
             super::types::ordinary_map_owned_get_i32_string_v1_type_id()
-        } else if values_result_root {
-            super::types::ordinary_map_owned_any_v2_type_id()
         } else {
             self.ordinary_map_owned_any_v2_read_result_type(local, &definition.ty)
                 .unwrap_or_else(|| definition.ty.clone())
@@ -12206,6 +12410,9 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         if self
             .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_local(local)
             .is_some_and(|receipt| receipt.call_result_type == *checker_type)
+            || self
+                .ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_local(local)
+                .is_some_and(|receipt| receipt.call_result_type == *checker_type)
         {
             return Some(super::types::ordinary_map_owned_any_v2_values_type_id());
         }
@@ -12943,17 +13150,86 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         .then_some(receipt)
     }
 
+    fn ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_body(
+        &self,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerReceipt>
+    {
+        let callables = self.checked_callables?;
+        let matching = callables
+            .values()
+            .filter_map(|producer| {
+                if !self.checked_callable_is_included(producer) || producer.owner == self.body.owner
+                {
+                    return None;
+                }
+                let cfg = producer
+                    .resources
+                    .ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()?;
+                let result_producer = cfg.values_result_producer_receipt.as_ref()?;
+                let caller = cfg.values_result_producer_caller_receipt.as_ref()?;
+                (caller.profile_version
+                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerProfileVersion::V1
+                    && caller.caller_owner == self.body.owner
+                    && caller.producer_result == *result_producer
+                    && caller.producer_owner == result_producer.owner
+                    && caller.producer_target == result_producer.owner
+                    && caller.snapshot_type == result_producer.snapshot_type
+                    && caller.snapshot_type != caller.call_result_type
+                    && self
+                        .type_catalog
+                        .is_none_or(|catalog| {
+                            is_list_of_dynamic_any_in_catalog(catalog, &caller.snapshot_type)
+                        })
+                    && caller.call_result_type == result_producer.surface_return_type)
+                    .then_some(caller)
+            })
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [receipt] => Some(*receipt),
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_local(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerReceipt>
+    {
+        self.ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_body()
+            .filter(|receipt| receipt.snapshot_local == *local)
+    }
+
+    fn ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_call(
+        &self,
+        expression: &ResolvedExpr,
+        call: &ResolvedCall,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerReceipt>
+    {
+        let ResolvedCallee::Function(target) = &call.callee else {
+            return None;
+        };
+        let producer = self.checked_callable(target)?;
+        let receipt =
+            self.ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_body()?;
+        (receipt.caller_owner == self.body.owner
+            && receipt.producer_target == *target
+            && receipt.producer_call == expression.node_id
+            && receipt.call_result_type == expression.ty
+            && call.arguments.is_empty()
+            && call.permission.is_none()
+            && call.effects == producer.signature.effects
+            && call.type_arguments.is_empty()
+            && call.session.is_empty()
+            && self.body.resolved_calls.get(&expression.node_id) == Some(&call.callee))
+        .then_some(receipt)
+    }
+
     fn is_exact_ordinary_map_owned_any_v2_values_len_call(
         &self,
         expression: &ResolvedExpr,
         call: &crate::core::ir::ResolvedCall,
     ) -> bool {
-        let Some(receipt) = self.ordinary_map_owned_any_v2_values_caller_receipt_for_body() else {
-            return false;
-        };
-        let Some(observation) = receipt.len_observation.as_ref() else {
-            return false;
-        };
         let [receiver] = call.arguments.as_slice() else {
             return false;
         };
@@ -12963,36 +13239,77 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         let ResolvedCallee::Builtin(builtin) = &call.callee else {
             return false;
         };
-        builtin.as_str() == "builtin.method.list.len"
-            && receipt.profile_version
-                == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerProfileVersion::V1
-            && receipt.caller_owner == self.body.owner
-            && receipt.result_binding == receipt.owner_local
-            && receipt.result_type != receipt.owner_type
-            && observation.call_node == expression.node_id
-            && observation.receiver_node == receiver.value.node_id
-            && call.result == observation.result_type
-            && expression.ty == observation.result_type
-            && call.permission == Some(crate::core::ir::Permission::View)
-            && call.effects.is_empty()
-            && expression.effects.is_empty()
-            && call.type_arguments.is_empty()
-            && call.session.is_empty()
-            && place.projections.is_empty()
-            && place.base == receipt.owner_local
-            && receiver.conversion.kind == CheckedConversionKind::Identity
-            && receiver.conversion.from == receipt.result_type
-            && receiver.conversion.to == receipt.result_type
-            && self
-                .body
-                .locals
-                .get(&receipt.owner_local)
-                .is_some_and(|local| local.ty == receipt.result_type)
-            && self
-                .body
-                .locals
-                .get(&observation.result_binding)
-                .is_some_and(|local| local.ty == observation.result_type)
+        let len_matches =
+            |owner_local: &ResolvedLocalId,
+             surface_type: &crate::core::ResolvedTypeId,
+             call_node: &NodeId,
+             receiver_node: &NodeId,
+             len_result_binding: &ResolvedLocalId,
+             len_result_type: &crate::core::ResolvedTypeId| {
+                builtin.as_str() == "builtin.method.list.len"
+                    && *call_node == expression.node_id
+                    && *receiver_node == receiver.value.node_id
+                    && call.result == *len_result_type
+                    && expression.ty == *len_result_type
+                    && call.permission == Some(crate::core::ir::Permission::View)
+                    && call.effects.is_empty()
+                    && expression.effects.is_empty()
+                    && call.type_arguments.is_empty()
+                    && call.session.is_empty()
+                    && place.projections.is_empty()
+                    && place.base == *owner_local
+                    && receiver.conversion.kind == CheckedConversionKind::Identity
+                    && receiver.conversion.from == *surface_type
+                    && receiver.conversion.to == *surface_type
+                    && self
+                        .body
+                        .locals
+                        .get(owner_local)
+                        .is_some_and(|local| local.ty == *surface_type)
+                    && self
+                        .body
+                        .locals
+                        .get(len_result_binding)
+                        .is_some_and(|local| local.ty == *len_result_type)
+            };
+        if let Some(receipt) = self.ordinary_map_owned_any_v2_values_caller_receipt_for_body() {
+            return receipt.len_observation.as_ref().is_some_and(|observation| {
+                receipt.profile_version
+                    == crate::core::OrdinaryMapOwnedAnyV2ValuesProducerCallerProfileVersion::V1
+                    && receipt.caller_owner == self.body.owner
+                    && receipt.result_binding == receipt.owner_local
+                    && receipt.result_type != receipt.owner_type
+                    && len_matches(
+                        &receipt.owner_local,
+                        &receipt.result_type,
+                        &observation.call_node,
+                        &observation.receiver_node,
+                        &observation.result_binding,
+                        &observation.result_type,
+                    )
+            });
+        }
+        if let Some(receipt) =
+            self.ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_body()
+        {
+            return receipt.profile_version
+                == crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerProfileVersion::V1
+                && receipt.caller_owner == self.body.owner
+                && receipt.snapshot_local == receipt.len.receiver_local
+                && receipt.call_result_type != receipt.snapshot_type
+                && receipt.len.conversion_kind == CheckedConversionKind::Identity
+                && receipt.len.conversion_from == receipt.call_result_type
+                && receipt.len.conversion_to == receipt.call_result_type
+                && len_matches(
+                    &receipt.snapshot_local,
+                    &receipt.call_result_type,
+                    &receipt.len.call_node,
+                    &receipt.len.receiver_node,
+                    &receipt.len.result_binding,
+                    &receipt.len.result_type,
+                );
+        }
+        false
     }
 
     fn is_exact_ordinary_map_owned_any_v2_values_producer_return(
@@ -13108,10 +13425,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         (string_caller_matches || len_caller_matches)
             && result.owner == self.body.owner
             && result.surface_return_type == self.body.root.ty
+            && result.snapshot_type != result.surface_return_type
             && self
                 .checked_callable(&self.body.owner)
                 .is_some_and(|producer| result.surface_return_type == producer.signature.result)
-            && result.snapshot_type == super::types::ordinary_map_owned_any_v2_values_type_id()
+            && self.type_catalog.is_none_or(|catalog| {
+                is_list_of_dynamic_any_in_catalog(catalog, &result.snapshot_type)
+            })
     }
 
     fn is_exact_ordinary_map_owned_any_v2_map_root_producer_return(
@@ -13423,6 +13743,116 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
             [branch] => Some(*branch),
             _ => None,
         }
+    }
+
+    fn ordinary_map_owned_any_v2_result_branch_receipts(
+        &self,
+    ) -> Option<&[crate::core::OrdinaryMapOwnedAnyV2ResultBranchReceipt]> {
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return None;
+        }
+        let flow = self
+            .resource_analysis?
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?
+            .flow
+            .as_ref()?;
+        super::ordinary_map_owned_any_v2_flow_result_branches(flow)
+            .filter(|branches| !branches.is_empty())
+    }
+
+    fn ordinary_map_owned_any_v2_result_branch_for_operation(
+        &self,
+        point: &NodeId,
+        kind: crate::core::OrdinaryMapOwnedAnyV2ActionKind,
+        expression_ty: &crate::core::ResolvedTypeId,
+    ) -> Option<OrdinaryMapOwnedAnyV2ResultBranchTarget> {
+        if let Some(branches) = self.ordinary_map_owned_any_v2_result_branch_receipts() {
+            let matches = branches
+                .iter()
+                .filter(|branch| branch.operation_point == *point && branch.kind == kind)
+                .collect::<Vec<_>>();
+            return match matches.as_slice() {
+                [branch] => Some(OrdinaryMapOwnedAnyV2ResultBranchTarget {
+                    result_node: branch.result_node.clone(),
+                    scrutinee_node: branch.scrutinee_node.clone(),
+                    result_type: branch.result_type.clone(),
+                    input_root: branch.input_root.clone(),
+                    output_root: branch.output_root.clone(),
+                    expect_source_metadata: false,
+                }),
+                _ => None,
+            };
+        }
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return None;
+        }
+        let values_unpack = self
+            .resource_analysis?
+            .ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()?
+            .values_unpack_result_branch_receipt
+            .as_ref()?;
+        match kind {
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                if values_unpack.map_new_operation == *point =>
+            {
+                Some(OrdinaryMapOwnedAnyV2ResultBranchTarget {
+                    result_node: values_unpack.map_new_operation.clone(),
+                    scrutinee_node: values_unpack.map_new_operation.clone(),
+                    result_type: expression_ty.clone(),
+                    input_root: None,
+                    output_root: values_unpack.initial_root.clone(),
+                    expect_source_metadata: true,
+                })
+            }
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set => {
+                let matches = values_unpack
+                    .sets
+                    .iter()
+                    .filter(|set| set.operation == *point)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [set] => Some(OrdinaryMapOwnedAnyV2ResultBranchTarget {
+                        result_node: set.operation.clone(),
+                        scrutinee_node: set.operation.clone(),
+                        result_type: expression_ty.clone(),
+                        input_root: Some(set.input_root.clone()),
+                        output_root: set.output_root.clone(),
+                        expect_source_metadata: true,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn ordinary_map_owned_any_v2_result_branch_has_root(&self, local: &ResolvedLocalId) -> bool {
+        if let Some(branches) = self.ordinary_map_owned_any_v2_result_branch_receipts() {
+            return branches
+                .iter()
+                .filter(|branch| branch.output_root == *local)
+                .count()
+                == 1;
+        }
+        if !self.ordinary_map_owned_any_v2_profile_selected() {
+            return false;
+        }
+        let Some(values_unpack) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .and_then(|cfg| cfg.values_unpack_result_branch_receipt.as_ref())
+        else {
+            return false;
+        };
+        let root_count = usize::from(values_unpack.initial_root == *local)
+            + values_unpack
+                .sets
+                .iter()
+                .filter(|set| set.output_root == *local)
+                .count();
+        root_count == 1
     }
 
     fn ordinary_map_owned_get_i32_string_v1_root_matches(
@@ -14787,12 +15217,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     let existing = existing + get_or_default_string_set_payload_drop as usize;
                     let existing = existing + get_or_default_string_result_drop as usize;
                     let existing = existing + computed_string_key_owner_chain_source_drop;
-                    let scalar_prefix_drop = receipt.flow.as_ref().is_some_and(|flow| {
-                        let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail) = &flow.proof else { return false; };
+                    let scalar_prefix_drop = receipt.settled_scalar_tail().is_some_and(|tail| {
                         tail.string_drops.get(local).is_some_and(|drop| {
                             drop.ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
-                                && &drop.point == point && drop.place_index == index
-                                && drop.point_rank < tail.first_condition_rank
+                                && &drop.point == point
+                                && drop.place_index == index
+                                && (drop.point_block != tail.split_block
+                                    || drop.point_rank < tail.first_condition_rank)
                                 && drop.loads.iter().all(|(_, rank)| *rank < drop.point_rank)
                         })
                     });
@@ -17142,6 +17573,72 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         }
         use crate::core::OrdinaryMapOwnedAnyV2ActionKind as K;
         if action.kind == K::New {
+            if let Some(branch) = self.ordinary_map_owned_any_v2_result_branch_for_operation(
+                &expression.node_id,
+                K::New,
+                &expression.ty,
+            ) {
+                let valid_call = matches!(
+                    &call.callee,
+                    ResolvedCallee::Builtin(name) if name.as_str() == "map_new"
+                );
+                let source_metadata_matches = if branch.expect_source_metadata {
+                    action.source_node.as_ref() == Some(&expression.node_id)
+                        && action.source_type.as_ref() == Some(&expression.ty)
+                } else {
+                    action.source_node.is_none() && action.source_type.is_none()
+                };
+                if !valid_call
+                    || !call.arguments.is_empty()
+                    || branch.result_node != expression.node_id
+                    || branch.scrutinee_node != expression.node_id
+                    || branch.result_type != expression.ty
+                    || branch.input_root.is_some()
+                    || action.local != branch.output_root
+                    || action.source_local.is_some()
+                    || action.source.is_some()
+                    || !source_metadata_matches
+                    || action.key.is_some()
+                    || action.value.is_some()
+                {
+                    self.error(
+                        &expression.node_id,
+                        "ordinary Map/Any V2 New Result operands differ from its exact Checker branch receipt",
+                    );
+                    return Some(self.fallback_value(expression));
+                }
+                let Some(catalog) = self.type_catalog else {
+                    self.error(
+                        &expression.node_id,
+                        "ordinary Map/Any V2 New Result has no canonical TypeDesc catalog",
+                    );
+                    return Some(self.fallback_value(expression));
+                };
+                let result_type = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+                if let Err(message) = catalog.validate_ordinary_map_owned_any_v2_root_result(
+                    &result_type,
+                    &branch.result_type,
+                ) {
+                    self.error(&expression.node_id, message);
+                    return Some(self.fallback_value(expression));
+                }
+                let Some(result) = self.id("expr", &expression.node_id) else {
+                    return Some(self.fallback_value(expression));
+                };
+                self.insert_value(result.clone(), result_type, &expression.node_id);
+                let output_value = self.ordinary_map_owned_any_v2_local_value(
+                    &branch.output_root,
+                    &expression.node_id,
+                );
+                self.emit(
+                    &expression.node_id,
+                    &format!("ordinary_map_owned_any_v2_new:{output_value}"),
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2New {
+                        result: result.clone(),
+                    },
+                );
+                return Some(result);
+            }
             let temporary_roots = analysis
                 .ordinary_map_owned_any_v2_cfg_receipt
                 .as_ref()?
@@ -17186,6 +17683,93 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 MirInstructionKind::OrdinaryMapOwnedAnyV2New {
                     result: result.clone(),
                 },
+            );
+            return Some(result);
+        }
+        if action.kind == K::Set {
+            let Some(branch) = self.ordinary_map_owned_any_v2_result_branch_for_operation(
+                &expression.node_id,
+                K::Set,
+                &expression.ty,
+            ) else {
+                return None;
+            };
+            let valid_call = matches!(
+                &call.callee,
+                ResolvedCallee::Builtin(name) if name.as_str() == "map_set"
+            );
+            let Some(input_root) = branch.input_root.as_ref() else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any V2 Set Result receipt has no input root",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            if !valid_call
+                || call.arguments.len() != 3
+                || branch.result_node != expression.node_id
+                || branch.scrutinee_node != expression.node_id
+                || branch.result_type != expression.ty
+                || action.local != branch.output_root
+                || action.source_local.as_ref() != Some(input_root)
+            {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any V2 Set Result operands differ from its exact Checker branch receipt",
+                );
+                return Some(self.fallback_value(expression));
+            }
+            let Some(catalog) = self.type_catalog else {
+                self.error(
+                    &expression.node_id,
+                    "ordinary Map/Any V2 Set Result has no canonical TypeDesc catalog",
+                );
+                return Some(self.fallback_value(expression));
+            };
+            let result_type = super::types::ordinary_map_owned_any_v2_root_result_type_id();
+            if let Err(message) = catalog
+                .validate_ordinary_map_owned_any_v2_root_result(&result_type, &branch.result_type)
+            {
+                self.error(&expression.node_id, message);
+                return Some(self.fallback_value(expression));
+            }
+            let source = self.v2_root_arg(&call.arguments[0].value, &action, &expression.node_id);
+            let Some((key, key_is_temporary)) = self.lower_ordinary_map_owned_any_v2_key(
+                &action,
+                &call.arguments[1].value,
+                &expression.node_id,
+            ) else {
+                return Some(self.fallback_value(expression));
+            };
+            let value = self.lower_expr(&call.arguments[2].value);
+            let Some(result) = self.id("expr", &expression.node_id) else {
+                return Some(self.fallback_value(expression));
+            };
+            self.insert_value(result.clone(), result_type, &expression.node_id);
+            let output_value = self
+                .ordinary_map_owned_any_v2_local_value(&branch.output_root, &expression.node_id);
+            self.emit(
+                &expression.node_id,
+                &format!("ordinary_map_owned_any_v2_set:{output_value}"),
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Set {
+                    result: result.clone(),
+                    source,
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+            );
+            self.drop_ordinary_map_string_temporaries(
+                &expression.node_id,
+                action.key_type.as_ref(),
+                &key,
+                key_is_temporary,
+                action.value_type.as_ref(),
+                &value,
+            );
+            self.drop_ordinary_map_owned_any_v2_set_aggregate_temporary(
+                &expression.node_id,
+                action.value_type.as_ref(),
+                &value,
             );
             return Some(result);
         }
@@ -18731,7 +19315,12 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                         .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_for_call(
                             expression, call,
                         )
-                        .is_some() =>
+                        .is_some()
+                        || self
+                            .ordinary_map_owned_any_v2_values_result_producer_caller_receipt_for_call(
+                                expression, call,
+                            )
+                            .is_some() =>
                 {
                     super::types::ordinary_map_owned_any_v2_values_type_id()
                 }
@@ -20132,6 +20721,17 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                             source: value,
                         },
                     );
+                } else if !self.current_is_terminated()
+                    && expression.ty == crate::core::ir::primitive_type_id(PrimitiveType::Unit)
+                {
+                    self.emit(
+                        &expression.node_id,
+                        "block",
+                        MirInstructionKind::Const {
+                            result: result.clone(),
+                            literal: crate::core::ir::ResolvedLiteral::Unit,
+                        },
+                    );
                 }
             }
             _ => self.error(
@@ -20480,19 +21080,46 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
             self.error(node, "match scrutinee has no canonical MIR type");
             return;
         };
-        let Some(join_id) = self.block_id("match.join", node) else {
-            return;
+        let computed_cfg_ids =
+            match self.computed_string_key_owner_chain_result_match_cfg(node, arms) {
+                Ok(ids) => ids,
+                Err(message) => {
+                    self.error(node, message);
+                    return;
+                }
+            };
+        let (join_id, computed_arm_ids) = match computed_cfg_ids {
+            Some((join_id, arm_ids)) => (join_id, Some(arm_ids)),
+            None => {
+                let Some(join_id) = self.block_id("match.join", node) else {
+                    return;
+                };
+                (join_id, None)
+            }
         };
-        self.add_block(
-            join_id.clone(),
-            vec![MirBlockParameter {
-                value: result.clone(),
-            }],
+        let outer_locals = self.locals.clone();
+        let mut assigned = BTreeSet::new();
+        for arm in arms {
+            collect_assigned_locals_expr(&arm.body, &mut assigned);
+        }
+        let carried = self.collect_carried_join_locals_for_set(
+            node,
+            &outer_locals,
+            assigned,
+            "match",
+            "match assignment target is absent from the typed local catalog",
         );
+        let mut join_parameters = vec![MirBlockParameter {
+            value: result.clone(),
+        }];
+        join_parameters.extend(carried.iter().map(|(_, value)| MirBlockParameter {
+            value: value.clone(),
+        }));
+        self.add_block(join_id.clone(), join_parameters);
 
         let mut switch_arms = Vec::with_capacity(arms.len());
         let mut arm_blocks = Vec::with_capacity(arms.len());
-        for arm in arms {
+        for (arm_index, arm) in arms.iter().enumerate() {
             let Some(case) = self.lower_switch_case(&arm.pattern.kind, &arm.node_id) else {
                 continue;
             };
@@ -20503,20 +21130,28 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 );
                 continue;
             }
-            let Some(block_id) = self.block_id("match.arm", &arm.node_id) else {
-                continue;
+            let (block_id, edge, join_edge) = if let Some(arm_ids) = &computed_arm_ids {
+                arm_ids[arm_index].clone()
+            } else {
+                let Some(block_id) = self.block_id("match.arm", &arm.node_id) else {
+                    continue;
+                };
+                let Some(edge) = self.edge_id("match.arm", &arm.node_id) else {
+                    continue;
+                };
+                let Some(join_edge) = self.edge_id("match.arm.join", &arm.node_id) else {
+                    continue;
+                };
+                (block_id, edge, join_edge)
             };
-            let Some(edge) = self.edge_id("match.arm", &arm.node_id) else {
-                continue;
-            };
-            let Some(join_edge) = self.edge_id("match.arm.join", &arm.node_id) else {
-                continue;
-            };
+            self.locals = outer_locals.clone();
             let Some(lowered_bindings) =
                 self.lower_switch_bindings(&arm.pattern, &arm.node_id, &scrutinee_ty)
             else {
+                self.locals = outer_locals.clone();
                 continue;
             };
+            let arm_locals = self.locals.clone();
             self.add_block(
                 block_id.clone(),
                 lowered_bindings
@@ -20539,8 +21174,10 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 join_edge,
                 &arm.body,
                 lowered_bindings.nested_record,
+                arm_locals,
             ));
         }
+        self.locals = outer_locals.clone();
         if switch_arms.is_empty() {
             self.error(node, "match has no MIR-lowerable arms");
             return;
@@ -20558,19 +21195,36 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         };
         self.terminate(terminator);
 
-        for (block_id, join_edge, body, nested_record) in arm_blocks {
+        for (block_id, join_edge, body, nested_record, arm_locals) in arm_blocks {
             self.switch_to(block_id);
+            self.locals = arm_locals;
             if let Some(setup) = nested_record {
                 self.emit_nested_record_switch_setup(setup);
             }
             let value = self.lower_expr(body);
             if !self.current_is_terminated() {
+                if let ResolvedExprKind::Block(arm_block) = &body.kind {
+                    if let Some(result_expr) = arm_block.result.as_deref() {
+                        self.emit_compiler_owned_string_unpack_drops(&value, &result_expr.node_id);
+                    }
+                }
+                let mut arguments = vec![value];
+                arguments.extend(carried.iter().map(|(local, _)| {
+                    self.locals
+                        .get(local)
+                        .cloned()
+                        .unwrap_or_else(|| outer_locals[local].clone())
+                }));
                 self.terminate(MirTerminator::Goto {
                     edge: join_edge,
                     target: join_id.clone(),
-                    arguments: vec![value],
+                    arguments,
                 });
             }
+        }
+        self.locals = outer_locals;
+        for (local, value) in carried {
+            self.locals.insert(local, value);
         }
         self.switch_to(join_id);
     }
@@ -20815,6 +21469,51 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         }
     }
 
+    /// Close Checker-receipted `CompilerOwnedStringDrop` Values unpack bindings
+    /// inside multi-block linear `ResultBranch` leaf arms before branching out
+    /// to `match.join`, matching `emit_end_of_body_owned_string_drops` anchors.
+    fn emit_compiler_owned_string_unpack_drops(&mut self, returned: &MirValueId, node_id: &NodeId) {
+        let Some(cfg) = self
+            .resource_analysis
+            .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
+            .filter(|cfg| cfg.owner == self.body.owner)
+        else {
+            return;
+        };
+        let mut drop_targets = Vec::new();
+        for receipt in &cfg.values_unpack_receipts {
+            if receipt.result_owner_settlement
+                != crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind::CompilerOwnedStringDrop
+                || receipt.result_owner_settlement_point.as_ref() != Some(node_id)
+            {
+                continue;
+            }
+            let Ok(target) = self.local_value(&receipt.unpack_binding) else {
+                continue;
+            };
+            if &target == returned {
+                continue;
+            }
+            let already_dropped = self.blocks.get(&self.current).is_some_and(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == &target)
+                })
+            });
+            if !already_dropped {
+                drop_targets.push(target);
+            }
+        }
+        drop_targets.sort();
+        drop_targets.dedup();
+        for (index, target) in drop_targets.into_iter().enumerate() {
+            self.emit(
+                node_id,
+                &format!("drop.{index}"),
+                MirInstructionKind::Drop { value: target },
+            );
+        }
+    }
+
     /// R6-1086/R6-1087: per-path Drop placement for arm-local consumption.
     /// The R6-1085 return-site pass holds whenever a value is consumed
     /// anywhere, so a String transferred inside exactly one arm of an
@@ -20864,7 +21563,12 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 && self
                     .values
                     .get(value)
-                    .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
+                    .is_some_and(|value| catalog.owns_managed_string_drop_target(&value.ty))
+        };
+        let is_direct_owned_string = |value: &MirValueId| -> bool {
+            self.values
+                .get(value)
+                .is_some_and(|value| catalog.validate_owned_string(&value.ty).is_ok())
         };
         let mut candidates: BTreeSet<MirValueId> = parameters
             .iter()
@@ -20884,9 +21588,11 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
             return;
         }
         let mut consumed_blocks: BTreeMap<MirValueId, BTreeSet<MirBlockId>> = BTreeMap::new();
+        let mut read_blocks: BTreeMap<MirValueId, BTreeSet<MirBlockId>> = BTreeMap::new();
         for (block_id, block) in &self.blocks {
             for instruction in &block.instructions {
                 let mut sources: Vec<MirValueId> = Vec::new();
+                let mut reads: Vec<MirValueId> = Vec::new();
                 match &instruction.kind {
                     MirInstructionKind::Move { source, .. }
                     | MirInstructionKind::Drop { value: source }
@@ -20894,6 +21600,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     | MirInstructionKind::MoveProjectDrop { base: source, .. }
                     | MirInstructionKind::Convert { source, .. } => {
                         sources.push(source.clone());
+                    }
+                    MirInstructionKind::Clone { source, .. }
+                    | MirInstructionKind::Copy { source, .. }
+                    | MirInstructionKind::Borrow { source, .. }
+                    | MirInstructionKind::Project { base: source, .. }
+                    | MirInstructionKind::VariantProject { base: source, .. } => {
+                        reads.push(source.clone());
                     }
                     MirInstructionKind::UpdateRecord { base, fields, .. } => {
                         sources.push(base.clone());
@@ -20908,8 +21621,12 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     }
                     MirInstructionKind::BuiltinCall {
                         kind, arguments, ..
-                    } if !matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe) => {
-                        sources.extend(arguments.iter().cloned());
+                    } => {
+                        if matches!(kind, MirBuiltinKind::AssertEq | MirBuiltinKind::AssertNe) {
+                            reads.extend(arguments.iter().cloned());
+                        } else {
+                            sources.extend(arguments.iter().cloned());
+                        }
                     }
                     MirInstructionKind::SessionCall {
                         endpoint, payload, ..
@@ -20925,6 +21642,14 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     if candidates.contains(&source) {
                         consumed_blocks
                             .entry(source)
+                            .or_default()
+                            .insert(block_id.clone());
+                    }
+                }
+                for read in reads {
+                    if candidates.contains(&read) {
+                        read_blocks
+                            .entry(read)
                             .or_default()
                             .insert(block_id.clone());
                     }
@@ -21070,13 +21795,24 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 // branch nested inside it can never place a second Drop
                 // on the same path, and placements of one value always
                 // live in mutually exclusive arms.
+                let has_downstream_read = |head: &MirBlockId, reach: &BTreeSet<MirBlockId>| {
+                    !is_direct_owned_string(value)
+                        && read_blocks.get(value).is_some_and(|blocks| {
+                            reach
+                                .iter()
+                                .any(|block| block != head && blocks.contains(block))
+                        })
+                };
                 let inside_then = consumed.iter().all(|block| reach_then.contains(block));
                 let touches_else = consumed.iter().any(|block| reach_else.contains(block));
                 let inside_else = consumed.iter().all(|block| reach_else.contains(block));
                 let touches_then = consumed.iter().any(|block| reach_then.contains(block));
-                if inside_then && !touches_else {
+                if inside_then && !touches_else && !has_downstream_read(&else_target, &reach_else) {
                     placed.push((else_target.clone(), vec![value.clone()]));
-                } else if inside_else && !touches_then {
+                } else if inside_else
+                    && !touches_then
+                    && !has_downstream_read(&then_target, &reach_then)
+                {
                     placed.push((then_target.clone(), vec![value.clone()]));
                 }
             }
@@ -21139,7 +21875,13 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     });
                     if inside && siblings_clear {
                         for (sibling, sibling_target) in arm_targets.iter().enumerate() {
-                            if sibling != index {
+                            let has_downstream_read = !is_direct_owned_string(value)
+                                && read_blocks.get(value).is_some_and(|blocks| {
+                                    reaches[sibling].iter().any(|block| {
+                                        block != sibling_target && blocks.contains(block)
+                                    })
+                                });
+                            if sibling != index && !has_downstream_read {
                                 placed.push((sibling_target.clone(), vec![value.clone()]));
                             }
                         }
@@ -21911,14 +22653,23 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
             return;
         };
 
+        let outer_locals = self.locals.clone();
+        let carried = self.collect_stmt_carried_join_locals(
+            node,
+            &outer_locals,
+            &[then_block, else_block],
+            "if",
+            "if assignment target is absent from the typed local catalog",
+        );
+        let mut join_parameters = vec![MirBlockParameter {
+            value: result.clone(),
+        }];
+        join_parameters.extend(carried.iter().map(|(_, value)| MirBlockParameter {
+            value: value.clone(),
+        }));
         self.add_block(then_id.clone(), Vec::new());
         self.add_block(else_id.clone(), Vec::new());
-        self.add_block(
-            join_id.clone(),
-            vec![MirBlockParameter {
-                value: result.clone(),
-            }],
-        );
+        self.add_block(join_id.clone(), join_parameters);
         self.terminate(MirTerminator::Branch {
             condition,
             then_edge,
@@ -21930,29 +22681,53 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         });
 
         self.switch_to(then_id);
+        self.locals = outer_locals.clone();
         let then_value = self.lower_block_expr(then_block);
         if !self.current_is_terminated() {
             match then_value.or_else(|| self.unit_branch_value(node, &result, then_block, "then")) {
-                Some(value) => self.terminate(MirTerminator::Goto {
-                    edge: then_join_edge,
-                    target: join_id.clone(),
-                    arguments: vec![value],
-                }),
+                Some(value) => {
+                    let mut arguments = vec![value];
+                    arguments.extend(carried.iter().map(|(local, _)| {
+                        self.locals
+                            .get(local)
+                            .cloned()
+                            .unwrap_or_else(|| outer_locals[local].clone())
+                    }));
+                    self.terminate(MirTerminator::Goto {
+                        edge: then_join_edge,
+                        target: join_id.clone(),
+                        arguments,
+                    });
+                }
                 None => self.error(node, "if then branch has no value"),
             }
         }
 
         self.switch_to(else_id);
+        self.locals = outer_locals.clone();
         let else_value = self.lower_block_expr(else_block);
         if !self.current_is_terminated() {
             match else_value.or_else(|| self.unit_branch_value(node, &result, else_block, "else")) {
-                Some(value) => self.terminate(MirTerminator::Goto {
-                    edge: else_join_edge,
-                    target: join_id.clone(),
-                    arguments: vec![value],
-                }),
+                Some(value) => {
+                    let mut arguments = vec![value];
+                    arguments.extend(carried.iter().map(|(local, _)| {
+                        self.locals
+                            .get(local)
+                            .cloned()
+                            .unwrap_or_else(|| outer_locals[local].clone())
+                    }));
+                    self.terminate(MirTerminator::Goto {
+                        edge: else_join_edge,
+                        target: join_id.clone(),
+                        arguments,
+                    });
+                }
                 None => self.error(node, "if else branch has no value"),
             }
+        }
+        self.locals = outer_locals;
+        for (local, value) in carried {
+            self.locals.insert(local, value);
         }
         self.switch_to(join_id);
     }
@@ -22051,6 +22826,23 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         for block in blocks {
             collect_assigned_locals(block, &mut assigned);
         }
+        self.collect_carried_join_locals_for_set(
+            node,
+            outer_locals,
+            assigned,
+            prefix,
+            missing_target_error,
+        )
+    }
+
+    fn collect_carried_join_locals_for_set(
+        &mut self,
+        node: &NodeId,
+        outer_locals: &HashMap<ResolvedLocalId, MirValueId>,
+        assigned: BTreeSet<ResolvedLocalId>,
+        prefix: &str,
+        missing_target_error: &str,
+    ) -> Vec<(ResolvedLocalId, MirValueId)> {
         assigned
             .into_iter()
             .filter(|local| outer_locals.contains_key(local))
@@ -24211,6 +25003,11 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
             .blocks
             .keys()
             .find(|block| block.as_str() == "bb.entry")
+            .or_else(|| {
+                self.blocks
+                    .keys()
+                    .find(|block| block.as_str().ends_with("/cfg:block:entry"))
+            })
             .cloned()
         else {
             return;
@@ -25772,12 +26569,9 @@ func main() -> i32 { identity(41) }
             .resources
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
-            .and_then(|cfg| cfg.values_producer_caller_receipt.as_ref())
+            .and_then(|cfg| cfg.values_result_producer_caller_receipt.as_ref())
             .expect("exact producer/caller receipt");
-        let observation = receipt
-            .len_observation
-            .as_ref()
-            .expect("the fixture observes List.len");
+        let observation = &receipt.len;
         let catalog = MirTypeCatalog::from_checked_program(&checked).expect("TypeDesc catalog");
         let functions = lower_program_with_type_catalog(&checked, &catalog)
             .expect("receipt-bound Values producer/caller MIR");
@@ -25786,10 +26580,10 @@ func main() -> i32 { identity(41) }
             .expect("caller MIR");
         let values_type = super::super::types::ordinary_map_owned_any_v2_values_type_id();
         let call_result =
-            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.call_node.0))
+            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.producer_call.0))
                 .expect("call result identity");
         let owner =
-            crate::core::mir::MirValueId::new(format!("local:{}", receipt.owner_local.0 .0))
+            crate::core::mir::MirValueId::new(format!("local:{}", receipt.snapshot_local.0 .0))
                 .expect("bound owner identity");
         let list_read =
             crate::core::mir::MirValueId::new(format!("expr:{}", observation.receiver_node.0))
@@ -25845,41 +26639,35 @@ func main() -> i32 { identity(41) }
             .resources
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
-            .and_then(|cfg| cfg.values_producer_caller_receipt.as_ref())
+            .and_then(|cfg| cfg.values_result_producer_caller_receipt.as_ref())
             .expect("exact producer/caller receipt")
             .clone();
-        let receiver_node = receipt
-            .len_observation
-            .as_ref()
-            .expect("the fixture observes List.len")
-            .receiver_node
-            .clone();
+        let receiver_node = receipt.len.receiver_node.clone();
 
         let mut callables = checked.callables().clone();
         let forged_producer = callables
             .get_mut(&producer_owner)
             .expect("cloned Values producer");
-        let erase = &mut forged_producer
+        forged_producer
             .resources
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_mut()
             .expect("producer CFG receipt")
-            .values_producer_return_receipt
+            .values_result_producer_receipt
             .as_mut()
-            .expect("producer return receipt")
-            .return_container_erase;
-        erase.source_node = crate::core::NodeId("forged:values-source".into());
+            .expect("producer Result receipt")
+            .success_result = crate::core::NodeId("forged:values-source".into());
 
         let caller = callables.get(&caller_owner).expect("cloned caller");
         let mir = super::lower_callable_with_checked_callables(caller, &callables, None)
             .expect("compatibility lowering remains structurally valid");
-        let expected_surface_type = receipt.result_type.clone();
+        let expected_surface_type = receipt.call_result_type.clone();
         let values_type = super::super::types::ordinary_map_owned_any_v2_values_type_id();
         let call_result =
-            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.call_node.0))
+            crate::core::mir::MirValueId::new(format!("expr:{}", receipt.producer_call.0))
                 .expect("call result identity");
         let owner =
-            crate::core::mir::MirValueId::new(format!("local:{}", receipt.owner_local.0 .0))
+            crate::core::mir::MirValueId::new(format!("local:{}", receipt.snapshot_local.0 .0))
                 .expect("bound owner identity");
         let list_read = crate::core::mir::MirValueId::new(format!("expr:{}", receiver_node.0))
             .expect("List read identity");
@@ -25904,13 +26692,28 @@ func main() -> i32 { identity(41) }
         let source = r#"
 func snapshot_values() -> List {
     let payload = "owned value"
-    let empty = map_new()
-    let root = map_set(empty, "key", payload)
-    let snapshot = values(root)
-    drop(empty)
-    drop(root)
-    drop(payload)
-    snapshot
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", payload) {
+                Ok(root) => {
+                    let snapshot = values(root)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    snapshot
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    []
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            []
+        },
+    }
 }
 
 func direct_caller() -> bool {
@@ -25938,13 +26741,17 @@ func main() -> i32 { 0 }
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
             .and_then(|cfg| cfg.values_crosscall_string_caller_receipt.as_ref())
-            .expect("exact cross-call String receipt");
+            .expect("exact V3 cross-call String receipt");
         let producer_return = producer
             .resources
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
-            .and_then(|cfg| cfg.values_producer_return_receipt.as_ref())
-            .expect("exact producer Values return receipt");
+            .and_then(|cfg| cfg.values_result_producer_receipt.as_ref())
+            .expect("exact Result producer Values receipt");
+        assert_eq!(
+            receipt.profile_version,
+            crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3
+        );
         assert_eq!(receipt.snapshot_type, producer_return.snapshot_type);
         assert_eq!(
             receipt.call_result_type,
@@ -25956,7 +26763,7 @@ func main() -> i32 { 0 }
             .get(&caller_owner)
             .expect("checked direct caller");
         assert!(
-            super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+            super::ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
                 producer, caller, receipt
             )
         );
@@ -25974,7 +26781,7 @@ func main() -> i32 { 0 }
             .expect("producer V2 CFG receipt")
             .values_crosscall_string_caller_receipt = Some(crossed_receipt.clone());
         assert!(
-            !super::ordinary_map_owned_any_v2_values_crosscall_string_source_is_exact(
+            !super::ordinary_map_owned_any_v2_values_result_crosscall_string_source_is_exact(
                 &crossed_producer,
                 caller,
                 &crossed_receipt,
@@ -27211,38 +28018,57 @@ func main() -> i32 {
         let source = r#"
 func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "k\0🧪", "owned\0🧪值")
-    let pair = map_get(root, "k\0🧪")
-    drop(empty)
-    drop(root)
+    match map_new() {
+        Ok(empty) => match map_set(empty, "k\0🧪", "owned\0🧪值") {
+            Ok(root) => {
+                let pair = map_get(root, "k\0🧪")
+                drop(empty)
+                drop(root)
 
-    let found = pair.0
-    let payload = pair.1
-    let carried = carry(payload)
-    let equal = if found { carried == "owned\0🧪值" } else { false }
-    println(found)
-    println(equal)
-    drop(pair)
-    drop(payload)
-    drop(carried)
+                let found = pair.0
+                let payload = pair.1
+                let carried = carry(payload)
+                let equal = if found { carried == "owned\0🧪值" } else { false }
+                println(found)
+                println(equal)
+                drop(pair)
+                drop(payload)
+                drop(carried)
 
-    let number_empty = map_new()
-    let number_root = map_set(number_empty, "zero", 0)
-    let number_pair = map_get(number_root, "zero")
-    drop(number_empty)
-    drop(number_root)
+                match map_new() {
+                    Ok(number_empty) => match map_set(number_empty, "zero", 0) {
+                        Ok(number_root) => {
+                            let number_pair = map_get(number_root, "zero")
+                            drop(number_empty)
+                            drop(number_root)
 
-    let number_found = number_pair.0
-    let zero_payload = number_pair.1
-    let zero_carried = carry(zero_payload)
-    let zero = if number_found { zero_carried } else { 0 }
-    println(number_found)
-    println(zero)
-    drop(number_pair)
-    drop(zero_payload)
-    drop(zero_carried)
-    0
+                            let number_found = number_pair.0
+                            let zero_payload = number_pair.1
+                            let zero_carried = carry(zero_payload)
+                            let zero = if number_found { zero_carried } else { 0 }
+                            println(number_found)
+                            println(zero)
+                            drop(number_pair)
+                            drop(zero_payload)
+                            drop(zero_carried)
+                            drop(zero)
+                            0
+                        },
+                        Err(status) => {
+                            drop(number_empty)
+                            status
+                        },
+                    },
+                    Err(status) => status,
+                }
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -27263,7 +28089,7 @@ func main() -> i32 {
         assert_eq!(cfg_receipt.owner, owner);
         assert_eq!(
             cfg_receipt.profile_version,
-            crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::AcyclicPerEdgeRootsV2
+            crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::ResultBranchV3
         );
         assert_eq!(
             cfg_receipt
@@ -27278,9 +28104,15 @@ func main() -> i32 {
             "both ordinary map_get calls in the positive source must be receipted"
         );
         assert!(cfg_receipt
-            .live_roots_on_edge
-            .values()
-            .all(|roots| roots.is_empty()));
+            .reachable_edges
+            .iter()
+            .filter(|(_, edge)| !matches!(edge.kind, crate::core::cfg::EdgeKind::MatchArm))
+            .all(|(edge_id, _)| {
+                cfg_receipt
+                    .live_roots_on_edge
+                    .get(edge_id)
+                    .is_some_and(std::collections::BTreeSet::is_empty)
+            }));
         let branch = function
             .blocks
             .values_mut()
@@ -27411,11 +28243,15 @@ func main() -> i32 {
     fn ordinary_map_owned_get_maps_if_condition_short_circuit_and_rejects_forged_anchor() {
         let source = r#"
 func main() -> i32 {
-    let empty = map_new()
-    let value = map_get_i32(empty, "k")
-    drop(value)
-    drop(empty)
-    if true && false { 1 } else { 0 }
+    match map_new() {
+        Ok(empty) => {
+            let value = map_get_i32(empty, "k")
+            drop(value)
+            drop(empty)
+            if true && false { 1 } else { 0 }
+        },
+        Err(status) => status,
+    }
 }
 "#;
         let tokens = Lexer::new(source).tokenize().expect("lex");
@@ -27485,6 +28321,22 @@ func main() -> i32 {
             "expected exact source-anchor rejection, got {errors:?}"
         );
     }
+}
+
+fn is_list_of_dynamic_any_in_catalog(
+    type_catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> bool {
+    type_catalog.get(ty).is_some_and(|desc| {
+        desc.kind == super::types::MirTypeKind::List
+            && matches!(
+                &desc.layout,
+                super::types::MirLayout::List { element }
+                    if type_catalog
+                        .get(element)
+                        .is_some_and(|elem| elem.kind == super::types::MirTypeKind::DynamicAny)
+            )
+    })
 }
 
 /// Mechanical projection of the separate NewResult source receipt. The
@@ -27610,25 +28462,31 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
     let values_element_type = super::types::ordinary_map_owned_any_v2_values_element_type_id();
     let string_type = primitive_type_id(PrimitiveType::String);
     let i32_type = primitive_type_id(PrimitiveType::I32);
+    let source_result_type = owner_cfg
+        .actions
+        .iter()
+        .find(|action| action.kind == ActionKind::New && action.point == receipt.map_new_operation)
+        .and_then(|action| action.source_type.as_ref())
+        .ok_or_else(|| fail("map_new source Result TypeDesc is absent"))?;
     if type_catalog.get(&map_type).is_none()
         || type_catalog.get(&values_element_type).is_none()
         || type_catalog
-            .validate_ordinary_map_owned_any_v2_root_result(
-                &root_result_type,
-                owner_cfg
-                    .actions
-                    .iter()
-                    .find(|action| {
-                        action.kind == ActionKind::New && action.point == receipt.map_new_operation
-                    })
-                    .and_then(|action| action.source_type.as_ref())
-                    .ok_or_else(|| fail("map_new source Result TypeDesc is absent"))?,
-            )
+            .validate_ordinary_map_owned_any_v2_root_result(&root_result_type, source_result_type)
             .is_err()
     {
         return Err(fail(
             "source Map/Result/Values TypeDesc identities are not canonical",
         ));
+    }
+    let Some([source_root_type, source_error_type]) =
+        type_catalog.resolved_type_children(source_result_type)
+    else {
+        return Err(fail(
+            "map_new Checker Result does not have exact root/i32 child types",
+        ));
+    };
+    if source_error_type != &i32_type {
+        return Err(fail("map_new Checker Result error payload is not i32"));
     }
     let empty_values_contract = type_catalog
         .validated_values_result_empty_list_construct_contract(&values_type)
@@ -27671,14 +28529,14 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         return Err(fail("map_new Checker action is absent or duplicated"));
     };
     if new_action.local != receipt.initial_root
-        || new_action.source_type.as_ref() != Some(&root_result_type)
+        || new_action.source_type.as_ref() != Some(source_result_type)
         || new_action.source.as_ref().is_some()
         || new_action.source_local.is_some()
         || callable
             .body
             .locals
             .get(&receipt.initial_root)
-            .is_none_or(|local| local.ty != map_type)
+            .is_none_or(|local| local.ty != *source_root_type)
         || callable
             .body
             .locals
@@ -27720,7 +28578,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         };
         if action.local != set.output_root
             || action.source_local.as_ref() != Some(&set.input_root)
-            || action.source_type.as_ref() != Some(&map_type)
+            || action.source_type.as_ref() != Some(source_root_type)
             || action.key.as_ref() != Some(&set.key_node)
             || action.key_type.as_ref() != Some(&string_type)
             || action.value.as_ref() != Some(&set.payload_node)
@@ -27735,7 +28593,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
                 .body
                 .locals
                 .get(&set.output_root)
-                .is_none_or(|local| local.ty != map_type)
+                .is_none_or(|local| local.ty != *source_root_type)
             || callable
                 .body
                 .locals
@@ -27770,11 +28628,12 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         let key = node_value(&set.key_node)?;
         let payload = local_value(&set.payload_local)?;
         let result = node_value(&set.operation)?;
+        let set_id = format!(
+            "inst:ordinary_map_values_result_producer:set_{index}:{}",
+            set.operation.0
+        );
         let set_instruction = instruction(
-            format!(
-                "inst:ordinary_map_values_result_producer:set_{index}:{}",
-                set.operation.0
-            ),
+            set_id.clone(),
             MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
                 result: result.clone(),
                 source: local_value(&set.input_root)?,
@@ -27787,13 +28646,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
             MirInstructionKind::Drop { value: key.clone() },
         )?;
         set_values.push((result, key, payload, set_instruction, key_drop));
-        set_instruction_ids.push(
-            MirInstructionId::new(format!(
-                "inst:ordinary_map_values_result_producer:set_{index}:{}",
-                set.operation.0
-            ))
-            .map_err(|error| error.to_string())?,
-        );
+        set_instruction_ids.push(MirInstructionId::new(set_id).map_err(|error| error.to_string())?);
         set_key_values.push(node_value(&set.key_node)?);
         set_payload_values.push(local_value(&set.payload_local)?);
         set_actions.push(*action);
@@ -27813,9 +28666,11 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         .last()
         .map(|set| &set.output_root)
         .ok_or_else(|| fail("Values producer has no Set root"))?;
+    let source_snapshot_is_values_list =
+        is_list_of_dynamic_any_in_catalog(type_catalog, &receipt.snapshot_type);
     if receipt.values_source_local != *final_root
-        || receipt.values_source_type != map_type
-        || receipt.snapshot_type != values_type
+        || receipt.values_source_type != *source_root_type
+        || !source_snapshot_is_values_list
         || values_action.local != *final_root
         || values_action.source_local.as_ref() != Some(final_root)
         || values_action.source_type.as_ref()
@@ -27827,7 +28682,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
             .body
             .locals
             .get(&receipt.snapshot_local)
-            .is_none_or(|local| local.ty != values_type)
+            .is_none_or(|local| local.ty != receipt.snapshot_type)
     {
         return Err(fail(
             "Values action does not borrow the final Set root or define the snapshot",
@@ -27845,8 +28700,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
     let values_instruction = instruction(
         format!(
             "inst:ordinary_map_owned_any_v2_values:{}:{}",
-            local_value(final_root)?,
-            receipt.values_operation.0
+            final_root.0 .0, receipt.values_operation.0
         ),
         MirInstructionKind::OrdinaryMapOwnedAnyV2Values {
             result: values_result.clone(),
@@ -27858,8 +28712,10 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
     require_point(&receipt.success_result)?;
 
     let mut explicit = BTreeMap::<NodeId, Vec<MirInstruction>>::new();
+    let mut origins = BTreeMap::<MirInstructionId, NodeId>::new();
     let mut add_at = |point: NodeId, inst: MirInstruction| -> Result<(), String> {
         require_point(&point)?;
+        origins.insert(inst.id.clone(), point.clone());
         explicit.entry(point).or_default().push(inst);
         Ok(())
     };
@@ -27974,7 +28830,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
             .body
             .locals
             .get(&settlement.local)
-            .is_some_and(|local| local.ty == map_type)
+            .is_some_and(|local| local.ty == *source_root_type)
             || settlement.place_index != 0
             || !receipt.set_branches.iter().any(|set| {
                 set.input_root == settlement.local || set.output_root == settlement.local
@@ -28276,6 +29132,14 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
     // All source-defined operations are inserted at their exact Checker point;
     // every other point in this sealed profile is an inert load, block, or
     // pattern identity and therefore has no executable MIR instruction.
+    if !block_parameters
+        .keys()
+        .all(|id| cfg.reachable_blocks.contains_key(id))
+    {
+        return Err(fail(
+            "source-bound operation point or CFG block was not projected exactly once",
+        ));
+    }
     let mut blocks = BTreeMap::new();
     for (source_id, source_block) in &cfg.reachable_blocks {
         let mut instructions = Vec::new();
@@ -28428,13 +29292,22 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
                 }
             }
             Terminator::Return { value, implicit } => {
-                if !implicit || value.as_ref() != Some(&receipt.map_new_match) {
+                let expected_implicit_conversion =
+                    NodeId(format!("{}/implicit-conversion", receipt.map_new_match.0));
+                if !implicit
+                    || !matches!(
+                        value.as_ref(),
+                        Some(node)
+                            if node == &receipt.map_new_match
+                                || node == &expected_implicit_conversion
+                    )
+                {
                     return Err(fail(
                         "source CFG return is not the unique outer Result match",
                     ));
                 }
                 MirTerminator::Return {
-                    value: Some(node_value(value.as_ref().expect("checked value"))?),
+                    value: Some(node_value(&receipt.map_new_match)?),
                 }
             }
             Terminator::Break { .. }
@@ -28448,7 +29321,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
             }
         };
         let id = block_value(source_id)?;
-        let parameters = block_parameters.remove(source_id).unwrap_or_default();
+        let parameters = block_parameters.get(source_id).cloned().unwrap_or_default();
         blocks.insert(
             id.clone(),
             MirBlock {
@@ -28459,10 +29332,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
             },
         );
     }
-    if !explicit.is_empty()
-        || !block_parameters.is_empty()
-        || blocks.len() != cfg.reachable_blocks.len()
-    {
+    if !explicit.is_empty() || blocks.len() != cfg.reachable_blocks.len() {
         return Err(fail(
             "source-bound operation point or CFG block was not projected exactly once",
         ));
@@ -28511,6 +29381,7 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         Some(Box::new(receipt.clone())),
         None,
         None,
+        None,
     );
     let mut function = MirFunction {
         owner: callable.owner.clone(),
@@ -28524,6 +29395,8 @@ fn ordinary_map_owned_any_v2_values_result_producer_function(
         proof_worklist: None,
         ownership: std::mem::take(&mut ownership),
     };
+    function.ownership.checker_managed_any =
+        super::managed_any::seal_initial_checked_lowering(&function, type_catalog, &origins);
     function.contracts = super::contracts::lower_contracts(callable, &function)
         .map_err(|errors| fail(&format!("source contract lowering failed: {errors:?}")))?;
     function.proof_worklist =

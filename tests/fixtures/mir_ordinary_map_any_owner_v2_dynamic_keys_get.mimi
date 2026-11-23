@@ -4,9 +4,9 @@ func main() -> bool {
     let key = prefix + suffix
     match map_new() {
         Ok(empty) => {
-        let miss_pair = map_get(empty, key)
     match map_set(empty, key, 0) {
         Ok(root) => {
+            let miss_pair = map_get(empty, key)
             let snapshot = keys(root)
             let copied = snapshot[0]
             let hit_pair = map_get(root, key)

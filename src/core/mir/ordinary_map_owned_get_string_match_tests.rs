@@ -49,7 +49,7 @@ fn main_function(program: &MirProgram) -> &MirFunction {
 
 #[test]
 fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
-    let (_checked, materialized) = materialized_fixture();
+    let (checked, materialized) = materialized_fixture();
     let program = &materialized.program;
     let function = main_function(program);
     function
@@ -64,7 +64,7 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
     assert_eq!(cfg.owner, function.owner);
     assert_eq!(
         cfg.profile_version,
-        crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1
+        crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::ResultBranchV3
     );
     let [receipt] = cfg.string_match_receipts.as_slice() else {
         panic!("exactly one direct String-get Result match receipt is required");
@@ -102,7 +102,7 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
         "new, set, and one local Map clone are receipted"
     );
     for root in created_roots {
-        assert_eq!(
+        assert!(
             actions
                 .iter()
                 .filter(|action| {
@@ -110,9 +110,9 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
                         && action.root == root.root
                         && action.local == root.local
                 })
-                .count(),
-            1,
-            "every Checker-owned Map root has one explicit Drop"
+                .count()
+                >= 1,
+            "every Checker-owned Map root has explicit path Drops"
         );
     }
     assert_eq!(
@@ -122,7 +122,7 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
                 |action| action.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop
             )
             .count(),
-        3
+        4
     );
 
     let string_ty = crate::core::ir::primitive_type_id(PrimitiveType::String);
@@ -215,7 +215,15 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
         })
     }));
 
-    let route_receipt = program.route_receipt(ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+    let route_receipt =
+        crate::core::mir::validate_ordinary_map_owned_get_result_branch_v3_mir_route(
+            &checked, program,
+        )
+        .expect("exact CheckedProgram/MIR owned-get ResultBranchV3 route validates");
+    assert_eq!(
+        route_receipt,
+        program.route_receipt(ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND)
+    );
     route_receipt
         .validate_against_program(program)
         .expect("exact typed owned-get route receipt covers the MIR graph");
@@ -229,11 +237,25 @@ fn checker_cfg_mir_and_all_consumers_accept_the_detached_string_result_match() {
 
     crate::codegen::mir::validate_mir_native(program)
         .expect("native preflight validates the same Checker/MIR receipt");
-    crate::verifier::validate_mir_capabilities(program)
-        .expect("verifier capability gate accepts the exact exhaustive match");
+    crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
+        &checked,
+        program,
+        &route_receipt,
+    )
+    .expect("verifier capability gate accepts the exact ResultBranchV3 route");
+    crate::verifier::verify_mir_with_ordinary_map_owned_get_result_branch_v3_route(
+        &checked,
+        program,
+        &route_receipt,
+        "ordinary_map_owned_get_detached_string_match".into(),
+    )
+    .expect("symbolic verifier accepts the exact ResultBranchV3 route");
 
-    let bytecode = compile_mir_program_with_route_receipt(program, &route_receipt)
-        .expect("AST-free bytecode consumer compiles the exact route");
+    let bytecode =
+        crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+            &checked, program,
+        )
+        .expect("AST-free bytecode consumer compiles the exact ResultBranchV3 route");
     let mut vm = BytecodeVM::new(bytecode);
     assert_eq!(vm.run_value().expect("bytecode execution"), Value::Int(0));
     assert_eq!(vm.take_stdout(), "snapshot survives\n");
@@ -364,14 +386,17 @@ fn erased_string_match_receipt_fails_closed_at_every_consumer() {
 #[test]
 fn source_near_misses_do_not_acquire_the_string_match_receipt() {
     let near_misses = [
-        SOURCE.replace("Err(status) => status", "Err(_) => 1"),
+        SOURCE.replace(
+            "                        Err(status) => { status },",
+            "                        Err(_) => { 1 },",
+        ),
         SOURCE
             .replace(
                 "let snapshot = map_get_string(source_copy, \"payload\")",
                 "let snapshot = map_get_string(source_copy, \"payload\")\n    let alias = snapshot",
             )
             .replace("match snapshot {", "match alias {"),
-        SOURCE.replace("            drop(text)\n", ""),
+        SOURCE.replace("                            drop(text)\n", ""),
     ];
     for (index, source) in near_misses.iter().enumerate() {
         let tokens = crate::lexer::Lexer::new(source)

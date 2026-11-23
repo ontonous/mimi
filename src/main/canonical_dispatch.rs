@@ -612,6 +612,28 @@ pub(crate) fn build_canonical_program(
         })?;
         return Ok(route.program);
     }
+    if admission.ordinary_map_owned_any_v2_values_result_producer_caller() {
+        let route = materialize_canonical_route(checked, merged_file)
+            .map_err(|error| error.to_diagnostic().message)?;
+        let profile = mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+            .as_str();
+        if !route
+            .ordinary_map_owned_any_v2_values_result_producer_caller_route_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt == &route.program.route_receipt(profile))
+        {
+            return Err(format!(
+                "{}: Checker ValuesResultProducerCaller admission did not materialize its exact independent route receipt",
+                mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            ));
+        }
+        preflight_ordinary_map_owned_any_v2_values_result_producer_caller(checked, &route.program)
+            .map_err(|reason| {
+                format!("canonical ValuesResultProducerCaller route rejected: {reason}")
+            })?;
+        return Ok(route.program);
+    }
     if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1() {
         let route = materialize_canonical_route(checked, merged_file)
             .map_err(|error| error.to_diagnostic().message)?;
@@ -903,10 +925,32 @@ pub(crate) fn route_receipt_profile_for_checked(
     {
         return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;
     }
-    if checked
-        .resource_analyses()
-        .values()
-        .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt())
+    if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+        return mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+            .as_str();
+    }
+    if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3() {
+        return mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+            .as_str();
+    }
+    if admission.ordinary_map_owned_any_v2_values_result_producer_caller() {
+        return mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+            .as_str();
+    }
+    if !admission.ordinary_map_owned_any_v2.is_direct_print_result()
+        && admission.ordinary_map_owned_any_v2
+            != mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
+        && matches!(
+            admission.ordinary_map_owned_get_i32_string_v1,
+            mimi::core::mir::OrdinaryMapOwnedGetI32StringV1Admission::CompleteCoverage
+        )
+        && checked
+            .resource_analyses()
+            .values()
+            .any(|analysis| analysis.has_ordinary_map_owned_get_result_branch_v3_receipt())
     {
         return mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;
     }
@@ -1136,7 +1180,13 @@ pub(crate) fn values_crosscall_string_caller_schema_for_checked(
     checked: &CheckedProgram,
 ) -> Option<&'static str> {
     let admission = mimi::core::mir::classify_canonical_mir_route_admission(checked);
-    if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {
+    if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+        Some(mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_SCHEMA)
+    } else if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3() {
+        Some(
+            mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_SCHEMA,
+        )
+    } else if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {
         Some(mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_V2_SCHEMA)
     } else if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_v1() {
         Some(mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_SCHEMA)
@@ -2048,6 +2098,33 @@ fn select_default_route_inner(
                 }
                 Ok(_) => DefaultMirRoute::Rejected(format!(
                     "{}: Checker ValuesResultCrosscallStringCaller V3 admission did not materialize its exact independent route receipt",
+                    mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+                )),
+                Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
+            };
+        }
+        if admission.ordinary_map_owned_any_v2_values_result_producer_caller() {
+            return match materialize_canonical_route(checked, merged_file) {
+                Ok(route)
+                    if route
+                        .ordinary_map_owned_any_v2_values_result_producer_caller_route_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt
+                                == &route.program.route_receipt(
+                                    mimi::core::mir::CanonicalMirRouteProfile::
+                                        OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+                                        .as_str(),
+                                )
+                        }) =>
+                {
+                    select_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+                        checked,
+                        route.program,
+                    )
+                }
+                Ok(_) => DefaultMirRoute::Rejected(format!(
+                    "{}: Checker ValuesResultProducerCaller admission did not materialize its exact independent route receipt",
                     mimi::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
                 )),
                 Err(error) => DefaultMirRoute::Rejected(error.to_diagnostic().message),
@@ -6045,6 +6122,80 @@ fn select_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1
     }
 }
 
+pub(crate) fn preflight_ordinary_map_owned_any_v2_values_result_producer_caller(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<(), String> {
+    let profile =
+        mimi::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+            .as_str();
+    let receipt =
+        mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked, program,
+        )?;
+    if receipt.schema != mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA || receipt.profile != profile {
+        return Err(format!(
+            "exact ValuesResultProducerCaller route receipt schema/profile required ('{}', '{profile}'), got ('{}', '{}')",
+            mimi::core::mir::MIR_ROUTE_RECEIPT_SCHEMA,
+            receipt.schema,
+            receipt.profile
+        ));
+    }
+    receipt.validate_against_program(program)?;
+    let program_receipt = program.route_receipt(profile);
+    if !program_receipt.same_semantic_identity(&receipt) {
+        return Err(
+            "ValuesResultProducerCaller Checker/MIR route receipt differs from the canonical MIR profile receipt"
+                .into(),
+        );
+    }
+    mimi::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+        program,
+    )
+    .map_err(|reason| {
+        format!("MIR ValuesResultProducerCaller operation/ownership receipt: {reason}")
+    })?;
+    mimi::interp::bytecode::compile_mir_program_with_values_result_producer_caller_route(
+        checked, program,
+    )
+    .map_err(|errors| format!("MIR ValuesResultProducerCaller bytecode capability: {errors:?}"))?;
+    mimi::codegen::mir::validate_checked_mir_native_values_result_producer_caller_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| format!("MIR ValuesResultProducerCaller native capability: {errors:?}"))?;
+    mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+        checked, program, &receipt,
+    )
+    .map_err(|errors| {
+        format!("MIR verifier ValuesResultProducerCaller capability: {errors:?}")
+    })?;
+    let results =
+        mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked,
+            program,
+            &receipt,
+            String::new(),
+        )?;
+    if !mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) {
+        return Err(format!(
+            "MIR ValuesResultProducerCaller verifier returned an unsupported or inconclusive result: {results:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn select_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+    checked: &CheckedProgram,
+    program: MirProgram,
+) -> DefaultMirRoute {
+    match preflight_ordinary_map_owned_any_v2_values_result_producer_caller(checked, &program) {
+        Ok(()) => DefaultMirRoute::Canonical(Box::new(program)),
+        Err(reason) => DefaultMirRoute::Rejected(format!(
+            "ordinary Map/Any owner-v2 ValuesResultProducerCaller preflight failed: {reason}"
+        )),
+    }
+}
+
 /// Preflight the separately versioned literal-index-one Values cross-call
 /// route through its own Checker, MIR, bytecode, native, and verifier gates.
 /// The route receipt shares a Rust type with V1, so this gate pins the V2
@@ -6963,12 +7114,6 @@ fn select_ordinary_map_owned_get_i32_string_v1_route(
     checked: &CheckedProgram,
     program: MirProgram,
 ) -> DefaultMirRoute {
-    if let Err(errors) = mimi::verifier::validate_mir_capabilities(&program) {
-        return DefaultMirRoute::Rejected(format!(
-            "ordinary Map owned-get MIR verifier capability: {errors:?}"
-        ));
-    }
-
     let has_result_branch_v3 = checked
         .resource_analyses()
         .values()
@@ -6999,6 +7144,18 @@ fn select_ordinary_map_owned_get_i32_string_v1_route(
     } else {
         program.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND)
     };
+    let capability_result = if has_result_branch_v3 {
+        mimi::verifier::validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
+            checked, &program, &receipt,
+        )
+    } else {
+        mimi::verifier::validate_mir_capabilities(&program)
+    };
+    if let Err(errors) = capability_result {
+        return DefaultMirRoute::Rejected(format!(
+            "ordinary Map owned-get MIR verifier capability: {errors:?}"
+        ));
+    }
     let bytecode_result = if has_result_branch_v3 {
         mimi::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
             checked, &program,
@@ -7016,7 +7173,17 @@ fn select_ordinary_map_owned_get_i32_string_v1_route(
             "ordinary Map owned-get MIR native capability: {errors:?}"
         ));
     }
-    match mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new()) {
+    let verify_result = if has_result_branch_v3 {
+        mimi::verifier::verify_mir_with_ordinary_map_owned_get_result_branch_v3_route(
+            checked,
+            &program,
+            &receipt,
+            String::new(),
+        )
+    } else {
+        mimi::verifier::verify_mir_with_route_receipt(&program, &receipt, String::new())
+    };
+    match verify_result {
         Ok(results)
             if mimi::verifier::canonical_execution_route_verifier_ready(&results, false, false) =>
         {
@@ -15099,44 +15266,45 @@ func main() -> i32 {
         type Label { text: string }
         func main() -> i32 {
             let payload = Label { text: "shared" }
-            let created = map_new()
-            match created {
+            match map_new() {
                 Ok(base) => {
                     let flag = true
                     if flag {
-                        let left_result = map_set(base, "left", payload)
-                        match left_result {
-                            Ok(left) => {
-                                let left_size = map_size(left)
-                                drop(left)
+                        match map_set(base, "left", payload) {
+                            Ok(child) => {
+                                map_size(child)
+                                drop(child)
+                                drop(base)
+                                drop(payload)
                                 0
                             },
                             Err(status) => {
                                 drop(base)
                                 drop(payload)
-                                return status
+                                status
                             },
                         }
                     } else {
-                        let right_result = map_set(base, "right", payload)
-                        match right_result {
-                            Ok(right) => {
-                                let right_size = map_size(right)
-                                drop(right)
+                        match map_set(base, "right", payload) {
+                            Ok(child) => {
+                                map_size(child)
+                                drop(child)
+                                drop(base)
+                                drop(payload)
                                 0
                             },
                             Err(status) => {
                                 drop(base)
                                 drop(payload)
-                                return status
+                                status
                             },
                         }
                     }
-                    drop(base)
-                    drop(payload)
-                    0
                 },
-                Err(status) => { drop(payload); status },
+                Err(status) => {
+                    drop(payload)
+                    status
+                },
             }
         }
     "#;
@@ -15209,10 +15377,12 @@ func main() -> i32 {
 
     #[test]
     fn branch_local_set_diamond_near_miss_is_rejected_without_opening_global_readiness() {
-        let near_miss = BRANCH_LOCAL_SET_DIAMOND_SOURCE.replace(
-            "                    drop(base)\n                    drop(payload)",
-            "                    let extra_result = map_set(base, \"extra\", 47)\n                    match extra_result {\n                        Ok(extra) => {\n                            drop(extra)\n                            0\n                        },\n                        Err(status) => {\n                            drop(base)\n                            drop(payload)\n                            return status\n                        },\n                    }\n                    drop(base)\n                    drop(payload)",
+        let near_miss = BRANCH_LOCAL_SET_DIAMOND_SOURCE.replacen(
+            "                                drop(base)\n                                drop(payload)\n                                0",
+            "                                match map_set(base, \"extra\", 47) {\n                                    Ok(extra) => {\n                                        drop(extra)\n                                        drop(base)\n                                        drop(payload)\n                                        0\n                                    },\n                                    Err(status) => {\n                                        drop(base)\n                                        drop(payload)\n                                        status\n                                    },\n                                }",
+            1,
         );
+        assert_ne!(near_miss, BRANCH_LOCAL_SET_DIAMOND_SOURCE);
         let (checked, file) = checked(&near_miss);
         let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked);
         assert!(!admission.ordinary_map_owned_any_v2_branch_local_set_diamond());

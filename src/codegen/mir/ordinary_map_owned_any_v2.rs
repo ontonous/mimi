@@ -537,6 +537,78 @@ fn v2_checked_get_payload_tag(
     v2_payload_tag(catalog, ty)
 }
 
+fn native_v2_root_result_variant_abi(
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+    label: &str,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let expected_result = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if ty != &expected_result {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            format!("{label} ABI requires Result<owner-v2 root, i32>"),
+        ));
+    }
+    let descriptor = catalog.get(ty).ok_or_else(|| {
+        NativeMirError::new(ty.as_str(), format!("{label} Result TypeDesc is absent"))
+    })?;
+    let crate::core::mir::types::MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            format!("{label} TypeDesc is not a Result layout"),
+        ));
+    };
+    if descriptor.id != *ty
+        || descriptor.kind != MirTypeKind::Result
+        || ok != &root_type
+        || error != &i32_type
+        || variants.len() != 2
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            format!("{label} TypeDesc is not exactly Result<owner-v2 root, i32>"),
+        ));
+    }
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1_u32), ("Err", error, 2_u32)] {
+        let variant_id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let (_, variant) = catalog
+            .validated_variant_switch_case(ty, &variant_id)
+            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("{label} Result::{name} payload is not canonical"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant_id,
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        ok.clone(),
+    ))
+}
+
 /// Materialize the Result ABI for the exact local-index Values branch. This
 /// intentionally pins its own Checker receipt and does not borrow the nearby
 /// MapSetDropControl Label authorization.
@@ -547,15 +619,7 @@ pub(super) fn native_values_local_index_i32_result_branch_variant_abi(
 ) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
     use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranchProfileVersion as BranchVersion;
 
-    let expected_result = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
-    let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
     let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
-    if ty != &expected_result {
-        return Err(NativeMirError::new(
-            ty.as_str(),
-            "ValuesLocalIndexI32ResultBranch ABI requires Result<owner-v2 root, i32>",
-        ));
-    }
     let cfg = function
         .ownership
         .ordinary_map_owned_any_v2_cfg_receipt()
@@ -586,67 +650,48 @@ pub(super) fn native_values_local_index_i32_result_branch_variant_abi(
             "ValuesLocalIndexI32ResultBranch ABI is outside its exact Checker owner/New/Set/i32 receipt",
         ));
     }
-    let descriptor = catalog.get(ty).ok_or_else(|| {
-        NativeMirError::new(
-            ty.as_str(),
-            "ValuesLocalIndexI32ResultBranch Result TypeDesc is absent",
-        )
-    })?;
-    let crate::core::mir::types::MirLayout::Result {
-        ok,
-        error,
-        variants,
-    } = &descriptor.layout
+    native_v2_root_result_variant_abi(catalog, ty, "ValuesLocalIndexI32ResultBranch")
+}
+
+/// Materialize the Result ABI for the exact V3/V4 ValuesResult producer.
+/// Independently gated by its own CheckedProgram-bound authorization bit.
+pub(super) fn native_values_result_crosscall_string_caller_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let Some(producer) = function
+        .ownership
+        .ordinary_map_owned_any_v2_values_result_producer_receipt()
     else {
         return Err(NativeMirError::new(
-            ty.as_str(),
-            "ValuesLocalIndexI32ResultBranch TypeDesc is not a Result layout",
+            function.owner.0.clone(),
+            "ValuesResultCrosscallStringCaller ABI has no distinct Checker producer receipt",
         ));
     };
-    if descriptor.id != *ty
-        || descriptor.kind != MirTypeKind::Result
-        || ok != &root_type
-        || error != &i32_type
-        || variants.len() != 2
-    {
+    if producer.owner != function.owner {
         return Err(NativeMirError::new(
-            ty.as_str(),
-            "ValuesLocalIndexI32ResultBranch TypeDesc is not exactly Result<owner-v2 root, i32>",
+            function.owner.0.clone(),
+            "ValuesResultCrosscallStringCaller ABI differs from the MIR function owner",
         ));
     }
-    let mut payload_fields = Vec::with_capacity(2);
-    for (name, expected_type, physical_field) in [("Ok", ok, 1_u32), ("Err", error, 2_u32)] {
-        let variant_id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
-        let (_, variant) = catalog
-            .validated_variant_switch_case(ty, &variant_id)
-            .map_err(|message| NativeMirError::new(ty.as_str(), message))?;
-        let field = match variant.fields.as_slice() {
-            [field] if field.ty == *expected_type => field,
-            _ => {
-                return Err(NativeMirError::new(
-                    ty.as_str(),
-                    format!(
-                        "ValuesLocalIndexI32ResultBranch Result::{name} payload is not canonical"
-                    ),
-                ));
-            }
-        };
-        payload_fields.push(NativeVariantPayloadSlot {
-            variant: variant_id,
-            field: field.id.clone(),
-            physical_field,
-            ty: field.ty.clone(),
-        });
-    }
-    Ok((
-        NativeVariantAbi {
-            tag_field: 0,
-            payload_field: 1,
-            payload_types: vec![ok.clone(), error.clone()],
-            payload_fields,
-        },
-        ok.clone(),
-    ))
+    native_v2_root_result_variant_abi(catalog, ty, "ValuesResultCrosscallStringCaller")
+}
+
+fn native_v2_root_result_struct_llvm_type<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    catalog: &MirTypeCatalog,
+    variant_abi: &NativeVariantAbi,
+) -> Result<inkwell::types::StructType<'ctx>, NativeMirError> {
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false))
 }
 
 fn native_values_local_index_i32_result_branch_llvm_type<'ctx>(
@@ -657,15 +702,18 @@ fn native_values_local_index_i32_result_branch_llvm_type<'ctx>(
 ) -> Result<inkwell::types::StructType<'ctx>, NativeMirError> {
     let (variant_abi, _) =
         native_values_local_index_i32_result_branch_variant_abi(function, catalog, ty)?;
-    let mut fields = vec![context.i8_type().into()];
-    fields.extend(
-        variant_abi
-            .payload_types
-            .iter()
-            .map(|payload| native_basic_type(context, catalog, payload))
-            .collect::<Result<Vec<_>, _>>()?,
-    );
-    Ok(context.struct_type(&fields, false))
+    native_v2_root_result_struct_llvm_type(context, catalog, &variant_abi)
+}
+
+fn native_values_result_crosscall_string_caller_llvm_type<'ctx>(
+    context: &'ctx inkwell::context::Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<inkwell::types::StructType<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_values_result_crosscall_string_caller_variant_abi(function, catalog, ty)?;
+    native_v2_root_result_struct_llvm_type(context, catalog, &variant_abi)
 }
 
 fn values_selection_receipt_error(message: String) -> String {
@@ -1118,6 +1166,12 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_native_contract(
     let crosscall_string_receipts = program
         .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
         .map_err(|message| vec![message])?;
+    let result_crosscall_string_receipts = program
+        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+        .map_err(|message| vec![message])?;
+    let result_producer_caller_receipts = program
+        .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+        .map_err(|message| vec![message])?;
     if !producer_caller_receipts.is_empty() {
         let route_receipts =
             crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_mir_route(
@@ -1130,7 +1184,7 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_native_contract(
             })?;
         if route_receipts != producer_caller_receipts {
             return Err(vec![
-                "Values producer-caller receipt differs from the independently validated MIR route"
+                "Values producer-caller receipt differs from its independently validated MIR route"
                     .into(),
             ]);
         }
@@ -1141,6 +1195,24 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_native_contract(
             .map_err(|message| {
                 vec![format!(
                     "Values cross-call String receipt rejected: {message}"
+                )]
+            })?;
+    }
+    for receipt in &result_crosscall_string_receipts {
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![format!(
+                    "Values Result cross-call String receipt rejected: {message}"
+                )]
+            })?;
+    }
+    for receipt in &result_producer_caller_receipts {
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![format!(
+                    "Values Result producer/caller receipt rejected: {message}"
                 )]
             })?;
     }
@@ -1165,13 +1237,20 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_native_contract(
                 .checker_ordinary_map_owned_any_v2_values_action_count()
         })
         .sum::<usize>();
-    if !producer_caller_receipts.is_empty() && !crosscall_string_receipts.is_empty() {
+    let result_profile_count = usize::from(!crosscall_string_receipts.is_empty())
+        + usize::from(!result_crosscall_string_receipts.is_empty())
+        + usize::from(!result_producer_caller_receipts.is_empty());
+    if (!producer_caller_receipts.is_empty() && result_profile_count > 0)
+        || result_profile_count > 1
+    {
         return Err(vec![
-            "Values carries both the whole-owner producer-caller and cross-call String profiles"
-                .into(),
+            "Values carries conflicting producer-caller profiles".into()
         ]);
     }
-    let producer_return_count = producer_caller_receipts.len() + crosscall_string_receipts.len();
+    let producer_return_count = producer_caller_receipts.len()
+        + crosscall_string_receipts.len()
+        + result_crosscall_string_receipts.len()
+        + result_producer_caller_receipts.len();
     let instruction_count = total_instruction_count
         .checked_sub(producer_return_count)
         .ok_or_else(|| {
@@ -1333,9 +1412,19 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_producer_caller_native_c
     let crosscall_receipts = program
         .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
         .map_err(|message| vec![message])?;
-    if !receipts.is_empty() && !crosscall_receipts.is_empty() {
+    let result_crosscall_receipts = program
+        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+        .map_err(|message| vec![message])?;
+    let result_producer_caller_receipts = program
+        .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+        .map_err(|message| vec![message])?;
+    if !receipts.is_empty()
+        && (!crosscall_receipts.is_empty()
+            || !result_crosscall_receipts.is_empty()
+            || !result_producer_caller_receipts.is_empty())
+    {
         return Err(vec![
-            "native Values carries both whole-owner and cross-call String producer/caller receipts"
+            "native Values carries conflicting whole-owner and Result producer/caller receipts"
                 .into(),
         ]);
     }
@@ -1348,11 +1437,35 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_producer_caller_native_c
                 )]
             })?;
     }
+    for receipt in &result_crosscall_receipts {
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![format!(
+                    "native Values Result cross-call String receipt is invalid: {message}"
+                )]
+            })?;
+    }
+    for receipt in &result_producer_caller_receipts {
+        receipt
+            .validate_against_program(program)
+            .map_err(|message| {
+                vec![format!(
+                    "native Values Result producer/caller receipt is invalid: {message}"
+                )]
+            })?;
+    }
     let values_return_or_call_signal = program.functions().values().any(|function| {
         (function.result == values_type
             && !crosscall_receipts
                 .iter()
-                .any(|receipt| receipt.producer_owner == function.owner))
+                .any(|receipt| receipt.producer_owner == function.owner)
+            && !result_crosscall_receipts
+                .iter()
+                .any(|receipt| receipt.producer_owner == function.owner)
+            && !result_producer_caller_receipts
+                .iter()
+                .any(|receipt| receipt.producer.producer_owner == function.owner))
             || function.blocks.values().any(|block| {
                 block.instructions.iter().any(|instruction| {
                     matches!(
@@ -1365,7 +1478,17 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_producer_caller_native_c
                                 receipt.caller_owner == function.owner
                                     && receipt.caller_call_instruction == instruction.id
                                     && &receipt.caller_call_result == result
-            })
+                            })
+                            && !result_crosscall_receipts.iter().any(|receipt| {
+                                receipt.caller_owner == function.owner
+                                    && receipt.caller_call_instruction == instruction.id
+                                    && &receipt.caller_call_result == result
+                            })
+                            && !result_producer_caller_receipts.iter().any(|receipt| {
+                                receipt.caller_owner == function.owner
+                                    && receipt.producer_call_instruction == instruction.id
+                                    && &receipt.caller_result == result
+                            })
                     )
                 })
             })
@@ -5004,11 +5127,17 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_unpack_native_contract(
     let crosscall_receipts = program
         .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
         .map_err(|message| vec![message])?;
-    if receipts.len() + crosscall_receipts.len() != instruction_count {
+    let result_crosscall_receipts = program
+        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+        .map_err(|message| vec![message])?;
+    if receipts.len() + crosscall_receipts.len() + result_crosscall_receipts.len()
+        != instruction_count
+    {
         return Err(vec![format!(
-            "Core AnyOwner-v2 Values unpack receipt count {} same-function + {} cross-call disagrees with MIR instruction count {}",
+            "Core AnyOwner-v2 Values unpack receipt count {} same-function + {} cross-call + {} result-cross-call disagrees with MIR instruction count {}",
             receipts.len(),
             crosscall_receipts.len(),
+            result_crosscall_receipts.len(),
             instruction_count
         )]);
     }
@@ -6343,6 +6472,30 @@ fn computed_string_key_owner_chain_native_anchors(
         };
         let map_new_switch = switch_anchor(&map_new_result)?;
         let map_set_switch = switch_anchor(&map_set_result)?;
+        let arm_target_for_variant =
+            |switch: &ComputedStringKeyOwnerChainResultSwitchNativeAnchor, variant_name: &str| {
+                let expected_variant =
+                    crate::core::NodeId(format!("builtin:variant:Result::{variant_name}"));
+                switch
+                    .arms
+                    .iter()
+                    .find_map(|arm| match &arm.case {
+                        crate::core::mir::MirSwitchCase::Variant(variant)
+                            if *variant == expected_variant =>
+                        {
+                            Some(arm.target.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "computed String-key Result switch lacks exact {variant_name} arm target"
+                        )
+                    })
+            };
+        let new_err_target = arm_target_for_variant(&map_new_switch, "Err")?;
+        let set_ok_target = arm_target_for_variant(&map_set_switch, "Ok")?;
+        let set_err_target = arm_target_for_variant(&map_set_switch, "Err")?;
         let path_terminals = branch
             .paths
             .iter()
@@ -6354,25 +6507,28 @@ fn computed_string_key_owner_chain_native_anchors(
                 .map_err(|error| {
                     format!("computed String-key path result ID is invalid: {error}")
                 })?;
-                let terminal_blocks = branch_function
-                    .blocks
-                    .values()
-                    .filter(|block| {
-                        matches!(
-                            &block.terminator,
-                            crate::core::mir::MirTerminator::Return {
-                                value: Some(value)
-                            } if value == &return_value
-                        )
-                    })
-                    .map(|block| block.id.clone())
-                    .collect::<Vec<_>>();
-                let [terminal_block] = terminal_blocks.as_slice() else {
-                    return Err(format!(
-                        "computed String-key path requires one direct MIR return for `{return_value}`, found {}",
-                        terminal_blocks.len()
-                    ));
+                let terminal_block = match path.kind {
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::MapNewErr => {
+                        new_err_target.clone()
+                    }
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::MapSetErr => {
+                        set_err_target.clone()
+                    }
+                    crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::Success => {
+                        set_ok_target.clone()
+                    }
                 };
+                let terminal_carries_result = branch_function
+                    .blocks
+                    .get(&terminal_block)
+                    .is_some_and(|block| {
+                        crate::core::mir::mir_block_terminally_carries_value(block, &return_value)
+                    });
+                if !terminal_carries_result {
+                    return Err(format!(
+                        "computed String-key path requires exact MIR terminal carry for `{return_value}` in `{terminal_block}`"
+                    ));
+                }
                 let drops = path
                     .drops
                     .iter()
@@ -6638,14 +6794,15 @@ fn validate_computed_string_key_owner_chain_result_branch_native_anchors(
             || terminal.arm_path != source_path.arm_path
             || terminal.result != source_path.result
             || terminal.return_value.as_str() != format!("expr:{}", source_path.result.0)
-            || !matches!(
-                function
-                    .blocks
-                    .get(&terminal.terminal_block)
-                    .map(|block| &block.terminator),
-                Some(MirTerminator::Return { value: Some(value) })
-                    if value == &terminal.return_value
-            )
+            || !function
+                .blocks
+                .get(&terminal.terminal_block)
+                .is_some_and(|block| {
+                    crate::core::mir::mir_block_terminally_carries_value(
+                        block,
+                        &terminal.return_value,
+                    )
+                })
             || terminal.drops.len() != source_path.drops.len()
         {
             return Err(
@@ -7379,11 +7536,207 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .program
                 .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
                 .map_err(|message| NativeMirError::new(subject, message))?;
+            let result_crosscall_receipts = self
+                .program
+                .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let result_producer_caller_receipts = self
+                .program
+                .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+                .map_err(|message| NativeMirError::new(subject, message))?;
             let whole_owner_receipts = self
                 .program
                 .ordinary_map_owned_any_v2_values_producer_caller_receipts()
                 .map_err(|message| NativeMirError::new(subject, message))?;
-            if !crosscall_receipts.is_empty() {
+            if !result_crosscall_receipts.is_empty() || !result_producer_caller_receipts.is_empty()
+            {
+                let (
+                    producer_owner,
+                    producer_values_instruction,
+                    producer_snapshot_binding_instruction,
+                    producer_snapshot,
+                    producer_return_block,
+                    producer_return_value,
+                    checker_owner,
+                    producer_values_result,
+                    snapshot_type,
+                ) = if !result_crosscall_receipts.is_empty() {
+                    if self.values_result_authorization
+                        != Some(super::NativeValuesResultAuthorization::CrosscallStringCaller)
+                        || !crosscall_receipts.is_empty()
+                        || !whole_owner_receipts.is_empty()
+                        || !result_producer_caller_receipts.is_empty()
+                        || result_crosscall_receipts.len() != 1
+                    {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "returned Result Values operation is unauthorized or mixes producer/caller profiles",
+                        ));
+                    }
+                    let Some(bridge) = result_crosscall_receipts.first() else {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "returned Result Values operation is unauthorized or mixes producer/caller profiles",
+                        ));
+                    };
+                    match bridge.checker_caller.profile_version {
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
+                            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_mir_route(
+                                self.program,
+                            )
+                            .map_err(|message| NativeMirError::new(subject, message))?;
+                        }
+                        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
+                            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_mir_route(
+                                self.program,
+                            )
+                            .map_err(|message| NativeMirError::new(subject, message))?;
+                        }
+                        other => {
+                            return Err(NativeMirError::new(
+                                subject,
+                                format!(
+                                    "Result Values cross-call String receipt has unsupported profile version {other:?}"
+                                ),
+                            ));
+                        }
+                    }
+                    let independently_derived = self
+                        .program
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    if independently_derived != result_crosscall_receipts {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "Values Result cross-call String receipt differs from its independently validated MIR route",
+                        ));
+                    }
+                    (
+                        &bridge.producer_owner,
+                        &bridge.producer_values_instruction,
+                        &bridge.producer_snapshot_binding_instruction,
+                        &bridge.producer_snapshot,
+                        &bridge.producer_return_block,
+                        &bridge.producer_return_value,
+                        &bridge.checker_producer_result.owner,
+                        &bridge.producer_values_result,
+                        &bridge.checker_producer_result.snapshot_type,
+                    )
+                } else {
+                    if self.values_result_authorization
+                        != Some(super::NativeValuesResultAuthorization::ProducerCaller)
+                        || !crosscall_receipts.is_empty()
+                        || !whole_owner_receipts.is_empty()
+                        || result_producer_caller_receipts.len() != 1
+                    {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "returned Result Values operation is unauthorized or mixes producer/caller profiles",
+                        ));
+                    }
+                    crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+                        self.program,
+                    )
+                    .map_err(|message| NativeMirError::new(subject, message))?;
+                    let Some(bridge) = result_producer_caller_receipts.first() else {
+                        return Err(NativeMirError::new(
+                            subject,
+                            "returned Result Values operation is unauthorized or mixes producer/caller profiles",
+                        ));
+                    };
+                    bridge
+                        .validate_against_program(self.program)
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    (
+                        &bridge.producer.producer_owner,
+                        &bridge.producer.producer_values_instruction,
+                        &bridge.producer.producer_snapshot_binding_instruction,
+                        &bridge.producer.producer_snapshot,
+                        &bridge.producer.producer_return_block,
+                        &bridge.producer.producer_return_value,
+                        &bridge.producer.checker_producer.owner,
+                        &bridge.producer.producer_values_result,
+                        &bridge.producer.checker_producer.snapshot_type,
+                    )
+                };
+                if producer_owner != &self.function.owner
+                    || producer_values_instruction.as_str() != subject
+                    || producer_values_result != result
+                {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "returned Values operation has no unique Result producer receipt",
+                    ));
+                }
+                let exact_instruction_count = self
+                    .function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        &instruction.id == producer_values_instruction
+                            && matches!(
+                                &instruction.kind,
+                                MirInstructionKind::OrdinaryMapOwnedAnyV2Values {
+                                    result: observed_result,
+                                    root: observed_root,
+                                } if observed_result == result && observed_root == root
+                            )
+                    })
+                    .count();
+                let snapshot_moves = self
+                    .function
+                    .blocks
+                    .values()
+                    .flat_map(|block| &block.instructions)
+                    .filter(|instruction| {
+                        &instruction.id == producer_snapshot_binding_instruction
+                            && matches!(
+                                &instruction.kind,
+                                MirInstructionKind::Move { result: moved, source }
+                                    if moved == producer_snapshot && source == result
+                            )
+                    })
+                    .count();
+                let return_block_matches = self
+                    .function
+                    .blocks
+                    .get(producer_return_block)
+                    .is_some_and(|block| {
+                        matches!(
+                            &block.terminator,
+                            MirTerminator::Return { value: Some(ret) }
+                                if ret == producer_return_value
+                        )
+                    });
+                if checker_owner != &self.function.owner
+                    || self.function.result != values_type
+                    || self
+                        .function
+                        .values
+                        .get(producer_values_result)
+                        .is_none_or(|value| value.ty != values_type)
+                    || self
+                        .function
+                        .values
+                        .get(producer_snapshot)
+                        .is_none_or(|value| value.ty != values_type)
+                    || self
+                        .function
+                        .values
+                        .get(producer_return_value)
+                        .is_none_or(|value| value.ty != values_type)
+                    || exact_instruction_count != 1
+                    || snapshot_moves != 1
+                    || !return_block_matches
+                {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "native Result Values producer result, snapshot binding, return, or Checker identity is mismatched",
+                    ));
+                }
+                checker_result_type = Some(snapshot_type.clone());
+            } else if !crosscall_receipts.is_empty() {
                 if !whole_owner_receipts.is_empty() || crosscall_receipts.len() != 1 {
                     return Err(NativeMirError::new(
                         subject,
@@ -7909,7 +8262,7 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .map_err(|message| NativeMirError::new(subject, message))
     }
 
-    fn emit_v2_root_guard(
+    pub(super) fn emit_v2_root_guard(
         &mut self,
         condition: inkwell::values::IntValue<'ctx>,
         message: &str,
@@ -8850,6 +9203,42 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     &result_ty,
                 )?,
             )
+        } else if self.values_result_authorization.is_some() {
+            let producer = self
+                .function
+                .ownership
+                .ordinary_map_owned_any_v2_values_result_producer_receipt()
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        "ValuesResultCrosscallStringCaller NewResult has no Checker producer receipt",
+                    )
+                })?;
+            let expected = MirValueId::new(format!("expr:{}", producer.map_new_operation.0))
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            if producer.owner != self.function.owner
+                || result != &expected
+                || self.value_type(result, subject)? != result_ty
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "native ValuesResultCrosscallStringCaller NewResult differs from its exact Checker operation/Result TypeDesc",
+                ));
+            }
+            (
+                native_values_result_crosscall_string_caller_variant_abi(
+                    self.function,
+                    self.program.type_catalog(),
+                    &result_ty,
+                )?
+                .0,
+                native_values_result_crosscall_string_caller_llvm_type(
+                    self.generator.context,
+                    self.function,
+                    self.program.type_catalog(),
+                    &result_ty,
+                )?,
+            )
         } else if self.map_set_drop_control_result_l1_authorized {
             let cfg = self
                 .function
@@ -9199,6 +9588,39 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 )?
                 .into_struct_type(),
             )
+        } else if crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+            self.function,
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
+            result,
+        )
+        .is_some()
+        {
+            crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                self.program.type_catalog(),
+                self.function,
+            )
+            .map_err(|message| NativeMirError::new(subject, message))?;
+            if self.value_type(result, subject)? != result_ty {
+                return Err(NativeMirError::new(
+                    subject,
+                    "native ResultBranchV1 New differs from its canonical Result TypeDesc",
+                ));
+            }
+            (
+                super::native_ordinary_map_result_branch_v1_variant_abi(
+                    self.function,
+                    self.program.type_catalog(),
+                    &result_ty,
+                )?
+                .0,
+                super::native_ordinary_map_result_branch_v1_llvm_type(
+                    self.generator.context,
+                    self.function,
+                    self.program.type_catalog(),
+                    &result_ty,
+                )?
+                .into_struct_type(),
+            )
         } else {
             let receipt = self
                 .function
@@ -9358,6 +9780,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if self.computed_string_key_owner_chain_l1_authorized
             || self.map_set_drop_control_result_l1_authorized
             || self.values_local_index_i32_result_branch_l1_authorized
+            || self.values_result_authorization.is_some()
+            || crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                self.function,
+                crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
+                result,
+            )
+            .is_some()
         {
             self.emit_v2_retire_unpublished_root_and_trap(
                 out_slot,
@@ -9452,6 +9881,13 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         if self.computed_string_key_owner_chain_l1_authorized
             || self.map_set_drop_control_result_l1_authorized
             || self.values_local_index_i32_result_branch_l1_authorized
+            || self.values_result_authorization.is_some()
+            || crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                self.function,
+                crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
+                result,
+            )
+            .is_some()
         {
             self.emit_v2_retire_unpublished_root_and_trap(
                 out_slot,
@@ -10329,6 +10765,55 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 ));
             }
             self.validate_set_result_literals(key, value, subject)?;
+        } else if let Some(auth) = self.values_result_authorization {
+            let crosscall_receipts;
+            let producer_caller_receipts;
+            let entry = match auth {
+                super::NativeValuesResultAuthorization::CrosscallStringCaller => {
+                    crosscall_receipts = self
+                        .program
+                        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    crosscall_receipts
+                        .iter()
+                        .filter(|receipt| receipt.producer_owner == self.function.owner)
+                        .flat_map(|receipt| receipt.producer_set_entries.iter())
+                        .find(|entry| entry.set_instruction.as_str() == subject)
+                }
+                super::NativeValuesResultAuthorization::ProducerCaller => {
+                    producer_caller_receipts = self
+                        .program
+                        .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+                        .map_err(|message| NativeMirError::new(subject, message))?;
+                    producer_caller_receipts
+                        .iter()
+                        .filter(|receipt| receipt.producer.producer_owner == self.function.owner)
+                        .flat_map(|receipt| receipt.producer.producer_set_entries.iter())
+                        .find(|entry| entry.set_instruction.as_str() == subject)
+                }
+            };
+            let Some(entry) = entry else {
+                return Err(NativeMirError::new(
+                    subject,
+                    "native Result-branch Values SetStringResult has no matching producer Set entry receipt",
+                ));
+            };
+            let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+            if result != &entry.result_carrier
+                || source != &entry.source_root
+                || key != &entry.key_value
+                || value != &entry.payload_value
+                || self.value_type(result, subject)? != result_ty
+                || self.value_type(source, subject)?
+                    != crate::core::mir::types::ordinary_map_owned_any_v2_type_id()
+                || self.value_type(key, subject)? != string_ty
+                || self.value_type(value, subject)? != string_ty
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "native ValuesResultCrosscallStringCaller SetStringResult operands differ from its Checker/MIR receipt",
+                ));
+            }
         } else {
             let receipt = self
                 .function
@@ -10381,6 +10866,21 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 &result_ty,
                 subject,
             )?
+        } else if self.values_result_authorization.is_some() {
+            (
+                native_values_result_crosscall_string_caller_variant_abi(
+                    self.function,
+                    catalog,
+                    &result_ty,
+                )?
+                .0,
+                native_values_result_crosscall_string_caller_llvm_type(
+                    self.generator.context,
+                    self.function,
+                    catalog,
+                    &result_ty,
+                )?,
+            )
         } else {
             let (variant_abi, _) = super::native_ordinary_map_set_get_string_result_variant_abi(
                 self.function,
@@ -10642,7 +11142,12 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .context
             .append_basic_block(self.llvm_function, "mir_map_set_string_result_join");
         self.generator.builder.position_at_end(capacity_block);
-        self.emit_v2_string_free(key_data, subject)?;
+        // ValuesResultProducer emits a block-level MIR Drop for the key literal
+        // after SetStringResult (covering both Ok and Err arms). Freeing it
+        // here as well would double-free on the recoverable capacity path.
+        if !self.values_result_authorization.is_some() {
+            self.emit_v2_string_free(key_data, subject)?;
+        }
         let mut capacity_result = result_llvm_type.get_undef();
         for (index, payload_ty) in variant_abi.payload_types.iter().enumerate() {
             let payload_llvm_ty = native_basic_type(self.generator.context, catalog, payload_ty)?;
@@ -13446,15 +13951,100 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .into_struct_type(),
             )
         };
+        self.emit_ordinary_map_owned_any_v2_set_result_with_abi(
+            source,
+            key,
+            value,
+            &result_ty,
+            &variant_abi,
+            result_llvm_type,
+            subject,
+        )
+    }
+
+    pub(super) fn emit_ordinary_map_owned_any_v2_set_result_branch_v1(
+        &mut self,
+        result: &MirValueId,
+        source: &MirValueId,
+        key: &MirValueId,
+        value: &MirValueId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let catalog = self.program.type_catalog();
+        if crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+            self.function,
+            crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set,
+            result,
+        )
+        .is_none()
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "native ResultBranchV1 Set has no matching Checker receipt",
+            ));
+        }
+        crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+            catalog,
+            self.function,
+        )
+        .map_err(|message| NativeMirError::new(subject, message))?;
+        let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+        let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+        let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+        if self.value_type(result, subject)? != result_ty
+            || self.value_type(source, subject)? != root_ty
+            || self.value_type(key, subject)? != string_ty
+        {
+            return Err(NativeMirError::new(
+                subject,
+                "native ResultBranchV1 Set operands differ from its canonical Result/root/key types",
+            ));
+        }
+        let variant_abi = super::native_ordinary_map_result_branch_v1_variant_abi(
+            self.function,
+            catalog,
+            &result_ty,
+        )?
+        .0;
+        let result_llvm_type = super::native_ordinary_map_result_branch_v1_llvm_type(
+            self.generator.context,
+            self.function,
+            catalog,
+            &result_ty,
+        )?
+        .into_struct_type();
+        self.emit_ordinary_map_owned_any_v2_set_result_with_abi(
+            source,
+            key,
+            value,
+            &result_ty,
+            &variant_abi,
+            result_llvm_type,
+            subject,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_ordinary_map_owned_any_v2_set_result_with_abi(
+        &mut self,
+        source: &MirValueId,
+        key: &MirValueId,
+        value: &MirValueId,
+        result_ty: &crate::core::ResolvedTypeId,
+        variant_abi: &super::NativeVariantAbi,
+        result_llvm_type: inkwell::types::StructType<'ctx>,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
+        let catalog = self.program.type_catalog();
         let ok_id = crate::core::NodeId("builtin:variant:Result::Ok".into());
         let err_id = crate::core::NodeId("builtin:variant:Result::Err".into());
         let ok_variant = catalog
-            .validated_variant_switch_case(&result_ty, &ok_id)
+            .validated_variant_switch_case(result_ty, &ok_id)
             .map_err(|message| NativeMirError::new(subject, message))?
             .1
             .clone();
         let err_variant = catalog
-            .validated_variant_switch_case(&result_ty, &err_id)
+            .validated_variant_switch_case(result_ty, &err_id)
             .map_err(|message| NativeMirError::new(subject, message))?
             .1
             .clone();
@@ -18988,6 +19578,10 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             .program
             .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
             .map_err(|message| NativeMirError::new(subject, message))?;
+        let result_crosscall_receipts = self
+            .program
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+            .map_err(|message| NativeMirError::new(subject, message))?;
         let matching = receipts
             .iter()
             .filter(|receipt| {
@@ -19001,10 +19595,20 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                     && receipt.caller_unpack_instruction.as_str() == subject
             })
             .collect::<Vec<_>>();
-        if !matching.is_empty() && !matching_crosscall.is_empty() {
+        let matching_result_crosscall = result_crosscall_receipts
+            .iter()
+            .filter(|receipt| {
+                receipt.caller_owner == self.function.owner
+                    && receipt.caller_unpack_instruction.as_str() == subject
+            })
+            .collect::<Vec<_>>();
+        let active_profiles = usize::from(!matching.is_empty())
+            + usize::from(!matching_crosscall.is_empty())
+            + usize::from(!matching_result_crosscall.is_empty());
+        if active_profiles > 1 {
             return Err(NativeMirError::new(
                 subject,
-                "ordinary Map/Any Values unpack is ambiguously covered by same-function and cross-call receipts",
+                "ordinary Map/Any Values unpack is ambiguously covered by multiple producer/caller receipts",
             ));
         }
         let (
@@ -19123,6 +19727,98 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 receipt.checker_caller.index_type.clone(),
                 receipt.payload_selection_digest.clone(),
                 receipt.payload_type_desc_digest.clone(),
+                receipt.caller_string.clone(),
+                receipt.caller_snapshot_drop_instruction.clone(),
+                checker_element,
+                checker_snapshot_type,
+                crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition::SelectedPayload,
+            )
+        } else if let [receipt] = matching_result_crosscall.as_slice() {
+            if self.values_result_authorization
+                != Some(super::NativeValuesResultAuthorization::CrosscallStringCaller)
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "ordinary Map/Any Result cross-call Values unpack requires its dedicated CheckedProgram route",
+                ));
+            }
+            match receipt.checker_caller.profile_version {
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
+                    validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_native_contract(
+                        self.program,
+                    )
+                }
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
+                    validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_native_contract(
+                        self.program,
+                    )
+                }
+                other => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        format!(
+                            "Result cross-call Values unpack has unsupported profile version {other:?}"
+                        ),
+                    ));
+                }
+            }
+            .map_err(|messages| NativeMirError::new(subject, messages.join("; ")))?;
+            if receipt.caller_unpack_result != *result
+                || receipt.caller_snapshot != *values
+                || receipt.caller_index != *index
+                || receipt.checker_caller.index_projection != *projection
+                || receipt.caller_owner != self.function.owner
+                || receipt.caller_unpack_instruction.as_str() != subject
+                || self.value_type(result, subject)? != receipt.string_type
+                || self.value_type(values, subject)? != receipt.values_type
+                || self.value_type(index, subject)? != receipt.checker_caller.index_type
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "ordinary Map/Any Result cross-call Values unpack receipt does not bind the exact snapshot/index/projection/String result",
+                ));
+            }
+            let string_descriptor = self
+                .program
+                .type_catalog()
+                .get(&receipt.string_type)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any Result cross-call Values String TypeDesc is absent",
+                    )
+                })?;
+            let payload_type_desc_digest =
+                blake3::hash(string_descriptor.canonical_text().as_bytes())
+                    .to_hex()
+                    .to_string();
+            let checker_snapshot_type = receipt.checker_caller.snapshot_type.clone();
+            let checker_snapshot = self
+                .program
+                .type_catalog()
+                .get(&checker_snapshot_type)
+                .ok_or_else(|| {
+                    NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any Result cross-call Values Checker snapshot TypeDesc is absent",
+                    )
+                })?;
+            let checker_element = match &checker_snapshot.layout {
+                MirLayout::List { element } if checker_snapshot.kind == MirTypeKind::List => {
+                    element.clone()
+                }
+                _ => {
+                    return Err(NativeMirError::new(
+                        subject,
+                        "ordinary Map/Any Result cross-call Values Checker snapshot is not List<DynamicAny>",
+                    ));
+                }
+            };
+            (
+                receipt.string_type.clone(),
+                receipt.checker_caller.index_type.clone(),
+                receipt.payload_selection_digest.clone(),
+                payload_type_desc_digest,
                 receipt.caller_string.clone(),
                 receipt.caller_snapshot_drop_instruction.clone(),
                 checker_element,
@@ -20405,6 +21101,53 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "ordinary Map/Any owner-v2 Values Len receiver has another TypeDesc",
             ));
         }
+        if self.values_result_authorization
+            == Some(super::NativeValuesResultAuthorization::ProducerCaller)
+        {
+            let result_bridges = self
+                .program
+                .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+                self.program,
+            )
+            .map_err(|message| NativeMirError::new(subject, message))?;
+            let matching_bridges = result_bridges
+                .iter()
+                .filter(|bridge| {
+                    bridge.caller_owner == self.function.owner
+                        && bridge.caller_len_receiver == *list
+                        && bridge.caller_len_instruction.as_str() == subject
+                        && bridge.caller_len_result == *result
+                })
+                .collect::<Vec<_>>();
+            let [bridge] = matching_bridges.as_slice() else {
+                return Err(NativeMirError::new(
+                    subject,
+                    "ordinary Map/Any owner-v2 Result Values Len has no unique producer/caller receipt",
+                ));
+            };
+            if bridge.schema
+                != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_SCHEMA
+                || bridge.profile
+                    != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+                || bridge.producer.values_type != values_type
+            {
+                return Err(NativeMirError::new(
+                    subject,
+                    "ordinary Map/Any owner-v2 Result Values Len disagrees with its producer/caller bridge",
+                ));
+            }
+            bridge
+                .validate_against_program(self.program)
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            return self.emit_ordinary_map_owned_any_v2_values_len_call(
+                result,
+                list,
+                &values_type,
+                subject,
+            );
+        }
         let receipts = ordinary_map_owned_any_v2_local_values_result_receipts(self.program)
             .map_err(|message| NativeMirError::new(subject, message))?;
         let bridge_receipts = self
@@ -20511,9 +21254,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 .and_then(|()| receipt.validate_against_program(self.program))
                 .map_err(|message| NativeMirError::new(subject, message))?;
         }
+        self.emit_ordinary_map_owned_any_v2_values_len_call(result, list, &values_type, subject)
+    }
+
+    fn emit_ordinary_map_owned_any_v2_values_len_call(
+        &mut self,
+        result: &MirValueId,
+        list: &MirValueId,
+        values_type: &crate::core::ResolvedTypeId,
+        subject: &str,
+    ) -> Result<BasicValueEnum<'ctx>, NativeMirError> {
         validate_ordinary_map_owned_any_v2_values_list_type(
             self.program.type_catalog(),
-            &values_type,
+            values_type,
         )
         .map_err(|message| NativeMirError::new(subject, message))?;
         let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
@@ -20687,13 +21440,22 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 }
             }
         }
+        let expected_source_root_type = cfg
+            .actions
+            .iter()
+            .find(|action| {
+                action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
+                    && action.point == branch.map_set_operation
+            })
+            .and_then(|action| action.source_type.as_ref());
         let root_type = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
         if cfg.owner != self.function.owner
             || branch.owner != self.function.owner
             || self.value_type(root, subject)? != root_type
             || !matches!(
-                matches.as_slice(),
-                [matched] if matched.binding_type == root_type
+                (matches.as_slice(), expected_source_root_type),
+                ([matched], Some(expected_source_root_type))
+                    if matched.binding_type == *expected_source_root_type
             )
         {
             return Err(NativeMirError::new(
@@ -20736,8 +21498,8 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             let expected_value = MirValueId::new(format!("local:{}", drop.local.0 .0))
                 .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
             let expected_subject = format!(
-                "inst:drop.{}:{}",
-                drop.settlement_place_index, drop.settlement_point.0
+                "inst:map_set_drop_control_result:payload_drop:{}",
+                drop.settlement_point.0
             );
             if value == &expected_value && subject == expected_subject {
                 payload_matches.push(drop);
@@ -21035,6 +21797,155 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
     validate_values_result_crosscall_string_caller_native_contract(program, true)
 }
 
+pub(super) fn validate_ordinary_map_owned_any_v2_values_result_producer_caller_native_contract(
+    program: &MirProgram,
+) -> Result<(), Vec<String>> {
+    use crate::core::mir::{MirInstructionKind as Instruction, MirTerminator};
+
+    let receipts = program
+        .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+        .map_err(|message| vec![message])?;
+    let [receipt] = receipts.as_slice() else {
+        return Err(vec![format!(
+            "native Result-branch Values producer/caller route requires one receipt, got {}",
+            receipts.len()
+        )]);
+    };
+    if receipt.schema
+        != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_SCHEMA
+        || receipt.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+    {
+        return Err(vec![
+            "native Result-branch Values producer/caller receipt has non-canonical schema or profile"
+                .into(),
+        ]);
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| vec![message])?;
+    let has_unpack = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                )
+            })
+        })
+    });
+    if has_unpack {
+        return Err(vec![
+            "native Result-branch Values producer/caller forbids cross-call ValuesUnpack instructions"
+                .into(),
+        ]);
+    }
+    validate_values_result_producer_native_census(program)?;
+    let caller = program
+        .functions()
+        .get(&receipt.caller_owner)
+        .ok_or_else(|| vec!["native Result-branch Values caller owner is absent".to_string()])?;
+    let values_type = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if caller.result != i32_type
+        || receipt.producer.values_type != values_type
+        || caller.values.get(&receipt.caller_result).map(|v| &v.ty) != Some(&values_type)
+        || caller.values.get(&receipt.caller_snapshot).map(|v| &v.ty) != Some(&values_type)
+        || caller
+            .values
+            .get(&receipt.caller_len_receiver)
+            .map(|v| &v.ty)
+            != Some(&values_type)
+        || caller.values.get(&receipt.caller_len_result).map(|v| &v.ty) != Some(&i32_type)
+        || caller
+            .values
+            .get(&receipt.caller_len_binding)
+            .map(|v| &v.ty)
+            != Some(&i32_type)
+        || caller
+            .values
+            .get(&receipt.caller_return_value)
+            .map(|v| &v.ty)
+            != Some(&i32_type)
+    {
+        return Err(vec![
+            "native Result-branch Values producer/caller operands disagree with canonical TypeDescs"
+                .into(),
+        ]);
+    }
+    let caller_instructions = caller
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .collect::<Vec<_>>();
+    let has_call = caller_instructions.iter().any(|instruction| {
+        instruction.id == receipt.producer_call_instruction
+            && matches!(
+                &instruction.kind,
+                Instruction::Call {
+                    result: Some(result),
+                    callee: crate::core::ir::ResolvedCallee::Function(target),
+                    ..
+                } if result == &receipt.caller_result && target == &receipt.producer.producer_owner
+            )
+    });
+    let has_clone = caller_instructions.iter().any(|instruction| {
+        instruction.id == receipt.caller_len_receiver_clone_instruction
+            && matches!(
+                &instruction.kind,
+                Instruction::Clone { result, source }
+                    if result == &receipt.caller_len_receiver
+                        && source == &receipt.caller_snapshot
+            )
+    });
+    let has_len = caller_instructions.iter().any(|instruction| {
+        instruction.id == receipt.caller_len_instruction
+            && matches!(
+                &instruction.kind,
+                Instruction::ListOp {
+                    result,
+                    operation: crate::core::mir::MirListOperation::Len,
+                    list,
+                    argument: None,
+                    list_operation_contract: Some(_),
+                } if result == &receipt.caller_len_result && list == &receipt.caller_len_receiver
+            )
+    });
+    let has_receiver_drop = caller_instructions.iter().any(|instruction| {
+        instruction.id == receipt.caller_len_receiver_drop_instruction
+            && matches!(
+                &instruction.kind,
+                Instruction::Drop { value } if value == &receipt.caller_len_receiver
+            )
+    });
+    let has_snapshot_drop = caller_instructions.iter().any(|instruction| {
+        instruction.id == receipt.caller_snapshot_drop_instruction
+            && matches!(
+                &instruction.kind,
+                Instruction::Drop { value } if value == &receipt.caller_snapshot
+            )
+    });
+    let has_return = caller.blocks.values().any(|block| {
+        matches!(
+            &block.terminator,
+            MirTerminator::Return { value: Some(value) } if value == &receipt.caller_return_value
+        )
+    });
+    if !has_call
+        || !has_clone
+        || !has_len
+        || !has_receiver_drop
+        || !has_snapshot_drop
+        || !has_return
+    {
+        return Err(vec![
+            "native Result-branch Values caller is missing its exact Call, Clone, Len, Drop, or i32 Return site"
+                .into(),
+        ]);
+    }
+    Ok(())
+}
+
 fn validate_values_result_crosscall_string_caller_native_contract(
     program: &MirProgram,
     index1: bool,
@@ -21206,17 +22117,39 @@ fn validate_values_result_crosscall_string_caller_native_contract(
             )
         })
         .count();
+    let expected_literal_drops = caller_instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                Instruction::Drop { value } if value == &receipt.caller_expected_literal
+            )
+        })
+        .count();
     let settlements_observed = [
-        receipt.caller_string_drop_instruction.clone(),
-        receipt.caller_snapshot_drop_instruction.clone(),
+        (&receipt.caller_string_drop_instruction, &receipt.caller_string),
+        (
+            &receipt.caller_snapshot_drop_instruction,
+            &receipt.caller_snapshot,
+        ),
     ]
     .iter()
-    .all(|id| {
-        caller_instructions.iter().any(|instruction| {
-            instruction.id == *id && matches!(instruction.kind, Instruction::Drop { .. })
-        })
+    .all(|(id, expected_value)| {
+        caller_instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.id == **id
+                    && matches!(&instruction.kind, Instruction::Drop { value } if value == *expected_value)
+            })
+            .count()
+            == 1
     });
-    if call_count != 1 || unpack_count != 1 || caller_drops != 2 || !settlements_observed {
+    if call_count != 1
+        || unpack_count != 1
+        || expected_literal_drops > 1
+        || caller_drops != 2 + expected_literal_drops
+        || !settlements_observed
+    {
         return Err(vec![
             "native Result-branch caller operation census lacks its direct call, one Values unpack, or owner settlements".into(),
         ]);
@@ -21773,6 +22706,7 @@ mod tests {
         COMPUTED_SET_CALLS.fetch_add(1, Ordering::SeqCst);
         COMPUTED_SET_SOURCE_ROOT.store(source_root, Ordering::SeqCst);
         COMPUTED_SET_KEY_POINTER.store(key as usize, Ordering::SeqCst);
+        COMPUTED_SET_KEY_POINTER_REUSED.store(false, Ordering::SeqCst);
         COMPUTED_SET_PAYLOAD_TOKEN.store(payload_token, Ordering::SeqCst);
         if out_root.is_null() {
             COMPUTED_SET_STATUS.store(1, Ordering::SeqCst);
@@ -21835,10 +22769,16 @@ mod tests {
     }
 
     extern "C" fn computed_set_any_result_payload_drop_shim(token: i64) -> i32 {
-        COMPUTED_SET_PAYLOAD_DROP_CALLS.fetch_add(1, Ordering::SeqCst);
-        COMPUTED_SET_PAYLOAD_DROP_TOKEN.store(token, Ordering::SeqCst);
+        let is_creator_token =
+            token != 0 && token == COMPUTED_SET_PAYLOAD_TOKEN.load(Ordering::SeqCst);
+        if is_creator_token {
+            COMPUTED_SET_PAYLOAD_DROP_CALLS.fetch_add(1, Ordering::SeqCst);
+            COMPUTED_SET_PAYLOAD_DROP_TOKEN.store(token, Ordering::SeqCst);
+        }
         let status = crate::runtime::mimi_any_payload_v2_drop(token);
-        COMPUTED_SET_PAYLOAD_DROP_STATUS.store(status, Ordering::SeqCst);
+        if is_creator_token {
+            COMPUTED_SET_PAYLOAD_DROP_STATUS.store(status, Ordering::SeqCst);
+        }
         status
     }
 
@@ -21864,9 +22804,29 @@ mod tests {
         crate::runtime::mimi_ordinary_map_owned_any_v2_drop(root)
     }
 
+    static COMPUTED_SET_KEY_POINTER_REUSED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    // SAFETY: called only by compiled JIT drop glue following `mimi_mir_ordinary_map_domain_own_string`'s C ABI.
+    unsafe extern "C" fn computed_set_any_result_own_string_shim(
+        pointer: *mut std::ffi::c_char,
+        length: i64,
+    ) -> i32 {
+        if !pointer.is_null()
+            && pointer as usize == COMPUTED_SET_KEY_POINTER.load(Ordering::SeqCst)
+            && COMPUTED_SET_KEY_FREE_CALLS.load(Ordering::SeqCst) >= 1
+        {
+            COMPUTED_SET_KEY_POINTER_REUSED.store(true, Ordering::SeqCst);
+        }
+        // SAFETY: this forwards the runtime's exact owned-string registration ABI.
+        unsafe { crate::runtime::mimi_mir_ordinary_map_domain_own_string(pointer, length) }
+    }
+
     // SAFETY: called only by compiled JIT drop glue following `mimi_string_free`'s C ABI.
     unsafe extern "C" fn computed_set_any_result_key_free_shim(pointer: *mut std::ffi::c_char) {
-        if pointer as usize == COMPUTED_SET_KEY_POINTER.load(Ordering::SeqCst) {
+        if !COMPUTED_SET_KEY_POINTER_REUSED.load(Ordering::SeqCst)
+            && pointer as usize == COMPUTED_SET_KEY_POINTER.load(Ordering::SeqCst)
+        {
             COMPUTED_SET_KEY_FREE_CALLS.fetch_add(1, Ordering::SeqCst);
         }
         // SAFETY: this forwards the runtime's exact mimi_string_free ABI.
@@ -22154,7 +23114,7 @@ mod tests {
             ),
             (
                 "mimi_mir_ordinary_map_domain_own_string",
-                crate::runtime::mimi_mir_ordinary_map_domain_own_string as *const () as usize,
+                computed_set_any_result_own_string_shim as *const () as usize,
             ),
             (
                 "mimi_mir_ordinary_map_domain_register_shutdown",
@@ -22181,6 +23141,16 @@ mod tests {
                 "mimi_print_bytes",
                 crate::runtime::mimi_print_bytes as *const () as usize,
             ),
+            ("printf", libc::printf as *const () as usize),
+            ("puts", libc::puts as *const () as usize),
+            ("malloc", libc::malloc as *const () as usize),
+            ("free", libc::free as *const () as usize),
+            ("strlen", libc::strlen as *const () as usize),
+            ("memcpy", libc::memcpy as *const () as usize),
+            ("memcmp", libc::memcmp as *const () as usize),
+            ("memset", libc::memset as *const () as usize),
+            ("realloc", libc::realloc as *const () as usize),
+            ("strcmp", libc::strcmp as *const () as usize),
             (
                 "mimi_runtime_abort",
                 crate::runtime::mimi_runtime_abort as *const () as usize,
@@ -22190,6 +23160,7 @@ mod tests {
                 crate::runtime::mimi_mir_assert_no_live_managed_any_v2_lists as *const () as usize,
             ),
         ];
+        use inkwell::values::AsValueRef;
         let mut mapped = BTreeSet::new();
         for import in generator.module.get_functions() {
             if import.count_basic_blocks() != 0 {
@@ -22200,6 +23171,13 @@ mod tests {
                 .to_str()
                 .expect("native runtime import name");
             if name.starts_with("llvm.") {
+                continue;
+            }
+            // Skip unreferenced declarations registered upfront by `CodeGenerator::new`.
+            // Any actually referenced external symbol must remain explicitly mapped below.
+            // SAFETY: `import` is a valid LLVM function declaration in this context.
+            if unsafe { inkwell::llvm_sys::core::LLVMGetFirstUse(import.as_value_ref()).is_null() }
+            {
                 continue;
             }
             let (_, address) = runtime_mappings
@@ -22304,13 +23282,28 @@ mod tests {
         let source = r#"
 func snapshot_values() -> List {
     let payload = "owned value"
-    let empty = map_new()
-    let root = map_set(empty, "key", payload)
-    let snapshot = values(root)
-    drop(empty)
-    drop(root)
-    drop(payload)
-    snapshot
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", payload) {
+                Ok(root) => {
+                    let snapshot = values(root)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    snapshot
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    []
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            []
+        },
+    }
 }
 
 func direct_caller() -> bool {
@@ -22387,14 +23380,16 @@ func main() -> i32 { 0 }
     fn values_crosscall_string_native_contract_accepts_exact_copy_and_independent_drops() {
         let (checked, program) = values_crosscall_string_checked_program_for_native_contract_test();
         let route =
-            crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
                 &checked, &program,
             )
-            .expect("exact cross-call Values String route receipt");
+            .expect("exact V3 cross-call Values String route receipt");
 
-        validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_native_contract(&program)
-            .expect("native Values cross-call String owner contract");
-        crate::codegen::mir::validate_checked_mir_native_values_crosscall_string_caller_route(
+        validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_native_contract(
+            &program,
+        )
+        .expect("native Values Result cross-call String owner contract");
+        crate::codegen::mir::validate_checked_mir_native_values_result_crosscall_string_caller_route(
             &checked, &program, &route,
         )
         .expect("CheckedProgram/MIR/native route identity");
@@ -22408,12 +23403,12 @@ func main() -> i32 { 0 }
         assert!(generic_error.iter().any(|diagnostic| {
             diagnostic
                 .message
-                .contains("ValuesCrosscallStringCaller requires its dedicated")
+                .contains("ValuesResultCrosscallStringCallerV3 requires its dedicated")
         }));
 
         let mut native = CodeGenerator::new(&context, "values_crosscall_checked_route");
         native
-            .compile_checked_mir_native_with_values_crosscall_string_caller_route(
+            .compile_checked_mir_native_with_values_result_crosscall_string_caller_route(
                 &checked, &program, &route,
             )
             .expect("exact Checker/MIR receipt authorizes native cross-call String emission");
@@ -22434,11 +23429,11 @@ func main() -> i32 { 0 }
         let (_, mut nonzero_index) =
             values_crosscall_string_checked_program_for_native_contract_test();
         let receipt = nonzero_index
-            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
-            .expect("read cross-call Values String receipt")
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+            .expect("read V3 cross-call Values String receipt")
             .into_iter()
             .next()
-            .expect("one cross-call Values String receipt");
+            .expect("one V3 cross-call Values String receipt");
         let mut caller = nonzero_index
             .functions()
             .get(&receipt.caller_owner)
@@ -22451,7 +23446,7 @@ func main() -> i32 { 0 }
             .flat_map(|block| &mut block.instructions)
         {
             if let Instruction::Const { result, literal } = &mut instruction.kind {
-                if result == &receipt.caller_index_zero {
+                if result == &receipt.caller_index {
                     *literal = ResolvedLiteral::Int(1);
                     changed_index = true;
                 }
@@ -22460,7 +23455,7 @@ func main() -> i32 { 0 }
         assert!(changed_index, "receipt-bound literal zero exists in caller");
         nonzero_index.replace_function_for_test_only(caller);
         assert!(
-            validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_native_contract(
+            validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_native_contract(
                 &nonzero_index,
             )
             .is_err(),
@@ -22470,11 +23465,11 @@ func main() -> i32 { 0 }
         let (_, mut missing_snapshot_drop) =
             values_crosscall_string_checked_program_for_native_contract_test();
         let receipt = missing_snapshot_drop
-            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
-            .expect("read cross-call Values String receipt")
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+            .expect("read V3 cross-call Values String receipt")
             .into_iter()
             .next()
-            .expect("one cross-call Values String receipt");
+            .expect("one V3 cross-call Values String receipt");
         let mut caller = missing_snapshot_drop
             .functions()
             .get(&receipt.caller_owner)
@@ -22494,7 +23489,7 @@ func main() -> i32 { 0 }
         );
         missing_snapshot_drop.replace_function_for_test_only(caller);
         assert!(
-            validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_native_contract(
+            validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_native_contract(
                 &missing_snapshot_drop,
             )
             .is_err(),
@@ -22504,11 +23499,11 @@ func main() -> i32 { 0 }
         let (_, mut wrong_producer_return) =
             values_crosscall_string_checked_program_for_native_contract_test();
         let receipt = wrong_producer_return
-            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
-            .expect("read cross-call Values String receipt")
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
+            .expect("read V3 cross-call Values String receipt")
             .into_iter()
             .next()
-            .expect("one cross-call Values String receipt");
+            .expect("one V3 cross-call Values String receipt");
         let mut producer = wrong_producer_return
             .functions()
             .get(&receipt.producer_owner)
@@ -22526,7 +23521,7 @@ func main() -> i32 { 0 }
         assert!(changed_return, "receipt-bound producer Return exists");
         wrong_producer_return.replace_function_for_test_only(producer);
         assert!(
-            validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_native_contract(
+            validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_native_contract(
                 &wrong_producer_return,
             )
             .is_err(),
@@ -24932,6 +25927,7 @@ func main() -> i32 {
                 "mimi_print_bytes",
                 crate::runtime::mimi_print_bytes as *const () as usize,
             ),
+            ("printf", libc::printf as *const () as usize),
             (
                 "mimi_runtime_abort",
                 observe_native_get_or_default_string_abort as *const () as usize,

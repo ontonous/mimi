@@ -1392,6 +1392,24 @@ impl BytecodeVM {
                 "ordinary Map/Any owner-v2 GetAny miss binding is not canonical i32",
             ));
         }
+        let computed_chain_record_target = self
+            .program
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.computed_string_key_owner_chain_result_branch_sites())
+            .and_then(|sites| match &sites.payload_binding.kind {
+                super::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::Record { nominal } => {
+                    Some((
+                        sites.payload_binding.type_id.clone(),
+                        nominal.clone(),
+                        sites.payload_descriptor_hash.clone(),
+                        sites.payload_tag,
+                        sites.payload_size,
+                        sites.payload_align,
+                    ))
+                }
+                _ => None,
+            });
         let (found, owner, unpack_backing) = match self.get_reg(root_reg) {
             Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
                 if root.is_unique() && root.is_live() =>
@@ -1408,13 +1426,137 @@ impl BytecodeVM {
                         "[E0800] ordinary Map/Any owner-v2 GetAny runtime ABI failed: {message}"
                     ))
                 })?;
-                (
-                    found,
-                    crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(
-                        expected_i32.clone(),
-                    ),
-                    Some((expected_i32.clone(), 0, Some(token))),
-                )
+                if found {
+                    if let Some((
+                        record_type_id,
+                        nominal,
+                        descriptor_hash_hex,
+                        payload_tag,
+                        payload_size,
+                        payload_align,
+                    )) = computed_chain_record_target
+                    {
+                        let descriptor_hash_bytes = ordinary_map_decode_route_hex(
+                            &descriptor_hash_hex,
+                            "ComputedStringKeyOwnerChain payload descriptor hash",
+                        )
+                        .inspect_err(|_| {
+                            let _ = crate::runtime::drop_managed_any_v2_token(token);
+                        })?;
+                        let descriptor_hash: [u8; 32] =
+                            descriptor_hash_bytes.try_into().map_err(|_| {
+                                let _ = crate::runtime::drop_managed_any_v2_token(token);
+                                InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 GetAny record descriptor hash length is invalid",
+                                )
+                            })?;
+                        if usize::try_from(payload_size).ok()
+                            != Some(std::mem::size_of::<OrdinaryMapOwnedAnyV2StringBox>())
+                            || usize::try_from(payload_align).ok()
+                                != Some(std::mem::align_of::<OrdinaryMapOwnedAnyV2StringBox>())
+                        {
+                            let _ = crate::runtime::drop_managed_any_v2_token(token);
+                            return Err(InterpError::new(
+                                "[E0800] ordinary Map/Any owner-v2 GetAny record layout mismatches StringBox",
+                            ));
+                        }
+                        let type_id_bytes = record_type_id.as_str().as_bytes();
+                        let type_id_len = i64::try_from(type_id_bytes.len()).map_err(|_| {
+                            let _ = crate::runtime::drop_managed_any_v2_token(token);
+                            InterpError::new(
+                                "[E0800] ordinary Map/Any owner-v2 GetAny record TypeId exceeds runtime ABI",
+                            )
+                        })?;
+                        let mut out_box = OrdinaryMapOwnedAnyV2StringBox {
+                            data: std::ptr::null_mut(),
+                            length: 0,
+                        };
+                        // SAFETY: `out_box` matches `payload_size`/`payload_align` checked above
+                        // for the descriptor-validated `StringBox` record layout.
+                        let unpack_status = unsafe {
+                            crate::runtime::mimi_any_payload_v2_unpack(
+                                token,
+                                payload_tag,
+                                type_id_bytes.as_ptr(),
+                                type_id_len,
+                                descriptor_hash.as_ptr(),
+                                (&mut out_box as *mut OrdinaryMapOwnedAnyV2StringBox).cast::<u8>(),
+                                i64::from(payload_size),
+                                i64::from(payload_align),
+                            )
+                        };
+                        if unpack_status != 0 {
+                            if !out_box.data.is_null() {
+                                // SAFETY: if non-null on error, ownership was not transferred elsewhere.
+                                unsafe { libc::free(out_box.data.cast()) };
+                            }
+                            let _ = crate::runtime::drop_managed_any_v2_token(token);
+                            return Err(InterpError::new(format!(
+                                "[E0800] ordinary Map/Any owner-v2 GetAny runtime record unpack failed with status {unpack_status}"
+                            )));
+                        }
+                        let extracted = if out_box.length == 0 {
+                            String::new()
+                        } else if out_box.length < 0 || out_box.data.is_null() {
+                            if !out_box.data.is_null() {
+                                // SAFETY: release malloc allocation returned by unpack.
+                                unsafe { libc::free(out_box.data.cast()) };
+                            }
+                            let _ = crate::runtime::drop_managed_any_v2_token(token);
+                            return Err(InterpError::new(
+                                "[E0800] ordinary Map/Any owner-v2 GetAny record text box is malformed",
+                            ));
+                        } else {
+                            let len = usize::try_from(out_box.length).map_err(|_| {
+                                // SAFETY: release malloc allocation returned by unpack.
+                                unsafe { libc::free(out_box.data.cast()) };
+                                let _ = crate::runtime::drop_managed_any_v2_token(token);
+                                InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 GetAny record text length overflows usize",
+                                )
+                            })?;
+                            // SAFETY: `out_box.data` points to `len` initialized UTF-8 bytes from
+                            // `ordinary_map_owned_any_v2_clone_string_box` until freed below.
+                            let bytes = unsafe {
+                                std::slice::from_raw_parts(out_box.data.cast::<u8>(), len)
+                            };
+                            let text_res = std::str::from_utf8(bytes).map(str::to_owned);
+                            // SAFETY: `out_box.data` was allocated by `libc::malloc` inside unpack.
+                            unsafe { libc::free(out_box.data.cast()) };
+                            text_res.map_err(|_| {
+                                let _ = crate::runtime::drop_managed_any_v2_token(token);
+                                InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 GetAny record text is non-UTF-8",
+                                )
+                            })?
+                        };
+                        (
+                            true,
+                            crate::interp::value::CanonicalManagedAnyV2::from_record(
+                                record_type_id.clone(),
+                                nominal,
+                                extracted,
+                            ),
+                            Some((record_type_id, 0, Some(token))),
+                        )
+                    } else {
+                        (
+                            found,
+                            crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(
+                                expected_i32.clone(),
+                            ),
+                            Some((expected_i32.clone(), 0, Some(token))),
+                        )
+                    }
+                } else {
+                    (
+                        false,
+                        crate::interp::value::CanonicalManagedAnyV2::from_runtime_i32(
+                            expected_i32.clone(),
+                        ),
+                        Some((expected_i32.clone(), 0, Some(token))),
+                    )
+                }
             }
             Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
                 return Err(InterpError::new(
@@ -3035,6 +3177,7 @@ impl BytecodeVM {
         self.validate_canonical_values_mixed_snapshot_remove_route_anchor()?;
         self.validate_canonical_values_producer_caller_route_anchor()?;
         self.validate_canonical_values_crosscall_string_caller_route_anchor()?;
+        self.validate_canonical_values_result_producer_caller_route_anchor()?;
         self.validate_canonical_map_root_producer_caller_route_anchor()?;
         self.validate_canonical_empty_root_root_queries_v1_route_anchor()?;
         self.validate_canonical_computed_key_get_route_anchor()?;
@@ -3544,6 +3687,20 @@ impl BytecodeVM {
         match &self.program.canonical_map_any_owner_v1_receipt {
             Some(receipt) => receipt
                 .validate_values_result_crosscall_string_caller_route_anchor(
+                    self.program.entry,
+                    &self.program.functions,
+                )
+                .map_err(InterpError::new),
+            None => Ok(false),
+        }
+    }
+
+    fn validate_canonical_values_result_producer_caller_route_anchor(
+        &self,
+    ) -> Result<bool, InterpError> {
+        match &self.program.canonical_map_any_owner_v1_receipt {
+            Some(receipt) => receipt
+                .validate_values_result_producer_caller_route_anchor(
                     self.program.entry,
                     &self.program.functions,
                 )
@@ -4183,6 +4340,7 @@ impl BytecodeVM {
             || self.validate_canonical_values_crosscall_string_caller_route_anchor()?
             || self.validate_canonical_values_crosscall_string_caller_index1_route_anchor()?
             || self.validate_canonical_values_result_crosscall_string_caller_route_anchor()?
+            || self.validate_canonical_values_result_producer_caller_route_anchor()?
             || self.validate_canonical_map_root_producer_caller_route_anchor()?
             || self.validate_canonical_ordinary_map_new_result_route_anchor()?
             || self.validate_canonical_ordinary_map_set_result_route_anchor()?
@@ -4813,13 +4971,23 @@ impl BytecodeVM {
                                 .canonical_map_any_owner_v1_receipt
                                 .as_ref()
                                 .map(|receipt| {
-                                    receipt.authorizes_map_root_producer_caller_move(
-                                        self.program.entry,
-                                        &self.program.functions,
-                                        function_index,
-                                        pc,
-                                        rd,
-                                        rs,
+                                    Ok::<bool, String>(
+                                        receipt.authorizes_map_root_producer_caller_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )? || receipt
+                                            .authorizes_ordinary_map_owned_any_v2_result_branch_root_move(
+                                                self.program.entry,
+                                                &self.program.functions,
+                                                function_index,
+                                                pc,
+                                                rd,
+                                                rs,
+                                            )?,
                                     )
                                 })
                                 .transpose()
@@ -4919,12 +5087,47 @@ impl BytecodeVM {
                                             rd,
                                             rs,
                                         )?
+                                    || receipt
+                                        .authorizes_map_set_drop_control_result_branch_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
+                                    || receipt
+                                        .authorizes_computed_string_key_owner_chain_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
                                     || receipt.authorizes_direct_print_result_root_move(
                                         function_index,
                                         pc,
                                         rd,
                                         rs,
-                                    ),
+                                    )
+                                    || receipt
+                                        .authorizes_values_result_crosscall_string_caller_root_move(
+                                            self.program.entry,
+                                            &self.program.functions,
+                                            function_index,
+                                            pc,
+                                            rd,
+                                            rs,
+                                        )?
+                                    || receipt.authorizes_values_result_producer_caller_root_move(
+                                        self.program.entry,
+                                        &self.program.functions,
+                                        function_index,
+                                        pc,
+                                        rd,
+                                        rs,
+                                    )?,
                                 None => false,
                             };
                             if !authorized {
@@ -8636,10 +8839,15 @@ impl BytecodeVM {
                 }
                 Op::MirOrdinaryMapOwnedGetI32StringV1New { rd } => {
                     self.ensure_reg(rd, "ordinary Map owned-Get v1 New destination")?;
-                    self.set_reg(
-                        rd,
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(Arc::new(BTreeMap::new())),
-                    );
+                    let map = Arc::new(BTreeMap::new());
+                    if self.ordinary_map_owned_get_v1_result_branch_route_enabled() {
+                        let handle =
+                            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_new();
+                        self.register_ordinary_map_owned_get_v1_runtime_handle(
+                            &map, handle, "New",
+                        )?;
+                    }
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedGetI32StringV1(map));
                 }
                 Op::MirOrdinaryMapOwnedGetI32StringV1Clone { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map owned-Get v1 clone")?;
@@ -8648,14 +8856,18 @@ impl BytecodeVM {
                             "ordinary Map owned-Get v1 Clone result aliases its source register",
                         ));
                     }
-                    let copied = match self.get_reg(ra) {
+                    let (copied, source_handle) = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
                             if Arc::strong_count(root) != 1 {
                                 return Err(InterpError::new(
                                     "ordinary Map owned-Get v1 Clone source has an unreceipted alias",
                                 ));
                             }
-                            Arc::new((**root).clone())
+                            let source_handle = self
+                                .ordinary_map_owned_get_v1_source_handle_if_enabled(
+                                    root, "Clone",
+                                )?;
+                            (Arc::new((**root).clone()), source_handle)
                         }
                         _ => {
                             return Err(InterpError::new(
@@ -8663,6 +8875,15 @@ impl BytecodeVM {
                             ));
                         }
                     };
+                    if let Some(source_handle) = source_handle {
+                        let handle =
+                            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_clone(
+                                source_handle,
+                            );
+                        self.register_ordinary_map_owned_get_v1_runtime_handle(
+                            &copied, handle, "Clone",
+                        )?;
+                    }
                     self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedGetI32StringV1(copied));
                 }
                 Op::MirOrdinaryMapOwnedGetI32StringV1Set { rd, ra, key, value } => {
@@ -8706,14 +8927,16 @@ impl BytecodeVM {
                             )))
                         }
                     };
-                    let mut entries = match self.get_reg(ra) {
+                    let (mut entries, source_handle) = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
                             if Arc::strong_count(root) != 1 {
                                 return Err(InterpError::new(
                                     "ordinary Map owned-Get v1 Set: source root has an unreceipted alias",
                                 ));
                             }
-                            root.as_ref().clone()
+                            let source_handle = self
+                                .ordinary_map_owned_get_v1_source_handle_if_enabled(root, "Set")?;
+                            (root.as_ref().clone(), source_handle)
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -8722,11 +8945,54 @@ impl BytecodeVM {
                             )));
                         }
                     };
+                    let runtime_handle = if let Some(source_handle) = source_handle {
+                        let key_len = i64::try_from(key.len()).map_err(|_| {
+                            InterpError::new("ordinary Map owned-Get v1 Set key length overflows")
+                        })?;
+                        let handle = match &value {
+                            crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::I32(
+                                integer,
+                            ) => unsafe {
+                                // SAFETY: `key` points to `key_len` readable UTF-8 bytes.
+                                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_i32(
+                                    source_handle,
+                                    key.as_ptr(),
+                                    key_len,
+                                    *integer,
+                                )
+                            },
+                            crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value::String(
+                                string,
+                            ) => {
+                                let value_len = i64::try_from(string.as_str().len()).map_err(|_| {
+                                    InterpError::new(
+                                        "ordinary Map owned-Get v1 Set value length overflows",
+                                    )
+                                })?;
+                                unsafe {
+                                    // SAFETY: `key` and `string` point to valid readable UTF-8 byte ranges.
+                                    crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string(
+                                        source_handle,
+                                        key.as_ptr(),
+                                        key_len,
+                                        string.as_str().as_ptr(),
+                                        value_len,
+                                    )
+                                }
+                            }
+                        };
+                        Some(handle)
+                    } else {
+                        None
+                    };
                     entries.insert(key, value);
-                    self.set_reg(
-                        rd,
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(Arc::new(entries)),
-                    );
+                    let map = Arc::new(entries);
+                    if let Some(handle) = runtime_handle {
+                        self.register_ordinary_map_owned_get_v1_runtime_handle(
+                            &map, handle, "Set",
+                        )?;
+                    }
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedGetI32StringV1(map));
                 }
                 Op::MirOrdinaryMapOwnedGetI32StringV1Remove { rd, ra, key } => {
                     self.ensure_unary_regs(
@@ -8741,7 +9007,7 @@ impl BytecodeVM {
                         ));
                     }
                     let key = match self.get_reg(key) {
-                        Value::String(key) => key.as_str(),
+                        Value::String(key) => key.as_str().to_owned(),
                         other => {
                             return Err(InterpError::new(format!(
                                 "ordinary Map owned-Get v1 Remove: expected String key, got {}",
@@ -8749,14 +9015,18 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    let mut entries = match self.get_reg(ra) {
+                    let (mut entries, source_handle) = match self.get_reg(ra) {
                         Value::CanonicalOrdinaryMapOwnedGetI32StringV1(root) => {
                             if Arc::strong_count(root) != 1 {
                                 return Err(InterpError::new(
                                     "ordinary Map owned-Get v1 Remove: source root has an unreceipted alias",
                                 ));
                             }
-                            root.as_ref().clone()
+                            let source_handle = self
+                                .ordinary_map_owned_get_v1_source_handle_if_enabled(
+                                    root, "Remove",
+                                )?;
+                            (root.as_ref().clone(), source_handle)
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -8765,11 +9035,32 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    entries.remove(key);
-                    self.set_reg(
-                        rd,
-                        Value::CanonicalOrdinaryMapOwnedGetI32StringV1(Arc::new(entries)),
-                    );
+                    let runtime_handle = if let Some(source_handle) = source_handle {
+                        let key_len = i64::try_from(key.len()).map_err(|_| {
+                            InterpError::new(
+                                "ordinary Map owned-Get v1 Remove key length overflows",
+                            )
+                        })?;
+                        let handle = unsafe {
+                            // SAFETY: `key` points to `key_len` readable UTF-8 bytes.
+                            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_remove(
+                                source_handle,
+                                key.as_ptr(),
+                                key_len,
+                            )
+                        };
+                        Some(handle)
+                    } else {
+                        None
+                    };
+                    entries.remove(key.as_str());
+                    let map = Arc::new(entries);
+                    if let Some(handle) = runtime_handle {
+                        self.register_ordinary_map_owned_get_v1_runtime_handle(
+                            &map, handle, "Remove",
+                        )?;
+                    }
+                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedGetI32StringV1(map));
                 }
                 Op::MirOrdinaryMapOwnedGetI32StringV1Size { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map owned-Get v1 Size")?;
@@ -9743,13 +10034,68 @@ impl BytecodeVM {
                     } else {
                         None
                     };
+                    let values_result_entry = if has_direct_print_result {
+                        None
+                    } else if let Some(found) = receipt.and_then(|receipt| {
+                        if receipt.has_values_result_crosscall_string_caller_route_anchor() {
+                            Some(
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_set_string_at_pc(
+                                        function_index,
+                                        set_pc,
+                                    )
+                                    .map(|(proof, entry, site)| (&proof.producer_owner, entry, site)),
+                            )
+                        } else if receipt.has_values_result_producer_caller_route_anchor() {
+                            Some(
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_result_producer_caller_set_string_at_pc(
+                                        function_index,
+                                        set_pc,
+                                    )
+                                    .map(|(proof, entry, site)| {
+                                        (&proof.producer.producer_owner, entry, site)
+                                    }),
+                            )
+                        } else {
+                            None
+                        }
+                    }) {
+                        let (producer_owner, entry, site) = found.ok_or_else(|| {
+                            InterpError::new(
+                                "Values Result SetStringResult has no exact bytecode site binding",
+                            )
+                        })?;
+                        if site.owner != *producer_owner
+                            || site.op
+                                != (Op::MirOrdinaryMapOwnedAnyV2SetStringResult {
+                                    rd,
+                                    ra,
+                                    key,
+                                    value,
+                                    string_type_id,
+                                    string_type_desc_hash,
+                                })
+                        {
+                            return Err(InterpError::new(
+                                "Values Result SetStringResult registers or TypeDesc disagree with their exact bytecode binding",
+                            ));
+                        }
+                        Some(entry)
+                    } else {
+                        None
+                    };
                     let key_text = match self.get_reg(key) {
                         Value::String(key)
-                            if direct_print_result_binding
-                                .as_ref()
-                                .map_or(key.as_str() == "answer", |binding| {
-                                    key.as_str() == binding.key_text
-                                }) =>
+                            if direct_print_result_binding.as_ref().map_or_else(
+                                || {
+                                    values_result_entry.map_or_else(
+                                        || key.as_str() == "answer",
+                                        |entry| key.as_str() == entry.key,
+                                    )
+                                },
+                                |binding| key.as_str() == binding.key_text,
+                            ) =>
                         {
                             key.as_str().to_owned()
                         }
@@ -9757,6 +10103,8 @@ impl BytecodeVM {
                             return Err(InterpError::new(
                                 if direct_print_result_binding.is_some() {
                                     "DirectPrintResult SetStringResult key differs from its exact route-bound key"
+                                } else if values_result_entry.is_some() {
+                                    "Values Result SetStringResult key differs from its exact Checker key"
                                 } else {
                                     "ordinary Map SetStringResult key is outside the exact `answer` profile"
                                 },
@@ -9770,16 +10118,23 @@ impl BytecodeVM {
                     };
                     let value_text = match self.get_reg(value) {
                         Value::String(value)
-                            if direct_print_result_binding
-                                .as_ref()
-                                .map_or(true, |binding| value.as_str() == binding.value_text) =>
+                            if direct_print_result_binding.as_ref().map_or_else(
+                                || {
+                                    values_result_entry.map_or(true, |entry| {
+                                        value.as_str() == entry.payload_literal
+                                    })
+                                },
+                                |binding| value.as_str() == binding.value_text,
+                            ) =>
                         {
                             SharedString::clone(value)
                         }
                         Value::String(_) => {
-                            return Err(InterpError::new(
-                                "DirectPrintResult SetStringResult payload differs from its exact Checker binding",
-                            ));
+                            return Err(InterpError::new(if values_result_entry.is_some() {
+                                "Values Result SetStringResult payload differs from its exact Checker binding"
+                            } else {
+                                "DirectPrintResult SetStringResult payload differs from its exact Checker binding"
+                            }));
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -10055,11 +10410,48 @@ impl BytecodeVM {
                 }
                 Op::MirOrdinaryMapOwnedAnyV2New { rd } => {
                     self.ensure_reg(rd, "ordinary Map/Any owner-v2 New destination")?;
-                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
-                    self.set_reg(
-                        rd,
-                        Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::new())),
-                    );
+                    let (function_index, pc) = {
+                        let frame = self.cur_frame();
+                        let pc = frame.pc.checked_sub(1).ok_or_else(|| {
+                            InterpError::new(
+                                "ordinary Map/Any owner-v2 New has no current bytecode PC",
+                            )
+                        })?;
+                        (frame.proto_idx, pc)
+                    };
+                    let pc_u32 = u32::try_from(pc).map_err(|_| {
+                        InterpError::new(
+                            "ordinary Map/Any owner-v2 New bytecode PC exceeds route ABI",
+                        )
+                    })?;
+                    let is_result_branch = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt.is_ordinary_map_owned_any_v2_result_branch_new_at_pc(
+                                function_index,
+                                pc_u32,
+                                rd,
+                            )
+                        });
+                    if is_result_branch {
+                        let value = if ordinary_map_owned_any_v2_root_publish_checkpoint().is_ok() {
+                            ordinary_map_set_result_variant(
+                                "Ok",
+                                Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::new())),
+                            )
+                        } else {
+                            ordinary_map_set_result_variant("Err", Value::Int(3))
+                        };
+                        self.set_reg(rd, value);
+                    } else {
+                        ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                        self.set_reg(
+                            rd,
+                            Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(BTreeMap::new())),
+                        );
+                    }
                 }
                 Op::MirOrdinaryMapOwnedAnyV2Clone { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Clone")?;
@@ -10096,6 +10488,7 @@ impl BytecodeVM {
                             "ordinary Map/Any owner-v2 Set result aliases a source register",
                         ));
                     }
+                    let (key_reg, value_reg) = (key, value);
                     let key = match self.get_reg(key) {
                         Value::String(key) => try_copy_ordinary_map_owned_get_string(key, false)
                             .ok_or_else(|| {
@@ -10118,6 +10511,25 @@ impl BytecodeVM {
                         })?;
                         (frame.proto_idx, pc)
                     };
+                    let pc_u32 = u32::try_from(pc).map_err(|_| {
+                        InterpError::new(
+                            "ordinary Map/Any owner-v2 Set bytecode PC exceeds route ABI",
+                        )
+                    })?;
+                    let is_result_branch = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .is_some_and(|receipt| {
+                            receipt.is_ordinary_map_owned_any_v2_result_branch_set_at_pc(
+                                function_index,
+                                pc_u32,
+                                rd,
+                                ra,
+                                key_reg,
+                                value_reg,
+                            )
+                        });
                     let proto = self
                         .program
                         .functions
@@ -10169,8 +10581,21 @@ impl BytecodeVM {
                         }
                     };
                     entries.insert(key, value);
-                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
-                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)));
+                    if is_result_branch {
+                        let outcome = if ordinary_map_owned_any_v2_root_publish_checkpoint().is_ok()
+                        {
+                            ordinary_map_set_result_variant(
+                                "Ok",
+                                Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)),
+                            )
+                        } else {
+                            ordinary_map_set_result_variant("Err", Value::Int(2))
+                        };
+                        self.set_reg(rd, outcome);
+                    } else {
+                        ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                        self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)));
+                    }
                 }
                 Op::MirOrdinaryMapOwnedAnyV2Remove { rd, ra, key } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Remove")?;
@@ -10188,14 +10613,40 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    let mut entries = match self.get_reg(ra) {
+                    let result = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() || !root.is_live() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 Remove runtime root has a stale or duplicate owner",
+                                ));
+                            }
+                            let removed = root
+                                .with_owner(|owner| owner.remove(key))
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "[E0800] ordinary Map/Any owner-v2 Remove runtime root was already retired",
+                                    )
+                                })?
+                                .map_err(|message| {
+                                    InterpError::new(format!(
+                                        "[E0800] ordinary Map/Any owner-v2 Remove failed: {message}"
+                                    ))
+                                })?;
+                            ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                            Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(
+                                CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot::new(removed),
+                            )
+                        }
                         Value::CanonicalOrdinaryMapOwnedAnyV2(root) => {
                             if Arc::strong_count(root) != 1 {
                                 return Err(InterpError::new(
                                     "ordinary Map/Any owner-v2 Remove source has an unreceipted alias",
                                 ));
                             }
-                            clone_ordinary_map_owned_any_v2_entries(root)?
+                            let mut entries = clone_ordinary_map_owned_any_v2_entries(root)?;
+                            entries.remove(key);
+                            ordinary_map_owned_any_v2_root_publish_checkpoint()?;
+                            Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries))
                         }
                         other => {
                             return Err(InterpError::new(format!(
@@ -10203,9 +10654,7 @@ impl BytecodeVM {
                             )));
                         }
                     };
-                    entries.remove(key);
-                    ordinary_map_owned_any_v2_root_publish_checkpoint()?;
-                    self.set_reg(rd, Value::CanonicalOrdinaryMapOwnedAnyV2(Arc::new(entries)));
+                    self.set_reg(rd, result);
                 }
                 Op::MirOrdinaryMapOwnedAnyV2Size { rd, ra } => {
                     self.ensure_unary_regs(rd, ra, "ordinary Map/Any owner-v2 Size")?;
@@ -10297,6 +10746,24 @@ impl BytecodeVM {
                         }
                     };
                     let contains = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() || !root.is_live() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 Contains runtime root has a stale or duplicate owner",
+                                ));
+                            }
+                            root.with_owner(|owner| owner.contains_key(key))
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "[E0800] ordinary Map/Any owner-v2 Contains runtime root was already retired",
+                                    )
+                                })?
+                                .map_err(|message| {
+                                    InterpError::new(format!(
+                                        "[E0800] ordinary Map/Any owner-v2 Contains failed: {message}"
+                                    ))
+                                })?
+                        }
                         Value::CanonicalOrdinaryMapOwnedAnyV2(root) => root.contains_key(key),
                         other => {
                             return Err(InterpError::new(format!(
@@ -10424,11 +10891,11 @@ impl BytecodeVM {
                                 )
                                 .map_err(InterpError::new)?;
                         }
-                        let (get_binding, has_dedicated_route_binding) = self
+                        let get_binding = self
                             .program
                             .canonical_map_any_owner_v1_receipt
                             .as_ref()
-                            .map(|receipt| {
+                            .and_then(|receipt| {
                                 let pc = u32::try_from(pc).unwrap_or(u32::MAX);
                                 let direct_route =
                                     receipt.has_ordinary_map_direct_tuple_get_l1_route_anchor();
@@ -10459,9 +10926,8 @@ impl BytecodeVM {
                                         )
                                     })
                                 };
-                                (binding.cloned(), route_binding.is_some() || direct_route)
-                            })
-                            .unwrap_or((None, false));
+                                binding.cloned()
+                            });
                         let get_binding = get_binding.ok_or_else(|| {
                             InterpError::new(
                                 "ordinary Map/Any owner-v2 GetAny has no Core result-settlement binding",
@@ -10498,10 +10964,9 @@ impl BytecodeVM {
                                     {
                                         false
                                     } else {
-                                        !has_dedicated_route_binding
-                                            || get_binding.source_local.0 .0.starts_with(
-                                                "ordinary-map-owned-any-v2:temporary-root:",
-                                            )
+                                        get_binding.source_local.0 .0.starts_with(
+                                            "ordinary-map-owned-any-v2:temporary-root:",
+                                        )
                                     }
                                 }
                             }
@@ -12016,7 +12481,13 @@ impl BytecodeVM {
                     } else {
                         None
                     };
-                    let (values_binding, route_binding, crosscall_site) = self
+                    let (
+                        values_binding,
+                        route_binding,
+                        crosscall_site,
+                        result_crosscall_site,
+                        result_producer_caller_site,
+                    ) = self
                         .program
                         .canonical_map_any_owner_v1_receipt
                         .as_ref()
@@ -12036,9 +12507,58 @@ impl BytecodeVM {
                                         function_index,
                                         pc_u32,
                                     ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_site_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
+                                receipt
+                                    .ordinary_map_owned_any_v2_values_result_producer_caller_site_at_pc(
+                                        function_index,
+                                        pc_u32,
+                                    ),
                             )
                         })
-                        .unwrap_or((None, None, None));
+                        .unwrap_or((None, None, None, None, None));
+                    let result_string_values_proof = match (
+                        result_crosscall_site,
+                        result_producer_caller_site,
+                    ) {
+                        (Some(_), Some(_)) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has ambiguous Result cross-call and producer-caller receipts",
+                            ));
+                        }
+                        (Some((proof, _, string_type_consts)), None) => Some((
+                            proof.producer_set_entries.as_slice(),
+                            &proof.string_type,
+                            string_type_consts,
+                        )),
+                        (None, Some((proof, _, string_type_consts))) => Some((
+                            proof.producer.producer_set_entries.as_slice(),
+                            &proof.producer.string_type,
+                            string_type_consts,
+                        )),
+                        (None, None) => None,
+                    };
+                    let crosscall_site = match (
+                        crosscall_site,
+                        result_crosscall_site,
+                        result_producer_caller_site,
+                    ) {
+                        (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values has ambiguous straight-line and Result cross-call receipts",
+                            ));
+                        }
+                        (Some(site), None, None) => {
+                            Some((&site.owner, site.function, site.pc, &site.op))
+                        }
+                        (None, Some((_, site, _)), None) | (None, None, Some((_, site, _))) => {
+                            Some((&site.owner, site.function, site.pc, &site.op))
+                        }
+                        (None, None, None) => None,
+                    };
                     if values_result_branch_site.is_none() {
                         match (values_binding, route_binding, crosscall_site) {
                         (Some(binding), None, None)
@@ -12062,16 +12582,16 @@ impl BytecodeVM {
                                     == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id() =>
                         {
                         }
-                        (None, None, Some(site))
-                            if site.function == function_index
-                                && site.pc == pc_u32
+                        (None, None, Some((site_owner, site_function, site_pc, site_op)))
+                            if site_function == function_index
+                                && site_pc == pc_u32
                                 && self
                                     .program
                                     .functions
                                     .get(function_index as usize)
-                                    .is_some_and(|function| site.owner.0 == function.name)
+                                    .is_some_and(|function| site_owner.0 == function.name)
                                 && matches!(
-                                    &site.op,
+                                    site_op,
                                     Op::MirOrdinaryMapOwnedAnyV2Values {
                                         rd: site_rd,
                                         ra: site_ra,
@@ -12219,6 +12739,120 @@ impl BytecodeVM {
                             values.push(Value::CanonicalManagedAnyV2(owner));
                             (values, i32_backings)
                         }
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root)
+                            if result_string_values_proof.is_some()
+                                && root.is_unique()
+                                && root.is_live() =>
+                        {
+                            let (
+                                producer_set_entries,
+                                string_type,
+                                (string_type_id_const, string_type_desc_hash_const),
+                            ) = result_string_values_proof
+                                .expect("guarded by result_string_values_proof.is_some()");
+                            let _selected_string_payload = self
+                                .program
+                                .canonical_map_any_owner_v1_receipt
+                                .as_ref()
+                                .and_then(|receipt| {
+                                    receipt.ordinary_map_owned_any_v2_selected_payload_binding(
+                                        string_type,
+                                    )
+                                })
+                                .filter(|binding| {
+                                    &binding.type_id == string_type
+                                        && matches!(
+                                            &binding.kind,
+                                            crate::interp::bytecode::instr::CanonicalOrdinaryMapOwnedAnyV2PayloadKind::String
+                                        )
+                                        && super::instr::is_canonical_digest(
+                                            &binding.type_desc_digest,
+                                        )
+                                })
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values Result runtime root has no exact selected String TypeDesc",
+                                    )
+                                })?;
+                            let function = self
+                                .program
+                                .functions
+                                .get(function_index as usize)
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "[E0800] ordinary Map/Any owner-v2 Values active function is absent",
+                                    )
+                                })?;
+                            let (string_type_id_str, descriptor_hash) =
+                                ordinary_map_string_result_type_identity(
+                                    function,
+                                    string_type_id_const,
+                                    string_type_desc_hash_const,
+                                )?;
+                            let actual_size = root
+                                .with_owner(|owner| owner.size())
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "ordinary Map/Any owner-v2 Values Result runtime root was already retired",
+                                    )
+                                })?
+                                .map_err(|error| {
+                                    InterpError::new(format!(
+                                        "[E0800] ordinary Map/Any owner-v2 Values Result size check failed: {error:?}"
+                                    ))
+                                })?;
+                            if usize::try_from(actual_size).ok() != Some(producer_set_entries.len())
+                            {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 Values Result runtime root entry count disagrees with producer receipt",
+                                ));
+                            }
+                            let mut sorted_keys = producer_set_entries
+                                .iter()
+                                .map(|entry| entry.key.as_str())
+                                .collect::<Vec<_>>();
+                            sorted_keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+                            sorted_keys.dedup();
+                            if sorted_keys.len() != producer_set_entries.len() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 Values Result producer receipt contains duplicate keys",
+                                ));
+                            }
+                            let mut values = Vec::new();
+                            values.try_reserve_exact(sorted_keys.len()).map_err(|_| {
+                                InterpError::new(
+                                    "ordinary Map/Any owner-v2 Values snapshot allocation failed",
+                                )
+                            })?;
+                            for key in sorted_keys {
+                                let text = root
+                                    .with_owner(|owner| {
+                                        owner.get_string_result_value(
+                                            key,
+                                            string_type_id_str.as_bytes(),
+                                            &descriptor_hash,
+                                        )
+                                    })
+                                    .ok_or_else(|| {
+                                        InterpError::new(
+                                            "ordinary Map/Any owner-v2 Values Result runtime root was already retired",
+                                        )
+                                    })?
+                                    .map_err(|message| {
+                                        InterpError::new(format!(
+                                            "[E0800] ordinary Map/Any owner-v2 Values Result String lookup failed: {message}"
+                                        ))
+                                    })?;
+                                let owner = Arc::new(
+                                    crate::interp::value::CanonicalManagedAnyV2::from_string(
+                                        string_type.clone(),
+                                        text,
+                                    ),
+                                );
+                                values.push(Value::CanonicalManagedAnyV2(owner));
+                            }
+                            (values, Vec::new())
+                        }
                         Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(_) => {
                             return Err(InterpError::new(
                                 "ordinary Map/Any owner-v2 Values runtime root has a stale or duplicate owner, or lacks its exact Result-branch site",
@@ -12289,8 +12923,13 @@ impl BytecodeVM {
                                     function_index,
                                     pc_u32,
                                 );
-                            match (local, route) {
-                                (Some((values_binding, clone_binding)), None)
+                            let result_route = receipt
+                                .ordinary_map_owned_any_v2_values_result_producer_caller_len_clone_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                );
+                            match (local, route, result_route) {
+                                (Some((values_binding, clone_binding)), None, None)
                                     if clone_binding.clone_pc == pc_u32
                                         && clone_binding.clone_rd == rd
                                         && clone_binding.clone_ra == ra
@@ -12298,7 +12937,7 @@ impl BytecodeVM {
                                 {
                                     (Some(values_binding.ra), true)
                                 }
-                                (None, Some(binding))
+                                (None, Some(binding), None)
                                     if binding.caller_function == function_index
                                         && binding.len_receiver_clone_pc == Some(pc_u32)
                                         && binding.len_receiver_clone_rd == Some(rd)
@@ -12308,6 +12947,19 @@ impl BytecodeVM {
                                         && binding.len_receiver_drop_ra == Some(rd)
                                         && binding.len_receiver_type.as_ref()
                                             == Some(&binding.owner_type) =>
+                                {
+                                    (None, true)
+                                }
+                                (None, None, Some((_proof, site)))
+                                    if site.function == function_index
+                                        && site.pc == pc_u32
+                                        && matches!(
+                                            &site.op,
+                                            Op::MirOrdinaryMapOwnedAnyV2ValuesClone {
+                                                rd: site_rd,
+                                                ra: site_ra,
+                                            } if (*site_rd, *site_ra) == (rd, ra)
+                                        ) =>
                                 {
                                     (None, true)
                                 }
@@ -12428,6 +13080,25 @@ impl BytecodeVM {
                         ));
                     }
                     let is_empty = match self.get_reg(ra) {
+                        Value::CanonicalOrdinaryMapOwnedAnyV2RuntimeRoot(root) => {
+                            if !root.is_unique() || !root.is_live() {
+                                return Err(InterpError::new(
+                                    "[E0800] ordinary Map/Any owner-v2 IsEmpty runtime root has a stale or duplicate owner",
+                                ));
+                            }
+                            root.with_owner(|owner| owner.size())
+                                .ok_or_else(|| {
+                                    InterpError::new(
+                                        "[E0800] ordinary Map/Any owner-v2 IsEmpty runtime root was already retired",
+                                    )
+                                })?
+                                .map_err(|error| {
+                                    InterpError::new(format!(
+                                        "[E0800] ordinary Map/Any owner-v2 IsEmpty failed: {error:?}"
+                                    ))
+                                })?
+                                == 0
+                        }
                         Value::CanonicalOrdinaryMapOwnedAnyV2(root) => root.is_empty(),
                         other => {
                             return Err(InterpError::new(format!(
@@ -12555,19 +13226,33 @@ impl BytecodeVM {
                                     pc_u32,
                                 )
                         });
+                    let result_producer_caller_drop = self
+                        .program
+                        .canonical_map_any_owner_v1_receipt
+                        .as_ref()
+                        .and_then(|receipt| {
+                            receipt
+                                .ordinary_map_owned_any_v2_values_result_producer_caller_drop_at_pc(
+                                    function_index,
+                                    pc_u32,
+                                )
+                        });
                     let authorization_count = usize::from(original_binding.is_some())
                         + usize::from(borrowed_clone.is_some())
                         + usize::from(route_owner_drop.is_some())
                         + usize::from(route_len_drop.is_some())
                         + usize::from(crosscall_snapshot_drop.is_some())
-                        + usize::from(result_crosscall_snapshot_drop.is_some());
+                        + usize::from(result_crosscall_snapshot_drop.is_some())
+                        + usize::from(result_producer_caller_drop.is_some());
                     if authorization_count != 1 {
                         return Err(InterpError::new(
                             "ordinary Map/Any owner-v2 Values Drop has no unique exact settlement or temporary Clone binding",
                         ));
                     }
                     let expected_drop_ra = if let Some(binding) = original_binding {
-                        if binding.drop_pc != u32::try_from(pc).unwrap_or(u32::MAX)
+                        let drop_pc_u32 = u32::try_from(pc).unwrap_or(u32::MAX);
+                        if (binding.drop_pc != drop_pc_u32
+                            && !binding.err_arm_drop_pcs.contains(&drop_pc_u32))
                             || binding.settlement
                                 != crate::core::OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop
                         {
@@ -12643,6 +13328,20 @@ impl BytecodeVM {
                         {
                             return Err(InterpError::new(
                                 "ordinary Map/Any owner-v2 Values Result cross-call snapshot Drop disagrees with its exact route anchor",
+                            ));
+                        }
+                        Some(ra)
+                    } else if let Some((_proof, site)) = result_producer_caller_drop {
+                        if site.function != function_index
+                            || site.pc != pc_u32
+                            || !matches!(
+                                &site.op,
+                                Op::MirOrdinaryMapOwnedAnyV2ValuesDrop { ra: site_ra }
+                                    if *site_ra == ra
+                            )
+                        {
+                            return Err(InterpError::new(
+                                "ordinary Map/Any owner-v2 Values Result producer/caller Drop disagrees with its exact route anchor",
                             ));
                         }
                         Some(ra)
@@ -16529,6 +17228,65 @@ impl BytecodeVM {
         let ok = Self::ordinary_map_owned_get_result_shape(proto, shapes, true)?;
         let err = Self::ordinary_map_owned_get_result_shape(proto, shapes, false)?;
         Ok((ok, err))
+    }
+
+    fn ordinary_map_owned_get_v1_result_branch_route_enabled(&self) -> bool {
+        self.program
+            .canonical_map_any_owner_v1_receipt
+            .as_ref()
+            .is_some_and(|receipt| {
+                receipt.has_ordinary_map_owned_get_result_branch_v3_route_anchor()
+            })
+    }
+
+    fn ordinary_map_owned_get_v1_source_handle_if_enabled(
+        &self,
+        root: &Arc<
+            BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value>,
+        >,
+        op_name: &str,
+    ) -> Result<Option<i64>, InterpError> {
+        if !self.ordinary_map_owned_get_v1_result_branch_route_enabled() {
+            return Ok(None);
+        }
+        let identity = Arc::as_ptr(root) as usize;
+        self.ordinary_map_owned_get_v1_runtime_handles
+            .get(&identity)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| {
+                InterpError::new(format!(
+                    "ordinary Map owned-Get ResultBranchV3 {op_name} source has no native root handle"
+                ))
+            })
+    }
+
+    fn register_ordinary_map_owned_get_v1_runtime_handle(
+        &mut self,
+        map: &Arc<
+            BTreeMap<String, crate::interp::value::CanonicalOrdinaryMapOwnedGetI32StringV1Value>,
+        >,
+        handle: i64,
+        op_name: &str,
+    ) -> Result<(), InterpError> {
+        if handle <= 0 {
+            return Err(InterpError::new(format!(
+                "[E0800] ordinary Map owned-Get ResultBranchV3 {op_name} returned invalid native root handle {handle}"
+            )));
+        }
+        let identity = Arc::as_ptr(map) as usize;
+        if self
+            .ordinary_map_owned_get_v1_runtime_handles
+            .contains_key(&identity)
+        {
+            crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_drop(handle);
+            return Err(InterpError::new(format!(
+                "ordinary Map owned-Get ResultBranchV3 {op_name} reused a live runtime-root identity"
+            )));
+        }
+        self.ordinary_map_owned_get_v1_runtime_handles
+            .insert(identity, handle);
+        Ok(())
     }
 
     /// Pop the top of the quote assembly stack.

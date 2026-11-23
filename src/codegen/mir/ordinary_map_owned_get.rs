@@ -242,9 +242,29 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
             ));
         }
         let moving = descriptor.ownership != MirOwnership::Copy;
-        let (variant_abi, _) = native_variant_abi(catalog, result_ty, moving)?;
-        let llvm_ty =
-            native_basic_type(self.generator.context, catalog, result_ty)?.into_struct_type();
+        let is_result_branch_v3_root = *result_ty
+            == crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+            && self.ordinary_map_owned_get_result_branch_v3_authorized;
+        let (variant_abi, _) = if is_result_branch_v3_root {
+            super::native_ordinary_map_owned_get_result_branch_v3_variant_abi(
+                self.function,
+                catalog,
+                result_ty,
+            )?
+        } else {
+            native_variant_abi(catalog, result_ty, moving)?
+        };
+        let llvm_ty = if is_result_branch_v3_root {
+            super::native_ordinary_map_owned_get_result_branch_v3_llvm_type(
+                self.generator.context,
+                self.function,
+                catalog,
+                result_ty,
+            )?
+            .into_struct_type()
+        } else {
+            native_basic_type(self.generator.context, catalog, result_ty)?.into_struct_type()
+        };
         let mut aggregate = llvm_ty.get_undef();
         for (index, ty) in variant_abi.payload_types.iter().enumerate() {
             let payload_type = native_basic_type(self.generator.context, catalog, ty)?;
@@ -447,8 +467,19 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
                 "ordinary Map owned-Get ResultBranchV3 operation has a noncanonical Result TypeDesc",
             ));
         }
+        if !self.ordinary_map_owned_get_result_branch_v3_authorized {
+            return Err(NativeMirError::new(
+                subject,
+                "ordinary Map owned-Get ResultBranchV3 emission requires its exact CheckedProgram-bound route",
+            ));
+        }
         let catalog = self.program.type_catalog();
-        let result_llvm_ty = native_basic_type(self.generator.context, catalog, &result_ty)?;
+        let result_llvm_ty = super::native_ordinary_map_owned_get_result_branch_v3_llvm_type(
+            self.generator.context,
+            self.function,
+            catalog,
+            &result_ty,
+        )?;
         let result_slot = self
             .generator
             .builder
@@ -1475,8 +1506,7 @@ mod tests {
 
     #[test]
     fn ordinary_map_owned_get_v1_capacity_is_one_mir_across_reference_bytecode_and_native() {
-        let program = canonical_program(
-            r#"
+        let source = r#"
 func snapshot_status(value: Result<string, i32>) -> i32 {
     match value {
         Ok(text) => {
@@ -1488,21 +1518,40 @@ func snapshot_status(value: Result<string, i32>) -> i32 {
 }
 
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "snapshot-key", "snapshot-value")
-    let snapshot = map_get_string(root, "snapshot-key")
-    drop(empty)
-    drop(root)
-    snapshot_status(snapshot)
+    match map_new() {
+        Ok(empty) => match map_set(empty, "snapshot-key", "snapshot-value") {
+            Ok(root) => {
+                let snapshot = map_get_string(root, "snapshot-key")
+                drop(empty)
+                drop(root)
+                snapshot_status(snapshot)
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
-"#,
-        );
+"#;
+        let tokens = Lexer::new(source).tokenize().expect("lex");
+        let file = Parser::new(tokens).parse_file().expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         let digest = program.canonical_digest();
         crate::codegen::mir::validate_mir_native(&program)
             .expect("failure injection must preserve the exact owned-Get admission contract");
         let main = crate::core::NodeId("function:main".into());
-        let reference = MirReferenceInterpreter::new(&program);
-        let bytecode = compile_mir_program(&program).expect("same MIR AST-free owned-Get bytecode");
+        let reference = MirReferenceInterpreter::new(&program).with_route_receipt(&route_receipt);
+        let bytecode =
+            crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+            )
+            .expect("same MIR AST-free owned-Get bytecode");
         assert!(
             bytecode.ast.is_none(),
             "the failure oracle must not retain a surface AST"
@@ -1512,7 +1561,11 @@ func main() -> i32 {
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_owned_get_capacity_same_program");
         generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect("same MIR native owned-Get lowering");
         generator
             .module
@@ -1534,13 +1587,13 @@ func main() -> i32 {
             .expect("native owned-Get in-process execution engine");
         for (symbol, address) in [
             (
-                "mimi_mir_ordinary_map_owned_get_i32_string_v1_new",
-                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_new as *const ()
-                    as usize,
+                "mimi_mir_ordinary_map_owned_get_i32_string_v1_new_result",
+                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_new_result
+                    as *const () as usize,
             ),
             (
-                "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string",
-                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string
+                "mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string_result",
+                crate::runtime::mimi_mir_ordinary_map_owned_get_i32_string_v1_set_string_result
                     as *const () as usize,
             ),
             (
@@ -1679,8 +1732,7 @@ func main() -> i32 {
 
     #[test]
     fn ordinary_map_owned_get_v1_emits_canonical_owned_results() {
-        let program = canonical_program(
-            r#"
+        let source = r#"
 func i32_or_status(value: Result<i32, i32>) -> i32 {
     match value {
         Ok(number) => number,
@@ -1699,47 +1751,99 @@ func print_string_or_status(value: Result<string, i32>) -> i32 {
 }
 
 func main() -> i32 {
-    let empty = map_new()
-    let numbers = map_set(empty, "number", 42)
-    let text = map_set(numbers, "text", "hello")
-    let full = map_set(text, "empty", "")
-    let removed = map_remove(full, "number")
+    match map_new() {
+        Ok(empty) => match map_set(empty, "number", 42) {
+            Ok(numbers) => match map_set(numbers, "text", "hello") {
+                Ok(text) => match map_set(text, "empty", "") {
+                    Ok(full) => {
+                        let removed = map_remove(full, "number")
 
-    println(i32_or_status(map_get_i32(full, "number")))
-    println(i32_or_status(map_get_i32(full, "text")))
-    println(i32_or_status(map_get_i32(full, "missing")))
-    println(print_string_or_status(map_get_string(full, "text")))
-    println(print_string_or_status(map_get_string(full, "number")))
-    println(print_string_or_status(map_get_string(full, "missing")))
-    println(print_string_or_status(map_get_string(full, "empty")))
-    println(i32_or_status(map_get_i32(removed, "number")))
-    println(i32_or_status(map_get_i32(full, "number")))
-    println(map_size(full))
-    println(map_size(removed))
-    println(has_key(full, "text"))
-    println(has_key(removed, "number"))
+                        println(i32_or_status(map_get_i32(full, "number")))
+                        println(i32_or_status(map_get_i32(full, "text")))
+                        println(i32_or_status(map_get_i32(full, "missing")))
+                        println(print_string_or_status(map_get_string(full, "text")))
+                        println(print_string_or_status(map_get_string(full, "number")))
+                        println(print_string_or_status(map_get_string(full, "missing")))
+                        println(print_string_or_status(map_get_string(full, "empty")))
+                        println(i32_or_status(map_get_i32(removed, "number")))
+                        println(i32_or_status(map_get_i32(full, "number")))
+                        println(map_size(full))
+                        println(map_size(removed))
+                        println(has_key(full, "text"))
+                        println(has_key(removed, "number"))
 
-    let snapshot_seed = map_new()
-    let snapshot_root = map_set(snapshot_seed, "detached", "after-root-drop")
-    let detached_snapshot = map_get_string(snapshot_root, "detached")
-    drop(snapshot_seed)
-    drop(snapshot_root)
-    println(print_string_or_status(detached_snapshot))
-
-    drop(empty)
-    drop(numbers)
-    drop(text)
-    drop(full)
-    drop(removed)
-    0
+                        match map_new() {
+                            Ok(snapshot_seed) => match map_set(snapshot_seed, "detached", "after-root-drop") {
+                                Ok(snapshot_root) => {
+                                    let detached_snapshot = map_get_string(snapshot_root, "detached")
+                                    drop(snapshot_seed)
+                                    drop(snapshot_root)
+                                    println(print_string_or_status(detached_snapshot))
+                                    drop(empty)
+                                    drop(numbers)
+                                    drop(text)
+                                    drop(full)
+                                    drop(removed)
+                                    0
+                                },
+                                Err(status) => {
+                                    drop(snapshot_seed)
+                                    drop(empty)
+                                    drop(numbers)
+                                    drop(text)
+                                    drop(full)
+                                    drop(removed)
+                                    status
+                                },
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                drop(numbers)
+                                drop(text)
+                                drop(full)
+                                drop(removed)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => {
+                        drop(empty)
+                        drop(numbers)
+                        drop(text)
+                        status
+                    },
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(numbers)
+                    status
+                },
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
-"#,
-        );
+"#;
+        let tokens = crate::lexer::Lexer::new(source)
+            .tokenize()
+            .expect("tokenize");
+        let file = crate::parser::Parser::new(tokens)
+            .parse_file()
+            .expect("parse");
+        let checked = crate::core::check_program(&file).expect("check");
+        let program = MirProgram::from_checked_program(&checked).expect("lower MIR");
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         crate::codegen::mir::validate_mir_native(&program)
             .expect("native admission accepts the owned-Get profile");
 
         let main = crate::core::NodeId("function:main".into());
         let reference = MirReferenceInterpreter::new(&program)
+            .with_route_receipt(&route_receipt)
             .execute_with_output(&main, &[])
             .expect("reference owned-Get execution");
         assert_eq!(reference.value, MirRuntimeValue::Int(0));
@@ -1748,8 +1852,13 @@ func main() -> i32 {
             "42\n-2\n-1\nhello\n7\n-2\n-1\n\n7\n-1\n42\n3\n2\ntrue\nfalse\nafter-root-drop\n7\n"
         );
 
-        let mut vm =
-            BytecodeVM::new(compile_mir_program(&program).expect("AST-free owned-Get bytecode"));
+        let mut vm = BytecodeVM::new(
+            crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+            )
+            .expect("AST-free owned-Get bytecode"),
+        );
         assert_eq!(
             vm.run_value().expect("bytecode owned-Get execution"),
             Value::Int(0)
@@ -1759,7 +1868,11 @@ func main() -> i32 {
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_ordinary_map_owned_get_v1");
         generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect("receipt-backed owned-Get native lowering");
         generator
             .module
@@ -1767,9 +1880,9 @@ func main() -> i32 {
             .expect("owned-Get native module verifies");
         let native_ir = generator.module.print_to_string().to_string();
         for helper in [
-            "_new",
-            "_set_i32",
-            "_set_string",
+            "_new_result",
+            "_set_i32_result",
+            "_set_string_result",
             "_remove",
             "_size",
             "_contains",

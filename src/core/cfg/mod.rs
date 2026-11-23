@@ -23,7 +23,9 @@ pub use resolved_lower::lower_resolved_bodies;
 pub use resource_lower::analyze_resolved_bodies;
 pub(crate) use resource_lower::{
     analyze_resolved_bodies_with_declaration_expressions,
-    collect_ordinary_map_owned_get_i32_string_cfg,
+    collect_ordinary_map_owned_get_i32_string_cfg, ordinary_map_v2_err_drops_match_prior_roots,
+    ordinary_map_v2_ok_spine_cfg_point_ranks, partition_ordinary_map_v2_chain_drops,
+    partition_ordinary_map_v2_ok_spine,
     validate_ordinary_map_owned_any_v2_direct_print_result_receipt,
     validate_ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt,
     validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_receipt,
@@ -37,7 +39,8 @@ pub(crate) use resource_lower::{
     validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_receipt,
     validate_ordinary_map_owned_any_v2_values_unpack_result_branch_receipt,
     validate_ordinary_map_owned_get_any_tuple_result_v1_receipt,
-    OrdinaryMapOwnedGetI32StringCfgCollection,
+    OrdinaryMapOwnedGetI32StringCfgCollection, OrdinaryMapV2LinearChainScope,
+    OrdinaryMapV2ResultChainStep,
 };
 pub use validate::validate_cfg;
 

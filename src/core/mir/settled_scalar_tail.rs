@@ -12,16 +12,11 @@ pub(super) fn allows_unary(
     op: ResolvedUnaryOp,
     operand: &MirValueId,
 ) -> bool {
-    let Some(flow) = function
+    let Some(tail) = function
         .ownership
         .checker_ordinary_map_owned_any_v2_cfg_receipt
         .as_ref()
-        .and_then(|receipt| receipt.flow.as_ref())
-    else {
-        return false;
-    };
-    let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail) =
-        &flow.proof
+        .and_then(|receipt| receipt.settled_scalar_tail())
     else {
         return false;
     };
@@ -63,6 +58,59 @@ pub(super) fn validate(
         fail("scalar-tail source AST disagrees with its private Checker commitment");
         return errors;
     }
+    let mut ok_prefix_source_blocks = BTreeSet::new();
+    let mut err_source_blocks = BTreeSet::new();
+    let mut block_spine_order = BTreeMap::new();
+    let mut match_joins: Vec<(BasicBlockId, NodeId)> = Vec::new();
+    match &flow.proof {
+        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(_) => {
+            if tail.split_block != flow.entry {
+                fail("scalar-tail split block disagrees with SettledScalarBranchTailV1 entry");
+                return errors;
+            }
+            block_spine_order.insert(flow.entry.clone(), 0usize);
+        }
+        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(branches) => {
+            let mut cursor = flow.entry.clone();
+            block_spine_order.insert(cursor.clone(), 0usize);
+            for step_idx in 0..branches.len() {
+                let Some(branch) = branches.iter().find(|branch| {
+                    flow.reachable_edges
+                        .get(&branch.ok.arm_entry_edge)
+                        .is_some_and(|edge| edge.from == cursor)
+                }) else {
+                    fail("ResultBranchV1 scalar-tail prefix lost an Ok spine branch");
+                    return errors;
+                };
+                ok_prefix_source_blocks.insert(cursor.clone());
+                for edge_id in &branch.err.path_edges {
+                    if let Some(edge) = flow.reachable_edges.get(edge_id) {
+                        if edge.from != cursor && edge.from != branch.err.join {
+                            err_source_blocks.insert(edge.from.clone());
+                        }
+                        if edge.to != branch.err.join {
+                            err_source_blocks.insert(edge.to.clone());
+                        }
+                    }
+                }
+                match_joins.push((branch.ok.join.clone(), branch.match_node.clone()));
+                cursor = branch.ok.arm_entry.clone();
+                block_spine_order.insert(cursor.clone(), step_idx + 1);
+            }
+            if cursor != tail.split_block {
+                fail("ResultBranchV1 scalar-tail split block does not end the Ok spine");
+                return errors;
+            }
+        }
+        _ => {
+            fail("scalar-tail proof is neither SettledScalarBranchTailV1 nor ResultBranchV1");
+            return errors;
+        }
+    }
+    let err_mir_blocks = err_source_blocks
+        .iter()
+        .filter_map(|source_block| blocks.get(source_block).cloned())
+        .collect::<BTreeSet<_>>();
     let expression = |node: &NodeId| {
         MirValueId::new(format!("expr:{}", node.0)).expect("expr MirValueId prefix is non-empty")
     };
@@ -91,14 +139,26 @@ pub(super) fn validate(
         let value = local(binding);
         let source_point = flow
             .reachable_blocks
-            .get(&flow.entry)
+            .get(&drop.point_block)
             .and_then(|block| block.points.get(drop.point_rank));
+        let drop_before_split = (drop.point_block == tail.split_block
+            && drop.point_rank < tail.first_condition_rank)
+            || ok_prefix_source_blocks.contains(&drop.point_block);
         let exact_source = source_point.is_some_and(|(point, kind)| {
             point == &drop.point && *kind == crate::core::cfg::CfgPointKind::ResourceAction
-        }) && drop.point_rank < tail.first_condition_rank
+        }) && drop_before_split
             && drop.loads.iter().all(|(point, rank)| {
-                locations.get(point) == Some(&(flow.entry.clone(), *rank))
-                    && *rank < drop.point_rank
+                locations.get(point).is_some_and(|(load_block, load_rank)| {
+                    *load_rank == *rank
+                        && matches!(
+                            (
+                                block_spine_order.get(load_block),
+                                block_spine_order.get(&drop.point_block),
+                            ),
+                            (Some(order_a), Some(order_b))
+                                if (order_a, *rank) < (order_b, drop.point_rank)
+                        )
+                })
             })
             && tail.owned_uses.get(binding).is_some_and(|uses| {
                 *uses
@@ -111,7 +171,7 @@ pub(super) fn validate(
             });
         let id = format!("inst:drop.{}:{}", drop.place_index, drop.point.0);
         let matches = seal.instructions.iter().filter(|(block, origin, instruction)| {
-            Some(block) == blocks.get(&flow.entry) && origin == &drop.point
+            Some(block) == blocks.get(&drop.point_block) && origin == &drop.point
                 && instruction.id.as_str() == id
                 && matches!(&instruction.kind, MirInstructionKind::Drop { value: actual } if actual == &value)
         }).collect::<Vec<_>>();
@@ -153,7 +213,7 @@ pub(super) fn validate(
             let Some((source_block, rank)) = locations.get(origin) else {
                 return true;
             };
-            if source_block != &flow.entry || block != drop_block {
+            if source_block != &drop.point_block || block != drop_block {
                 return true;
             }
             let Some(index) = body
@@ -176,6 +236,8 @@ pub(super) fn validate(
                 actual.id == instruction.id
                     || !mir_instruction_value_uses(&actual.kind).contains(&value)
                     || (block == drop_block && index < drop_index)
+                    || (err_mir_blocks.contains(block)
+                        && matches!(&actual.kind, MirInstructionKind::Drop { value: drop_val } if drop_val == &value))
             }) && !mir_terminator_value_uses(&body.terminator).contains(&value)
         });
         if !source_order || !actual_reads_before_drop {
@@ -186,14 +248,6 @@ pub(super) fn validate(
     }
     for (node, source) in &tail.nodes {
         let result = expression(node);
-        if function
-            .values
-            .get(&result)
-            .is_none_or(|value| value.ty != source.ty)
-        {
-            fail("scalar-tail source expression has a different result type");
-            continue;
-        }
         let Some((source_block, _)) = locations.get(node) else {
             fail("scalar-tail source expression has no exact CFG point");
             continue;
@@ -205,6 +259,20 @@ pub(super) fn validate(
             fail("scalar-tail source expression has no MIR block");
             continue;
         };
+        if matches!(&source.kind, Source::StatementJoin) {
+            if !mir_block.parameters.is_empty() {
+                fail("scalar-tail statement join unexpectedly carries block parameters");
+            }
+            continue;
+        }
+        if function
+            .values
+            .get(&result)
+            .is_none_or(|value| value.ty != source.ty)
+        {
+            fail("scalar-tail source expression has a different result type");
+            continue;
+        }
         if matches!(&source.kind, Source::Join) {
             if mir_block.parameters.as_slice() != [MirBlockParameter { value: result }] {
                 fail("scalar-tail source join has a different result parameter");
@@ -357,9 +425,18 @@ pub(super) fn validate(
             let arm = blocks
                 .get(&edge.from)
                 .and_then(|id| function.blocks.get(id));
+            let is_statement_join = matches!(
+                tail.nodes.get(construct).map(|node| &node.kind),
+                Some(Source::StatementJoin)
+            );
             if !arm.is_some_and(|block| {
                 matches!(&block.terminator, MirTerminator::Goto { target, arguments, .. }
-                if Some(target) == blocks.get(join) && arguments == &[expression(value)])
+                if Some(target) == blocks.get(join)
+                    && if is_statement_join {
+                        arguments.is_empty()
+                    } else {
+                        arguments == &[expression(value)]
+                    })
             }) {
                 fail("scalar-tail source arm result differs from its MIR edge argument");
             }
@@ -370,11 +447,129 @@ pub(super) fn validate(
         .values()
         .filter(|block| matches!(block.terminator, MirTerminator::Return { .. }))
         .collect::<Vec<_>>();
-    if !matches!(returns.as_slice(), [block]
-        if Some(&block.id) == blocks.get(&tail.return_block)
-            && function.result == tail.return_type
-            && matches!(&block.terminator, MirTerminator::Return { value: Some(value) } if value == &expression(&tail.return_node)))
-    {
+    let take_block_forward_move = |block: &MirBlock,
+                                   require_empty_otherwise: bool,
+                                   source: &MirValueId|
+     -> Option<(MirValueId, MirInstructionId)> {
+        if require_empty_otherwise && block.instructions.len() != 1 {
+            return None;
+        }
+        let last = block.instructions.last()?;
+        let MirInstructionKind::Move {
+            result,
+            source: actual_source,
+        } = &last.kind
+        else {
+            return None;
+        };
+        if actual_source != source {
+            return None;
+        }
+        let exact_seal = seal
+            .instructions
+            .iter()
+            .any(|(seal_block, origin, sealed)| {
+                seal_block == &block.id
+                    && sealed == last
+                    && last.id.as_str() == format!("inst:block:{}", origin.0)
+                    && *result == expression(origin)
+            });
+        exact_seal.then(|| (result.clone(), last.id.clone()))
+    };
+    let tail_return_valid = if match_joins.is_empty() {
+        matches!(returns.as_slice(), [block]
+            if Some(&block.id) == blocks.get(&tail.return_block)
+                && function.result == tail.return_type
+                && matches!(&block.terminator, MirTerminator::Return { value: Some(value) } if value == &expression(&tail.return_node)))
+    } else {
+        let mut chain_ok = function.result == tail.return_type && returns.len() == 1;
+        let mut expected_block = blocks.get(&tail.return_block);
+        let mut forwarded_value = expression(&tail.return_node);
+        let mut forwarding_insts = Vec::new();
+        for (idx, (join_source_block, match_node)) in match_joins.iter().rev().enumerate() {
+            let Some(mir_from) = expected_block.and_then(|id| function.blocks.get(id)) else {
+                chain_ok = false;
+                break;
+            };
+            let Some(mir_join_id) = blocks.get(join_source_block) else {
+                chain_ok = false;
+                break;
+            };
+            let Some(mir_join) = function.blocks.get(mir_join_id) else {
+                chain_ok = false;
+                break;
+            };
+            let is_join_block = idx > 0;
+            let expected_arg = match &mir_from.terminator {
+                MirTerminator::Goto {
+                    target, arguments, ..
+                } if target == mir_join_id && arguments.len() == 1 => &arguments[0],
+                _ => {
+                    chain_ok = false;
+                    break;
+                }
+            };
+            if expected_arg != &forwarded_value {
+                if let Some((result, inst_id)) =
+                    take_block_forward_move(mir_from, is_join_block, &forwarded_value)
+                {
+                    if &result != expected_arg {
+                        chain_ok = false;
+                        break;
+                    }
+                    forwarding_insts.push(inst_id);
+                } else {
+                    chain_ok = false;
+                    break;
+                }
+            } else if is_join_block && !mir_from.instructions.is_empty() {
+                chain_ok = false;
+                break;
+            }
+            if mir_join.parameters.as_slice()
+                != [MirBlockParameter {
+                    value: expression(match_node),
+                }]
+            {
+                chain_ok = false;
+                break;
+            }
+            expected_block = Some(mir_join_id);
+            forwarded_value = expression(match_node);
+        }
+        if chain_ok {
+            if let [ret_block] = returns.as_slice() {
+                if expected_block != Some(&ret_block.id) {
+                    chain_ok = false;
+                } else if let MirTerminator::Return { value: Some(value) } = &ret_block.terminator {
+                    if value != &forwarded_value {
+                        if let Some((result, inst_id)) =
+                            take_block_forward_move(ret_block, true, &forwarded_value)
+                        {
+                            if &result != value {
+                                chain_ok = false;
+                            } else {
+                                forwarding_insts.push(inst_id);
+                            }
+                        } else {
+                            chain_ok = false;
+                        }
+                    } else if !ret_block.instructions.is_empty() {
+                        chain_ok = false;
+                    }
+                } else {
+                    chain_ok = false;
+                }
+            } else {
+                chain_ok = false;
+            }
+        }
+        if chain_ok {
+            allowed.extend(forwarding_insts);
+        }
+        chain_ok
+    };
+    if !tail_return_valid {
         fail("scalar-tail source return differs from the unique MIR return operand or type");
     }
     if seen_selectors.len()
@@ -395,16 +590,18 @@ pub(super) fn validate(
         // Local String settlements are authorized only by the exact AST Drop
         // above. A second instruction with a fresh ID and the same valid
         // source origin must not gain ownership authority from prefix location.
-        if matches!(&instruction.kind, MirInstructionKind::Drop { value }
-            if tail.string_drops.keys().any(|binding| local(binding) == *value))
+        if !err_mir_blocks.contains(block)
+            && matches!(&instruction.kind, MirInstructionKind::Drop { value }
+                if tail.string_drops.keys().any(|binding| local(binding) == *value))
         {
             fail("scalar-tail source String Drop has an additional unauthorized local settlement");
             continue;
         }
         let prefix = locations.get(origin).is_some_and(|(source_block, rank)| {
-            source_block == &flow.entry
-                && *rank < tail.first_condition_rank
-                && blocks.get(source_block) == Some(block)
+            blocks.get(source_block) == Some(block)
+                && ((source_block == &tail.split_block && *rank < tail.first_condition_rank)
+                    || ok_prefix_source_blocks.contains(source_block)
+                    || err_source_blocks.contains(source_block))
         });
         if !prefix {
             fail(&format!(

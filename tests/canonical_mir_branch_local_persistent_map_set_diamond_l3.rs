@@ -337,6 +337,23 @@ fn semantic_identity_digest_from_manifest(fields: &BTreeMap<String, String>) -> 
     blake3::hash(framed.as_bytes()).to_hex().to_string()
 }
 
+fn route_identity_digest_from_manifest(fields: &BTreeMap<String, String>) -> String {
+    let semantic = semantic_identity_digest_from_manifest(fields);
+    let profile = fields
+        .get("profile")
+        .unwrap_or_else(|| panic!("native receipt manifest omitted profile"));
+    let mut framed = String::from("mimi-proof-mir-route-identity-v1");
+    let mut frame = |value: &str| {
+        use std::fmt::Write as _;
+        write!(framed, "{}:", value.len()).expect("writing a String cannot fail");
+        framed.push_str(value);
+        framed.push('\n');
+    };
+    frame(profile);
+    frame(&semantic);
+    blake3::hash(framed.as_bytes()).to_hex().to_string()
+}
+
 fn one_line<'a>(stderr: &'a str, prefix: &str, mode: &str) -> &'a str {
     let lines = stderr
         .lines()
@@ -422,7 +439,7 @@ fn assert_route_receipts(stderr: &str, explicit_mir: bool, mode: &str) -> (Strin
         "{mode} native receipt is not bound to route-admission MIR"
     );
     assert_eq!(
-        semantic_identity_digest_from_manifest(&native_fields).as_str(),
+        route_identity_digest_from_manifest(&native_fields).as_str(),
         receipt_identity_digest.as_str(),
         "{mode} native receipt manifest is not bound to route-admission identity"
     );
@@ -702,14 +719,16 @@ fn assert_fixture_pair_is_exact() {
     for required in [
         "type Label { text: string }",
         "let payload = Label { text: \"shared\" }",
-        "let base = map_new()",
+        "match map_new()",
+        "Ok(base) =>",
         "let flag = true",
-        "let child = map_set(base, \"left\", payload)",
-        "let child = map_set(base, \"right\", payload)",
+        "match map_set(base, \"left\", payload)",
+        "match map_set(base, \"right\", payload)",
+        "Ok(child) =>",
         "map_size(child)",
         "drop(child)",
         "drop(base)",
-        "    0",
+        "drop(payload)",
     ] {
         assert!(
             true_source.contains(required),

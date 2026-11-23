@@ -16,12 +16,64 @@ pub(super) fn collect(
     checked_record_field_types: &BTreeMap<NodeId, Vec<(String, ResolvedTypeId)>>,
     zero_miss: Option<&crate::core::OrdinaryMapOwnedAnyV2ZeroMissI32ObservationReceipt>,
 ) -> Option<Receipt> {
-    let Terminator::Branch { condition, .. } = &cfg.blocks.get(&cfg.entry)?.terminator else {
-        return None;
-    };
     if cfg.owner != body.owner || !body.captures.is_empty() {
         return None;
     }
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)?;
+    let mut prefix_blocks = BTreeSet::new();
+    let mut block_spine_order = BTreeMap::new();
+    let mut step_joins = Vec::with_capacity(scope.steps.len());
+    let mut current_block = cfg.entry.clone();
+    block_spine_order.insert(current_block.clone(), 0usize);
+    for (step_idx, step) in scope.steps.iter().enumerate() {
+        let (dispatch, _, _, ok_entry, _, step_join) = ordinary_map_result_branch_edges(
+            cfg,
+            &step.scrutinee.node_id,
+            &step.match_expr.node_id,
+            &step.ok_arm.node_id,
+            &step.err_arm.node_id,
+        )?;
+        if dispatch != current_block {
+            return None;
+        }
+        for err_stmt in step.err_statements {
+            let ResolvedStmtKind::Drop(places) = &err_stmt.kind else {
+                return None;
+            };
+            if places.iter().any(|place| !place.projections.is_empty()) {
+                return None;
+            }
+        }
+        let err_value = match &step.err_arm.body.kind {
+            ResolvedExprKind::Block(block) => block.result.as_deref()?,
+            _ => &step.err_arm.body,
+        };
+        if !err_value.effects.is_empty()
+            || !matches!(
+                types.get(&err_value.ty),
+                Some(ResolvedType::Primitive(
+                    crate::core::PrimitiveType::I32 | crate::core::PrimitiveType::Bool
+                ))
+            )
+            || !match &err_value.kind {
+                ResolvedExprKind::Literal(ResolvedLiteral::Int(_) | ResolvedLiteral::Bool(_)) => {
+                    true
+                }
+                ResolvedExprKind::Load(place) => place.projections.is_empty(),
+                _ => false,
+            }
+        {
+            return None;
+        }
+        prefix_blocks.insert(current_block);
+        step_joins.push((step_join, step.match_expr.node_id.clone()));
+        current_block = ok_entry;
+        block_spine_order.insert(current_block.clone(), step_idx + 1);
+    }
+    let split_block = current_block;
+    let Terminator::Branch { condition, .. } = &cfg.blocks.get(&split_block)?.terminator else {
+        return None;
+    };
     let mut points = BTreeMap::new();
     for (block_id, block) in &cfg.blocks {
         for (rank, point) in block.points.iter().enumerate() {
@@ -37,23 +89,55 @@ pub(super) fn collect(
         }
     }
     let (first_block, first_rank, first_kind) = points.get(condition)?;
-    if first_block != &cfg.entry || *first_kind != CfgPointKind::Condition {
+    if first_block != &split_block || *first_kind != CfgPointKind::Condition {
         return None;
     }
     let before = |node: &NodeId| {
-        points
-            .get(node)
-            .is_some_and(|(block, rank, _)| block == &cfg.entry && rank < first_rank)
+        points.get(node).is_some_and(|(block, rank, _)| {
+            prefix_blocks.contains(block) || (block == &split_block && rank < first_rank)
+        })
     };
-    let result = body.root.result.as_deref()?;
+    let result = scope.leaf_result?;
     let (return_block, _, _) = points.get(&result.node_id)?;
-    if !matches!(&cfg.blocks.get(return_block)?.terminator,
-        Terminator::Return { value: Some(node), implicit: true } if node == &result.node_id)
-    {
-        return None;
+    if scope.is_straight_line {
+        if !matches!(&cfg.blocks.get(return_block)?.terminator,
+            Terminator::Return { value: Some(node), implicit: true } if node == &result.node_id)
+        {
+            return None;
+        }
+    } else {
+        let mut cursor = return_block.clone();
+        for (expected_join, match_node) in step_joins.iter().rev() {
+            let Terminator::Goto { edge } = &cfg.blocks.get(&cursor)?.terminator else {
+                return None;
+            };
+            let cfg_edge = cfg.edges.get(edge)?;
+            if &cfg_edge.to != expected_join {
+                return None;
+            }
+            let join_block = cfg.blocks.get(expected_join)?;
+            if !join_block
+                .points
+                .iter()
+                .any(|point| &point.source.node == match_node)
+            {
+                return None;
+            }
+            cursor = expected_join.clone();
+        }
+        let Some((outer_join, outer_match)) = step_joins.first() else {
+            return None;
+        };
+        if &cursor != outer_join
+            || !matches!(&cfg.blocks.get(&cursor)?.terminator,
+                Terminator::Return { value: Some(node), implicit: true } if node == outer_match)
+        {
+            return None;
+        }
     }
     let mut receipt = Receipt {
         owner: body.owner.clone(),
+        split_block: split_block.clone(),
         first_condition: condition.clone(),
         first_condition_rank: *first_rank,
         nodes: BTreeMap::new(),
@@ -73,9 +157,9 @@ pub(super) fn collect(
         points: &points,
         receipt: &mut receipt,
     };
-    // Root statements before the boundary remain the existing V2 collector's
+    // Prefix statements before the split remain the existing V2 collector's
     // responsibility. A statement crossing the split is scalar in its entirety.
-    for statement in &body.root.statements {
+    for statement in scope.leaf_statements {
         if matches!(
             &statement.kind,
             ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_)
@@ -135,7 +219,7 @@ pub(super) fn collect(
         if copy {
             continue;
         }
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+        let census = scope.local_source_uses(body, local);
         if census.has_nested_callable
             || !census.captures.is_empty()
             || !census.has_unique_load_nodes()
@@ -149,22 +233,30 @@ pub(super) fn collect(
         if explicit_drop {
             let drop = &census.places[0];
             let (drop_block, drop_rank, drop_kind) = points.get(&drop.statement)?;
-            let source_drop = body
-                .root
-                .statements
+            let source_drop = scope
+                .combined_statements
                 .iter()
+                .copied()
                 .find(|statement| statement.node_id == drop.statement)?;
-            if drop_block != &cfg.entry
+            if (!prefix_blocks.contains(drop_block) && drop_block != &split_block)
+                || (drop_block == &split_block && drop_rank >= first_rank)
                 || *drop_kind != CfgPointKind::ResourceAction
                 || !matches!(&source_drop.kind, ResolvedStmtKind::Drop(places)
                     if places.get(drop.place_index).is_some_and(|place| place.base == *local && place.projections.is_empty()))
             {
                 return None;
             }
+            let block_point_before =
+                |block_a: &BasicBlockId, rank_a: usize, block_b: &BasicBlockId, rank_b: usize| {
+                    matches!(
+                        (block_spine_order.get(block_a), block_spine_order.get(block_b)),
+                        (Some(order_a), Some(order_b)) if (order_a, rank_a) < (order_b, rank_b)
+                    )
+                };
             let mut loads = Vec::new();
             for load in &census.loads {
                 let (block, rank, _) = points.get(&load.node)?;
-                if block != &cfg.entry || rank >= drop_rank {
+                if !block_point_before(block, *rank, drop_block, *drop_rank) {
                     return None;
                 }
                 loads.push((load.node.clone(), *rank));
@@ -178,6 +270,7 @@ pub(super) fn collect(
                     local.clone(),
                     crate::core::ownership::OrdinaryMapOwnedAnyV2ScalarTailStringDrop {
                         ty: binding.ty.clone(),
+                        point_block: drop_block.clone(),
                         point: drop.statement.clone(),
                         place_index: drop.place_index,
                         point_rank: *drop_rank,
@@ -198,7 +291,7 @@ pub(super) fn collect(
         let field_transfer = if census.places.is_empty() && single_string_record {
             match census.loads.as_slice() {
                 [usage] if !usage.unprojected && usage.direct_field.is_some() => {
-                    body.root.statements.iter().any(|statement| {
+                    scope.combined_statements.iter().copied().any(|statement| {
                         let ResolvedStmtKind::Bind {
                             pattern:
                                 ResolvedPattern {
@@ -294,7 +387,55 @@ impl Collector<'_> {
                 }
                 self.expression(value)
             }
-            ResolvedStmtKind::Expr(value) => self.expression(value),
+            ResolvedStmtKind::Expr(value) => {
+                if let ResolvedExprKind::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } = &value.kind
+                {
+                    if matches!(
+                        self.types.get(&value.ty),
+                        Some(ResolvedType::Primitive(crate::core::PrimitiveType::Unit))
+                    ) && value.effects.is_empty()
+                        && then_block.result.is_none()
+                        && else_block.result.is_none()
+                    {
+                        self.expression(condition)?;
+                        for stmt in &then_block.statements {
+                            self.statement(stmt)?;
+                        }
+                        for stmt in &else_block.statements {
+                            self.statement(stmt)?;
+                        }
+                        self.selector(
+                            &value.node_id,
+                            &condition.node_id,
+                            &then_block.node_id,
+                            &else_block.node_id,
+                            then_block.node_id.clone(),
+                            else_block.node_id.clone(),
+                        )?;
+                        if !self.points.contains_key(&value.node_id)
+                            || self
+                                .receipt
+                                .nodes
+                                .insert(
+                                    value.node_id.clone(),
+                                    ScalarNode {
+                                        ty: value.ty.clone(),
+                                        kind: ScalarKind::StatementJoin,
+                                    },
+                                )
+                                .is_some()
+                        {
+                            return None;
+                        }
+                        return Some(());
+                    }
+                }
+                self.expression(value)
+            }
             _ => None,
         }
     }

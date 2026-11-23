@@ -10,23 +10,36 @@ func main() -> i32 {
                     Ok(child) => {
                         map_size(child)
                         drop(child)
+                        drop(base)
+                        drop(payload)
                         0
                     },
-                    Err(_) => 0,
+                    Err(status) => {
+                        drop(base)
+                        drop(payload)
+                        status
+                    },
                 }
             } else {
                 match map_set(base, "right", payload) {
                     Ok(child) => {
                         map_size(child)
                         drop(child)
+                        drop(base)
+                        drop(payload)
                         0
                     },
-                    Err(_) => 0,
+                    Err(status) => {
+                        drop(base)
+                        drop(payload)
+                        status
+                    },
                 }
             }
-            drop(base)
-            0
         },
-        Err(status) => status,
+        Err(status) => {
+            drop(payload)
+            status
+        },
     }
 }

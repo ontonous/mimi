@@ -10808,10 +10808,252 @@ fn merge_no_opinion_defers_to_the_proving_engine() {
 
     // flow attempted no proof → resolved verdict wins silently.
     let primary = vec![vr_044("g", VerifStatus::Proven)];
-    let secondary = vec![vr_044("g", VerifStatus::InfrastructureError)];
+    let secondary = vec![vr_044("g", VerifStatus::NoObligations)];
     let merged = merge_engine_verdicts(primary, secondary);
     assert_eq!(merged[0].status, VerifStatus::Proven);
     assert!(!merged[0].message.contains("E0439"));
+}
+
+#[test]
+fn merge_infrastructure_error_never_borrows_the_other_engines_proof() {
+    let mut resolved_proof = vr_044("resolved-fails", VerifStatus::Proven);
+    let mut resolved_artifact = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_artifact.resolved_ir_hash = "resolved-f".into();
+    resolved_proof.artifact = Some(resolved_artifact);
+
+    let mut flow_failure = vr_044("resolved-fails", VerifStatus::InfrastructureError);
+    flow_failure.message = "Flow solver allocation failed".into();
+    let merged = merge_engine_verdicts(vec![resolved_proof], vec![flow_failure]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, VerifStatus::InfrastructureError);
+    assert_eq!(merged[0].constraint_count, 0);
+    assert_eq!(merged[0].trusted_subset_domain, None);
+    assert!(merged[0].artifact.is_none());
+    assert!(merged[0].message.contains("Flow solver allocation failed"));
+    assert!(merged[0].message.contains("InfrastructureError"));
+    assert!(!merged[0].message.contains("E0439"));
+
+    // The rule is symmetric: a failed Resolved attempt cannot inherit a Flow
+    // proof either, and any artifact attached to the failed side is revoked.
+    let mut resolved_failure = vr_044("flow-fails", VerifStatus::InfrastructureError);
+    resolved_failure.message = "Resolved encoder failed".into();
+    let mut invalid_failure_artifact = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    invalid_failure_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    invalid_failure_artifact.resolved_ir_hash = "stale-failure-artifact".into();
+    resolved_failure.artifact = Some(invalid_failure_artifact);
+
+    let mut flow_proof = vr_044("flow-fails", VerifStatus::Proven);
+    let mut flow_artifact = ProofArtifact::new("z3 flow".into(), "source-a".into());
+    flow_artifact.vir_hash = "flow-f".into();
+    flow_proof.artifact = Some(flow_artifact);
+    let merged = merge_engine_verdicts(vec![resolved_failure], vec![flow_proof]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, VerifStatus::InfrastructureError);
+    assert_eq!(merged[0].constraint_count, 0);
+    assert_eq!(merged[0].trusted_subset_domain, None);
+    assert!(merged[0].artifact.is_none());
+    assert!(merged[0].message.contains("Resolved encoder failed"));
+    assert!(merged[0].message.contains("InfrastructureError"));
+    assert!(!merged[0].message.contains("E0439"));
+
+    // Infrastructure failure also takes precedence over an ordinary
+    // unsupported result; only NoObligations is a neutral defer.
+    let failed = vec![vr_044("unsupported", VerifStatus::InfrastructureError)];
+    let unsupported = vec![vr_044("unsupported", VerifStatus::NotInTrustedSubset)];
+    let merged = merge_engine_verdicts(failed, unsupported);
+    assert_eq!(merged[0].status, VerifStatus::InfrastructureError);
+    assert!(merged[0].artifact.is_none());
+}
+
+#[test]
+fn merge_unmatched_infrastructure_errors_revoke_artifacts() {
+    let mut resolved_only_failure = vr_044("resolved-only", VerifStatus::InfrastructureError);
+    resolved_only_failure.message = "Resolved call-site solver session failed".into();
+    resolved_only_failure.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+    let mut resolved_failure_artifact =
+        ProofArtifact::new("z3 resolved".into(), "shared-source".into());
+    resolved_failure_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_failure_artifact.resolved_ir_hash = "resolved-only".into();
+    resolved_only_failure.artifact = Some(resolved_failure_artifact);
+
+    let mut resolved_match = vr_044("paired", VerifStatus::Proven);
+    let mut resolved_match_artifact =
+        ProofArtifact::new("z3 resolved".into(), "shared-source".into());
+    resolved_match_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_match_artifact.resolved_ir_hash = "paired-resolved".into();
+    resolved_match.artifact = Some(resolved_match_artifact);
+
+    let mut flow_match = vr_044("paired", VerifStatus::Proven);
+    let mut flow_match_artifact = ProofArtifact::new("z3 flow".into(), "shared-source".into());
+    flow_match_artifact.vir_hash = "paired-flow".into();
+    flow_match.artifact = Some(flow_match_artifact);
+    let merged = merge_engine_verdicts(
+        vec![resolved_only_failure, resolved_match],
+        vec![flow_match],
+    );
+    let failed = merged
+        .iter()
+        .find(|result| result.func_name == "resolved-only")
+        .expect("unmatched primary result remains visible");
+    assert_eq!(failed.status, VerifStatus::InfrastructureError);
+    assert_eq!(failed.constraint_count, 0);
+    assert_eq!(failed.trusted_subset_domain, None);
+    assert!(failed.artifact.is_none());
+    assert!(failed
+        .message
+        .contains("Resolved call-site solver session failed"));
+    assert!(failed.message.contains("InfrastructureError"));
+    assert!(!failed.message.contains("E0439"));
+
+    let mut resolved_match = vr_044("paired", VerifStatus::Proven);
+    let mut resolved_match_artifact =
+        ProofArtifact::new("z3 resolved".into(), "shared-source".into());
+    resolved_match_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_match_artifact.resolved_ir_hash = "paired-resolved".into();
+    resolved_match.artifact = Some(resolved_match_artifact);
+
+    let mut flow_match = vr_044("paired", VerifStatus::Proven);
+    let mut flow_match_artifact = ProofArtifact::new("z3 flow".into(), "shared-source".into());
+    flow_match_artifact.vir_hash = "paired-flow".into();
+    flow_match.artifact = Some(flow_match_artifact);
+
+    let mut flow_only_failure = vr_044("flow-only", VerifStatus::InfrastructureError);
+    flow_only_failure.message = "Flow call-site encoding failed".into();
+    let mut flow_failure_artifact = ProofArtifact::new("z3 flow".into(), "shared-source".into());
+    flow_failure_artifact.vir_hash = "flow-only".into();
+    flow_only_failure.artifact = Some(flow_failure_artifact);
+
+    let merged = merge_engine_verdicts(vec![resolved_match], vec![flow_match, flow_only_failure]);
+    let failed = merged
+        .iter()
+        .find(|result| result.func_name == "flow-only")
+        .expect("unmatched Flow-only result remains visible");
+    assert_eq!(failed.status, VerifStatus::InfrastructureError);
+    assert_eq!(failed.constraint_count, 0);
+    assert_eq!(failed.trusted_subset_domain, None);
+    assert!(failed.artifact.is_none());
+    assert!(failed.message.contains("Flow call-site encoding failed"));
+    assert!(failed.message.contains("InfrastructureError"));
+    assert!(!failed.message.contains("E0439"));
+}
+
+#[test]
+fn merge_batch_provenance_rejection_preserves_infrastructure_error_detail() {
+    let mut infrastructure = vr_044("resolved-only", VerifStatus::InfrastructureError);
+    infrastructure.message = "Resolved solver session allocation failed".into();
+    infrastructure.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+        "specific solver-session allocation failure",
+        crate::span::Span::new(3, 2, 3, 8),
+    ));
+    let mut resolved_artifact = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_artifact.resolved_ir_hash = "resolved-only".into();
+    infrastructure.artifact = Some(resolved_artifact);
+
+    let mut flow_only = vr_044("flow-only", VerifStatus::Proven);
+    let mut flow_artifact = ProofArtifact::new("z3 flow".into(), "source-b".into());
+    flow_artifact.vir_hash = "flow-only".into();
+    flow_only.artifact = Some(flow_artifact);
+
+    // Different source snapshots trigger batch normalization before either
+    // unmatched branch is handled. The original infrastructure detail and
+    // diagnostic must survive that normalization and artifact revocation.
+    let merged = merge_engine_verdicts(vec![infrastructure], vec![flow_only]);
+    let failed = merged
+        .iter()
+        .find(|result| result.func_name == "resolved-only")
+        .expect("infrastructure result remains visible");
+    assert_eq!(failed.status, VerifStatus::InfrastructureError);
+    assert!(failed.artifact.is_none());
+    assert!(failed
+        .message
+        .contains("Resolved solver session allocation failed"));
+    assert!(failed.message.contains("mixed source provenance"));
+    assert_eq!(
+        failed
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.message.as_str()),
+        Some("specific solver-session allocation failure")
+    );
+}
+
+#[test]
+fn merge_matched_source_conflict_preserves_original_infrastructure_from_either_engine() {
+    let mut resolved_proof = vr_044("f", VerifStatus::Proven);
+    let mut resolved_artifact = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_artifact.resolved_ir_hash = "resolved-f".into();
+    resolved_proof.artifact = Some(resolved_artifact);
+
+    let mut flow_failure = vr_044("f", VerifStatus::InfrastructureError);
+    flow_failure.message = "Flow callee Z3 allocation failed".into();
+    flow_failure.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+        "Flow solver-session allocation failed at call site",
+        crate::span::Span::new(4, 3, 4, 9),
+    ));
+    flow_failure.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+    let mut flow_artifact = ProofArtifact::new("z3 flow".into(), "source-b".into());
+    flow_artifact.vir_hash = "flow-f".into();
+    flow_failure.artifact = Some(flow_artifact);
+
+    // Primary Proven becomes a synthetic provenance InfrastructureError
+    // during batch normalization. The original secondary solver failure must
+    // remain the result, including its message and diagnostic.
+    let merged = merge_engine_verdicts(vec![resolved_proof], vec![flow_failure]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, VerifStatus::InfrastructureError);
+    assert_eq!(merged[0].constraint_count, 0);
+    assert_eq!(merged[0].trusted_subset_domain, None);
+    assert!(merged[0].artifact.is_none());
+    assert!(merged[0]
+        .message
+        .contains("Flow callee Z3 allocation failed"));
+    assert!(merged[0].message.contains("mixed source provenance"));
+    assert_eq!(
+        merged[0]
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.message.as_str()),
+        Some("Flow solver-session allocation failed at call site")
+    );
+
+    let mut resolved_failure = vr_044("g", VerifStatus::InfrastructureError);
+    resolved_failure.message = "Resolved callee Z3 allocation failed".into();
+    resolved_failure.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+        "Resolved solver-session allocation failed at call site",
+        crate::span::Span::new(7, 2, 7, 8),
+    ));
+    resolved_failure.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+    let mut resolved_artifact = ProofArtifact::new("z3 resolved".into(), "source-a".into());
+    resolved_artifact.engine = ProofArtifact::ENGINE_RESOLVED.into();
+    resolved_artifact.resolved_ir_hash = "resolved-g".into();
+    resolved_failure.artifact = Some(resolved_artifact);
+
+    let mut flow_proof = vr_044("g", VerifStatus::Proven);
+    let mut flow_artifact = ProofArtifact::new("z3 flow".into(), "source-b".into());
+    flow_artifact.vir_hash = "flow-g".into();
+    flow_proof.artifact = Some(flow_artifact);
+
+    // The reverse source/status order keeps the original primary failure.
+    let merged = merge_engine_verdicts(vec![resolved_failure], vec![flow_proof]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].status, VerifStatus::InfrastructureError);
+    assert_eq!(merged[0].constraint_count, 0);
+    assert_eq!(merged[0].trusted_subset_domain, None);
+    assert!(merged[0].artifact.is_none());
+    assert!(merged[0]
+        .message
+        .contains("Resolved callee Z3 allocation failed"));
+    assert!(merged[0].message.contains("mixed source provenance"));
+    assert_eq!(
+        merged[0]
+            .diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic.message.as_str()),
+        Some("Resolved solver-session allocation failed at call site")
+    );
 }
 
 #[test]
@@ -15699,20 +15941,40 @@ extern "C" {
 func main() -> i32 {
     let counter = Counter.spawn()
     let actor_value = counter.bump(5)
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(actor_value))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    match map_new() {
+        Ok(root) => match map_set(root, "answer", scalar_probe(actor_value)) {
+            Ok(updated) => {
+                let size = map_size(updated)
+                drop(root)
+                drop(updated)
+                size
+            },
+            Err(status) => {
+                drop(root)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#;
     const UNUSED_ACTOR_MAIN: &str = r#"
 func main() -> i32 {
-    let root = map_new()
-    let updated = map_set(root, "answer", scalar_probe(41 as i32))
-    let size = map_size(updated)
-    drop(updated)
-    size
+    match map_new() {
+        Ok(root) => match map_set(root, "answer", scalar_probe(41 as i32)) {
+            Ok(updated) => {
+                let size = map_size(updated)
+                drop(root)
+                drop(updated)
+                size
+            },
+            Err(status) => {
+                drop(root)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#;
     let actor_prefix = include_str!(concat!(

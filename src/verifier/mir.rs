@@ -815,6 +815,113 @@ pub(crate) fn verify_program_with_route_receipt(
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
+    if program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_ordinary_map_owned_get_result_branch_v3_receipt()
+            || function.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
+                            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
+                    )
+                })
+            })
+    }) {
+        return Err(format!(
+            "{}: owned-Get ResultBranchV3 requires its exact CheckedProgram-bound verifier route",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
+    verify_program_inner(program, source_hash, route_receipt)
+}
+
+/// Verify the exact Checker-bound owned-Get ResultBranchV3 island. Generic MIR
+/// verifier entry points refuse this profile because it uses synthetic
+/// `Result<V1Root, i32>` values and CFG block-parameter roots that are only
+/// authorized by `CheckedProgram::validate_ordinary_map_owned_get_result_branch_v3_mir_route`.
+pub(crate) fn verify_program_with_ordinary_map_owned_get_result_branch_v3_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    source_hash: String,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<Vec<VerificationResult>, String> {
+    let profile = crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;
+    if route_receipt.profile != profile {
+        return Err(format!(
+            "{}: owned-Get ResultBranchV3 verifier requires exact route profile '{profile}', found '{}'",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            route_receipt.profile
+        ));
+    }
+    checked
+        .validate_backend(crate::core::BackendProfile::Verifier)
+        .map_err(|diagnostics| {
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+    route_receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!(
+                "{}: owned-Get ResultBranchV3 route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            )
+        })?;
+    let expected = crate::core::mir::validate_ordinary_map_owned_get_result_branch_v3_mir_route(
+        checked, program,
+    )
+    .map_err(|message| {
+        format!(
+            "{}: owned-Get ResultBranchV3 Checker/MIR route rejected: {message}",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })?;
+    if &expected != route_receipt {
+        return Err(format!(
+            "{}: owned-Get ResultBranchV3 route receipt differs from the exact CheckedProgram/MIR graph identity",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    super::mir_capability::validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
+        checked,
+        program,
+        route_receipt,
+    )
+    .map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: owned-Get ResultBranchV3 verifier capability rejected the graph: {errors:?}"
+        )
+    })?;
+    if !program
+        .functions()
+        .values()
+        .any(|function| function_has_verification_obligation(function, program))
+    {
+        return Ok(program
+            .functions()
+            .keys()
+            .map(|owner| VerificationResult {
+                func_name: owner.0.clone(),
+                status: VerifStatus::NoObligations,
+                message: format!(
+                    "owned-Get ResultBranchV3 Checker receipt, exact MIR graph, and TypeDesc capability validated; no proof obligations were present (source_hash={source_hash}, profile={}, mir_digest={}, route_identity_digest={})",
+                    route_receipt.profile,
+                    route_receipt.mir_digest,
+                    route_receipt.route_identity_digest(),
+                ),
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: None,
+            })
+            .collect());
+    }
     verify_program_inner(program, source_hash, route_receipt)
 }
 
@@ -1260,10 +1367,41 @@ pub(crate) fn mir_program_has_ordinary_map_new_result_signal(program: &MirProgra
     use crate::core::mir::MirInstructionKind;
 
     let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
-    program.type_catalog().get(&result_ty).is_some()
-        || program.functions().values().any(|function| {
-            function.ownership.ordinary_map_new_result_receipt().is_some()
-                || function.values.values().any(|value| value.ty == result_ty)
+    if program.functions().values().any(|function| {
+        function
+            .ownership
+            .ordinary_map_new_result_receipt()
+            .is_some()
+    }) {
+        return true;
+    }
+    let has_validated_result_branch_v1 = program.functions().values().any(|function| {
+        function
+            .ownership
+            .ordinary_map_owned_any_v2_cfg_receipt()
+            .and_then(|cfg| cfg.flow.as_ref())
+            .and_then(crate::core::mir::ordinary_map_owned_any_v2_flow_result_branches)
+            .is_some_and(|branches| !branches.is_empty())
+            && crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                program.type_catalog(),
+                function,
+            )
+            .is_ok()
+    });
+    let has_unattributed_result_ty = program.functions().values().any(|function| {
+        let is_result_branch_v1 = function
+            .ownership
+            .ordinary_map_owned_any_v2_cfg_receipt()
+            .and_then(|cfg| cfg.flow.as_ref())
+            .and_then(crate::core::mir::ordinary_map_owned_any_v2_flow_result_branches)
+            .is_some_and(|branches| !branches.is_empty())
+            && crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                program.type_catalog(),
+                function,
+            )
+            .is_ok();
+        !is_result_branch_v1
+            && (function.values.values().any(|value| value.ty == result_ty)
                 || function.blocks.values().any(|block| {
                     block.instructions.iter().any(|instruction| {
                         matches!(
@@ -1272,8 +1410,10 @@ pub(crate) fn mir_program_has_ordinary_map_new_result_signal(program: &MirProgra
                                 if function.values.get(result).is_some_and(|value| value.ty == result_ty)
                         )
                     })
-                })
-        })
+                }))
+    });
+    has_unattributed_result_ty
+        || (!has_validated_result_branch_v1 && program.type_catalog().get(&result_ty).is_some())
 }
 
 /// Detect the nested New/Set Result → GetAny → stdout receipt profile before
@@ -1329,7 +1469,8 @@ pub(crate) fn mir_program_has_ordinary_map_owned_any_v2_map_set_drop_control_res
     program.functions().values().any(|function| {
         function
             .ownership
-            .has_checker_ordinary_map_owned_any_v2_cfg_receipt()
+            .ordinary_map_owned_any_v2_cfg_receipt()
+            .is_some_and(|receipt| receipt.map_set_drop_control_result_branch_receipt.is_some())
     }) || crate::core::mir::
         validate_ordinary_map_owned_any_v2_map_set_drop_control_result_branch_mir_route(program)
         .is_ok()
@@ -2546,6 +2687,132 @@ pub(crate) fn verify_program_with_ordinary_map_owned_any_v2_values_result_crossc
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValuesResultVerifierMode {
+    CrosscallStringCaller(
+        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion,
+    ),
+    ProducerCaller,
+}
+
+fn withhold_result_branch_values_verdicts(
+    program: &MirProgram,
+    owners: [&crate::core::NodeId; 2],
+    message: &str,
+    results: &mut Vec<VerificationResult>,
+) {
+    for owner in owners {
+        let has_obligation = program
+            .functions()
+            .get(owner)
+            .is_some_and(|function| function_has_verification_obligation(function, program));
+        let existing = results
+            .iter_mut()
+            .find(|result| result.func_name == owner.0);
+        match existing {
+            Some(result) if result.status == VerifStatus::Verified => {
+                result.status = VerifStatus::NotInTrustedSubset;
+                result.message = message.to_string();
+                result.constraint_count = 0;
+                result.artifact = None;
+                result.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
+            }
+            Some(_) => {}
+            None if has_obligation => results.push(VerificationResult {
+                func_name: owner.0.clone(),
+                status: VerifStatus::NotInTrustedSubset,
+                message: message.to_string(),
+                diagnostic: None,
+                duration_us: 0,
+                constraint_count: 0,
+                artifact: None,
+                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
+            }),
+            None => {}
+        }
+    }
+}
+
+pub(crate) fn verify_program_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE;
+    if route_receipt.profile != profile {
+        return Err(format!(
+            "{}: Values Result producer/caller verifier requires exact profile '{profile}', found '{}'",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            route_receipt.profile
+        ));
+    }
+    checked
+        .validate_backend(crate::core::BackendProfile::Verifier)
+        .map_err(|diagnostics| {
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+    route_receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!(
+                "{}: Values Result producer/caller route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            )
+        })?;
+    let expected =
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked, program,
+        )
+        .map_err(|message| {
+            format!(
+                "{}: Values Result producer/caller Checker/MIR route rejected: {message}",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })?;
+    if &expected != route_receipt {
+        return Err(format!(
+            "{}: Values Result producer/caller receipt differs from the exact CheckedProgram-bound receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+        program,
+    )
+    .map_err(|message| {
+        format!(
+            "{}: Values Result producer/caller MIR proof census rejected: {message}",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })?;
+    validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
+        program,
+        route_receipt,
+        profile,
+    )?;
+
+    let mut results = verify_program_inner(program, source_hash, route_receipt)?;
+    let result_receipt = program
+        .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Result-branch Values producer/caller receipt disappeared".to_string())?;
+    withhold_result_branch_values_verdicts(
+        program,
+        [
+            &result_receipt.producer.producer_owner,
+            &result_receipt.caller_owner,
+        ],
+        "exact Checker/MIR Result producer/caller receipts were validated, but Result status/tag and Values cross-call semantics are not modeled; contract verdict withheld",
+        &mut results,
+    );
+    Ok(results)
+}
+
 fn verify_program_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_profile(
     checked: &crate::core::CheckedProgram,
     program: &MirProgram,
@@ -2641,31 +2908,12 @@ fn verify_program_with_ordinary_map_owned_any_v2_values_result_crosscall_string_
         .into_iter()
         .next()
         .ok_or_else(|| "Result-branch Values String caller receipt disappeared".to_string())?;
-    for owner in [&result_receipt.producer_owner, &result_receipt.caller_owner] {
-        let existing = results
-            .iter_mut()
-            .find(|result| result.func_name == owner.0);
-        match existing {
-            Some(result) if result.status == VerifStatus::Verified => {
-                result.status = VerifStatus::NotInTrustedSubset;
-                result.message = "exact Checker/MIR producer and caller receipts were validated, but Result status/tag and Values cross-call semantics are not modeled; contract verdict withheld".into();
-                result.constraint_count = 0;
-                result.artifact = None;
-                result.trusted_subset_domain = Some(TrustedSubsetDomain::Contract);
-            }
-            Some(_) => {}
-            None => results.push(VerificationResult {
-                func_name: owner.0.clone(),
-                status: VerifStatus::NotInTrustedSubset,
-                message: "exact Checker/MIR producer and caller receipts were validated, but Result status/tag and Values cross-call semantics are not modeled; contract verdict withheld".into(),
-                diagnostic: None,
-                duration_us: 0,
-                constraint_count: 0,
-                artifact: None,
-                trusted_subset_domain: Some(TrustedSubsetDomain::Contract),
-            }),
-        }
-    }
+    withhold_result_branch_values_verdicts(
+        program,
+        [&result_receipt.producer_owner, &result_receipt.caller_owner],
+        "exact Checker/MIR producer and caller receipts were validated, but Result status/tag and Values cross-call semantics are not modeled; contract verdict withheld",
+        &mut results,
+    );
     Ok(results)
 }
 
@@ -3129,25 +3377,59 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
                         && receipt.unpacks.is_empty()
                 })
                 .collect::<Vec<_>>();
-            let [bridge] = bridge_matches.as_slice() else {
+            if let [bridge] = bridge_matches.as_slice() {
+                let exact_len_reads_clone = bridge.len_instruction.as_ref().is_some_and(|len_id| {
+                    function.blocks.values().any(|block| {
+                        block.instructions.iter().any(|len_instruction| {
+                            len_instruction.id == *len_id
+                                && matches!(
+                                    &len_instruction.kind,
+                                    MirInstructionKind::ListOp {
+                                        operation: MirListOperation::Len,
+                                        list,
+                                        ..
+                                    } if list == result
+                                )
+                        })
+                    })
+                });
+                return bridge.validate_against_program(program).is_ok() && exact_len_reads_clone;
+            }
+            if !bridge_matches.is_empty() {
+                return false;
+            }
+            let result_bridges = match program
+                .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+            {
+                Ok(receipts) => receipts,
+                Err(_) => return false,
+            };
+            let result_bridge_matches = result_bridges
+                .iter()
+                .filter(|receipt| {
+                    receipt.caller_owner == function.owner
+                        && receipt.caller_snapshot == *source
+                        && receipt.caller_len_receiver == *result
+                        && receipt.producer.values_type == values_type
+                })
+                .collect::<Vec<_>>();
+            let [result_bridge] = result_bridge_matches.as_slice() else {
                 return false;
             };
-            let exact_len_reads_clone = bridge.len_instruction.as_ref().is_some_and(|len_id| {
-                function.blocks.values().any(|block| {
-                    block.instructions.iter().any(|len_instruction| {
-                        len_instruction.id == *len_id
-                            && matches!(
-                                &len_instruction.kind,
-                                MirInstructionKind::ListOp {
-                                    operation: MirListOperation::Len,
-                                    list,
-                                    ..
-                                } if list == result
-                            )
-                    })
+            let exact_len_reads_clone = function.blocks.values().any(|block| {
+                block.instructions.iter().any(|len_instruction| {
+                    len_instruction.id == result_bridge.caller_len_instruction
+                        && matches!(
+                            &len_instruction.kind,
+                            MirInstructionKind::ListOp {
+                                operation: MirListOperation::Len,
+                                list,
+                                ..
+                            } if list == result
+                        )
                 })
             });
-            bridge.validate_against_program(program).is_ok() && exact_len_reads_clone
+            result_bridge.validate_against_program(program).is_ok() && exact_len_reads_clone
         }
         MirInstructionKind::OrdinaryMapOwnedAnyV2GetAny { result, root, key } => program
             .ordinary_map_owned_any_v2_get_any_result_receipts()
@@ -3418,6 +3700,24 @@ fn ordinary_map_owned_any_v2_instruction_failure_is_modelled(
                         matches!(matching.as_slice(), [receipt]
                             if receipt.producer_values_result == *result
                                 && receipt.values_type
+                                    == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
+                                && receipt.validate_against_program(program).is_ok())
+                    })
+                || program
+                    .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+                    .ok()
+                    .is_some_and(|receipts| {
+                        let matching = receipts
+                            .iter()
+                            .filter(|receipt| {
+                                receipt.producer.producer_owner == function.owner
+                                    && receipt.producer.producer_values_instruction
+                                        == instruction.id
+                            })
+                            .collect::<Vec<_>>();
+                        matches!(matching.as_slice(), [receipt]
+                            if receipt.producer.producer_values_result == *result
+                                && receipt.producer.values_type
                                     == crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
                                 && receipt.validate_against_program(program).is_ok())
                     })
@@ -3992,10 +4292,18 @@ fn verify_program_inner(
         == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE;
     let crosscall_result_string_index1_profile = route_receipt.profile
         == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE;
+    let values_result_producer_caller_profile = route_receipt.profile
+        == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE;
     let values_bridge_validation = if crosscall_result_string_profile
         || crosscall_result_string_index1_profile
     {
         validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_verifier_receipts(
+            program,
+            route_receipt,
+            &route_receipt.profile,
+        )
+    } else if values_result_producer_caller_profile {
+        validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
             program,
             route_receipt,
             &route_receipt.profile,
@@ -4050,11 +4358,18 @@ fn verify_program_inner(
             || crosscall_string_profile
             || crosscall_string_index1_profile
             || crosscall_result_string_profile
-            || crosscall_result_string_index1_profile,
+            || crosscall_result_string_index1_profile
+            || values_result_producer_caller_profile,
         if crosscall_result_string_profile {
-            Some(crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3)
+            Some(ValuesResultVerifierMode::CrosscallStringCaller(
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3,
+            ))
         } else if crosscall_result_string_index1_profile {
-            Some(crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4)
+            Some(ValuesResultVerifierMode::CrosscallStringCaller(
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4,
+            ))
+        } else if values_result_producer_caller_profile {
+            Some(ValuesResultVerifierMode::ProducerCaller)
         } else {
             None
         },
@@ -4233,8 +4548,31 @@ fn verify_program_inner(
                 crate::core::mir::types::MirLayout::Result { .. }
                     if program.transitions().is_empty() =>
                 {
+                    let is_validated_result_branch_v1 = matches!(
+                        route_receipt.profile.as_str(),
+                        p if p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PERSISTENT_ROOT_ALIAS_REPLACEMENT_PROFILE
+                            || p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CLONE_ISOLATION_PROFILE
+                            || p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE
+                            || p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE
+                            || p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE
+                            || p == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE
+                    ) && program
+                        .functions()
+                        .values()
+                        .filter(|f| {
+                            f.values.values().any(|v| &v.ty == ty)
+                        })
+                        .all(|f| {
+                            crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                                program.type_catalog(),
+                                f,
+                            )
+                            .is_ok()
+                        });
                     let source_bound_root_result = route_receipt.profile
                         == crate::core::mir::ORDINARY_MAP_NEW_RESULT_L2_VERIFIER_PROFILE
+                        || route_receipt.profile
+                            == crate::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE
                         || route_receipt.profile
                             == crate::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE
                         || route_receipt.profile
@@ -4246,7 +4584,8 @@ fn verify_program_inner(
                         || route_receipt.profile
                             == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
                         || route_receipt.profile
-                            == crate::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE;
+                            == crate::core::mir::ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE
+                        || is_validated_result_branch_v1;
                     if route_receipt.profile
                         == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE
                         && ty
@@ -4275,6 +4614,7 @@ fn verify_program_inner(
                         let owner = crate::core::NodeId("function:main".into());
                         let source_result_type = if route_receipt.profile
                             == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE
+                            || is_validated_result_branch_v1
                         {
                             crate::core::mir::types::ordinary_map_owned_any_v2_source_result_type_id()
                                 .ok()
@@ -4290,6 +4630,16 @@ fn verify_program_inner(
                                         .ownership
                                         .ordinary_map_new_result_receipt()
                                         .map(|receipt| &receipt.source_result_type)
+                                } else if route_receipt.profile
+                                    == crate::core::mir::ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE
+                                {
+                                    function
+                                        .ownership
+                                        .ordinary_map_set_lineage_receipt()
+                                        .filter(|receipt| {
+                                            receipt.new_result_type == receipt.set_result_type
+                                        })
+                                        .map(|receipt| &receipt.set_result_type)
                                 } else if route_receipt.profile
                                     == crate::core::mir::ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE
                                 {
@@ -4347,6 +4697,53 @@ fn verify_program_inner(
                                 .err()
                                 .map(|error| (ty.clone(), error))
                         })
+                    } else if route_receipt.profile
+                        == crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+                        && ty
+                            == &crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+                        && program.functions().values().any(|function| {
+                            function
+                                .ownership
+                                .has_ordinary_map_owned_get_result_branch_v3_receipt()
+                        })
+                    {
+                        let mut matched = false;
+                        let mut first_error = None;
+                        for function in program.functions().values() {
+                            let Some(receipt) = function
+                                .ownership
+                                .ordinary_map_owned_get_result_branch_v3_receipt()
+                            else {
+                                continue;
+                            };
+                            for branch in &receipt.result_branches {
+                                if matches!(
+                                    branch.kind,
+                                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New
+                                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set
+                                ) {
+                                    matched = true;
+                                    if let Err(error) = program
+                                        .type_catalog()
+                                        .validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                                            ty,
+                                            &branch.result_type,
+                                        )
+                                    {
+                                        first_error.get_or_insert(error);
+                                    }
+                                }
+                            }
+                        }
+                        if !matched {
+                            Some((
+                                ty.clone(),
+                                "owned-Get ResultBranchV3 synthetic Result has no New/Set source branch receipt"
+                                    .into(),
+                            ))
+                        } else {
+                            first_error.map(|error| (ty.clone(), error))
+                        }
                     } else {
                         let direct = program
                             .type_catalog()
@@ -4462,10 +4859,59 @@ fn verify_program_inner(
                             )
                             .is_ok()
                     });
+            let exact_owned_get_result_branch_v3_root_result = route_receipt.profile
+                == crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND
+                && function
+                    .ownership
+                    .has_ordinary_map_owned_get_result_branch_v3_receipt()
+                && ty
+                    == &crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+                && function
+                    .ownership
+                    .ordinary_map_owned_get_result_branch_v3_receipt()
+                    .is_some_and(|receipt| {
+                        receipt.result_branches.iter().any(|branch| {
+                            matches!(
+                                branch.kind,
+                                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New
+                                    | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set
+                            ) && program
+                                .type_catalog()
+                                .validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                                    ty,
+                                    &branch.result_type,
+                                )
+                                .is_ok()
+                        })
+                    });
+            let exact_values_result_crosscall_string_caller_root_result = (route_receipt.profile
+                == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE
+                || route_receipt.profile
+                    == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE
+                || route_receipt.profile
+                    == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE)
+                && function
+                    .ownership
+                    .ordinary_map_owned_any_v2_values_result_producer_receipt()
+                    .is_some_and(|producer| producer.owner == function.owner)
+                && ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id()
+                && crate::core::mir::types::ordinary_map_owned_any_v2_source_result_type_id()
+                    .ok()
+                    .is_some_and(|source_result_type| {
+                        program
+                            .type_catalog()
+                            .validate_ordinary_map_owned_any_v2_root_result(
+                                ty,
+                                &source_result_type,
+                            )
+                            .is_ok()
+                    });
             !exact_string_get_result
                 && !exact_any_i32_root_result
                 && !exact_computed_string_key_root_result
                 && !exact_values_local_index_i32_result_branch_root_result
+                && !exact_values_result_crosscall_string_caller_root_result
+                && !exact_owned_get_result_branch_v3_root_result
                 && (function.result == *ty || function.values.values().any(|value| value.ty == *ty))
         }) {
             let message = format!(
@@ -4778,9 +5224,7 @@ fn unique_default_math_span(root: &MirProofDefaultRoot) -> Option<crate::span::S
 fn validate_ordinary_map_owned_any_v2_values_verifier_receipts(
     program: &MirProgram,
     allow_producer_caller_return: bool,
-    values_result_crosscall_profile: Option<
-        crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion,
-    >,
+    values_result_mode: Option<ValuesResultVerifierMode>,
 ) -> Result<(), String> {
     let values_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
     let has_values_signal = program.functions().values().any(|function| {
@@ -4809,13 +5253,12 @@ fn validate_ordinary_map_owned_any_v2_values_verifier_receipts(
         .ordinary_map_owned_any_v2_payload_selection_receipt()?
         .ok_or_else(|| "Values has no Core payload-selection receipt".to_string())?;
     selection.validate_against_program(program)?;
-    let producer_caller_receipts =
-        if allow_producer_caller_return && values_result_crosscall_profile.is_none() {
-            program.ordinary_map_owned_any_v2_values_producer_caller_receipts()?
-        } else {
-            Vec::new()
-        };
-    let receipts = if values_result_crosscall_profile.is_some() {
+    let producer_caller_receipts = if allow_producer_caller_return && values_result_mode.is_none() {
+        program.ordinary_map_owned_any_v2_values_producer_caller_receipts()?
+    } else {
+        Vec::new()
+    };
+    let receipts = if values_result_mode.is_some() {
         Vec::new()
     } else if allow_producer_caller_return {
         program.ordinary_map_owned_any_v2_values_result_receipts_excluding_producer_caller(
@@ -4914,12 +5357,12 @@ fn validate_ordinary_map_owned_any_v2_values_verifier_receipts(
             );
         }
     }
-    let crosscall_string_receipts =
-        if allow_producer_caller_return && values_result_crosscall_profile.is_none() {
-            program.ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()?
-        } else {
-            Vec::new()
-        };
+    let crosscall_string_receipts = if allow_producer_caller_return && values_result_mode.is_none()
+    {
+        program.ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()?
+    } else {
+        Vec::new()
+    };
     for crosscall in &crosscall_string_receipts {
         validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_type_owner_bridge(
             program, crosscall,
@@ -4953,64 +5396,114 @@ fn validate_ordinary_map_owned_any_v2_values_verifier_receipts(
             );
         }
     }
-    if let Some(expected_version) = values_result_crosscall_profile {
-        let result_crosscall_receipts =
-            program.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()?;
-        if result_crosscall_receipts.len() != 1 {
-            return Err(format!(
-                "Result-branch Values verifier requires one exact cross-call receipt, found {}",
-                result_crosscall_receipts.len()
-            ));
-        }
-        let receipt = &result_crosscall_receipts[0];
-        let expected_profile = match expected_version {
-            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
-                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE
+    match values_result_mode {
+        Some(ValuesResultVerifierMode::CrosscallStringCaller(expected_version)) => {
+            let result_crosscall_receipts = program
+                .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()?;
+            if result_crosscall_receipts.len() != 1 {
+                return Err(format!(
+                    "Result-branch Values verifier requires one exact cross-call receipt, found {}",
+                    result_crosscall_receipts.len()
+                ));
             }
-            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
-                crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE
+            let receipt = &result_crosscall_receipts[0];
+            let expected_profile = match expected_version {
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V3 => {
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE
+                }
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V4 => {
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_INDEX1_PROFILE
+                }
+                crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V1
+                | crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2 => {
+                    return Err("straight-line Values caller profile cannot enter Result verifier receipt validation".into())
+                }
+            };
+            if receipt.profile != expected_profile
+                || receipt.checker_caller.profile_version != expected_version
+            {
+                return Err(format!(
+                    "Result-branch Values verifier requires exact {:?} receipt '{expected_profile}'",
+                    expected_version
+                ));
             }
-            crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V1
-            | crate::core::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion::V2 => {
-                return Err("straight-line Values caller profile cannot enter Result verifier receipt validation".into())
+            validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_type_owner_bridge(
+                program, receipt,
+            )?;
+            let producer = program
+                .functions()
+                .get(&receipt.producer_owner)
+                .ok_or_else(|| "Result-branch Values producer function is absent".to_string())?;
+            let exact_operation = producer.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    instruction.id == receipt.producer_values_instruction
+                        && matches!(
+                            &instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
+                                if result == &receipt.producer_values_result
+                        )
+                })
+            });
+            let identity = (
+                receipt.producer_owner.clone(),
+                receipt.producer_values_instruction.clone(),
+            );
+            if !exact_operation
+                || producer.result != values_ty
+                || receipt.values_type != values_ty
+                || !observed.insert(identity)
+            {
+                return Err("Result-branch Values caller receipt does not cover one unique exact producer Values result".into());
             }
-        };
-        if receipt.profile != expected_profile
-            || receipt.checker_caller.profile_version != expected_version
-        {
-            return Err(format!(
-                "Result-branch Values verifier requires exact {:?} receipt '{expected_profile}'",
-                expected_version
-            ));
         }
-        validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_type_owner_bridge(
-            program, receipt,
-        )?;
-        let producer = program
-            .functions()
-            .get(&receipt.producer_owner)
-            .ok_or_else(|| "Result-branch Values producer function is absent".to_string())?;
-        let exact_operation = producer.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                instruction.id == receipt.producer_values_instruction
-                    && matches!(
-                        &instruction.kind,
-                        MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
-                            if result == &receipt.producer_values_result
-                    )
-            })
-        });
-        let identity = (
-            receipt.producer_owner.clone(),
-            receipt.producer_values_instruction.clone(),
-        );
-        if !exact_operation
-            || producer.result != values_ty
-            || receipt.values_type != values_ty
-            || !observed.insert(identity)
-        {
-            return Err("Result-branch Values caller receipt does not cover one unique exact producer Values result".into());
+        Some(ValuesResultVerifierMode::ProducerCaller) => {
+            let result_producer_caller_receipts =
+                program.ordinary_map_owned_any_v2_values_result_producer_caller_receipts()?;
+            if result_producer_caller_receipts.len() != 1 {
+                return Err(format!(
+                    "Result-branch Values producer/caller verifier requires one exact receipt, found {}",
+                    result_producer_caller_receipts.len()
+                ));
+            }
+            let receipt = &result_producer_caller_receipts[0];
+            if receipt.profile
+                != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+            {
+                return Err(format!(
+                    "Result-branch Values producer/caller verifier requires exact receipt '{}'",
+                    crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+                ));
+            }
+            validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
+                program, receipt,
+            )?;
+            let producer = program
+                .functions()
+                .get(&receipt.producer.producer_owner)
+                .ok_or_else(|| "Result-branch Values producer function is absent".to_string())?;
+            let exact_operation = producer.blocks.values().any(|block| {
+                block.instructions.iter().any(|instruction| {
+                    instruction.id == receipt.producer.producer_values_instruction
+                        && matches!(
+                            &instruction.kind,
+                            MirInstructionKind::OrdinaryMapOwnedAnyV2Values { result, .. }
+                                if result == &receipt.producer.producer_values_result
+                        )
+                })
+            });
+            let identity = (
+                receipt.producer.producer_owner.clone(),
+                receipt.producer.producer_values_instruction.clone(),
+            );
+            if !exact_operation
+                || producer.result != values_ty
+                || receipt.producer.values_type != values_ty
+                || !observed.insert(identity)
+            {
+                return Err("Result-branch Values producer/caller receipt does not cover one unique exact producer Values result".into());
+            }
         }
+        None => {}
     }
     if observed != expected {
         return Err(format!(
@@ -5572,6 +6065,224 @@ fn validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_veri
 /// instruction and source owner identity; this verifier bridge repeats the
 /// executable ABI, selected String payload, and ownership-settlement checks
 /// before symbolic execution.
+#[allow(clippy::too_many_arguments)]
+fn validate_result_branch_values_producer_bridge_common<'a>(
+    program: &'a MirProgram,
+    producer_owner: &crate::core::NodeId,
+    checker_producer: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt,
+    producer_values_result: &MirValueId,
+    producer_snapshot: &MirValueId,
+    producer_return_value: &MirValueId,
+    producer_root_drop_instructions: &[crate::core::mir::MirInstructionId],
+    producer_payload_drop_instructions: &[crate::core::mir::MirInstructionId],
+    values_type: &crate::core::ResolvedTypeId,
+    string_type: &crate::core::ResolvedTypeId,
+    values_ty: &crate::core::ResolvedTypeId,
+    string_ty: &crate::core::ResolvedTypeId,
+) -> Result<&'a MirFunction, String> {
+    if values_type != values_ty
+        || string_type != string_ty
+        || checker_producer.snapshot_type == *values_ty
+        || checker_producer.surface_return_type == *values_ty
+        || checker_producer.snapshot_type == checker_producer.surface_return_type
+    {
+        return Err(
+            "Result-branch Values producer TypeDescs do not preserve canonical List<DynamicAny>/Values separation".into(),
+        );
+    }
+    let producer = program
+        .functions()
+        .get(producer_owner)
+        .ok_or_else(|| "Result-branch Values producer owner is absent".to_string())?;
+    let typed_value =
+        |function: &MirFunction, value: &MirValueId, expected: &crate::core::ResolvedTypeId| {
+            function
+                .values
+                .get(value)
+                .is_some_and(|entry| &entry.ty == expected)
+        };
+    if producer.result != *values_ty
+        || !typed_value(producer, producer_values_result, values_ty)
+        || !typed_value(producer, producer_snapshot, values_ty)
+        || !typed_value(producer, producer_return_value, values_ty)
+    {
+        return Err(
+            "Result-branch Values producer values do not use canonical Values TypeDesc".into(),
+        );
+    }
+    let catalog = program.type_catalog();
+    let values_desc = catalog
+        .get(values_ty)
+        .ok_or_else(|| "Result-branch Values TypeDesc is absent".to_string())?;
+    let element_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id();
+    if values_desc.kind != MirTypeKind::OrdinaryMapOwnedAnyV2Values
+        || !matches!(&values_desc.layout, MirLayout::List { element } if element == &element_ty)
+    {
+        return Err(
+            "Result-branch cross-call owner is not the canonical Values List TypeDesc".into(),
+        );
+    }
+    let source_dynamic_any_types = catalog
+        .iter()
+        .filter_map(|(id, descriptor)| {
+            (descriptor.kind == MirTypeKind::DynamicAny).then_some(id.clone())
+        })
+        .collect::<Vec<_>>();
+    let [source_dynamic_any] = source_dynamic_any_types.as_slice() else {
+        return Err(format!(
+            "Result-branch source List<DynamicAny> requires one DynamicAny TypeDesc, found {}",
+            source_dynamic_any_types.len()
+        ));
+    };
+    let checker_snapshot_desc = catalog
+        .get(&checker_producer.snapshot_type)
+        .ok_or_else(|| "Result-branch Checker snapshot TypeDesc is absent".to_string())?;
+    let checker_surface_desc = catalog
+        .get(&checker_producer.surface_return_type)
+        .ok_or_else(|| "Result-branch erased surface List TypeDesc is absent".to_string())?;
+    let exact_source_list = |descriptor: &crate::core::mir::types::MirTypeDesc| {
+        descriptor.kind == MirTypeKind::List
+            && matches!(
+                &descriptor.layout,
+                MirLayout::List { element } if element == source_dynamic_any
+            )
+    };
+    if !exact_source_list(checker_snapshot_desc) || !exact_source_list(checker_surface_desc) {
+        return Err("Result-branch Checker snapshot/surface TypeDescs do not preserve exact List<DynamicAny> ownership".into());
+    }
+    catalog.validate_owned_string(string_ty)?;
+    for operation in [
+        MirGlueOperation::MoveOut,
+        MirGlueOperation::Clone,
+        MirGlueOperation::Drop,
+    ] {
+        catalog.validate_list_glue(values_ty, operation)?;
+    }
+    let selection = program
+        .ordinary_map_owned_any_v2_payload_selection_receipt()?
+        .ok_or_else(|| {
+            "Result-branch Values caller has no payload-selection receipt".to_string()
+        })?;
+    selection.validate_against_program(program)?;
+    if !selection
+        .selected_types
+        .iter()
+        .any(|selected| selected.type_id == *string_ty)
+    {
+        return Err("Result-branch selected String payload is not bound to the exact payload-selection TypeDesc".into());
+    }
+    let producer_root_drop_sites = producer
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
+            )
+        })
+        .map(|instruction| instruction.id.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_root_drop_sites = producer_root_drop_instructions
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let all_payload_drop_sites_are_drops = producer_payload_drop_instructions.iter().all(|id| {
+        producer.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                instruction.id == *id && matches!(instruction.kind, MirInstructionKind::Drop { .. })
+            })
+        })
+    });
+    if producer_root_drop_sites != expected_root_drop_sites || !all_payload_drop_sites_are_drops {
+        return Err("Result-branch Values producer ownership settlement is incomplete".into());
+    }
+    Ok(producer)
+}
+
+fn find_single_instruction_in_function<'a>(
+    function: &'a MirFunction,
+    id: &crate::core::mir::MirInstructionId,
+    label: &str,
+) -> Result<&'a crate::core::mir::MirInstruction, String> {
+    let matches = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| instruction.id == *id)
+        .collect::<Vec<_>>();
+    let [instruction] = matches.as_slice() else {
+        return Err(format!(
+            "{label} receipt does not identify one MIR instruction"
+        ));
+    };
+    Ok(instruction)
+}
+
+fn function_has_drop_for(
+    owner: &MirFunction,
+    instruction_id: &crate::core::mir::MirInstructionId,
+    value: &MirValueId,
+) -> bool {
+    owner.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            instruction.id == *instruction_id
+                && matches!(&instruction.kind, MirInstructionKind::Drop { value: dropped } if dropped == value)
+        })
+    })
+}
+
+fn validate_result_branch_values_producer_set_census(
+    program: &MirProgram,
+    producer_owner: &crate::core::NodeId,
+    producer_set_entries: &[crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultSetEntryMirReceipt],
+    producer_path_receipts: &[crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultPathMirReceipt],
+) -> Result<(), String> {
+    let actual_set_sites = program
+        .functions()
+        .iter()
+        .flat_map(|(owner, function)| {
+            function
+                .blocks
+                .values()
+                .flat_map(|block| block.instructions.iter())
+                .filter(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+                    )
+                })
+                .map(move |instruction| (owner.clone(), instruction.id.clone()))
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_set_sites = producer_set_entries
+        .iter()
+        .map(|entry| (producer_owner.clone(), entry.set_instruction.clone()))
+        .collect::<BTreeSet<_>>();
+    if actual_set_sites != expected_set_sites
+        || producer_set_entries.is_empty()
+        || producer_path_receipts.is_empty()
+    {
+        return Err(
+            "Result-branch Values producer Set/path instruction census differs from the exact receipt".into(),
+        );
+    }
+    Ok(())
+}
+
+/// Check that the Checker source receipt, erased surface return type, single
+/// producer owner, single caller owner, explicit Values Drop, and selected
+/// String payload agree cleanly across every MIR boundary. Both V3
+/// (one-entry/index-zero) and V4 (two-entry/index-one) pass the exact version
+/// tag into `validate_against_program`, and neither profile can accept an
+/// unmatched receipt or fall back onto straight-line V1/V2.
+///
+/// NOTE: V3 and V4 intentionally share this validator via exact receipt profile
+/// tag, schema, element count, index value, and Checker producer version tags.
+/// `OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerMirReceipt` commits to
+/// instruction and source owner identity; this verifier bridge repeats the
+/// executable ABI, selected String payload, and ownership-settlement checks
+/// before symbolic execution.
 pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_type_owner_bridge(
     program: &MirProgram,
     receipt: &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
@@ -5608,25 +6319,29 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
         || receipt.checker_caller.values_element_count != expected_count
         || receipt.checker_caller.index_value != expected_index
         || receipt.checker_producer_result.profile_version != expected_producer_version
-        || receipt.values_type != values_ty
-        || receipt.string_type != string_ty
         || receipt.bool_type != bool_ty
         || receipt.checker_caller.call_result_type
             != receipt.checker_producer_result.surface_return_type
         || receipt.checker_caller.snapshot_type != receipt.checker_producer_result.snapshot_type
         || receipt.checker_caller.producer_result_receipt.as_ref()
             != Some(&receipt.checker_producer_result)
-        || receipt.checker_producer_result.snapshot_type == values_ty
-        || receipt.checker_producer_result.surface_return_type == values_ty
-        || receipt.checker_producer_result.snapshot_type
-            == receipt.checker_producer_result.surface_return_type
     {
         return Err("Result-branch Values caller schema, version, source type, or cardinality is not canonical".into());
     }
-    let producer = program
-        .functions()
-        .get(&receipt.producer_owner)
-        .ok_or_else(|| "Result-branch Values producer owner is absent".to_string())?;
+    validate_result_branch_values_producer_bridge_common(
+        program,
+        &receipt.producer_owner,
+        &receipt.checker_producer_result,
+        &receipt.producer_values_result,
+        &receipt.producer_snapshot,
+        &receipt.producer_return_value,
+        &receipt.producer_root_drop_instructions,
+        &receipt.producer_payload_drop_instructions,
+        &receipt.values_type,
+        &receipt.string_type,
+        &values_ty,
+        &string_ty,
+    )?;
     let caller = program
         .functions()
         .get(&receipt.caller_owner)
@@ -5639,11 +6354,7 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
                 .is_some_and(|entry| &entry.ty == expected)
         };
     if receipt.call_target != receipt.producer_owner
-        || producer.result != values_ty
         || caller.result != bool_ty
-        || !typed_value(producer, &receipt.producer_values_result, &values_ty)
-        || !typed_value(producer, &receipt.producer_snapshot, &values_ty)
-        || !typed_value(producer, &receipt.producer_return_value, &values_ty)
         || !typed_value(caller, &receipt.caller_call_result, &values_ty)
         || !typed_value(caller, &receipt.caller_snapshot, &values_ty)
         || !typed_value(caller, &receipt.caller_unpack_result, &string_ty)
@@ -5653,22 +6364,15 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
         || !typed_value(caller, &receipt.caller_return_value, &bool_ty)
     {
         return Err(
-            "Result-branch Values producer/caller values do not use their receipted TypeDescs"
-                .into(),
+            "Result-branch Values caller values do not use their receipted TypeDescs".into(),
         );
     }
 
-    let call_sites = caller
-        .blocks
-        .values()
-        .flat_map(|block| block.instructions.iter())
-        .filter(|instruction| instruction.id == receipt.caller_call_instruction)
-        .collect::<Vec<_>>();
-    let [call] = call_sites.as_slice() else {
-        return Err(
-            "Result-branch Values caller call receipt does not identify one MIR instruction".into(),
-        );
-    };
+    let call = find_single_instruction_in_function(
+        caller,
+        &receipt.caller_call_instruction,
+        "Result-branch Values caller call",
+    )?;
     if !matches!(
         &call.kind,
         MirInstructionKind::Call {
@@ -5681,18 +6385,11 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
             "Result-branch Values caller call does not target its receipted producer".into(),
         );
     }
-    let unpack_sites = caller
-        .blocks
-        .values()
-        .flat_map(|block| block.instructions.iter())
-        .filter(|instruction| instruction.id == receipt.caller_unpack_instruction)
-        .collect::<Vec<_>>();
-    let [unpack] = unpack_sites.as_slice() else {
-        return Err(
-            "Result-branch Values caller unpack receipt does not identify one MIR instruction"
-                .into(),
-        );
-    };
+    let unpack = find_single_instruction_in_function(
+        caller,
+        &receipt.caller_unpack_instruction,
+        "Result-branch Values caller unpack",
+    )?;
     if !matches!(
         &unpack.kind,
         MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack {
@@ -5706,120 +6403,172 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
     ) {
         return Err("Result-branch Values caller unpack operands differ from the exact producer/caller receipt".into());
     }
-
-    let catalog = program.type_catalog();
-    let values_desc = catalog
-        .get(&values_ty)
-        .ok_or_else(|| "Result-branch Values TypeDesc is absent".to_string())?;
-    let element_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_element_type_id();
-    if values_desc.kind != MirTypeKind::OrdinaryMapOwnedAnyV2Values
-        || !matches!(&values_desc.layout, MirLayout::List { element } if element == &element_ty)
-    {
-        return Err(
-            "Result-branch cross-call owner is not the canonical Values List TypeDesc".into(),
-        );
-    }
-    let source_dynamic_any_types = catalog
-        .iter()
-        .filter_map(|(id, descriptor)| {
-            (descriptor.kind == MirTypeKind::DynamicAny).then_some(id.clone())
-        })
-        .collect::<Vec<_>>();
-    let [source_dynamic_any] = source_dynamic_any_types.as_slice() else {
-        return Err(format!(
-            "Result-branch source List<DynamicAny> requires one DynamicAny TypeDesc, found {}",
-            source_dynamic_any_types.len()
-        ));
-    };
-    let checker_snapshot_desc = catalog
-        .get(&receipt.checker_producer_result.snapshot_type)
-        .ok_or_else(|| "Result-branch Checker snapshot TypeDesc is absent".to_string())?;
-    let checker_surface_desc = catalog
-        .get(&receipt.checker_producer_result.surface_return_type)
-        .ok_or_else(|| "Result-branch erased surface List TypeDesc is absent".to_string())?;
-    let exact_source_list = |descriptor: &crate::core::mir::types::MirTypeDesc| {
-        descriptor.kind == MirTypeKind::List
-            && matches!(
-                &descriptor.layout,
-                MirLayout::List { element } if element == source_dynamic_any
-            )
-    };
-    if !exact_source_list(checker_snapshot_desc) || !exact_source_list(checker_surface_desc) {
-        return Err("Result-branch Checker snapshot/surface TypeDescs do not preserve exact List<DynamicAny> ownership".into());
-    }
-    catalog.validate_owned_string(&string_ty)?;
-    for operation in [
-        MirGlueOperation::MoveOut,
-        MirGlueOperation::Clone,
-        MirGlueOperation::Drop,
-    ] {
-        catalog.validate_list_glue(&values_ty, operation)?;
-    }
-    let selection = program
-        .ordinary_map_owned_any_v2_payload_selection_receipt()?
-        .ok_or_else(|| {
-            "Result-branch Values caller has no payload-selection receipt".to_string()
-        })?;
-    selection.validate_against_program(program)?;
-    if !selection
-        .selected_types
-        .iter()
-        .any(|selected| selected.type_id == string_ty)
-    {
-        return Err("Result-branch selected String payload is not bound to the exact payload-selection TypeDesc".into());
-    }
-    let has_drop = |owner: &MirFunction,
-                    instruction_id: &crate::core::mir::MirInstructionId,
-                    value: &MirValueId| {
-        owner.blocks.values().any(|block| {
-            block.instructions.iter().any(|instruction| {
-                instruction.id == *instruction_id
-                    && matches!(&instruction.kind, MirInstructionKind::Drop { value: dropped } if dropped == value)
-            })
-        })
-    };
-    let producer_root_drop_sites = producer
-        .blocks
-        .values()
-        .flat_map(|block| block.instructions.iter())
-        .filter(|instruction| {
-            matches!(
-                instruction.kind,
-                MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
-            )
-        })
-        .map(|instruction| instruction.id.clone())
-        .collect::<BTreeSet<_>>();
-    let expected_root_drop_sites = receipt
-        .producer_root_drop_instructions
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let all_payload_drop_sites_are_drops =
-        receipt.producer_payload_drop_instructions.iter().all(|id| {
-            producer.blocks.values().any(|block| {
-                block.instructions.iter().any(|instruction| {
-                    instruction.id == *id
-                        && matches!(instruction.kind, MirInstructionKind::Drop { .. })
-                })
-            })
-        });
-    if producer_root_drop_sites != expected_root_drop_sites
-        || !all_payload_drop_sites_are_drops
-        || !has_drop(
-            caller,
-            &receipt.caller_string_drop_instruction,
-            &receipt.caller_string,
-        )
-        || !has_drop(
-            caller,
-            &receipt.caller_snapshot_drop_instruction,
-            &receipt.caller_snapshot,
-        )
-    {
+    if !function_has_drop_for(
+        caller,
+        &receipt.caller_string_drop_instruction,
+        &receipt.caller_string,
+    ) || !function_has_drop_for(
+        caller,
+        &receipt.caller_snapshot_drop_instruction,
+        &receipt.caller_snapshot,
+    ) {
         return Err(
             "Result-branch Values caller/producer ownership settlement is incomplete".into(),
         );
+    }
+    Ok(())
+}
+
+/// Validate the Result-branch Values producer and its length-observing caller
+/// before symbolic execution. Shares the producer bridge checks while forcing
+/// caller length clone/Len/Drop settlement and zero Values unpack operations.
+pub(super) fn validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
+    program: &MirProgram,
+    receipt: &crate::core::mir::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerMirReceipt,
+) -> Result<(), String> {
+    receipt.validate_against_program(program)?;
+    let expected_producer_profile = match receipt.producer.checker_producer.profile_version {
+        crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion::V1 => {
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_PROFILE_V1
+        }
+        crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion::V2 => {
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_PROFILE_V2
+        }
+    };
+    let values_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+    let string_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let i32_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    if receipt.schema
+        != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_SCHEMA
+        || receipt.profile
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+        || receipt.checker_caller.profile_version
+            != crate::core::OrdinaryMapOwnedAnyV2ValuesResultProducerCallerProfileVersion::V1
+        || receipt.producer.schema
+            != crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_SCHEMA
+        || receipt.producer.profile != expected_producer_profile
+        || receipt.checker_caller.producer_result != receipt.producer.checker_producer
+        || receipt.checker_caller.call_result_type
+            != receipt.producer.checker_producer.surface_return_type
+        || receipt.checker_caller.snapshot_type != receipt.producer.checker_producer.snapshot_type
+        || receipt.checker_caller.len.result_type != i32_ty
+        || receipt.checker_caller.caller_return_type != i32_ty
+    {
+        return Err(
+            "Result-branch Values producer/caller schema, version, or source TypeDesc is not canonical".into(),
+        );
+    }
+    validate_result_branch_values_producer_bridge_common(
+        program,
+        &receipt.producer.producer_owner,
+        &receipt.producer.checker_producer,
+        &receipt.producer.producer_values_result,
+        &receipt.producer.producer_snapshot,
+        &receipt.producer.producer_return_value,
+        &receipt.producer.producer_root_drop_instructions,
+        &receipt.producer.producer_payload_drop_instructions,
+        &receipt.producer.values_type,
+        &receipt.producer.string_type,
+        &values_ty,
+        &string_ty,
+    )?;
+    let caller = program
+        .functions()
+        .get(&receipt.caller_owner)
+        .ok_or_else(|| "Result-branch Values producer/caller owner is absent".to_string())?;
+    let typed_value =
+        |function: &MirFunction, value: &MirValueId, expected: &crate::core::ResolvedTypeId| {
+            function
+                .values
+                .get(value)
+                .is_some_and(|entry| &entry.ty == expected)
+        };
+    if caller.result != i32_ty
+        || !typed_value(caller, &receipt.caller_result, &values_ty)
+        || !typed_value(caller, &receipt.caller_snapshot, &values_ty)
+        || !typed_value(caller, &receipt.caller_len_receiver, &values_ty)
+        || !typed_value(caller, &receipt.caller_len_result, &i32_ty)
+        || !typed_value(caller, &receipt.caller_len_binding, &i32_ty)
+        || !typed_value(caller, &receipt.caller_return_value, &i32_ty)
+    {
+        return Err(
+            "Result-branch Values producer/caller values do not use their canonical TypeDescs"
+                .into(),
+        );
+    }
+    let call = find_single_instruction_in_function(
+        caller,
+        &receipt.producer_call_instruction,
+        "Result-branch Values producer/caller call",
+    )?;
+    if !matches!(
+        &call.kind,
+        MirInstructionKind::Call {
+            result: Some(result),
+            callee: crate::core::ir::ResolvedCallee::Function(target),
+            ..
+        } if result == &receipt.caller_result && target == &receipt.producer.producer_owner
+    ) {
+        return Err(
+            "Result-branch Values producer/caller call does not target its receipted producer"
+                .into(),
+        );
+    }
+    let snapshot_bind = find_single_instruction_in_function(
+        caller,
+        &receipt.caller_snapshot_binding_instruction,
+        "Result-branch Values producer/caller snapshot Move",
+    )?;
+    if !matches!(
+        &snapshot_bind.kind,
+        MirInstructionKind::Move { result, source }
+            if result == &receipt.caller_snapshot && source == &receipt.caller_result
+    ) {
+        return Err(
+            "Result-branch Values producer/caller snapshot Move disagrees with its receipt".into(),
+        );
+    }
+    let len_clone = find_single_instruction_in_function(
+        caller,
+        &receipt.caller_len_receiver_clone_instruction,
+        "Result-branch Values producer/caller len Clone",
+    )?;
+    if !matches!(
+        &len_clone.kind,
+        MirInstructionKind::Clone { result, source }
+            if result == &receipt.caller_len_receiver && source == &receipt.caller_snapshot
+    ) {
+        return Err(
+            "Result-branch Values producer/caller len Clone disagrees with its receipt".into(),
+        );
+    }
+    let len_call = find_single_instruction_in_function(
+        caller,
+        &receipt.caller_len_instruction,
+        "Result-branch Values producer/caller Len",
+    )?;
+    if !matches!(
+        &len_call.kind,
+        MirInstructionKind::ListOp {
+            result,
+            operation: MirListOperation::Len,
+            list,
+            argument: None,
+            list_operation_contract: Some(_),
+        } if result == &receipt.caller_len_result && list == &receipt.caller_len_receiver
+    ) {
+        return Err("Result-branch Values producer/caller Len disagrees with its receipt".into());
+    }
+    if !function_has_drop_for(
+        caller,
+        &receipt.caller_len_receiver_drop_instruction,
+        &receipt.caller_len_receiver,
+    ) || !function_has_drop_for(
+        caller,
+        &receipt.caller_snapshot_drop_instruction,
+        &receipt.caller_snapshot,
+    ) {
+        return Err("Result-branch Values producer/caller Drop settlement is incomplete".into());
     }
     Ok(())
 }
@@ -5872,40 +6621,64 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_result_crosscall_string_
         receipt.caller_owner.clone(),
         receipt.caller_unpack_instruction.clone(),
     )]);
-    let actual_set_sites = program
-        .functions()
-        .iter()
-        .flat_map(|(owner, function)| {
-            function
-                .blocks
-                .values()
-                .flat_map(|block| block.instructions.iter())
-                .filter(|instruction| {
-                    matches!(
-                        instruction.kind,
-                        MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
-                    )
-                })
-                .map(move |instruction| (owner.clone(), instruction.id.clone()))
-        })
-        .collect::<BTreeSet<_>>();
-    let expected_set_sites = receipt
-        .producer_set_entries
-        .iter()
-        .map(|entry| {
-            (
-                receipt.producer_owner.clone(),
-                entry.set_instruction.clone(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    if actual_unpack_sites != expected_unpack_sites
-        || actual_set_sites != expected_set_sites
-        || receipt.producer_set_entries.is_empty()
-        || receipt.producer_path_receipts.is_empty()
-    {
-        return Err("Result-branch Values producer/caller instruction census differs from the exact V3/V4 receipt".into());
+    if actual_unpack_sites != expected_unpack_sites {
+        return Err("Result-branch Values producer/caller unpack instruction census differs from the exact V3/V4 receipt".into());
     }
+    validate_result_branch_values_producer_set_census(
+        program,
+        &receipt.producer_owner,
+        &receipt.producer_set_entries,
+        &receipt.producer_path_receipts,
+    )?;
+    Ok(())
+}
+
+/// Recheck the exact Result-branch Values producer and length-observing caller
+/// evidence before symbolic execution. Rejects any `ValuesUnpack` instruction.
+pub(super) fn validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
+    program: &MirProgram,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    profile: &str,
+) -> Result<(), String> {
+    let receipts = program.ordinary_map_owned_any_v2_values_result_producer_caller_receipts()?;
+    let [receipt] = receipts.as_slice() else {
+        return Err(format!(
+            "Result-branch Values producer/caller requires one independent MIR proof receipt, found {}",
+            receipts.len()
+        ));
+    };
+    if route_receipt.profile != profile || receipt.profile != profile {
+        return Err(format!(
+            "Result-branch Values producer/caller proof requires exact profile '{profile}'"
+        ));
+    }
+    route_receipt.validate_against_program(program)?;
+    receipt.validate_against_program(program)?;
+    validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
+        program, receipt,
+    )?;
+    let has_unpack_site = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
+                )
+            })
+        })
+    });
+    if has_unpack_site {
+        return Err(
+            "Result-branch Values producer/caller forbids cross-call ValuesUnpack instructions"
+                .into(),
+        );
+    }
+    validate_result_branch_values_producer_set_census(
+        program,
+        &receipt.producer.producer_owner,
+        &receipt.producer.producer_set_entries,
+        &receipt.producer.producer_path_receipts,
+    )?;
     Ok(())
 }
 
@@ -13019,6 +13792,11 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                     .ownership
                     .has_checker_values_local_index_i32_result_branch_receipt()
         });
+    let exact_result_branch_v1 =
+        crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+            catalog, function,
+        )
+        .is_ok();
     let branch_result_type =
         crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
     let branch_source_result_type =
@@ -13035,6 +13813,10 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
             || function
                 .ownership
                 .ordinary_map_new_result_receipt()
+                .is_some()
+            || function
+                .ownership
+                .ordinary_map_set_lineage_receipt()
                 .is_some()
             || function
                 .ownership
@@ -13116,6 +13898,10 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
             .has_checker_ordinary_map_owned_any_v2_actions()
         || function
             .ownership
+            .ordinary_map_set_lineage_receipt()
+            .is_some()
+        || function
+            .ownership
             .ordinary_map_set_get_any_i32_lineage_receipt()
             .is_some()
         || function
@@ -13128,6 +13914,7 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                     instruction.kind,
                     MirInstructionKind::OrdinaryMapOwnedAnyV2New { .. }
                         | MirInstructionKind::OrdinaryMapOwnedAnyV2Set { .. }
+                        | MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
                         | MirInstructionKind::OrdinaryMapOwnedAnyV2Remove { .. }
                         | MirInstructionKind::OrdinaryMapOwnedAnyV2Size { .. }
                         | MirInstructionKind::OrdinaryMapOwnedAnyV2Contains { .. }
@@ -13151,6 +13938,7 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
         .ownership
         .has_checker_ordinary_map_owned_any_v2_actions();
     let new_result_receipt = function.ownership.ordinary_map_new_result_receipt();
+    let set_lineage_receipt = function.ownership.ordinary_map_set_lineage_receipt();
     let set_get_i32_receipt = function
         .ownership
         .ordinary_map_set_get_i32_lineage_receipt();
@@ -13165,6 +13953,7 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
         .ordinary_map_set_get_string_lineage_receipt();
     if !has_checker_actions
         && new_result_receipt.is_none()
+        && set_lineage_receipt.is_none()
         && set_get_i32_receipt.is_none()
         && set_get_any_i32_receipt.is_none()
         && set_get_any_result_i32_receipt.is_none()
@@ -13195,6 +13984,8 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                 .map_err(|message| {
                     format!("canonical MIR ordinary Map NewResult TypeDesc rejected: {message}")
                 })?;
+        } else if set_lineage_receipt.is_some() {
+            crate::core::mir::validate_ordinary_map_set_result_types(function, catalog)?;
         } else if set_get_i32_receipt.is_some() {
             crate::core::mir::validate_ordinary_map_set_get_i32_result_types(function, catalog)?;
         } else if set_get_any_i32_receipt.is_some() {
@@ -13303,6 +14094,7 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                     .get(&parameter.value)
                     .is_some_and(|value| value.ty == owner_ty)
                     && !exact_values_local_index_i32_result_branch
+                    && !exact_result_branch_v1
             })
         })
     {
@@ -13434,6 +14226,17 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
     {
         let valid = match &instruction.kind {
             MirInstructionKind::OrdinaryMapOwnedAnyV2New { result } => {
+                let is_result_branch_v1 = exact_result_branch_v1
+                    && crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                        function,
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
+                        result,
+                    )
+                    .is_some()
+                    && function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == branch_result_type);
                 let is_branch_new_result = exact_values_local_index_i32_result_branch
                     && values_local_index_i32_result_branch_receipt.is_some_and(|receipt| {
                         crate::core::mir::MirInstructionId::new(format!(
@@ -13456,7 +14259,7 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                                 )
                                 .is_ok()
                         });
-                is_owner(result) || is_branch_new_result
+                is_owner(result) || is_branch_new_result || is_result_branch_v1
             }
             MirInstructionKind::Clone { result, source }
                 if is_owner(result) || is_owner(source) =>
@@ -13468,7 +14271,23 @@ fn validate_ordinary_map_owned_any_v2_verifier_boundary(
                 source,
                 key,
                 value,
-            } => is_owner(result) && is_owner(source) && is_string(key) && is_payload(value),
+            } => {
+                let is_result_branch_v1 = exact_result_branch_v1
+                    && crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                        function,
+                        crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set,
+                        result,
+                    )
+                    .is_some()
+                    && function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == branch_result_type);
+                (is_owner(result) || is_result_branch_v1)
+                    && is_owner(source)
+                    && is_string(key)
+                    && is_payload(value)
+            }
             MirInstructionKind::OrdinaryMapOwnedAnyV2Remove {
                 result,
                 source,
@@ -14612,12 +15431,18 @@ fn validate_ordinary_map_owned_get_verifier_boundary(
                 .is_some_and(|value| value.ty == owner_ty)
         })
         || function.blocks.values().any(|block| {
-            block.parameters.iter().any(|parameter| {
-                function
-                    .values
-                    .get(&parameter.value)
-                    .is_some_and(|value| value.ty == owner_ty)
-            })
+            !(function
+                .ownership
+                .has_ordinary_map_owned_get_result_branch_v3_receipt()
+                && block.id != function.entry
+                && (block.id.as_str().starts_with("bb:")
+                    || block.id.as_str().contains("/cfg:block:")))
+                && block.parameters.iter().any(|parameter| {
+                    function
+                        .values
+                        .get(&parameter.value)
+                        .is_some_and(|value| value.ty == owner_ty)
+                })
         })
     {
         return Err(
@@ -14661,6 +15486,42 @@ fn validate_ordinary_map_owned_get_verifier_boundary(
                     && catalog.validate_copy_scalar(&descriptor.id).is_ok()
             })
     };
+    let root_result_ty =
+        crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+    let is_root_result = |value: &MirValueId, kind| {
+        function.values.get(value).is_some_and(|value| {
+            value.ty == root_result_ty
+                && function
+                    .ownership
+                    .ordinary_map_owned_get_result_branch_v3_receipt()
+                    .is_some_and(|receipt| {
+                        receipt.result_branches.iter().any(|branch| {
+                            branch.kind == kind
+                                && catalog
+                                    .validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                                        &value.ty,
+                                        &branch.result_type,
+                                    )
+                                    .is_ok()
+                        })
+                    })
+        })
+    };
+    let payload_is_allowed = |value: &MirValueId| {
+        function
+            .values
+            .get(value)
+            .and_then(|value| catalog.get(&value.ty))
+            .is_some_and(|descriptor| match descriptor.kind {
+                MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
+                    catalog.validate_copy_scalar(&descriptor.id).is_ok()
+                }
+                MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
+                    catalog.validate_owned_string(&descriptor.id).is_ok()
+                }
+                _ => false,
+            })
+    };
     for instruction in function
         .blocks
         .values()
@@ -14668,6 +15529,12 @@ fn validate_ordinary_map_owned_get_verifier_boundary(
     {
         let valid = match &instruction.kind {
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { result } => is_owner(result),
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { result } => {
+                is_root_result(
+                    result,
+                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New,
+                )
+            }
             MirInstructionKind::Clone { result, source }
                 if is_owner(result) || is_owner(source) =>
             {
@@ -14679,20 +15546,20 @@ fn validate_ordinary_map_owned_get_verifier_boundary(
                 key,
                 value,
             } => {
-                let payload_is_i32 = function
-                    .values
-                    .get(value)
-                    .and_then(|value| catalog.get(&value.ty))
-                    .is_some_and(|descriptor| match descriptor.kind {
-                        MirTypeKind::Primitive(crate::core::PrimitiveType::I32) => {
-                            catalog.validate_copy_scalar(&descriptor.id).is_ok()
-                        }
-                        MirTypeKind::Primitive(crate::core::PrimitiveType::String) => {
-                            catalog.validate_owned_string(&descriptor.id).is_ok()
-                        }
-                        _ => false,
-                    });
-                is_owner(result) && is_owner(source) && is_string(key) && payload_is_i32
+                is_owner(result) && is_owner(source) && is_string(key) && payload_is_allowed(value)
+            }
+            MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult {
+                result,
+                source,
+                key,
+                value,
+            } => {
+                is_root_result(
+                    result,
+                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+                ) && is_owner(source)
+                    && is_string(key)
+                    && payload_is_allowed(value)
             }
             MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove {
                 result,
@@ -14846,7 +15713,9 @@ fn instruction_touches_ordinary_map_owned_get(instruction: &MirInstructionKind) 
     matches!(
         instruction,
         MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+            | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
             | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
@@ -14871,7 +15740,9 @@ fn instruction_touches_ordinary_map_owned_get_type(
     };
     match instruction {
         MirInstructionKind::OrdinaryMapOwnedGetI32StringV1New { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Remove { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Size { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Contains { .. }
@@ -19345,6 +20216,67 @@ fn explore_literal_switch(
 /// contains a canonical recoverable transition producing the exact result
 /// TypeDesc; an unrelated non-Copy Result remains fail-closed at the older
 /// validator boundary.
+fn build_ordinary_map_owned_any_v2_root_result_variant(
+    function: &MirFunction,
+    catalog: &crate::core::mir::types::MirTypeCatalog,
+    instruction_id: &crate::core::mir::MirInstructionId,
+    result: &MirValueId,
+    source_result_type: &crate::core::ResolvedTypeId,
+    fresh_name: String,
+    ok_value: SymbolicValue,
+    err_status: i64,
+    context_label: &str,
+) -> Result<SymbolicValue, String> {
+    let owner_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let canonical_result = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    catalog
+        .validate_ordinary_map_owned_any_v2_root_result(&canonical_result, source_result_type)
+        .map_err(|message| format!("{instruction_id}: {message}"))?;
+    catalog
+        .validate_glue(&canonical_result, MirGlueOperation::MoveOut)
+        .map_err(|message| format!("{instruction_id}: {message}"))?;
+    let (_, variants) = catalog
+        .variant_layout(&canonical_result)
+        .ok_or_else(|| format!("{instruction_id}: {context_label} has no Result variants"))?;
+    let ok = variants
+        .iter()
+        .find(|variant| variant.id.0 == "builtin:variant:Result::Ok")
+        .ok_or_else(|| format!("{instruction_id}: Result has no canonical Ok variant"))?;
+    let err = variants
+        .iter()
+        .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
+        .ok_or_else(|| format!("{instruction_id}: Result has no canonical Err variant"))?;
+    if ok.fields.len() != 1
+        || err.fields.len() != 1
+        || ok.fields[0].ty != owner_ty
+        || err.fields[0].ty != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(format!(
+            "{instruction_id}: {context_label} variants do not carry exactly Ok(root)/Err(i32)"
+        ));
+    }
+    let success = Bool::fresh_const(&fresh_name);
+    let tag = success.ite(
+        &Int::from_i64(ok.discriminant as i64),
+        &Int::from_i64(err.discriminant as i64),
+    );
+    let value = SymbolicValue::Variant {
+        nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+            .map_err(|error| error.to_string())?,
+        tag,
+        payload: BTreeMap::from([
+            (ok.fields[0].id.clone(), ok_value),
+            (
+                err.fields[0].id.clone(),
+                SymbolicValue::Int(Int::from_i64(err_status)),
+            ),
+        ]),
+        active_variant: None,
+    };
+    ensure_result_shape(function, catalog, result, &value)?;
+    Ok(value)
+}
+
 fn validate_consuming_variant_contract(
     function: &MirFunction,
     program: &MirProgram,
@@ -19372,6 +20304,39 @@ fn validate_consuming_variant_contract(
             return Ok(());
         }
     }
+    if ty == &crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id() {
+        if let Some(receipt) = function
+            .ownership
+            .ordinary_map_owned_get_result_branch_v3_receipt()
+        {
+            if function.owner != receipt.owner {
+                return Err(
+                    "owned-Get ResultBranchV3 owner differs from its exact Checker receipt".into(),
+                );
+            }
+            let mut validated = false;
+            for branch in &receipt.result_branches {
+                if matches!(
+                    branch.kind,
+                    crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New
+                        | crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set
+                ) {
+                    catalog.validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                        ty,
+                        &branch.result_type,
+                    )?;
+                    validated = true;
+                }
+            }
+            if !validated {
+                return Err(
+                    "owned-Get ResultBranchV3 synthetic Result has no New/Set source branch receipt"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
+    }
     if ty == &crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id() {
         if let Some(receipt) = function
             .ownership
@@ -19395,6 +20360,18 @@ fn validate_consuming_variant_contract(
         if let Some(receipt) = function.ownership.ordinary_map_new_result_receipt() {
             return catalog
                 .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.source_result_type);
+        }
+        if let Some(receipt) = function.ownership.ordinary_map_set_lineage_receipt() {
+            if function.owner != receipt.owner {
+                return Err(
+                    "ordinary Map SetResult root Result owner differs from its exact Checker receipt"
+                        .into(),
+                );
+            }
+            crate::core::mir::validate_ordinary_map_set_result_types(function, catalog)?;
+            catalog.validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.new_result_type)?;
+            return catalog
+                .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.set_result_type);
         }
         if let Some(receipt) = function
             .ownership
@@ -19455,6 +20432,15 @@ fn validate_consuming_variant_contract(
             }
             return catalog
                 .validate_ordinary_map_owned_any_v2_root_result(ty, &receipt.set_result_type);
+        }
+        if crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+            catalog, function,
+        )
+        .is_ok()
+        {
+            let source_result_type =
+                crate::core::mir::types::ordinary_map_owned_any_v2_source_result_type_id()?;
+            return catalog.validate_ordinary_map_owned_any_v2_root_result(ty, &source_result_type);
         }
     }
     if let Some(receipt) = function
@@ -20322,6 +21308,123 @@ fn eval_ordinary_map_owned_get_instruction(
     // different: its API explicitly returns Err(3) for a capacity failure,
     // so that observable outcome is modeled by
     // `symbolic_ordinary_map_owned_get_result`.
+    let parse_set_payload = |state: &mut SymbolicState,
+                             value: &MirValueId|
+     -> Result<SymbolicOrdinaryMapOwnedGetValue, String> {
+        let value_ty = instruction_value_type(function, value, "ordinary Map owned-get Set value")?;
+        let payload =
+            state.values.get(value).cloned().ok_or_else(|| {
+                format!("{instruction_id}: Set payload '{}' is unavailable", value)
+            })?;
+        match catalog.get(&value_ty).map(|desc| &desc.kind) {
+                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::I32)) => {
+                    catalog.validate_copy_scalar(&value_ty)?;
+                    let SymbolicValue::Int(value) = payload else {
+                        return Err(format!(
+                            "{instruction_id}: Set i32 payload is not a symbolic integer"
+                        ));
+                    };
+                    add_definedness(
+                        state,
+                        Bool::and(&[
+                            &value.ge(Int::from_i64(i32::MIN as i64)),
+                            &value.le(Int::from_i64(i32::MAX as i64)),
+                        ]),
+                        "E0802",
+                    )?;
+                    Ok(SymbolicOrdinaryMapOwnedGetValue::I32(value))
+                }
+                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::String)) => {
+                    catalog.validate_owned_string(&value_ty)?;
+                    let value = symbolic_string_for_value(state, value).ok_or_else(|| {
+                        format!("{instruction_id}: Set String payload is not modeled")
+                    })?;
+                    Ok(SymbolicOrdinaryMapOwnedGetValue::String(value))
+                }
+                _ => Err(format!(
+                    "{instruction_id}: ordinary Map owned-get Set payload is outside the i32/String profile"
+                )),
+            }
+    };
+    let validate_root_result_receipt =
+        |result: &MirValueId,
+         kind: crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind|
+         -> Result<crate::core::ResolvedTypeId, String> {
+            let root_result_ty =
+                crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+            if function.values.get(result).map(|value| &value.ty) != Some(&root_result_ty) {
+                return Err(format!(
+                    "{instruction_id}: owned-Get ResultBranchV3 result does not use its canonical Result<V1Root, i32> TypeDesc"
+                ));
+            }
+            let receipt = function
+                .ownership
+                .ordinary_map_owned_get_result_branch_v3_receipt()
+                .ok_or_else(|| {
+                    format!("{instruction_id}: owned-Get ResultBranchV3 has no Checker receipt")
+                })?;
+            let mut validated = false;
+            for branch in &receipt.result_branches {
+                if branch.kind == kind {
+                    catalog.validate_ordinary_map_owned_get_i32_string_v1_root_result(
+                        &root_result_ty,
+                        &branch.result_type,
+                    )?;
+                    validated = true;
+                }
+            }
+            if !validated {
+                return Err(format!(
+                    "{instruction_id}: owned-Get ResultBranchV3 has no matching branch receipt"
+                ));
+            }
+            Ok(root_result_ty)
+        };
+    let build_root_result_variant = |root_result_ty: &crate::core::ResolvedTypeId,
+                                     ok_entries: Vec<SymbolicOrdinaryMapOwnedGetEntry>,
+                                     err_status: i64,
+                                     success_name: &str|
+     -> Result<SymbolicValue, String> {
+        let (_, variants) = catalog.variant_layout(root_result_ty).ok_or_else(|| {
+            format!("{instruction_id}: owned-Get ResultBranchV3 has no Result variants")
+        })?;
+        let ok = variants
+            .iter()
+            .find(|variant| variant.id.0 == "builtin:variant:Result::Ok")
+            .ok_or_else(|| format!("{instruction_id}: Result has no canonical Ok variant"))?;
+        let err = variants
+            .iter()
+            .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
+            .ok_or_else(|| format!("{instruction_id}: Result has no canonical Err variant"))?;
+        if ok.fields.len() != 1 || err.fields.len() != 1 || ok.fields[0].ty != owner_ty {
+            return Err(format!(
+                "{instruction_id}: owned-Get ResultBranchV3 variants do not carry Ok(V1Root)/Err(i32)"
+            ));
+        }
+        let success = Bool::fresh_const(success_name);
+        let tag = success.ite(
+            &Int::from_i64(ok.discriminant as i64),
+            &Int::from_i64(err.discriminant as i64),
+        );
+        Ok(SymbolicValue::Variant {
+            nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
+                .map_err(|error| error.to_string())?,
+            tag,
+            payload: BTreeMap::from([
+                (
+                    ok.fields[0].id.clone(),
+                    SymbolicValue::OrdinaryMapOwnedGetI32StringV1 {
+                        entries: ok_entries,
+                    },
+                ),
+                (
+                    err.fields[0].id.clone(),
+                    SymbolicValue::Int(Int::from_i64(err_status)),
+                ),
+            ]),
+            active_variant: None,
+        })
+    };
     match instruction {
         I::OrdinaryMapOwnedGetI32StringV1New { result } => {
             if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty) {
@@ -20343,6 +21446,30 @@ fn eval_ordinary_map_owned_get_instruction(
                 },
             );
         }
+        I::OrdinaryMapOwnedGetI32StringV1NewResult { result } => {
+            let root_result_ty = validate_root_result_receipt(
+                result,
+                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::New,
+            )?;
+            catalog.validate_glue(&owner_ty, MirGlueOperation::MoveOut)?;
+            if state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get NewResult '{}' is already defined",
+                    result
+                ));
+            }
+            let value = build_root_result_variant(
+                &root_result_ty,
+                Vec::new(),
+                3,
+                &format!(
+                    "mir.ordinary_map_owned_get_new_result.success.{}",
+                    instruction_id.as_str()
+                ),
+            )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
+        }
         I::OrdinaryMapOwnedGetI32StringV1Set {
             result,
             source,
@@ -20361,42 +21488,7 @@ fn eval_ordinary_map_owned_get_instruction(
             let symbolic_key = symbolic_string_for_value(state, key)
                 .ok_or_else(|| format!("{instruction_id}: Set key String is not modeled"))?
                 .as_z3()?;
-            let value_ty =
-                instruction_value_type(function, value, "ordinary Map owned-get Set value")?;
-            let payload = state.values.get(value).cloned().ok_or_else(|| {
-                format!("{instruction_id}: Set payload '{}' is unavailable", value)
-            })?;
-            let stored_value = match catalog.get(&value_ty).map(|desc| &desc.kind) {
-                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::I32)) => {
-                    catalog.validate_copy_scalar(&value_ty)?;
-                    let SymbolicValue::Int(value) = payload else {
-                        return Err(format!(
-                            "{instruction_id}: Set i32 payload is not a symbolic integer"
-                        ));
-                    };
-                    add_definedness(
-                        state,
-                        Bool::and(&[
-                            &value.ge(Int::from_i64(i32::MIN as i64)),
-                            &value.le(Int::from_i64(i32::MAX as i64)),
-                        ]),
-                        "E0802",
-                    )?;
-                    SymbolicOrdinaryMapOwnedGetValue::I32(value)
-                }
-                Some(MirTypeKind::Primitive(crate::core::PrimitiveType::String)) => {
-                    catalog.validate_owned_string(&value_ty)?;
-                    let value = symbolic_string_for_value(state, value).ok_or_else(|| {
-                        format!("{instruction_id}: Set String payload is not modeled")
-                    })?;
-                    SymbolicOrdinaryMapOwnedGetValue::String(value)
-                }
-                _ => {
-                    return Err(format!(
-                        "{instruction_id}: ordinary Map owned-get Set payload is outside the i32/String profile"
-                    ));
-                }
-            };
+            let stored_value = parse_set_payload(state, value)?;
             let mut entries = match state.values.get(source).cloned() {
                 Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
                 Some(_) => {
@@ -20428,6 +21520,67 @@ fn eval_ordinary_map_owned_get_instruction(
                 result.clone(),
                 SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries },
             );
+        }
+        I::OrdinaryMapOwnedGetI32StringV1SetResult {
+            result,
+            source,
+            key,
+            value,
+        } => {
+            let root_result_ty = validate_root_result_receipt(
+                result,
+                crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+            )?;
+            if function.values.get(source).map(|value| &value.ty) != Some(&owner_ty) {
+                return Err(format!(
+                    "{instruction_id}: ordinary Map owned-get SetResult source TypeDesc is invalid"
+                ));
+            }
+            let key_ty =
+                instruction_value_type(function, key, "ordinary Map owned-get SetResult key")?;
+            catalog.validate_owned_string(&key_ty)?;
+            let symbolic_key = symbolic_string_for_value(state, key)
+                .ok_or_else(|| format!("{instruction_id}: SetResult key String is not modeled"))?
+                .as_z3()?;
+            let stored_value = parse_set_payload(state, value)?;
+            let mut entries = match state.values.get(source).cloned() {
+                Some(SymbolicValue::OrdinaryMapOwnedGetI32StringV1 { entries }) => entries,
+                Some(_) => {
+                    return Err(format!(
+                        "{instruction_id}: SetResult source is not an ordinary Map owned-get root"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{instruction_id}: SetResult source '{}' is unavailable",
+                        source
+                    ));
+                }
+            };
+            if result == source || state.values.contains_key(result) {
+                return Err(format!(
+                    "{instruction_id}: SetResult aliases an existing root"
+                ));
+            }
+            for entry in &mut entries {
+                entry.present = Bool::and(&[&entry.present, &entry.key.eq(&symbolic_key).not()]);
+            }
+            entries.push(SymbolicOrdinaryMapOwnedGetEntry {
+                key: symbolic_key,
+                present: Bool::from_bool(true),
+                value: stored_value,
+            });
+            let value = build_root_result_variant(
+                &root_result_ty,
+                entries,
+                2,
+                &format!(
+                    "mir.ordinary_map_owned_get_set_result.success.{}",
+                    instruction_id.as_str()
+                ),
+            )?;
+            ensure_result_shape(function, catalog, result, &value)?;
+            state.values.insert(result.clone(), value);
         }
         I::OrdinaryMapOwnedGetI32StringV1Remove {
             result,
@@ -21703,6 +22856,18 @@ fn eval_instruction(
                         ));
                     }
                     Some(&receipt.set_result_type)
+                } else if crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                    function,
+                    crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
+                    result,
+                )
+                .is_some()
+                {
+                    crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                        catalog, function,
+                    )
+                    .map_err(|message| format!("{instruction_id}: {message}"))?;
+                    branch_source_result_type.as_ref()
                 } else {
                     None
                 }
@@ -21711,74 +22876,27 @@ fn eval_instruction(
                         "{instruction_id}: explicit Map NewResult has no Checker source receipt"
                     )
                 })?;
-                let canonical_result =
-                    crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
-                catalog
-                    .validate_ordinary_map_owned_any_v2_root_result(
-                        &canonical_result,
-                        source_result_type,
-                    )
-                    .map_err(|message| format!("{instruction_id}: {message}"))?;
-                catalog
-                    .validate_glue(&canonical_result, MirGlueOperation::MoveOut)
-                    .map_err(|message| format!("{instruction_id}: {message}"))?;
-                let (_, variants) = catalog.variant_layout(&canonical_result).ok_or_else(|| {
-                    format!("{instruction_id}: explicit Map NewResult has no Result variants")
-                })?;
-                let ok = variants
-                    .iter()
-                    .find(|variant| variant.id.0 == "builtin:variant:Result::Ok")
-                    .ok_or_else(|| {
-                        format!("{instruction_id}: Result has no canonical Ok variant")
-                    })?;
-                let err = variants
-                    .iter()
-                    .find(|variant| variant.id.0 == "builtin:variant:Result::Err")
-                    .ok_or_else(|| {
-                        format!("{instruction_id}: Result has no canonical Err variant")
-                    })?;
-                if ok.fields.len() != 1
-                    || err.fields.len() != 1
-                    || ok.fields[0].ty != owner_ty
-                    || err.fields[0].ty
-                        != crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
-                {
-                    return Err(format!(
-                        "{instruction_id}: explicit Map NewResult variants do not carry exactly Ok(root)/Err(i32)"
-                    ));
-                }
                 // Allocation capacity is the source-level Err(3) branch. Keep
                 // both outcomes in the symbolic Result and let the exact
                 // SwitchMove graph select the root or status payload. No
                 // E0800 trap is attached to this recoverable operation.
-                let success = Bool::fresh_const(&format!(
-                    "mir.ordinary_map_new_result.success.{}",
-                    instruction_id.as_str()
-                ));
-                let tag = success.ite(
-                    &Int::from_i64(ok.discriminant as i64),
-                    &Int::from_i64(err.discriminant as i64),
-                );
-                let value = SymbolicValue::Variant {
-                    nominal: crate::core::ir::NominalTypeId::new("builtin:type:Result")
-                        .map_err(|error| error.to_string())?,
-                    tag,
-                    payload: BTreeMap::from([
-                        (
-                            ok.fields[0].id.clone(),
-                            SymbolicValue::OrdinaryMapOwnedAnyV2 {
-                                entries: BTreeMap::new(),
-                                symbolic_entries: Vec::new(),
-                            },
-                        ),
-                        (
-                            err.fields[0].id.clone(),
-                            SymbolicValue::Int(Int::from_i64(3)),
-                        ),
-                    ]),
-                    active_variant: None,
-                };
-                ensure_result_shape(function, catalog, result, &value)?;
+                let value = build_ordinary_map_owned_any_v2_root_result_variant(
+                    function,
+                    catalog,
+                    instruction_id,
+                    result,
+                    source_result_type,
+                    format!(
+                        "mir.ordinary_map_new_result.success.{}",
+                        instruction_id.as_str()
+                    ),
+                    SymbolicValue::OrdinaryMapOwnedAnyV2 {
+                        entries: BTreeMap::new(),
+                        symbolic_entries: Vec::new(),
+                    },
+                    3,
+                    "explicit Map NewResult",
+                )?;
                 state.values.insert(result.clone(), value);
             } else {
                 return Err(format!(
@@ -21809,8 +22927,25 @@ fn eval_instruction(
                 format!("{instruction_id}: ordinary Map/Any owner-v2 Set key String is not modeled")
             })?;
             let exact_key = symbolic_key_value.exact_text();
-            if function.values.get(result).map(|value| &value.ty) != Some(&owner_ty)
-                || function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+            let root_result_ty =
+                crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+            let is_result_branch_v1 = function.values.get(result).map(|value| &value.ty)
+                == Some(&root_result_ty)
+                && crate::core::mir::ordinary_map_owned_any_v2_result_branch_v1_for_op(
+                    function,
+                    crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set,
+                    result,
+                )
+                .is_some();
+            if is_result_branch_v1 {
+                crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+                    catalog, function,
+                )
+                .map_err(|message| format!("{instruction_id}: {message}"))?;
+            }
+            if function.values.get(source).map(|value| &value.ty) != Some(&owner_ty)
+                || (!is_result_branch_v1
+                    && function.values.get(result).map(|value| &value.ty) != Some(&owner_ty))
             {
                 return Err(format!(
                     "{instruction_id}: ordinary Map/Any owner-v2 Set source/result TypeDesc is invalid"
@@ -21892,14 +23027,37 @@ fn eval_instruction(
                     payload: Box::new(stored_payload),
                 });
             }
-            add_ordinary_map_owned_any_v2_root_publish_capacity_failure(state, instruction_id)?;
-            state.values.insert(
-                result.clone(),
-                SymbolicValue::OrdinaryMapOwnedAnyV2 {
-                    entries,
-                    symbolic_entries,
-                },
-            );
+            if is_result_branch_v1 {
+                let source_result_type =
+                    crate::core::mir::types::ordinary_map_owned_any_v2_source_result_type_id()?;
+                let value = build_ordinary_map_owned_any_v2_root_result_variant(
+                    function,
+                    catalog,
+                    instruction_id,
+                    result,
+                    &source_result_type,
+                    format!(
+                        "mir.ordinary_map_set_result.success.{}",
+                        instruction_id.as_str()
+                    ),
+                    SymbolicValue::OrdinaryMapOwnedAnyV2 {
+                        entries,
+                        symbolic_entries,
+                    },
+                    2,
+                    "explicit Map SetResult",
+                )?;
+                state.values.insert(result.clone(), value);
+            } else {
+                add_ordinary_map_owned_any_v2_root_publish_capacity_failure(state, instruction_id)?;
+                state.values.insert(
+                    result.clone(),
+                    SymbolicValue::OrdinaryMapOwnedAnyV2 {
+                        entries,
+                        symbolic_entries,
+                    },
+                );
+            }
         }
         MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
             result,
@@ -24652,9 +25810,22 @@ fn eval_instruction(
         }
         MirInstructionKind::OrdinaryMapOwnedGetI32StringV1NewResult { .. }
         | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. } => {
-            return Err(format!(
-                "{instruction_id}: owned-Get ResultBranchV3 requires its exact CheckedProgram/MIR route receipt and is outside generic symbolic verification"
-            ));
+            if function
+                .ownership
+                .has_ordinary_map_owned_get_result_branch_v3_receipt()
+            {
+                eval_ordinary_map_owned_get_instruction(
+                    function,
+                    catalog,
+                    state,
+                    instruction_id,
+                    instruction,
+                )?;
+            } else {
+                return Err(format!(
+                    "{instruction_id}: owned-Get ResultBranchV3 requires its exact CheckedProgram/MIR route receipt and is outside generic symbolic verification"
+                ));
+            }
         }
         MirInstructionKind::Const { result, literal } => {
             let result_ty = function
@@ -43457,7 +44628,7 @@ mod managed_any_verifier_tests {
 mod values_producer_caller_verifier_tests {
     use crate::core::mir::reference::MirProgram;
     use crate::core::mir::{
-        MirInstructionKind, OrdinaryMapOwnedAnyV2ValuesProducerCallerMirReceipt,
+        MirInstructionKind, OrdinaryMapOwnedAnyV2ValuesResultProducerCallerMirReceipt,
     };
     use crate::core::NodeId;
     use crate::lexer::Lexer;
@@ -43487,15 +44658,15 @@ mod values_producer_caller_verifier_tests {
         checked: &crate::core::CheckedProgram,
         program: &MirProgram,
     ) -> crate::core::mir::CanonicalMirRouteReceipt {
-        crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_route(
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
             checked, program,
         )
         .expect("exact Checker-bound Values producer/caller route")
     }
 
-    fn receipt(program: &MirProgram) -> OrdinaryMapOwnedAnyV2ValuesProducerCallerMirReceipt {
+    fn receipt(program: &MirProgram) -> OrdinaryMapOwnedAnyV2ValuesResultProducerCallerMirReceipt {
         let receipts = program
-            .ordinary_map_owned_any_v2_values_producer_caller_receipts()
+            .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
             .expect("derive Values producer/caller receipts");
         let [receipt] = receipts.as_slice() else {
             panic!("fixture must have exactly one Values producer/caller receipt");
@@ -43504,101 +44675,68 @@ mod values_producer_caller_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn checker_bound_direct_values_caller_is_admitted_but_raw_route_stays_closed() {
         let (checked, program) = fixture();
         let route = route_receipt(&checked, &program);
-        let receipts =
-            crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_mir_route(
-                &program,
-            )
-            .expect("MIR-only Values producer/caller census");
-        let [receipt] = receipts.as_slice() else {
-            panic!("fixture must have one MIR Values producer/caller receipt");
-        };
-        assert!(
-            receipt.unpacks.is_empty(),
-            "V1 authorizes no cross-function indexed unpack"
-        );
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+            &program,
+        )
+        .expect("MIR-only Values producer/caller census");
+        let receipt = &receipt(&program);
         assert_ne!(
-            receipt.producer_checker_snapshot_type, receipt.producer_surface_return_type,
+            receipt.checker_caller.snapshot_type,
+            receipt.producer.checker_producer.surface_return_type,
             "Checker actual List<DynamicAny> owner must remain distinct from surface List"
         );
         assert_eq!(
-            receipt.producer_checker_snapshot_type,
-            receipt.checker_producer.snapshot_type
+            receipt.checker_caller.snapshot_type,
+            receipt.producer.checker_producer.snapshot_type
         );
         assert_eq!(
-            receipt.producer_surface_return_type,
-            receipt.checker_producer.surface_return_type
+            receipt.checker_caller.call_result_type,
+            receipt.producer.checker_producer.surface_return_type
         );
         assert_eq!(
-            receipt.call_surface_result_type,
-            receipt.checker_caller.result_type
-        );
-        assert_eq!(
-            receipt.call_surface_result_type, receipt.producer_surface_return_type,
-            "the direct Checker Call ABI is the producer's surface return type"
-        );
-        assert_eq!(
-            receipt.checker_caller.owner_type, receipt.producer_checker_snapshot_type,
-            "the caller ownership obligation retains the producer's actual element type"
-        );
-        assert_eq!(
-            receipt.producer_return_source_type,
-            receipt.producer_checker_snapshot_type
-        );
-        assert_eq!(
-            receipt.producer_return_target_type,
-            receipt.producer_surface_return_type
-        );
-        assert_eq!(
-            receipt.producer_return_conversion_kind,
-            crate::core::ir::CheckedConversionKind::ContainerErase
+            receipt.checker_caller.len.receiver_type,
+            receipt.producer.checker_producer.surface_return_type,
+            "the Len receiver Checker type preserves the erased List surface signature"
         );
         let values_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
-        assert_eq!(receipt.producer_result_type, values_ty);
-        assert_eq!(receipt.call_result_type, values_ty);
-        assert_eq!(receipt.owner_type, values_ty);
-        assert_ne!(receipt.producer_checker_snapshot_type, values_ty);
-        assert_ne!(receipt.producer_surface_return_type, values_ty);
-        if receipt.len_receiver.is_some() {
-            assert_eq!(
-                receipt.len_receiver_type.as_ref(),
-                Some(&values_ty),
-                "an optional Len receiver must also stay in the dedicated MIR Values ABI"
-            );
-        } else {
-            assert!(receipt.len_receiver_type.is_none());
-        }
-        super::validate_ordinary_map_owned_any_v2_values_producer_caller_type_bridge(
+        assert_eq!(receipt.producer.values_type, values_ty);
+        assert_ne!(receipt.producer.checker_producer.snapshot_type, values_ty);
+        assert_ne!(
+            receipt.producer.checker_producer.surface_return_type,
+            values_ty
+        );
+        super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
             &program, receipt,
         )
-        .expect("Checker ContainerErase must be the exact bridge into the MIR Values TypeDesc");
+        .expect("Checker surface/snapshot pair must bridge into the MIR Values TypeDesc");
 
         assert!(
             crate::verifier::validate_mir_capabilities(&program).is_err(),
             "the raw whole-program capability gate must continue rejecting Values cross-calls"
         );
-        crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_producer_caller_route(
+        crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
             &checked, &program, &route,
         )
         .expect("only the Checker-bound exact route may admit the Values transfer");
-        let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_producer_caller_route(
+        let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
             &checked,
             &program,
             &route,
-            "values-producer-caller-fixture".into(),
+            "values-result-producer-caller-fixture".into(),
         )
         .expect("specialized MIR verifier accepts exact producer/caller ownership");
         assert!(results.is_empty(), "fixture has no contracts to prove");
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn forged_callee_and_missing_whole_owner_drop_are_rejected() {
         let (checked, canonical) = fixture();
         let bridge = receipt(&canonical);
+        let profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE;
 
         let mut forged_callee = canonical.clone();
         let mut caller = forged_callee
@@ -43610,26 +44748,25 @@ mod values_producer_caller_verifier_tests {
             .blocks
             .values_mut()
             .flat_map(|block| &mut block.instructions)
-            .find(|instruction| instruction.id == bridge.call_instruction)
+            .find(|instruction| instruction.id == bridge.producer_call_instruction)
             .expect("direct Values Call");
         let MirInstructionKind::Call { callee, .. } = &mut call.kind else {
             panic!("receipt call identity is not a Call");
         };
         *callee = crate::core::ir::ResolvedCallee::Function(NodeId("function:main".into()));
         forged_callee.replace_function_for_test_only(caller);
-        let forged_callee_route = forged_callee.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE,
-        );
+        let forged_callee_route = forged_callee.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
                 &forged_callee,
                 &forged_callee_route,
+                profile,
             )
             .is_err(),
             "a resealed MIR route still cannot forge the direct producer callee"
         );
         assert!(
-            crate::core::mir::validate_ordinary_map_owned_any_v2_values_producer_caller_route(
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
                 &checked,
                 &forged_callee,
             )
@@ -43637,7 +44774,7 @@ mod values_producer_caller_verifier_tests {
             "the Checker-bound route must reject a forged callee"
         );
         assert!(
-            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_producer_caller_route(
+            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
                 &checked,
                 &forged_callee,
                 &forged_callee_route,
@@ -43660,26 +44797,25 @@ mod values_producer_caller_verifier_tests {
                 block
                     .instructions
                     .iter()
-                    .any(|instruction| instruction.id == bridge.owner_drop_instruction)
+                    .any(|instruction| instruction.id == bridge.caller_snapshot_drop_instruction)
             })
             .expect("whole-owner Drop block");
         block
             .instructions
-            .retain(|instruction| instruction.id != bridge.owner_drop_instruction);
+            .retain(|instruction| instruction.id != bridge.caller_snapshot_drop_instruction);
         missing_drop.replace_function_for_test_only(caller);
-        let missing_drop_route = missing_drop.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE,
-        );
+        let missing_drop_route = missing_drop.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
                 &missing_drop,
                 &missing_drop_route,
+                profile,
             )
             .is_err(),
             "removing the exact whole-owner Drop must fail even with a newly sealed route digest"
         );
         assert!(
-            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_producer_caller_route(
+            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
                 &checked,
                 &missing_drop,
                 &missing_drop_route,
@@ -43691,16 +44827,20 @@ mod values_producer_caller_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn surface_and_actual_owner_type_bridge_rejects_mutated_type_edges() {
         let (_, program) = fixture();
         let canonical = receipt(&program);
+        let profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE;
 
         let mut forged_surface = canonical.clone();
-        forged_surface.producer_surface_return_type =
-            forged_surface.producer_checker_snapshot_type.clone();
+        forged_surface.producer.checker_producer.surface_return_type = forged_surface
+            .producer
+            .checker_producer
+            .snapshot_type
+            .clone();
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_type_bridge(
+            super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
                 &program,
                 &forged_surface,
             )
@@ -43708,23 +44848,11 @@ mod values_producer_caller_verifier_tests {
             "the verifier must reject collapsing Checker surface List into actual List<DynamicAny>"
         );
 
-        let mut forged_conversion = canonical.clone();
-        forged_conversion.producer_return_source_type =
-            forged_conversion.producer_surface_return_type.clone();
-        assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_type_bridge(
-                &program,
-                &forged_conversion,
-            )
-            .is_err(),
-            "the exact ContainerErase source endpoint must be the actual owner type"
-        );
-
         let mut forged_call_surface = canonical.clone();
-        forged_call_surface.call_surface_result_type =
-            forged_call_surface.producer_checker_snapshot_type.clone();
+        forged_call_surface.checker_caller.call_result_type =
+            forged_call_surface.checker_caller.snapshot_type.clone();
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_type_bridge(
+            super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_type_owner_bridge(
                 &program,
                 &forged_call_surface,
             )
@@ -43740,17 +44868,20 @@ mod values_producer_caller_verifier_tests {
             .clone();
         caller
             .values
-            .get_mut(&canonical.call_result)
+            .get_mut(&canonical.caller_result)
             .expect("direct Call result value")
-            .ty = canonical.producer_surface_return_type.clone();
+            .ty = canonical
+            .producer
+            .checker_producer
+            .surface_return_type
+            .clone();
         forged_call_abi.replace_function_for_test_only(caller);
-        let forged_call_route = forged_call_abi.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_PRODUCER_CALLER_PROFILE,
-        );
+        let forged_call_route = forged_call_abi.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_producer_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_producer_caller_verifier_receipts(
                 &forged_call_abi,
                 &forged_call_route,
+                profile,
             )
             .is_err(),
             "the MIR Call result must use the dedicated V2 Values TypeDesc, never surface List"
@@ -43762,7 +44893,7 @@ mod values_producer_caller_verifier_tests {
 mod values_crosscall_string_caller_verifier_tests {
     use crate::core::mir::reference::MirProgram;
     use crate::core::mir::{
-        MirInstructionKind, OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerMirReceipt,
+        MirInstructionKind, OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
     };
     use crate::core::NodeId;
 
@@ -43793,15 +44924,17 @@ mod values_crosscall_string_caller_verifier_tests {
         checked: &crate::core::CheckedProgram,
         program: &MirProgram,
     ) -> crate::core::mir::CanonicalMirRouteReceipt {
-        crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
             checked, program,
         )
         .expect("exact Checker-bound Values cross-call String caller route")
     }
 
-    fn bridge(program: &MirProgram) -> OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerMirReceipt {
+    fn bridge(
+        program: &MirProgram,
+    ) -> OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt {
         let receipts = program
-            .ordinary_map_owned_any_v2_values_crosscall_string_caller_receipts()
+            .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_receipts()
             .expect("derive Values cross-call String caller receipt");
         let [receipt] = receipts.as_slice() else {
             panic!("fixture must have exactly one Values cross-call String caller receipt");
@@ -43810,7 +44943,6 @@ mod values_crosscall_string_caller_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn checker_bound_values_string_crosscall_is_admitted_but_raw_gate_stays_closed() {
         let (checked, program) = fixture();
         let route = route_receipt(&checked, &program);
@@ -43821,11 +44953,11 @@ mod values_crosscall_string_caller_verifier_tests {
             crosscall.values_type,
             crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id()
         );
-        super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_type_owner_bridge(
+        super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_type_owner_bridge(
             &program, &crosscall,
         )
         .expect("the cross-call Checker/MIR String and owner bridge is exact");
-        crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_mir_route(
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_mir_route(
             &program,
         )
         .expect("MIR-only cross-call census validates the exact unpack and owner settlements");
@@ -43834,13 +44966,13 @@ mod values_crosscall_string_caller_verifier_tests {
             crate::verifier::validate_mir_capabilities(&program).is_err(),
             "raw MIR capability validation must remain closed to cross-function Values ownership"
         );
-        crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+        crate::verifier::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
             &checked,
             &program,
             &route,
         )
         .expect("only the Checker-bound cross-call route admits the narrow capability");
-        let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+        let results = crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
             &checked,
             &program,
             &route,
@@ -43857,10 +44989,11 @@ mod values_crosscall_string_caller_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn forged_call_type_and_missing_owner_drops_fail_closed_after_resealing() {
         let (checked, canonical) = fixture();
         let proof = bridge(&canonical);
+        let profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE;
 
         let mut forged_callee = canonical.clone();
         let mut caller = forged_callee
@@ -43879,11 +45012,9 @@ mod values_crosscall_string_caller_verifier_tests {
         };
         *callee = crate::core::ir::ResolvedCallee::Function(NodeId("function:main".into()));
         forged_callee.replace_function_for_test_only(caller);
-        let forged_callee_route = forged_callee.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE,
-        );
+        let forged_callee_route = forged_callee.route_receipt(profile);
         assert!(
-            crate::core::mir::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+            crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
                 &checked,
                 &forged_callee,
             )
@@ -43891,7 +45022,7 @@ mod values_crosscall_string_caller_verifier_tests {
             "the Checker-bound route must reject a resealed forged direct callee"
         );
         assert!(
-            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
                 &checked,
                 &forged_callee,
                 &forged_callee_route,
@@ -43913,19 +45044,18 @@ mod values_crosscall_string_caller_verifier_tests {
             .expect("direct Call result")
             .ty = proof.string_type.clone();
         forged_type.replace_function_for_test_only(caller);
-        let forged_type_route = forged_type.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE,
-        );
+        let forged_type_route = forged_type.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_verifier_receipts(
                 &forged_type,
                 &forged_type_route,
+                profile,
             )
             .is_err(),
             "the direct Call result must retain the dedicated Values owner TypeDesc"
         );
         assert!(
-            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+            crate::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
                 &checked,
                 &forged_type,
                 &forged_type_route,
@@ -43955,13 +45085,12 @@ mod values_crosscall_string_caller_verifier_tests {
             .instructions
             .retain(|instruction| instruction.id != proof.caller_string_drop_instruction);
         missing_string_drop.replace_function_for_test_only(caller);
-        let missing_string_drop_route = missing_string_drop.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE,
-        );
+        let missing_string_drop_route = missing_string_drop.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_verifier_receipts(
                 &missing_string_drop,
                 &missing_string_drop_route,
+                profile,
             )
             .is_err(),
             "the independently owned selected String must be dropped exactly once"
@@ -43987,27 +45116,25 @@ mod values_crosscall_string_caller_verifier_tests {
             .instructions
             .retain(|instruction| instruction.id != proof.caller_snapshot_drop_instruction);
         missing_snapshot_drop.replace_function_for_test_only(caller);
-        let missing_snapshot_drop_route = missing_snapshot_drop.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE,
-        );
+        let missing_snapshot_drop_route = missing_snapshot_drop.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_verifier_receipts(
                 &missing_snapshot_drop,
                 &missing_snapshot_drop_route,
+                profile,
             )
             .is_err(),
-            "the returned Values snapshot must be explicitly dropped by its caller"
+            "the independently owned Values snapshot must be explicitly dropped by its caller"
         );
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn mutated_receipt_type_bridge_and_unpack_index_fail_closed() {
         let (_, program) = fixture();
         let mut forged_receipt = bridge(&program);
         forged_receipt.string_type = forged_receipt.bool_type.clone();
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_type_owner_bridge(
+            super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_type_owner_bridge(
                 &program,
                 &forged_receipt,
             )
@@ -44016,6 +45143,8 @@ mod values_crosscall_string_caller_verifier_tests {
         );
 
         let proof = bridge(&program);
+        let profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE;
         let mut forged_index = program.clone();
         let mut caller = forged_index
             .functions()
@@ -44034,13 +45163,12 @@ mod values_crosscall_string_caller_verifier_tests {
         };
         *index = proof.caller_call_result.clone();
         forged_index.replace_function_for_test_only(caller);
-        let forged_index_route = forged_index.route_receipt(
-            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_CROSSCALL_STRING_CALLER_PROFILE,
-        );
+        let forged_index_route = forged_index.route_receipt(profile);
         assert!(
-            super::validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_verifier_receipts(
+            super::validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_verifier_receipts(
                 &forged_index,
                 &forged_index_route,
+                profile,
             )
             .is_err(),
             "the cross-call unpack must retain the Checker-proved literal-zero index"
@@ -44411,7 +45539,6 @@ mod computed_key_get_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn computed_key_get_raw_profile_is_inferred_and_receipts_are_exact() {
         let original = fixture();
         let profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE;
@@ -44548,7 +45675,6 @@ mod computed_key_get_verifier_tests {
     }
 
     #[test]
-    #[ignore = "route-blocked: map_new Result capacity hard gate - from_checked_program rejects any map_new source with 'ordinary Map/Any owner-v2 TypeCatalog candidate has incomplete or conflicting coverage' until the per-profile routes reopen (src/core/mir/route.rs); re-migrate these sources to the nested-match Result shape when unblocking"]
     fn computed_key_string_get_requires_the_embedded_owned_result_drop_credential() {
         const {
             assert!(!crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_PRODUCTION_READY);
@@ -45697,7 +46823,8 @@ mod ordinary_map_owned_any_v2_direct_print_result_l2_verifier_tests {
             "{error}"
         );
         assert!(
-            error.contains("ordinary Map/Any owner-v2 candidate"),
+            error.contains("ordinary Map/Any owner-v2 candidate")
+                || error.contains("staged ordinary Map/Any owner-v2 consumer"),
             "{error}"
         );
     }

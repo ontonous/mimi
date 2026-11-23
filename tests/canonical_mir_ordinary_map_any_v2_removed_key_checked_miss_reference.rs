@@ -239,7 +239,10 @@ fn removed_key_checked_miss_rejects_pre_remove_root_and_wrong_keys() {
     let hit_checked = checked_source(&pre_remove_hit_only);
     let hit_mir = mimi::core::mir::reference::MirProgram::from_checked_program(&hit_checked)
         .expect("the pre-Remove hit-only control lowers to diagnostic canonical MIR");
+    let hit_receipt =
+        hit_mir.route_receipt(mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
     let hit = MirReferenceInterpreter::new(&hit_mir)
+        .with_route_receipt(&hit_receipt)
         .execute_with_output(&NodeId("function:main".into()), &[])
         .expect("the old Set root remains queryable as a hit");
     assert_eq!(hit.value, MirRuntimeValue::Bool(true));

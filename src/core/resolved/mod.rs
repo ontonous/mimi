@@ -10069,13 +10069,12 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
         )
     }
 
-    fn direct_binding<'a>(
-        body: &'a crate::core::ResolvedBody,
+    fn direct_binding_in_statements<'a>(
+        statements: impl IntoIterator<Item = &'a crate::core::ResolvedStmt>,
         local: &crate::core::ResolvedLocalId,
     ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
-        body.root
-            .statements
-            .iter()
+        statements
+            .into_iter()
             .filter_map(|statement| {
                 let ResolvedStmtKind::Bind {
                     pattern:
@@ -10097,32 +10096,73 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
             .collect()
     }
 
+    fn linear_result_chain_statements(
+        block: &crate::core::ResolvedBlock,
+    ) -> Vec<&crate::core::ResolvedStmt> {
+        let mut statements = Vec::new();
+        let mut current = block;
+        let mut seen = BTreeSet::new();
+        loop {
+            statements.extend(current.statements.iter());
+            let tail_expr = current.result.as_deref().or_else(|| {
+                current
+                    .statements
+                    .last()
+                    .and_then(|statement| match &statement.kind {
+                        ResolvedStmtKind::Expr(expr) => Some(expr),
+                        _ => None,
+                    })
+            });
+            let Some(ResolvedExprKind::Match { arms, .. }) = tail_expr.map(|expr| &expr.kind)
+            else {
+                break;
+            };
+            let ok_blocks = arms
+                .iter()
+                .filter_map(|arm| {
+                    (arm.guard.is_none()
+                        && matches!(
+                            &arm.pattern.kind,
+                            ResolvedPatternKind::Constructor { variant, .. }
+                                if variant.0 == "builtin:variant:Result::Ok"
+                        ))
+                    .then(|| match &arm.body.kind {
+                        ResolvedExprKind::Block(arm_block) => Some(arm_block.as_ref()),
+                        _ => None,
+                    })
+                    .flatten()
+                })
+                .collect::<Vec<_>>();
+            let [next] = ok_blocks.as_slice() else {
+                break;
+            };
+            if !seen.insert(*next as *const crate::core::ResolvedBlock as usize) {
+                break;
+            }
+            current = *next;
+        }
+        statements
+    }
+
+    fn direct_binding<'a>(
+        body: &'a crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+    ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
+        direct_binding_in_statements(&body.root.statements, local)
+    }
+
+    fn direct_binding_in_linear_chain<'a>(
+        body: &'a crate::core::ResolvedBody,
+        local: &crate::core::ResolvedLocalId,
+    ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
+        direct_binding_in_statements(linear_result_chain_statements(&body.root), local)
+    }
+
     fn direct_binding_in_block<'a>(
         block: &'a crate::core::ResolvedBlock,
         local: &crate::core::ResolvedLocalId,
     ) -> Vec<(&'a crate::core::ResolvedStmt, &'a crate::core::ResolvedExpr)> {
-        block
-            .statements
-            .iter()
-            .filter_map(|statement| {
-                let ResolvedStmtKind::Bind {
-                    pattern:
-                        crate::core::ResolvedPattern {
-                            kind:
-                                ResolvedPatternKind::Binding {
-                                    local: bound,
-                                    by_reference: None,
-                                },
-                            ..
-                        },
-                    initializer: Some(initializer),
-                } = &statement.kind
-                else {
-                    return None;
-                };
-                (bound == local).then_some((statement, initializer))
-            })
-            .collect()
+        direct_binding_in_statements(&block.statements, local)
     }
 
     fn exact_result_arm<'a>(
@@ -10753,6 +10793,7 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
                                 && action.key.as_ref().is_some_and(|key| call.arguments[1].value.node_id == *key)
                     )
             };
+            let linear_call_bindings = direct_binding_in_linear_chain(body, pair);
             let nested_call_bindings = computed_owner_chain_source_paths
                 .as_ref()
                 .map(|(block, _, _)| direct_binding_in_block(block, pair))
@@ -10764,7 +10805,10 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
                         .iter()
                         .any(exact_pair_binding_initializer)
             } else {
-                call_bindings.len() == 1 && call_bindings.iter().any(exact_pair_binding_initializer)
+                linear_call_bindings.len() == 1
+                    && linear_call_bindings
+                        .iter()
+                        .any(exact_pair_binding_initializer)
             };
             let unpack_bindings = direct_binding(body, &receipt.unpack_binding);
             let exact_unpack_binding_initializer =
@@ -10778,6 +10822,8 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
                             .get(&receipt.unpack_binding)
                             .is_some_and(|local| local.ty == expression.ty)
                 };
+            let linear_unpack_bindings =
+                direct_binding_in_linear_chain(body, &receipt.unpack_binding);
             let nested_unpack_bindings = computed_owner_chain_source_paths
                 .as_ref()
                 .map(|(block, _, _)| direct_binding_in_block(block, &receipt.unpack_binding))
@@ -10789,9 +10835,12 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
                         .iter()
                         .any(exact_unpack_binding_initializer)
             } else {
-                unpack_bindings.len() == 1
-                    && unpack_bindings.iter().any(exact_unpack_binding_initializer)
+                linear_unpack_bindings.len() == 1
+                    && linear_unpack_bindings
+                        .iter()
+                        .any(exact_unpack_binding_initializer)
             };
+            let linear_statements = linear_result_chain_statements(&body.root);
             let pair_drops = body
                 .root
                 .statements
@@ -10807,22 +10856,29 @@ fn validate_ordinary_map_owned_any_v2_nonprimitive_cast_receipts(
                         )
                 })
                 .collect::<Vec<_>>();
-            let pair_order = body
-                .root
-                .statements
+            let linear_pair_drops = linear_statements
+                .iter()
+                .filter(|statement| {
+                    statement.node_id == receipt.settlement_point
+                        && matches!(
+                            &statement.kind,
+                            ResolvedStmtKind::Drop(places)
+                                if places.len() == 1
+                                    && places[0].base == *pair
+                                    && places[0].projections.is_empty()
+                        )
+                })
+                .collect::<Vec<_>>();
+            let pair_order = linear_statements
                 .iter()
                 .position(|statement| statement.node_id == receipt.pair_binding_point);
-            let unpack_order = body
-                .root
-                .statements
+            let unpack_order = linear_statements
                 .iter()
                 .position(|statement| statement.node_id == receipt.unpack_binding_point);
-            let drop_order = body
-                .root
-                .statements
+            let drop_order = linear_statements
                 .iter()
                 .position(|statement| statement.node_id == receipt.settlement_point);
-            let exact_root_pair_drop = pair_drops.len() == 1
+            let exact_root_pair_drop = linear_pair_drops.len() == 1
                 && matches!(
                     (pair_order, unpack_order, drop_order),
                     (Some(pair), Some(unpack), Some(drop)) if pair < unpack && unpack < drop
@@ -15071,37 +15127,60 @@ fn validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
                 if observation_calls.len() != 2 || &observation_calls != calls {
                     return false;
                 }
-                let new_actions = cfg
-                    .actions
+                let Some(owner_analysis) = program.resource_analysis(&owner) else {
+                    return false;
+                };
+                let (Some(cfg_ir), Some(body)) = (
+                    program.callable_cfgs.get(&owner),
+                    program.resolved_bodies.get(&owner),
+                ) else {
+                    return false;
+                };
+                let Some(scope) = crate::core::cfg::OrdinaryMapV2LinearChainScope::collect(
+                    cfg_ir,
+                    body,
+                    &program.resolved_types,
+                ) else {
+                    return false;
+                };
+                let Some((ok_actions, _ok_attempts, ok_drops, err_drops)) =
+                    crate::core::cfg::partition_ordinary_map_v2_ok_spine(
+                        &scope,
+                        &cfg.actions,
+                        &owner_analysis.ordinary_map_owned_any_v2_operation_attempts,
+                    )
+                else {
+                    return false;
+                };
+                let new_actions = ok_actions
                     .iter()
+                    .copied()
                     .filter(|action| {
                         action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
                     })
                     .collect::<Vec<_>>();
-                let set_actions = cfg
-                    .actions
+                let set_actions = ok_actions
                     .iter()
+                    .copied()
                     .filter(|action| {
                         action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Set
                     })
                     .collect::<Vec<_>>();
-                let get_actions = cfg
-                    .actions
+                let get_actions = ok_actions
                     .iter()
+                    .copied()
                     .filter(|action| {
                         action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::GetAny
-                    })
-                    .collect::<Vec<_>>();
-                let root_drops = cfg
-                    .actions
-                    .iter()
-                    .filter(|action| {
-                        action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
                     })
                     .collect::<Vec<_>>();
                 let ([new], [set]) = (new_actions.as_slice(), set_actions.as_slice()) else {
                     return false;
                 };
+                let err_drops_ok = crate::core::cfg::ordinary_map_v2_err_drops_match_prior_roots(
+                    &scope,
+                    &[(&new.point, &new.local), (&set.point, &set.local)],
+                    &err_drops,
+                );
                 let hit_digest = blake3::hash(b"hit").to_hex().to_string();
                 let miss_digest = blake3::hash(b"absent").to_hex().to_string();
                 let exact_observation_pair = observations.iter().all(|observation| {
@@ -15209,8 +15288,9 @@ fn validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
                     && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
                     && source.owner == owner
                     && source.hit_observation.operation != source.miss_observation.operation
-                    && cfg.actions.len() == 6
-                    && cfg.actions.iter().all(|action| {
+                    && ok_actions.len() == 6
+                    && err_drops_ok
+                    && ok_actions.iter().all(|action| {
                         matches!(
                             action.kind,
                             crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
@@ -15222,13 +15302,13 @@ fn validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
                     && set.source_local.as_ref() == Some(&new.local)
                     && set.source.as_ref() == Some(&new.root)
                     && get_actions.len() == 2
-                    && root_drops.len() == 2
-                    && root_drops
+                    && ok_drops.len() == 2
+                    && ok_drops
                         .iter()
                         .filter(|drop| drop.local == new.local && drop.root == new.root)
                         .count()
                         == 1
-                    && root_drops
+                    && ok_drops
                         .iter()
                         .filter(|drop| drop.local == set.local && drop.root == set.root)
                         .count()
@@ -15526,7 +15606,7 @@ fn validate_ordinary_map_owned_any_v2_checked_unpack_receipts(
                 cfg.owner == *owner
                     && cfg.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
                     && cfg.dynamic_keys_get_receipts.len() == 1
-                    && cfg.actions.len() == 7
+                    && cfg.actions.len() == 8
                     && cfg.result_receipts.len() == 2
                     && cfg.unpack_receipts.len() == 2
                     && cfg.found_observation_receipts.len() == 2

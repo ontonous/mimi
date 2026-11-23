@@ -29,6 +29,50 @@ impl<'a, 'ctx> NativeMirFunctionEmitter<'a, 'ctx> {
         let receipt = receipt.ok_or_else(|| {
             NativeMirError::new(subject, "List construction has no canonical receipt")
         })?;
+        let instruction_id = crate::core::mir::MirInstructionId::new(subject.to_owned())
+            .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+        let authorized_empty_values = self.values_result_authorization.is_some()
+            && crate::core::mir::mir_function_authorizes_values_result_empty_list_construct(
+                self.function,
+                &instruction_id,
+                result,
+                elements,
+            );
+        if authorized_empty_values {
+            catalog
+                .validate_values_result_empty_list_construct_receipt(
+                    &result_ty,
+                    &element_types,
+                    receipt,
+                )
+                .map_err(|message| NativeMirError::new(subject, message))?;
+            let new_fn = self
+                .generator
+                .get_runtime_fn("mimi_mir_list_new_managed_any_v2")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            let list = call_try_basic_value(
+                &self
+                    .generator
+                    .builder
+                    .build_call(new_fn, &[], "mir_list_new_values_empty")
+                    .map_err(|error| NativeMirError::new(subject, error.to_string()))?,
+            )
+            .ok_or_else(|| {
+                NativeMirError::new(subject, "Values empty List constructor returned void")
+            })?
+            .into_pointer_value();
+            let nonnull = self
+                .generator
+                .builder
+                .build_is_not_null(list, "mir_list_new_values_empty_nonnull")
+                .map_err(|error| NativeMirError::new(subject, error.to_string()))?;
+            self.emit_v2_root_guard(
+                nonnull,
+                "[E0800] Result-branch empty Values List allocation failed",
+                subject,
+            )?;
+            return Ok(list.into());
+        }
         catalog
             .validate_list_construct_receipt(&result_ty, &element_types, receipt)
             .map_err(|message| NativeMirError::new(subject, message))?;

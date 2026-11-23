@@ -19,7 +19,7 @@ use mimi::lexer::Lexer;
 
 const FIXTURE: &str =
     include_str!("fixtures/mir_ordinary_map_any_owner_v2_dynamic_string_keys.mimi");
-const FIXTURE_SHA256: &str = "79d307bf23c4aadfde8720d56447ea74ab01ff9b68390d124ff782f9000ecd66";
+const FIXTURE_SHA256: &str = "a13a43bde5f8bf859c536d4aee1cae0aa1d90d2f1bcd28c2f8eb85fc83c5bd85";
 const ROUTE_PROFILE: &str = "ordinary-map-owned-any-v2-computed-string-key-owner-chain-v1";
 const RUNTIME_FEATURE: &str = "ordinary-map-set-result-l3";
 const GENERATED_ENTRY: &str = "mimi_owner_err_cleanup_generated_main";
@@ -157,7 +157,7 @@ fn computed_string_key_source_err_releases_every_owner_domain() {
         (
             "success",
             -1,
-            "true\ntrue\nfalse\nnative-owner-v2 mode=success generated_status=0 observation_status=0 shutdown_registered=1 final_roots=0 final_map_handles=0 final_owned_get_handles=0 final_runtime_map_handles=0 final_managed_any=0 final_owned_strings=0 final_any_owner_tokens=0 final_lists=0\n",
+            "true\ntrue\nfalse\ntrue\nnative-owner-v2 mode=success generated_status=0 observation_status=0 shutdown_registered=1 final_roots=0 final_map_handles=0 final_owned_get_handles=0 final_runtime_map_handles=0 final_managed_any=0 final_owned_strings=0 final_any_owner_tokens=0 final_lists=0\n",
         ),
         (
             "new-err",
@@ -258,8 +258,15 @@ fn compile_exact_fixture(
         file.items.push(main_item);
     }
     let checked = mimi::core::check_program(&file).expect("Checker accepts exact fixture");
-    let program =
-        MirProgram::from_checked_program(&checked).expect("materialize exact fixture MIR");
+    let excluded_sources = file
+        .sources
+        .records()
+        .iter()
+        .filter(|record| record.key.as_str() == "stdlib:prelude.mimi")
+        .map(|record| record.id)
+        .collect::<std::collections::HashSet<_>>();
+    let program = MirProgram::from_checked_program_excluding_sources(&checked, &excluded_sources)
+        .expect("materialize exact fixture MIR");
     let receipt = validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route(
         &checked, &program,
     )

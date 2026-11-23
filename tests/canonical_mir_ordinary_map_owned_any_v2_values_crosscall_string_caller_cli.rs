@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const ROUTE_PROFILE: &str = "ordinary-map-owned-any-v2-values-crosscall-string-caller-v1";
+const ROUTE_PROFILE: &str =
+    "ordinary-map-owned-any-v2-values-result-crosscall-string-caller-v3-one-entry";
 const ROUTE_ADMISSION_PREFIX: &str = "MIMI_ROUTE_CENSUS route-admission ";
 const NATIVE_BUILD_PREFIX: &str = "MIMI_ROUTE_CENSUS canonical-native-build ";
 const VERIFIER_PROVENANCE_PREFIX: &str = "canonical MIR verifier provenance: ";
@@ -167,15 +168,29 @@ fn route_identity(
         .split_whitespace()
         .map(|field| field.split_once('=').expect("route field key=value").0)
         .collect::<Vec<_>>();
-    assert_eq!(
-        route_field_order,
-        [
+    let expected_fields: &[&str] = if consumer == "build" {
+        &[
+            "consumer",
+            "mode",
+            "checker_profile",
+            "build_route_profile",
+            "mir_digest",
+            "mir_route_identity_digest",
+            "receipt_identity_digest",
+            "build_route_identity_digest",
+        ]
+    } else {
+        &[
             "consumer",
             "mode",
             "checker_profile",
             "mir_digest",
             "receipt_identity_digest",
-        ],
+        ]
+    };
+    assert_eq!(
+        route_field_order.as_slice(),
+        expected_fields,
         "{label} route census field contract changed"
     );
     assert_eq!(values.get("consumer").copied(), Some(consumer), "{label}");

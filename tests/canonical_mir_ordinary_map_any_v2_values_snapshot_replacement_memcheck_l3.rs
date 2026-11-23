@@ -1003,7 +1003,11 @@ mod memcheck_summary_tests {
     #[should_panic(expected = "partial or duplicate loss-summary set")]
     fn rejects_incomplete_loss_rows_in_all_free_report() {
         let incomplete = ALL_FREE_REPORT_WITH_ZERO_LOSS_ROWS
-            .replace("==31415==    possibly lost: 0 bytes in 0 blocks\n", "");
+            .replace("==31415==      possibly lost: 0 bytes in 0 blocks\n", "");
+        assert_ne!(
+            incomplete, ALL_FREE_REPORT_WITH_ZERO_LOSS_ROWS,
+            "incomplete loss row fixture must remove the possibly lost row"
+        );
         let _ = memcheck_summary(&incomplete, "incomplete loss fixture");
     }
 
@@ -1025,7 +1029,7 @@ mod memcheck_summary_tests {
     }
 
     #[test]
-    #[should_panic(expected = "malformed definitely lost:")]
+    #[should_panic(expected = "has a malformed grouped Memcheck count")]
     fn rejects_malformed_loss_row_in_all_free_report() {
         let malformed = ALL_FREE_REPORT_WITH_ZERO_LOSS_ROWS.replace(
             "definitely lost: 0 bytes in 0 blocks",

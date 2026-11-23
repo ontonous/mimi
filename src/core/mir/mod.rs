@@ -489,7 +489,9 @@ pub(crate) use receipt::{
     validate_ordinary_map_set_get_string_result_types, validate_ordinary_map_set_result_types,
 };
 pub(crate) use route::ORDINARY_MAP_NEW_RESULT_PENDING_L1_PROFILE;
-pub(crate) use route::ORDINARY_MAP_SET_RESULT_PENDING_L1_PROFILE;
+pub(crate) use route::{
+    mir_block_terminally_carries_value, ORDINARY_MAP_SET_RESULT_PENDING_L1_PROFILE,
+};
 
 pub mod reference;
 mod route;
@@ -617,7 +619,6 @@ pub use proof_source_census::{
     MirProofSourcePlaceInput, MirProofSourceRoot, MirProofSourceRootKind, MirProofSourceScopeFrame,
     MirProofWorklistCoverage,
 };
-pub(crate) use receipt::validate_ordinary_map_set_get_any_i32_result_types;
 pub use receipt::{
     validate_ordinary_map_owner_lifecycle_observer_v1_mir_route, CanonicalMirRouteReceipt,
     OrdinaryMapOwnedAnyV2FoundObservationMirReceipt, OrdinaryMapOwnedAnyV2GetAnyResultReceipt,
@@ -677,8 +678,14 @@ pub use receipt::{
     ORDINARY_MAP_OWNER_LIFECYCLE_OBSERVER_V1_SCHEMA,
 };
 pub(crate) use receipt::{
+    validate_ordinary_map_set_get_any_i32_result_types,
+    OrdinaryMapOwnedAnyV2ValuesResultSetEntryMirReceipt,
+};
+pub(crate) use receipt::{
     OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerMirReceipt,
     OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerMirReceipt,
+    OrdinaryMapOwnedAnyV2ValuesResultPathMirReceipt,
+    OrdinaryMapOwnedAnyV2ValuesResultProducerCallerMirReceipt,
 };
 pub(crate) use route::materialize_ordinary_map_owned_any_v2_for_verifier_diagnostics;
 pub(crate) use route::ordinary_map_owned_any_v2_checked_get_multi_lookup_source_candidate;
@@ -5160,10 +5167,11 @@ impl MirOwnershipSummary {
             .as_deref()
     }
 
-    /// Whether this function carries the independent Checker ordinary
-    /// Map/Any v2 CFG receipt, without exposing or lending the receipt itself.
-    pub(crate) fn has_checker_ordinary_map_owned_any_v2_cfg_receipt(&self) -> bool {
-        self.checker_ordinary_map_owned_any_v2_cfg_receipt.is_some()
+    pub(crate) fn ordinary_map_owned_any_v2_values_result_producer_receipt(
+        &self,
+    ) -> Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt> {
+        self.checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+            .as_deref()
     }
 
     /// Confirm that the Checker source receipt for the Values Result-branch
@@ -6632,6 +6640,19 @@ fn validate_ordinary_map_owned_any_v2_action_receipts(
     }
     if function
         .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+        .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_cfg_receipt
+            .as_ref()
+            .and_then(|cfg| cfg.values_result_producer_receipt.as_ref())
+            .is_some()
+    {
+        return validate_ordinary_map_owned_any_v2_values_result_producer_actions(function);
+    }
+    if function
+        .ownership
         .checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage
         .is_some()
     {
@@ -6971,6 +6992,7 @@ fn validate_ordinary_map_owned_any_v2_action_receipts(
             .find(|instruction| instruction.id == receipt.instruction);
         let operation_key = operation.and_then(|instruction| match &instruction.kind {
             I::OrdinaryMapOwnedAnyV2Set { key, .. }
+            | I::OrdinaryMapOwnedAnyV2SetResult { key, .. }
             | I::OrdinaryMapOwnedAnyV2SetAnyResult { key, .. }
             | I::OrdinaryMapOwnedAnyV2Remove { key, .. }
             | I::OrdinaryMapOwnedAnyV2Contains { key, .. }
@@ -7106,11 +7128,39 @@ fn validate_ordinary_map_owned_any_v2_action_receipts(
                 | crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
         ) {
             let owner_type = types::ordinary_map_owned_any_v2_type_id();
+            let closed_result_branch_new = action.kind
+                == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                && function
+                    .ownership
+                    .checker_ordinary_map_owned_any_v2_cfg_receipt
+                    .as_ref()
+                    .is_some_and(|cfg| {
+                        cfg.result_receipts
+                            .iter()
+                            .filter_map(|result| {
+                                result
+                                    .computed_string_key_owner_chain
+                                    .as_deref()
+                                    .and_then(|chain| chain.result_branch.as_deref())
+                            })
+                            .any(|branch| branch.map_new_operation == action.point)
+                            || cfg
+                                .values_unpack_result_branch_receipt
+                                .as_ref()
+                                .is_some_and(|branch| branch.map_new_operation == action.point)
+                    });
             let checker_local = checker_action
                 .and_then(|checker| MirValueId::new(format!("local:{}", checker.local.0 .0)).ok());
             let expected_root = checker_action
                 .map(|checker| format!("ordinary-map-owned-any-v2:{}", checker.local.0 .0));
             let checker_action_matches = checker_action.is_some_and(|checker| {
+                let source_matches = if closed_result_branch_new {
+                    checker.source_node == action.source_node
+                        && checker.source_type == action.source_type
+                        && checker.source_type.is_some()
+                } else {
+                    checker.source_node.is_none() && checker.source_type.is_none()
+                };
                 checker.profile_version == crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
                     && checker.kind == action.kind
                     && checker.point == action.point
@@ -7130,8 +7180,7 @@ fn validate_ordinary_map_owned_any_v2_action_receipts(
                     && !checker.payload_clone
                     && checker.source_local.is_none()
                     && checker.source.is_none()
-                    && checker.source_node.is_none()
-                    && checker.source_type.is_none()
+                    && source_matches
                     && checker.result_type.is_none()
                     && checker.result_local.is_none()
             });
@@ -7141,12 +7190,42 @@ fn validate_ordinary_map_owned_any_v2_action_receipts(
                         crate::core::OrdinaryMapOwnedAnyV2ActionKind::New,
                         I::OrdinaryMapOwnedAnyV2New { result },
                     ) => {
-                        &action.local == result
-                            && action.result.as_ref() == Some(&action.local)
-                            && function
-                                .values
-                                .get(result)
-                                .is_some_and(|value| value.ty == owner_type)
+                        let result_branch = function
+                            .ownership
+                            .checker_ordinary_map_owned_any_v2_cfg_receipt
+                            .as_ref()
+                            .and_then(|cfg| cfg.flow.as_ref())
+                            .and_then(ordinary_map_owned_any_v2_flow_result_branches)
+                            .and_then(|branches| {
+                                branches.iter().find(|branch| {
+                                    branch.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::New
+                                        && branch.operation_point == action.point
+                                        && MirValueId::new(format!(
+                                            "local:{}",
+                                            branch.output_root.0 .0
+                                        ))
+                                        .ok()
+                                        .as_ref()
+                                            == Some(&action.local)
+                                })
+                            });
+                        if result_branch.is_some() || closed_result_branch_new {
+                            let expected_result =
+                                MirValueId::new(format!("expr:{}", action.point.0)).ok();
+                            expected_result.as_ref() == Some(result)
+                                && action.result.as_ref() == Some(&action.local)
+                                && function.values.get(result).is_some_and(|value| {
+                                    value.ty
+                                        == types::ordinary_map_owned_any_v2_root_result_type_id()
+                                })
+                        } else {
+                            &action.local == result
+                                && action.result.as_ref() == Some(&action.local)
+                                && function
+                                    .values
+                                    .get(result)
+                                    .is_some_and(|value| value.ty == owner_type)
+                        }
                     }
                     (
                         crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop,
@@ -7578,6 +7657,314 @@ fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_actions(
                             if root == &mirrored_action.local
                                 && mirrored_action.result.is_none())
                     })
+            }
+            _ => false,
+        };
+        if !checker_matches || !operation_matches {
+            errors.push(malformed(
+                "action is detached from its exact Checker path, source point, or MIR operation",
+            ));
+        }
+    }
+    errors
+}
+
+/// Validate the exact Result-wrapped Values producer actions and MIR
+/// operations against `OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt`.
+fn validate_ordinary_map_owned_any_v2_values_result_producer_actions(
+    function: &MirFunction,
+) -> Vec<MirValidationError> {
+    use crate::core::ownership::{
+        OrdinaryMapOwnedAnyV2ValuesResultPathKind as PathKind,
+        OrdinaryMapOwnedAnyV2ValuesResultProducerProfileVersion as ProducerProfile,
+    };
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as Action;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as Profile;
+    use MirInstructionKind as I;
+
+    let malformed = |message: &str| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ValuesResultProducer Result action projection {message}"),
+    };
+    let Some(cfg) = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+    else {
+        return vec![malformed("has no Checker CFG receipt")];
+    };
+    let Some(branch) = cfg.values_result_producer_receipt.as_ref() else {
+        return vec![malformed("has no ValuesResultProducer Checker receipt")];
+    };
+    if function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+        .as_deref()
+        != Some(branch)
+    {
+        return vec![malformed(
+            "disagrees between summary and CFG ValuesResultProducer receipts",
+        )];
+    }
+    if cfg.map_set_drop_control_result_branch_receipt.is_some()
+        || cfg.values_local_index_i32_result_branch_receipt.is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_new_result
+            .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_set_lineage
+            .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_set_get_i32_lineage
+            .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_set_get_any_i32_lineage
+            .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_set_get_any_result_i32_lineage
+            .is_some()
+        || function
+            .ownership
+            .checker_ordinary_map_owned_any_v2_set_get_string_lineage
+            .is_some()
+    {
+        return vec![malformed(
+            "cannot mix ValuesResultProducer with another Result profile",
+        )];
+    }
+
+    let expected_sets = match branch.profile_version {
+        ProducerProfile::V1 => 1usize,
+        ProducerProfile::V2 => 2usize,
+    };
+    let operations = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| {
+            matches!(
+                instruction.kind,
+                I::OrdinaryMapOwnedAnyV2New { .. }
+                    | I::OrdinaryMapOwnedAnyV2Set { .. }
+                    | I::OrdinaryMapOwnedAnyV2SetResult { .. }
+                    | I::OrdinaryMapOwnedAnyV2SetAnyResult { .. }
+                    | I::OrdinaryMapOwnedAnyV2SetStringResult { .. }
+                    | I::OrdinaryMapOwnedAnyV2Remove { .. }
+                    | I::OrdinaryMapOwnedAnyV2Values { .. }
+                    | I::OrdinaryMapOwnedAnyV2Drop { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    let mirrored = &function.ownership.checker_ordinary_map_owned_any_v2;
+    let count = |kind| {
+        cfg.actions
+            .iter()
+            .filter(|action| action.kind == kind)
+            .count()
+    };
+    let expected_drops = branch.root_settlements.len();
+    let expected_total = 1 + expected_sets + 1 + expected_drops;
+    if function.owner != branch.owner
+        || cfg.owner != branch.owner
+        || cfg.profile_version != Profile::V2
+        || branch.set_branches.len() != expected_sets
+        || cfg.actions.len() != expected_total
+        || mirrored.len() != expected_total
+        || operations.len() != expected_total
+        || count(Action::New) != 1
+        || count(Action::Set) != expected_sets
+        || count(Action::Values) != 1
+        || count(Action::Drop) != expected_drops
+    {
+        return vec![malformed(
+            "does not carry the exact ValuesResultProducer Checker/MIR census",
+        )];
+    }
+
+    let values_type = types::ordinary_map_owned_any_v2_values_type_id();
+    let expected_empty_lists = branch
+        .paths
+        .iter()
+        .filter(|path| path.kind == PathKind::EmptyList)
+        .count();
+    let observed_empty_lists = function
+        .blocks
+        .values()
+        .flat_map(|block| block.instructions.iter())
+        .filter(|instruction| {
+            matches!(
+                &instruction.kind,
+                I::ConstructList { result, elements, .. }
+                    if function.values.get(result).is_some_and(|v| v.ty == values_type)
+                        && mir_function_authorizes_values_result_empty_list_construct(
+                            function,
+                            &instruction.id,
+                            result,
+                            elements,
+                        )
+            )
+        })
+        .count();
+    if observed_empty_lists != expected_empty_lists {
+        return vec![malformed(
+            "empty Values ConstructList census disagrees with Checker paths",
+        )];
+    }
+
+    let local_value = |local: &crate::core::ir::ResolvedLocalId| {
+        MirValueId::new(format!("local:{}", local.0 .0)).ok()
+    };
+    let expression_value = |node: &NodeId| MirValueId::new(format!("expr:{}", node.0)).ok();
+    let root_type = types::ordinary_map_owned_any_v2_type_id();
+    let root_result_type = types::ordinary_map_owned_any_v2_root_result_type_id();
+    let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
+    let mut errors = Vec::new();
+    for mirrored_action in mirrored {
+        let matching = cfg
+            .actions
+            .iter()
+            .filter(|action| {
+                action.point == mirrored_action.point
+                    && action.kind == mirrored_action.kind
+                    && local_value(&action.local).as_ref() == Some(&mirrored_action.local)
+            })
+            .collect::<Vec<_>>();
+        let [source_action] = matching.as_slice() else {
+            errors.push(malformed("contains a stale or ambiguous mirrored action"));
+            continue;
+        };
+        let expected_mirrored_id = format!(
+            "inst:ordinary_map_owned_any_v2_{}:{}:{}",
+            source_action.kind.as_str(),
+            mirrored_action.local,
+            source_action.point.0
+        );
+        let expected_key = source_action
+            .key_local
+            .as_ref()
+            .and_then(local_value)
+            .or_else(|| source_action.key.as_ref().and_then(expression_value));
+        let expected_value = source_action.value.as_ref().and_then(expression_value);
+        let checker_matches = mirrored_action.profile_version == Profile::V2
+            && mirrored_action.root == source_action.root.0 .0
+            && mirrored_action.key_node == source_action.key
+            && mirrored_action.key == expected_key
+            && mirrored_action.key_type == source_action.key_type
+            && mirrored_action.key_local == source_action.key_local
+            && mirrored_action.key_local_mutable == source_action.key_local_mutable
+            && mirrored_action.key_provenance == source_action.key_provenance
+            && mirrored_action.key_static_digest == source_action.key_static_digest
+            && mirrored_action.value == expected_value
+            && mirrored_action.value_type == source_action.value_type
+            && mirrored_action.payload_clone == source_action.payload_clone
+            && mirrored_action.source_local
+                == source_action.source_local.as_ref().and_then(local_value)
+            && mirrored_action.source
+                == source_action.source.as_ref().map(|root| root.0 .0.clone())
+            && mirrored_action.source_node == source_action.source_node
+            && mirrored_action.source_type == source_action.source_type
+            && mirrored_action.result_source_type == source_action.result_type
+            && mirrored_action.result_local == source_action.result_local
+            && mirrored_action.instruction.as_str() == expected_mirrored_id;
+        let operation_matches = match source_action.kind {
+            Action::New => {
+                let expected_id = format!(
+                    "inst:ordinary_map_values_result_producer:new:{}",
+                    branch.map_new_operation.0
+                );
+                operations
+                    .iter()
+                    .find(|inst| inst.id.as_str() == expected_id)
+                    .is_some_and(|instruction| {
+                        matches!(&instruction.kind, I::OrdinaryMapOwnedAnyV2New { result }
+                            if expression_value(&branch.map_new_operation).as_ref() == Some(result)
+                                && function.values.get(result).is_some_and(|v| v.ty == root_result_type)
+                                && mirrored_action.result.as_ref() == local_value(&branch.initial_root).as_ref()
+                                && source_action.point == branch.map_new_operation
+                                && source_action.local == branch.initial_root
+                                && source_action.source_node.as_ref() == Some(&branch.map_new_operation)
+                                && source_action.source_type.is_some()
+                                && source_action.source_local.is_none()
+                                && source_action.key.is_none()
+                                && source_action.value.is_none())
+                    })
+            }
+            Action::Set => branch
+                .set_branches
+                .iter()
+                .enumerate()
+                .find(|(_, set_branch)| set_branch.operation == source_action.point)
+                .is_some_and(|(index, set_branch)| {
+                    let expected_id = format!(
+                        "inst:ordinary_map_values_result_producer:set_{index}:{}",
+                        set_branch.operation.0
+                    );
+                    operations
+                        .iter()
+                        .find(|inst| inst.id.as_str() == expected_id)
+                        .is_some_and(|instruction| {
+                            matches!(&instruction.kind, I::OrdinaryMapOwnedAnyV2SetResult { result, source, key, value }
+                                if expression_value(&set_branch.operation).as_ref() == Some(result)
+                                    && function.values.get(result).is_some_and(|v| v.ty == root_result_type)
+                                    && local_value(&set_branch.input_root).as_ref() == Some(source)
+                                    && function.values.get(source).is_some_and(|v| v.ty == root_type)
+                                    && expression_value(&set_branch.key_node).as_ref() == Some(key)
+                                    && function.values.get(key).is_some_and(|v| v.ty == string_type)
+                                    && local_value(&set_branch.payload_local).as_ref() == Some(value)
+                                    && function.values.get(value).is_some_and(|v| v.ty == string_type)
+                                    && mirrored_action.result.as_ref() == local_value(&set_branch.output_root).as_ref()
+                                    && source_action.local == set_branch.output_root
+                                    && source_action.source_local.as_ref() == Some(&set_branch.input_root)
+                                    && source_action.key.as_ref() == Some(&set_branch.key_node)
+                                    && source_action.value.as_ref() == Some(&set_branch.payload_node))
+                        })
+                }),
+            Action::Values => {
+                let expected_id = format!(
+                    "inst:ordinary_map_owned_any_v2_values:{}:{}",
+                    branch.values_source_local.0 .0, branch.values_operation.0
+                );
+                operations
+                    .iter()
+                    .find(|inst| inst.id.as_str() == expected_id)
+                    .is_some_and(|instruction| {
+                        matches!(&instruction.kind, I::OrdinaryMapOwnedAnyV2Values { result, root }
+                            if expression_value(&branch.values_operation).as_ref() == Some(result)
+                                && local_value(&branch.values_source_local).as_ref() == Some(root)
+                                && function.values.get(result).is_some_and(|v| v.ty == values_type)
+                                && function.values.get(root).is_some_and(|v| v.ty == root_type)
+                                && mirrored_action.result.as_ref() == Some(result)
+                                && source_action.point == branch.values_operation
+                                && source_action.local == branch.values_source_local
+                                && source_action.result_type.as_ref() == Some(&branch.snapshot_type)
+                                && source_action.result_local.as_ref() == Some(&branch.snapshot_local))
+                    })
+            }
+            Action::Drop => {
+                let settlement_matches = branch.root_settlements.iter().any(|drop| {
+                    drop.local == source_action.local
+                        && drop.point == source_action.point
+                        && drop.place_index == 0
+                });
+                let expected_id = format!(
+                    "inst:ordinary_map_owned_any_v2_drop:{}:{}",
+                    mirrored_action.local, source_action.point.0
+                );
+                settlement_matches
+                    && operations
+                        .iter()
+                        .find(|inst| inst.id.as_str() == expected_id)
+                        .is_some_and(|instruction| {
+                            matches!(&instruction.kind, I::OrdinaryMapOwnedAnyV2Drop { root }
+                                if root == &mirrored_action.local
+                                    && function.values.get(root).is_some_and(|v| v.ty == root_type)
+                                    && mirrored_action.result.is_none())
+                        })
             }
             _ => false,
         };
@@ -8452,7 +8839,7 @@ fn v2_mir_static_string_value(
     resolved
 }
 
-fn ordinary_map_owned_any_v2_if_mir_anchor(
+pub(super) fn ordinary_map_owned_any_v2_if_mir_anchor(
     function: &MirFunction,
     flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
     source_node: &NodeId,
@@ -8585,16 +8972,15 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             .ownership
             .checker_ordinary_map_owned_any_v2_map_root_get_any_caller_receipt
             .is_some()
-        || function.blocks.len() != 10
+        || function.blocks.len() != 16
         || cfg.owner != owner
         || cfg.profile_version != ProfileVersion::V2
-        || cfg.flow.is_some()
         || !cfg.computed_key_string_get_receipts.is_empty()
         || !cfg.static_key_get_receipts.is_empty()
         || !cfg.keys_snapshot_receipts.is_empty()
         || cfg.dynamic_keys_get_receipts.len() != 1
-        || cfg.actions.len() != 7
-        || cfg.attempts.len() != 7
+        || cfg.actions.len() != 8
+        || cfg.attempts.len() != 8
         || cfg.result_receipts.len() != 2
         || cfg.values_producer_return_receipt.is_some()
         || cfg.values_producer_caller_receipt.is_some()
@@ -8618,12 +9004,22 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
     {
         return Err("is not the single exact main DynamicKeysGet V2 profile".into());
     }
+    let Some(flow) = cfg.flow.as_ref() else {
+        return Err("is missing ResultBranchV1 flow receipt for DynamicKeysGet".into());
+    };
+    let Some(result_branches) = ordinary_map_owned_any_v2_flow_result_branches(flow) else {
+        return Err("DynamicKeysGet requires a ResultBranchV1 flow receipt".into());
+    };
+    if result_branches.len() != 2 {
+        return Err("DynamicKeysGet ResultBranchV1 requires two Result branches".into());
+    }
     let [source] = cfg.dynamic_keys_get_receipts.as_slice() else {
         return Err("has an ambiguous DynamicKeysGet source receipt".into());
     };
     if source.profile_version != DynamicVersion::V1
         || source.owner != owner
         || source.key_suffix_utf8 != [0, 0xe9, 0x9b, 0xaa]
+        || source.err_root_drops.len() != 1
         || source.outcome_and_nodes[0].left != source.outcome_terms[0].expression
         || source.outcome_and_nodes[0].right != source.outcome_terms[1].expression
         || source.outcome_and_nodes[1].left != source.outcome_and_nodes[0].expression
@@ -8632,13 +9028,13 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         || source.outcome_and_nodes[2].right != source.outcome_terms[3].expression
         || source.outcome_and_nodes[2].expression != source.miss_found.outcome_node
         || source.outcome_and_nodes[2].expression != source.hit_found.outcome_node
-        || source.source_statement_nodes.len() != 25
+        || source.source_statement_nodes.len() != 23
         || source
             .source_statement_nodes
             .iter()
             .collect::<BTreeSet<_>>()
             .len()
-            != 25
+            != 23
     {
         return Err(
             "has altered DynamicKeysGet identity, suffix, or three-AND outcome chain".into(),
@@ -8659,6 +9055,8 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         source.outcome_local.clone(),
         source.keys_snapshot.snapshot_local.clone(),
         source.keys_snapshot.copied_key_local.clone(),
+        source.new_err_local.clone(),
+        source.set_err_local.clone(),
     ];
     let exact_local_values = exact_local_ids
         .into_iter()
@@ -8671,13 +9069,13 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         .filter(|value| value.as_str().starts_with("local:"))
         .cloned()
         .collect::<BTreeSet<_>>();
-    if exact_local_values.len() != 14 || actual_local_values != exact_local_values {
+    if exact_local_values.len() != 16 || actual_local_values != exact_local_values {
         return Err("has missing, aliased, or extra DynamicKeysGet source locals".into());
     }
 
-    // These two independent private snapshots are required for the exception:
-    // the general source CFG stays sealed, and the exact nested DynamicKeysGet
-    // Checker receipt cannot be replaced by a public V2 profile count.
+    // These two independent private snapshots remain required: the general
+    // source CFG stays sealed, and the exact nested DynamicKeysGet Checker
+    // receipt cannot be replaced by a public V2 profile count.
     let source_cfg = function
         .ownership
         .checker_managed_any_cfg_receipt
@@ -8703,16 +9101,16 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         || seal.v2_map_root_get_any_caller.is_some()
         || seal.generic_identity.is_some()
         || seal.generic_trap_cleanup.is_some()
-        || !source_cfg.match_arms.is_empty()
-        || source_cfg.reachable_blocks.len() != 10
-        || source_cfg.reachable_edges.len() != 12
+        || source_cfg.match_arms.len() != 2
+        || source_cfg.reachable_blocks.len() != 16
+        || source_cfg.reachable_edges.len() != 20
     {
         return Err(
             "does not match the private ManagedAny source-CFG and DynamicKeysGet seals".into(),
         );
     }
 
-    let expected_actions = [
+    let ok_actions = [
         &source.new_action,
         &source.miss_get_action,
         &source.set_action,
@@ -8721,16 +9119,21 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         &source.root_drops[0],
         &source.root_drops[1],
     ];
-    let expected_action_values = expected_actions
+    let err_empty_drop = &source.err_root_drops[0];
+    let expected_action_set = ok_actions
         .iter()
-        .map(|action| (**action).clone())
-        .collect::<Vec<_>>();
-    if cfg.actions != expected_action_values
-        || expected_actions
+        .copied()
+        .chain(std::iter::once(err_empty_drop))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let actual_action_set = cfg.actions.iter().cloned().collect::<BTreeSet<_>>();
+    if actual_action_set.len() != 8
+        || actual_action_set != expected_action_set
+        || expected_action_set
             .iter()
             .any(|action| action.profile_version != ProfileVersion::V2)
     {
-        return Err("does not preserve the exact seven ordered DynamicKeysGet actions".into());
+        return Err("does not preserve the exact eight DynamicKeysGet actions".into());
     }
     let identity = |local: &crate::core::ir::ResolvedLocalId| {
         crate::core::ResourceId(NodeId(format!("ordinary-map-owned-any-v2:{}", local.0 .0)))
@@ -8744,6 +9147,9 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             .root_drops
             .iter()
             .any(|action| action.kind != Action::Drop)
+        || err_empty_drop.kind != Action::Drop
+        || err_empty_drop.local != source.new_action.local
+        || err_empty_drop.root != identity(&source.new_action.local)
         || source.set_action.source_local.as_ref() != Some(&source.new_action.local)
         || source.set_action.source.as_ref() != Some(&identity(&source.new_action.local))
         || source.set_action.local == source.new_action.local
@@ -8977,14 +9383,17 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             None,
         );
     }
-    if expected_attempts.len() != 7 || cfg.attempts != expected_attempts {
-        return Err("does not preserve the exact seven DynamicKeysGet attempts".into());
+    push_attempt(
+        &err_empty_drop.point,
+        AttemptKind::Drop,
+        vec![err_empty_drop.local.0.clone()],
+        Some(err_empty_drop.local.clone()),
+        None,
+    );
+    if expected_attempts.len() != 8 || cfg.attempts != expected_attempts {
+        return Err("does not preserve the exact eight DynamicKeysGet attempts".into());
     }
 
-    // Rebuild the exact three-stage Checker CFG from the ordered conjunction
-    // receipts. The general ManagedAny validator later binds this snapshot to
-    // MIR; this local check makes the missing-flow exception specific to this
-    // short-circuit shape rather than any ten-block function.
     let block_id =
         |node: &NodeId, role: &str| SourceBlockId(NodeId(format!("{}/cfg:block:{role}", node.0)));
     let edge_id =
@@ -8993,12 +9402,104 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
     if entry.0 .0.rsplit_once("/cfg:block:").map(|(_, role)| role) != Some("entry") {
         return Err("Checker source-CFG entry is not canonical".into());
     }
-    let mut expected_blocks = BTreeSet::from([entry.clone()]);
-    let mut expected_edges = BTreeSet::new();
+    let new_branch = &result_branches[0];
+    let set_branch = &result_branches[1];
+    if new_branch.kind != Action::New
+        || new_branch.operation_point != source.new_action.point
+        || new_branch.output_root != source.new_action.local
+        || new_branch.input_root.is_some()
+        || set_branch.kind != Action::Set
+        || set_branch.operation_point != source.set_action.point
+        || set_branch.output_root != source.set_action.local
+        || set_branch.input_root.as_ref() != Some(&source.new_action.local)
+    {
+        return Err("DynamicKeysGet ResultBranchV1 does not match New/Set lifecycle".into());
+    }
+    let new_ok_edge = new_branch.ok.arm_entry_edge.clone();
+    let new_err_edge = new_branch.err.arm_entry_edge.clone();
+    let set_ok_edge = set_branch.ok.arm_entry_edge.clone();
+    let set_err_edge = set_branch.err.arm_entry_edge.clone();
+    let new_ok_block = source_cfg
+        .reachable_edges
+        .get(&new_ok_edge)
+        .ok_or("missing DynamicKeysGet New Ok edge")?
+        .to
+        .clone();
+    let new_err_block = source_cfg
+        .reachable_edges
+        .get(&new_err_edge)
+        .ok_or("missing DynamicKeysGet New Err edge")?
+        .to
+        .clone();
+    let new_err_join_edge = new_branch
+        .err
+        .exit_edges
+        .iter()
+        .next()
+        .cloned()
+        .filter(|_| new_branch.err.exit_edges.len() == 1)
+        .ok_or("missing DynamicKeysGet New Err exit edge")?;
+    let new_join = block_id(&new_branch.match_node, "match-join");
+    let set_ok_block = source_cfg
+        .reachable_edges
+        .get(&set_ok_edge)
+        .ok_or("missing DynamicKeysGet Set Ok edge")?
+        .to
+        .clone();
+    let set_err_block = source_cfg
+        .reachable_edges
+        .get(&set_err_edge)
+        .ok_or("missing DynamicKeysGet Set Err edge")?
+        .to
+        .clone();
+    let set_err_join_edge = set_branch
+        .err
+        .exit_edges
+        .iter()
+        .next()
+        .cloned()
+        .filter(|_| set_branch.err.exit_edges.len() == 1)
+        .ok_or("missing DynamicKeysGet Set Err exit edge")?;
+    let set_ok_join_edge = set_branch
+        .ok
+        .exit_edges
+        .iter()
+        .next()
+        .cloned()
+        .filter(|_| set_branch.ok.exit_edges.len() == 1)
+        .ok_or("missing DynamicKeysGet Set Ok exit edge")?;
+    let set_join = block_id(&set_branch.match_node, "match-join");
+    let new_ok_join_edge = new_branch
+        .ok
+        .exit_edges
+        .iter()
+        .next()
+        .cloned()
+        .filter(|_| new_branch.ok.exit_edges.len() == 1)
+        .ok_or("missing DynamicKeysGet New Ok exit edge")?;
+    let mut expected_blocks = BTreeSet::from([
+        entry.clone(),
+        new_ok_block.clone(),
+        new_err_block.clone(),
+        new_join.clone(),
+        set_ok_block.clone(),
+        set_err_block.clone(),
+        set_join.clone(),
+    ]);
+    let mut expected_edges = BTreeSet::from([
+        new_ok_edge.clone(),
+        new_err_edge.clone(),
+        new_err_join_edge.clone(),
+        new_ok_join_edge.clone(),
+        set_ok_edge.clone(),
+        set_err_edge.clone(),
+        set_err_join_edge.clone(),
+        set_ok_join_edge.clone(),
+    ]);
     let mut stages = Vec::with_capacity(3);
     for (index, and_node) in source.outcome_and_nodes.iter().enumerate() {
         let head = if index == 0 {
-            entry.clone()
+            set_ok_block.clone()
         } else {
             block_id(&source.outcome_and_nodes[index - 1].expression, "if-join")
         };
@@ -9029,8 +9530,8 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             else_join_edge,
         ));
     }
-    if expected_blocks.len() != 10
-        || expected_edges.len() != 12
+    if expected_blocks.len() != 16
+        || expected_edges.len() != 20
         || source_cfg
             .reachable_blocks
             .keys()
@@ -9045,7 +9546,8 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             != expected_edges
     {
         return Err(
-            "Checker source-CFG is not the exact ten-block/twelve-edge three-AND graph".into(),
+            "Checker source-CFG is not the exact sixteen-block/twenty-edge Result + three-AND graph"
+                .into(),
         );
     }
     let points_for = |node: &NodeId, kind: CfgPointKind| {
@@ -9191,23 +9693,45 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         .values()
         .filter(|block| matches!(block.terminator, SourceTerminator::Return { .. }))
         .count();
-    let final_terminator = source_cfg
-        .reachable_blocks
-        .get(final_join)
-        .map(|block| &block.terminator);
+    let final_join_points_ok = points_for(&source.return_load, CfgPointKind::Expression)
+        .iter()
+        .map(|(block, _)| *block)
+        .collect::<Vec<_>>()
+        == [final_join];
+    let set_err_drop_ok = points_for(&err_empty_drop.point, CfgPointKind::ResourceAction)
+        .iter()
+        .map(|(block, _)| *block)
+        .collect::<Vec<_>>()
+        == [&set_err_block];
     if return_blocks != 1
+        || !final_join_points_ok
+        || !set_err_drop_ok
         || !matches!(
-            final_terminator,
+            source_cfg.reachable_blocks.get(final_join).map(|block| &block.terminator),
+            Some(SourceTerminator::Goto { edge }) if edge == &set_ok_join_edge
+        )
+        || !matches!(
+            source_cfg.reachable_blocks.get(&set_join).map(|block| &block.terminator),
+            Some(SourceTerminator::Goto { edge }) if edge == &new_ok_join_edge
+        )
+        || !matches!(
+            source_cfg.reachable_blocks.get(&new_join).map(|block| &block.terminator),
             Some(SourceTerminator::Return { value: Some(value), implicit: true })
-                if value == &source.return_load
+                if value == &new_branch.match_node
         )
     {
         return Err(
-            "Checker source-CFG does not return the receipted outcome from the final join".into(),
+            "Checker source-CFG does not return the receipted outcome through Result joins".into(),
         );
     }
     for (index, statement) in source.source_statement_nodes.iter().enumerate() {
-        let expected_block = if index < 23 { &entry } else { final_join };
+        let expected_block = if index < 3 {
+            &entry
+        } else if index < 21 {
+            &set_ok_block
+        } else {
+            final_join
+        };
         if !source_cfg.reachable_blocks.iter().any(|(block, snapshot)| {
             block == expected_block
                 && snapshot
@@ -9221,27 +9745,27 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
                     .iter()
                     .any(|point| point.source.node == *statement)
         }) {
-            return Err("DynamicKeysGet statement identity escaped its exact Checker entry/final-join block".into());
+            return Err("DynamicKeysGet statement identity escaped its exact Checker Result-branch/final-join block".into());
         }
     }
 
-    // Identify the first true/false selector and require every owner event to
-    // occur once in entry before it. Replaying these events gives an explicit
-    // owner-empty cut, rather than trusting an absent generic flow receipt.
+    // Identify the first true/false selector in `set_ok_block` and require
+    // every Ok-spine owner event to occur once along (entry -> new_ok ->
+    // set_ok) strictly before it.
     let first_selector = &source.outcome_and_nodes[0].left;
     let selector_points = points_for(first_selector, CfgPointKind::Condition);
     let [(selector_block, selector_index)] = selector_points.as_slice() else {
         return Err("has no unique first DynamicKeysGet selector point".into());
     };
-    if *selector_block != &entry {
-        return Err("first DynamicKeysGet selector is not in the Checker entry block".into());
+    if *selector_block != &set_ok_block {
+        return Err("first DynamicKeysGet selector is not in the Checker Set Ok block".into());
     }
     let locate_before_selector =
         |node: &NodeId,
          label: &str,
          expected_kind: CfgPointKind,
          expected_drop_local: Option<&crate::core::ir::ResolvedLocalId>|
-         -> Result<usize, String> {
+         -> Result<(usize, usize), String> {
             let found = source_cfg
                 .reachable_blocks
                 .iter()
@@ -9251,26 +9775,75 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
                         .iter()
                         .enumerate()
                         .filter_map(move |(index, point)| {
-                            (point.source.node == *node).then_some((block, index, point))
+                            (point.source.node == *node && point.kind == expected_kind)
+                                .then_some((block, index, point))
                         })
                 })
                 .collect::<Vec<_>>();
-            let [(block, index, point)] = found.as_slice() else {
+            let [(block, index, _point)] = found.as_slice() else {
+                let wrong_kind = source_cfg
+                    .reachable_blocks
+                    .iter()
+                    .flat_map(|(block, snapshot)| {
+                        snapshot
+                            .points
+                            .iter()
+                            .enumerate()
+                            .filter_map(move |(index, point)| {
+                                (point.source.node == *node).then_some((block, index, point.kind))
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                return if let [(block, index, actual_kind)] = wrong_kind.as_slice() {
+                    let wrong_block_rank = if *block == &entry {
+                        Some(0usize)
+                    } else if *block == &new_ok_block {
+                        Some(1usize)
+                    } else if *block == &set_ok_block {
+                        Some(2usize)
+                    } else {
+                        None
+                    };
+                    if wrong_block_rank.is_none_or(|rank| rank == 2 && *index >= *selector_index) {
+                        Err(format!(
+                            "DynamicKeysGet {label} point is not strictly before the first selector"
+                        ))
+                    } else if *actual_kind != expected_kind {
+                        Err(format!(
+                            "DynamicKeysGet {label} point has the wrong Checker point kind"
+                        ))
+                    } else {
+                        Err(format!(
+                            "DynamicKeysGet {label} point is missing or duplicated"
+                        ))
+                    }
+                } else {
+                    Err(format!(
+                        "DynamicKeysGet {label} point is missing or duplicated"
+                    ))
+                };
+            };
+            let block_rank = if *block == &entry {
+                Some(0usize)
+            } else if *block == &new_ok_block {
+                Some(1usize)
+            } else if *block == &set_ok_block {
+                Some(2usize)
+            } else {
+                None
+            };
+            let Some(block_rank) = block_rank else {
                 return Err(format!(
-                    "DynamicKeysGet {label} point is missing or duplicated"
+                    "DynamicKeysGet {label} point is not strictly before the first selector"
                 ));
             };
-            if *block != &entry || *index >= *selector_index {
+            if block_rank == 2 && *index >= *selector_index {
                 return Err(format!(
                     "DynamicKeysGet {label} point is not strictly before the first selector"
                 ));
             }
-            if point.kind != expected_kind {
-                return Err(format!(
-                    "DynamicKeysGet {label} point has the wrong Checker point kind"
-                ));
-            }
             if let Some(local) = expected_drop_local {
+                let point = &source_cfg.reachable_blocks[*block].points[*index];
                 let [place] = point.read_places.as_slice() else {
                     return Err(format!("DynamicKeysGet {label} is not a single-local Drop"));
                 };
@@ -9280,7 +9853,7 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
                     ));
                 }
             }
-            Ok(*index)
+            Ok((block_rank, *index))
         };
     // Every source Drop receipt must identify the Checker ResourceAction that
     // reads exactly that local. Merely naming an arbitrary earlier point is
@@ -9350,9 +9923,9 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
         KeysBind(crate::core::ir::ResolvedLocalId),
         KeysDrop(crate::core::ir::ResolvedLocalId),
     }
-    let mut events = Vec::<(usize, OwnerEvent)>::new();
+    let mut events = Vec::<((usize, usize), OwnerEvent)>::new();
     let mut event_points = BTreeSet::new();
-    for action in expected_actions {
+    for action in ok_actions {
         if !event_points.insert(action.point.clone()) {
             return Err("repeats a DynamicKeysGet owner action point".into());
         }
@@ -9360,10 +9933,10 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
             locate_before_selector(
                 &action.point,
                 "Map/Any action",
-                if action.kind == Action::Drop {
-                    CfgPointKind::ResourceAction
-                } else {
-                    CfgPointKind::Expression
+                match action.kind {
+                    Action::New | Action::Set => CfgPointKind::Condition,
+                    Action::Drop => CfgPointKind::ResourceAction,
+                    _ => CfgPointKind::Expression,
                 },
                 (action.kind == Action::Drop).then_some(&action.local),
             )?,
@@ -9499,8 +10072,253 @@ fn validate_dynamic_keys_get_owner_prefix_without_flow(
     Ok(())
 }
 
+fn map_ordinary_map_owned_any_v2_source_blocks_to_mir_errors(
+    function: &MirFunction,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+) -> Result<BTreeMap<crate::core::cfg::BasicBlockId, MirBlockId>, Vec<String>> {
+    fn source_role(id: &crate::core::cfg::BasicBlockId) -> Option<&str> {
+        id.0 .0.rsplit_once("/cfg:block:").map(|(_, role)| role)
+    }
+
+    let mut source_to_mir = BTreeMap::<crate::core::cfg::BasicBlockId, MirBlockId>::new();
+    let mut mapped_blocks = BTreeSet::new();
+    let mut errors = Vec::new();
+    for (source_id, block) in &flow.reachable_blocks {
+        let Some(role) = source_role(source_id) else {
+            errors.push("block has no canonical role".to_string());
+            continue;
+        };
+        let mir_id = if role == "entry" {
+            Ok(function.entry.clone())
+        } else if role == "if-join" {
+            let Some((source_node, _)) = source_id.0 .0.rsplit_once("/cfg:block:") else {
+                errors.push("if join has no canonical source node".into());
+                continue;
+            };
+            let source_node = NodeId(source_node.to_owned());
+            ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &source_node).and_then(
+                |(if_prefix, mir_node)| {
+                    MirBlockId::new(format!("bb:{if_prefix}.join:{}", mir_node.0))
+                        .map_err(|_| "contains an invalid canonical if-join identity".to_string())
+                },
+            )
+        } else if matches!(role, "if-then" | "if-else") {
+            let expected_kind = if role == "if-then" {
+                crate::core::cfg::EdgeKind::Then
+            } else {
+                crate::core::cfg::EdgeKind::Else
+            };
+            let mut incoming = flow
+                .reachable_edges
+                .values()
+                .filter(|edge| &edge.to == source_id && edge.kind == expected_kind);
+            let Some(selector) = incoming.next() else {
+                errors.push("if arm has no canonical selector edge".into());
+                continue;
+            };
+            if incoming.next().is_some() {
+                errors.push("if arm has multiple canonical selector edges".into());
+                continue;
+            }
+            let arm_role = if role == "if-then" { "then" } else { "else" };
+            ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &selector.source.node).and_then(
+                |(if_prefix, mir_node)| {
+                    MirBlockId::new(format!("bb:{if_prefix}.{arm_role}:{}", mir_node.0))
+                        .map_err(|_| "contains an invalid canonical if-arm identity".to_string())
+                },
+            )
+        } else {
+            let is_arm = role == "match-arm";
+            let source_node = if is_arm {
+                let incoming = flow.reachable_edges.values().find(|edge| {
+                    &edge.to == source_id
+                        && matches!(
+                            edge.kind,
+                            crate::core::cfg::EdgeKind::Then
+                                | crate::core::cfg::EdgeKind::Else
+                                | crate::core::cfg::EdgeKind::MatchArm
+                        )
+                });
+                incoming.map(|edge| &edge.source.node)
+            } else {
+                Some(&block.source.node)
+            };
+            let Some(source_node) = source_node else {
+                errors.push("control block has no source construct identity".into());
+                continue;
+            };
+            MirBlockId::new(format!("bb:{}:{}", role.replace('-', "."), source_node.0))
+                .map_err(|_| "contains an invalid canonical block identity".to_string())
+        };
+        let mir_id = match mir_id {
+            Ok(id) => id,
+            Err(message) => {
+                errors.push(message);
+                continue;
+            }
+        };
+        if !function.blocks.contains_key(&mir_id) || !mapped_blocks.insert(mir_id.clone()) {
+            errors.push("does not map to unique MIR blocks".into());
+            continue;
+        }
+        source_to_mir.insert(source_id.clone(), mir_id);
+    }
+    if mapped_blocks != function.blocks.keys().cloned().collect::<BTreeSet<_>>()
+        || source_to_mir.get(&flow.entry) != Some(&function.entry)
+    {
+        errors.push("block mapping does not cover the MIR graph exactly".into());
+    }
+    if errors.is_empty() {
+        Ok(source_to_mir)
+    } else {
+        Err(errors)
+    }
+}
+
+fn map_ordinary_map_owned_any_v2_source_blocks_to_mir(
+    function: &MirFunction,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+) -> Result<BTreeMap<crate::core::cfg::BasicBlockId, MirBlockId>, String> {
+    map_ordinary_map_owned_any_v2_source_blocks_to_mir_errors(function, flow)
+        .map_err(|errors| errors.into_iter().next().unwrap_or_default())
+}
+
+fn validate_ordinary_map_owned_any_v2_result_branch_cfg_flow_receipt_with_scalar_tail(
+    function: &MirFunction,
+    receipt: &crate::core::OrdinaryMapOwnedAnyV2CfgReceipt,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+    result_branches: &[crate::core::OrdinaryMapOwnedAnyV2ResultBranchReceipt],
+    check_scalar_tail: bool,
+) -> Vec<MirValidationError> {
+    use crate::core::{
+        OrdinaryMapOwnedAnyV2ActionKind as Action, OrdinaryMapOwnedAnyV2ProfileVersion as Profile,
+        PrimitiveType,
+    };
+
+    let malformed = |message: &str| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ordinary Map/Any v2 Result-branch CFG flow receipt {message}"),
+    };
+    let mut errors = Vec::new();
+    if receipt.owner != function.owner || receipt.profile_version != Profile::V2 {
+        errors.push(malformed("has an invalid Checker owner or profile"));
+        return errors;
+    }
+    let entry_role = flow
+        .entry
+        .0
+         .0
+        .rsplit_once("/cfg:block:")
+        .map(|(_, role)| role);
+    if result_branches.is_empty()
+        || !flow.reachable_blocks.contains_key(&flow.entry)
+        || entry_role != Some("entry")
+        || !flow.reachable_blocks.contains_key(&flow.split)
+        || !flow.reachable_blocks.contains_key(&flow.join)
+        || flow.reachable_blocks.len() != function.blocks.len()
+        || !flow.live_owners_in.keys().eq(flow.reachable_blocks.keys())
+        || !flow.live_owners_out.keys().eq(flow.reachable_blocks.keys())
+        || !flow
+            .live_owners_on_edge
+            .keys()
+            .eq(flow.reachable_edges.keys())
+    {
+        errors.push(malformed(
+            "does not describe a closed Result-branch owner-flow graph",
+        ));
+        return errors;
+    }
+    for (block_id, block) in &flow.reachable_blocks {
+        for edge_id in block.terminator.outgoing_edges() {
+            let Some(edge) = flow.reachable_edges.get(edge_id) else {
+                errors.push(malformed("terminator references an absent edge"));
+                continue;
+            };
+            if &edge.from != block_id || !flow.reachable_blocks.contains_key(&edge.to) {
+                errors.push(malformed("contains an inconsistent edge endpoint"));
+            }
+        }
+        if matches!(
+            block.terminator,
+            crate::core::cfg::Terminator::Return { .. }
+        ) && !flow
+            .live_owners_out
+            .get(block_id)
+            .is_some_and(BTreeSet::is_empty)
+        {
+            errors.push(malformed("retains live owners across return"));
+        }
+    }
+    let i32_type = crate::core::ir::primitive_type_id(PrimitiveType::I32);
+    for branch in result_branches {
+        let output_id = format!("ordinary-map-owned-any-v2:{}", branch.output_root.0 .0);
+        let input_valid = branch.input_root.as_ref().is_none_or(|root| {
+            let input_id = format!("ordinary-map-owned-any-v2:{}", root.0 .0);
+            branch.ok.roots_at_entry.contains(&input_id)
+                && branch.err.roots_at_entry.contains(&input_id)
+        });
+        let action_matches = receipt.actions.iter().any(|action| {
+            action.kind == branch.kind
+                && action.point == branch.operation_point
+                && action.local == branch.output_root
+                && action.source_local == branch.input_root
+        });
+        if !matches!(branch.kind, Action::New | Action::Set)
+            || !action_matches
+            || branch.ok_variant.0 != "builtin:variant:Result::Ok"
+            || branch.err_variant.0 != "builtin:variant:Result::Err"
+            || branch.err_payload_type != i32_type
+            || !flow.arm_edges.contains(&branch.ok.arm_entry_edge)
+            || !flow.arm_edges.contains(&branch.err.arm_entry_edge)
+            || !flow.reachable_edges.contains_key(&branch.ok.arm_entry_edge)
+            || !flow
+                .reachable_edges
+                .contains_key(&branch.err.arm_entry_edge)
+            || branch.ok.roots_at_exit != branch.err.roots_at_exit
+            || !branch.ok.roots_at_entry.contains(&output_id)
+            || branch.err.roots_at_entry.contains(&output_id)
+            || !input_valid
+        {
+            errors.push(malformed("contains an inconsistent Result-branch entry"));
+        }
+    }
+    if errors.is_empty() && check_scalar_tail {
+        if let Some(tail) = receipt.result_branch_scalar_tail.as_ref() {
+            match map_ordinary_map_owned_any_v2_source_blocks_to_mir_errors(function, flow) {
+                Ok(source_to_mir) => {
+                    errors.extend(settled_scalar_tail::validate(
+                        function,
+                        flow,
+                        tail,
+                        &source_to_mir,
+                    ));
+                }
+                Err(messages) => {
+                    for message in messages {
+                        errors.push(malformed(&message));
+                    }
+                }
+            }
+        }
+    }
+    errors
+}
+
+pub(super) fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt_before_seal(
+    function: &MirFunction,
+) -> Vec<MirValidationError> {
+    validate_ordinary_map_owned_any_v2_cfg_flow_receipt_with_scalar_tail(function, false)
+}
+
 fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
     function: &MirFunction,
+) -> Vec<MirValidationError> {
+    validate_ordinary_map_owned_any_v2_cfg_flow_receipt_with_scalar_tail(function, true)
+}
+
+fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt_with_scalar_tail(
+    function: &MirFunction,
+    check_scalar_tail: bool,
 ) -> Vec<MirValidationError> {
     use crate::core::cfg::{BasicBlockId as SourceBlockId, EdgeId as SourceEdgeId};
     use crate::core::{
@@ -9532,19 +10350,66 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
         // replay with path-local New/Set roots and snapshot settlement.
         return Vec::new();
     }
-    if !receipt.dynamic_keys_get_receipts.is_empty() {
+    if receipt.values_unpack_result_branch_receipt.is_some()
+        || receipt.result_receipts.iter().any(|result| {
+            result
+                .computed_string_key_owner_chain
+                .as_deref()
+                .and_then(|chain| chain.result_branch.as_deref())
+                .is_some()
+        })
+    {
+        // Closed three-path Result-branch profiles replay their own
+        // per-arm owners directly against the Checker CFG snapshot when
+        // generic live-owner `flow` is absent.
         return if receipt.flow.is_some() {
             vec![malformed(
-                "DynamicKeysGet must use its sealed no-flow owner-prefix proof",
+                "closed Result-branch owner profile cannot mix with generic live-owner flow",
             )]
         } else {
-            match validate_dynamic_keys_get_owner_prefix_without_flow(function, receipt) {
-                Ok(()) => Vec::new(),
-                Err(message) => vec![malformed(&format!(
-                    "is missing for a multi-block owner function outside the sealed DynamicKeysGet exception: {message}"
-                ))],
-            }
+            Vec::new()
         };
+    }
+    if receipt
+        .values_result_producer_receipt
+        .as_ref()
+        .is_some_and(|producer| {
+            function
+                .ownership
+                .checker_ordinary_map_owned_any_v2_values_result_producer_receipt
+                .as_deref()
+                == Some(producer)
+        })
+    {
+        return Vec::new();
+    }
+    if !receipt.dynamic_keys_get_receipts.is_empty() {
+        let Some(flow) = receipt.flow.as_ref() else {
+            return vec![malformed("is missing for a multi-block owner function")];
+        };
+        let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(
+            result_branches,
+        ) = &flow.proof
+        else {
+            return vec![malformed(
+                "DynamicKeysGet must use ResultBranchV1 Checker CFG flow proof",
+            )];
+        };
+        let mut errors =
+            validate_ordinary_map_owned_any_v2_result_branch_cfg_flow_receipt_with_scalar_tail(
+                function,
+                receipt,
+                flow,
+                result_branches,
+                check_scalar_tail,
+            );
+        if let Err(message) = validate_dynamic_keys_get_owner_prefix_without_flow(function, receipt)
+        {
+            errors.push(malformed(&format!(
+                "is missing for a multi-block owner function outside the sealed DynamicKeysGet exception: {message}"
+            )));
+        }
+        return errors;
     }
     let Some(flow) = receipt.flow.as_ref() else {
         return if function.blocks.len() > 1 {
@@ -9553,6 +10418,29 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
             Vec::new()
         };
     };
+    if let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(
+        result_branches,
+    ) = &flow.proof
+    {
+        return validate_ordinary_map_owned_any_v2_result_branch_cfg_flow_receipt_with_scalar_tail(
+            function,
+            receipt,
+            flow,
+            result_branches,
+            check_scalar_tail,
+        );
+    }
+    if let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(
+        persistent,
+    ) = &flow.proof
+    {
+        return validate_ordinary_map_owned_any_v2_branch_local_set_diamond_cfg_flow(
+            function,
+            receipt,
+            flow,
+            persistent,
+        );
+    }
     let mut errors = Vec::new();
     let fail = |errors: &mut Vec<MirValidationError>, message: &str| {
         errors.push(malformed(message));
@@ -9589,10 +10477,6 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
     let declared_settled_branch_tail = matches!(
         &flow.proof,
         crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(_)
-    );
-    let declared_persistent_set_diamond = matches!(
-        &flow.proof,
-        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(_)
     );
     if declared_settled_branch_tail && !owner_free_facts_are_empty {
         fail(
@@ -9666,18 +10550,6 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
             return errors;
         }
     };
-    if declared_persistent_set_diamond
-        && !matches!(
-            &split.terminator,
-            crate::core::cfg::Terminator::Branch { .. }
-        )
-    {
-        fail(
-            &mut errors,
-            "persistent Set proof requires the exact two-arm if diamond",
-        );
-        return errors;
-    }
     let mut branch_edges = BTreeSet::new();
     let mut branch_edge_reused = false;
     let mut return_blocks = Vec::new();
@@ -9938,348 +10810,51 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
     if declared_settled_branch_tail && !branch_tail_is_acyclic {
         fail(&mut errors, "settled branch tail contains a cycle");
     }
-    if declared_persistent_set_diamond && !branch_tail_is_acyclic {
-        fail(&mut errors, "persistent Set diamond contains a cycle");
-    }
     if errors.len() > 0 {
         return errors;
     }
 
     // Bind every Checker block and edge to the canonical MIR graph. This is
     // independent of the ManagedAny receipt and preserves V2's own proof.
-    let mut source_to_mir = BTreeMap::<SourceBlockId, MirBlockId>::new();
-    let mut mapped_blocks = BTreeSet::new();
-    for (source_id, block) in &flow.reachable_blocks {
-        let role = source_role(source_id).expect("canonical role was checked");
-        let mir_id = if role == "entry" {
-            function.entry.clone()
-        } else if role == "if-join" {
-            let Some((source_node, _)) = source_id.0 .0.rsplit_once("/cfg:block:") else {
-                fail(&mut errors, "if join has no canonical source node");
-                continue;
-            };
-            let source_node = NodeId(source_node.to_owned());
-            let (if_prefix, mir_node) =
-                match ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &source_node) {
-                    Ok(anchor) => anchor,
-                    Err(message) => {
-                        fail(&mut errors, &message);
-                        continue;
-                    }
-                };
-            match MirBlockId::new(format!("bb:{if_prefix}.join:{}", mir_node.0)) {
-                Ok(id) => id,
-                Err(_) => {
-                    fail(
-                        &mut errors,
-                        "contains an invalid canonical if-join identity",
-                    );
-                    continue;
-                }
-            }
-        } else if matches!(role, "if-then" | "if-else") {
-            let expected_kind = if role == "if-then" {
-                crate::core::cfg::EdgeKind::Then
-            } else {
-                crate::core::cfg::EdgeKind::Else
-            };
-            let mut incoming = flow
-                .reachable_edges
-                .values()
-                .filter(|edge| &edge.to == source_id && edge.kind == expected_kind);
-            let Some(selector) = incoming.next() else {
-                fail(&mut errors, "if arm has no canonical selector edge");
-                continue;
-            };
-            if incoming.next().is_some() {
-                fail(&mut errors, "if arm has multiple canonical selector edges");
-                continue;
-            }
-            let (if_prefix, mir_node) = match ordinary_map_owned_any_v2_if_mir_anchor(
-                function,
-                flow,
-                &selector.source.node,
-            ) {
-                Ok(anchor) => anchor,
-                Err(message) => {
+    let source_to_mir =
+        match map_ordinary_map_owned_any_v2_source_blocks_to_mir_errors(function, flow) {
+            Ok(mapping) => mapping,
+            Err(messages) => {
+                for message in messages {
                     fail(&mut errors, &message);
-                    continue;
                 }
-            };
-            let arm_role = if role == "if-then" { "then" } else { "else" };
-            match MirBlockId::new(format!("bb:{if_prefix}.{arm_role}:{}", mir_node.0)) {
-                Ok(id) => id,
-                Err(_) => {
-                    fail(&mut errors, "contains an invalid canonical if-arm identity");
-                    continue;
-                }
-            }
-        } else {
-            let is_arm = role == "match-arm";
-            let source_node = if is_arm {
-                let incoming = flow.reachable_edges.values().find(|edge| {
-                    &edge.to == source_id
-                        && matches!(
-                            edge.kind,
-                            crate::core::cfg::EdgeKind::Then
-                                | crate::core::cfg::EdgeKind::Else
-                                | crate::core::cfg::EdgeKind::MatchArm
-                        )
-                });
-                incoming.map(|edge| &edge.source.node)
-            } else {
-                Some(&block.source.node)
-            };
-            let Some(source_node) = source_node else {
-                fail(
-                    &mut errors,
-                    "control block has no source construct identity",
-                );
-                continue;
-            };
-            match MirBlockId::new(format!("bb:{}:{}", role.replace('-', "."), source_node.0)) {
-                Ok(id) => id,
-                Err(_) => {
-                    fail(&mut errors, "contains an invalid canonical block identity");
-                    continue;
-                }
+                return errors;
             }
         };
-        if !function.blocks.contains_key(&mir_id) || !mapped_blocks.insert(mir_id.clone()) {
-            fail(&mut errors, "does not map to unique MIR blocks");
-        }
-        source_to_mir.insert(source_id.clone(), mir_id);
-    }
-    if mapped_blocks != function.blocks.keys().cloned().collect::<BTreeSet<_>>()
-        || source_to_mir.get(&flow.entry) != Some(&function.entry)
-    {
-        fail(
-            &mut errors,
-            "block mapping does not cover the MIR graph exactly",
-        );
+
+    let source_edge_to_mir = |edge_id: &SourceEdgeId| {
+        ordinary_map_owned_any_v2_source_edge_to_mir(function, flow, edge_id)
+    };
+    validate_ordinary_map_owned_any_v2_mir_edge_and_terminator_binding(
+        function,
+        receipt,
+        flow,
+        &source_to_mir,
+        &source_edge_to_mir,
+        true,
+        &mut errors,
+        &malformed,
+    );
+    if !errors.is_empty() {
         return errors;
     }
 
-    let source_edge_to_mir = |edge_id: &SourceEdgeId| -> Result<MirEdgeId, String> {
-        let edge = flow
-            .reachable_edges
-            .get(edge_id)
-            .ok_or_else(|| "Checker edge is absent".to_owned())?;
-        let role = edge
-            .id
-            .0
-             .0
-            .rsplit_once("/cfg:edge:")
-            .map(|(_, role)| role)
-            .ok_or_else(|| "Checker edge has no canonical role".to_owned())?;
-        let (mir_role, mir_node) = match role {
-            "if-then" | "if-else" => {
-                let expected_kind = if role == "if-then" {
-                    crate::core::cfg::EdgeKind::Then
-                } else {
-                    crate::core::cfg::EdgeKind::Else
-                };
-                if edge.kind != expected_kind {
-                    return Err("if selector edge kind disagrees with its canonical role".into());
-                }
-                let (if_prefix, mir_node) =
-                    ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &edge.source.node)?;
-                let arm_role = if role == "if-then" { "then" } else { "else" };
-                (format!("{if_prefix}.{arm_role}"), mir_node)
-            }
-            "if-then-join" | "if-else-join" => {
-                if edge.kind != crate::core::cfg::EdgeKind::Fallthrough
-                    || source_role(&edge.to) != Some("if-join")
-                {
-                    return Err("if join edge has a noncanonical target or kind".into());
-                }
-                let target = flow
-                    .reachable_blocks
-                    .get(&edge.to)
-                    .ok_or_else(|| "Checker if join edge target is absent".to_owned())?;
-                let (if_prefix, mir_node) =
-                    ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &target.source.node)?;
-                let arm_role = if role == "if-then-join" {
-                    "then"
-                } else {
-                    "else"
-                };
-                (format!("{if_prefix}.{arm_role}.join"), mir_node)
-            }
-            _ => {
-                let node = if role.contains("match-arm-join") {
-                    edge.source.node.clone()
-                } else if role.contains("join") {
-                    flow.reachable_blocks
-                        .get(&edge.to)
-                        .ok_or_else(|| "Checker edge target is absent".to_owned())?
-                        .source
-                        .node
-                        .clone()
-                } else {
-                    edge.source.node.clone()
-                };
-                (role.replace('-', "."), node)
-            }
-        };
-        MirEdgeId::new(format!("edge:{mir_role}:{}", mir_node.0)).map_err(|error| error.to_string())
-    };
-    let mut expected_edges = BTreeMap::<MirEdgeId, (MirBlockId, MirBlockId)>::new();
-    for edge in flow.reachable_edges.values() {
-        let Ok(mir_edge) = source_edge_to_mir(&edge.id) else {
-            fail(&mut errors, "contains an invalid canonical edge identity");
-            continue;
-        };
-        let (Some(from), Some(to)) = (source_to_mir.get(&edge.from), source_to_mir.get(&edge.to))
-        else {
-            fail(&mut errors, "edge endpoints have no MIR mapping");
-            continue;
-        };
-        if expected_edges
-            .insert(mir_edge, (from.clone(), to.clone()))
-            .is_some()
-        {
-            fail(&mut errors, "has colliding canonical edge identities");
-        }
-    }
-    let mut actual_edges = BTreeMap::<MirEdgeId, (MirBlockId, MirBlockId)>::new();
-    for block in function.blocks.values() {
-        let mut add = |edge: &MirEdgeId, target: &MirBlockId| {
-            if actual_edges
-                .insert(edge.clone(), (block.id.clone(), target.clone()))
-                .is_some()
-            {
-                fail(&mut errors, "MIR repeats an edge identity");
-            }
-        };
-        match &block.terminator {
-            MirTerminator::Goto { edge, target, .. } => add(edge, target),
-            MirTerminator::Branch {
-                then_edge,
-                then_target,
-                else_edge,
-                else_target,
-                ..
-            } => {
-                add(then_edge, then_target);
-                add(else_edge, else_target);
-            }
-            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
-                for arm in arms {
-                    add(&arm.edge, &arm.target);
-                }
-            }
-            MirTerminator::Return { .. }
-            | MirTerminator::Trap { .. }
-            | MirTerminator::Fault { .. }
-            | MirTerminator::Unreachable => {}
-        }
-    }
-    if expected_edges != actual_edges {
-        fail(
-            &mut errors,
-            "edge identities or endpoints disagree with the Checker CFG",
-        );
-    }
-
-    if let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(
-        tail,
-    ) = &flow.proof
-    {
-        errors.extend(settled_scalar_tail::validate(
-            function,
-            flow,
+    if check_scalar_tail {
+        if let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(
             tail,
-            &source_to_mir,
-        ));
-    }
-    if let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(
-        persistent,
-    ) = &flow.proof
-    {
-        errors.extend(validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
-            function,
-            receipt,
-            flow,
-            persistent,
-            &source_to_mir,
-            &source_point_locations,
-            &source_point_positions,
-            &source_edge_to_mir,
-        ));
-    }
-
-    for (source_id, source_block) in &flow.reachable_blocks {
-        let Some(mir_id) = source_to_mir.get(source_id) else {
-            continue;
-        };
-        let Some(mir_block) = function.blocks.get(mir_id) else {
-            continue;
-        };
-        match (&source_block.terminator, &mir_block.terminator) {
-            (
-                crate::core::cfg::Terminator::Branch {
-                    condition,
-                    then_edge,
-                    else_edge,
-                },
-                MirTerminator::Branch {
-                    condition: actual_condition,
-                    then_edge: actual_then,
-                    else_edge: actual_else,
-                    ..
-                },
-            ) if MirValueId::new(format!("expr:{}", condition.0))
-                .ok()
-                .as_ref()
-                == Some(actual_condition)
-                && source_edge_to_mir(then_edge).ok().as_ref() == Some(actual_then)
-                && source_edge_to_mir(else_edge).ok().as_ref() == Some(actual_else) => {}
-            (
-                crate::core::cfg::Terminator::Match { scrutinee, arms },
-                MirTerminator::Switch {
-                    scrutinee: actual,
-                    arms: actual_arms,
-                }
-                | MirTerminator::SwitchMove {
-                    scrutinee: actual,
-                    arms: actual_arms,
-                },
-            ) if MirValueId::new(format!("expr:{}", scrutinee.0))
-                .ok()
-                .as_ref()
-                == Some(actual)
-                && arms.len() == 2
-                && actual_arms.len() == 2
-                && arms.iter().zip(actual_arms).all(|(edge, arm)| {
-                    source_edge_to_mir(edge).ok().as_ref() == Some(&arm.edge)
-                        && arm.bindings.is_empty()
-                }) => {}
-            (
-                crate::core::cfg::Terminator::Goto { edge },
-                MirTerminator::Goto {
-                    edge: actual_edge, ..
-                },
-            ) if source_edge_to_mir(edge).ok().as_ref() == Some(actual_edge) => {}
-            (crate::core::cfg::Terminator::Return { .. }, MirTerminator::Return { .. }) => {}
-            _ => fail(
-                &mut errors,
-                "MIR terminator disagrees with its Checker block",
-            ),
-        }
-        for parameter in &mir_block.parameters {
-            let parameter_type = function.values.get(&parameter.value).map(|value| &value.ty);
-            if parameter_type == Some(&types::ordinary_map_owned_any_v2_type_id())
-                || receipt
-                    .result_receipts
-                    .iter()
-                    .any(|result| parameter_type == Some(&result.result_type))
-            {
-                fail(
-                    &mut errors,
-                    "branch diamond may not carry a V2 owner through block parameters",
-                );
-            }
+        ) = &flow.proof
+        {
+            errors.extend(settled_scalar_tail::validate(
+                function,
+                flow,
+                tail,
+                &source_to_mir,
+            ));
         }
     }
     if !errors.is_empty() {
@@ -10703,16 +11278,6 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
         };
         let allowed = if settled_before_branch_tail {
             point_precedes_branch_tail(&action.point)
-        } else if declared_persistent_set_diamond {
-            if block == entry {
-                action.kind == Action::New
-            } else if arm_blocks.contains(block) {
-                matches!(action.kind, Action::Set | Action::Size | Action::Drop)
-            } else if block == join {
-                action.kind == Action::Drop
-            } else {
-                false
-            }
         } else if block == entry {
             action.kind != Action::Drop
         } else if arm_blocks.contains(block) {
@@ -11089,28 +11654,9 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
         && split_live
             .iter()
             .any(|owner| matches!(owner, Owner::Result { .. }));
-    let split_has_exact_persistent_base = match &flow.proof {
-        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(
-            proof,
-        ) => {
-            split_live
-                == BTreeSet::from([Owner::Root {
-                    local: proof.base_local.clone(),
-                    resource: crate::core::ResourceId(crate::core::NodeId(format!(
-                        "ordinary-map-owned-any-v2:{}",
-                        proof.base_local.0 .0
-                    ))),
-                }])
-                && results.is_empty()
-        }
-        _ => false,
-    };
     let split_is_settled_before_selector = settled_before_branch_tail && split_live.is_empty();
-    let split_owner_shape_is_valid = if declared_persistent_set_diamond {
-        split_has_exact_persistent_base
-    } else {
-        split_has_live_root_and_result || split_is_settled_before_selector
-    };
+    let split_owner_shape_is_valid =
+        split_has_live_root_and_result || split_is_settled_before_selector;
     if !split_owner_shape_is_valid
         || roots.len() != 0
         || results.len() != 0
@@ -11144,6 +11690,462 @@ fn validate_ordinary_map_owned_any_v2_cfg_flow_receipt(
             "join does not explicitly settle every root and result owner",
         );
     }
+    errors
+}
+
+fn ordinary_map_cfg_block_role(id: &crate::core::cfg::BasicBlockId) -> Option<&str> {
+    id.0 .0.rsplit_once("/cfg:block:").map(|(_, role)| role)
+}
+
+fn ordinary_map_owned_any_v2_source_edge_to_mir(
+    function: &MirFunction,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+    edge_id: &crate::core::cfg::EdgeId,
+) -> Result<MirEdgeId, String> {
+    let source_role = ordinary_map_cfg_block_role;
+    let edge = flow
+        .reachable_edges
+        .get(edge_id)
+        .ok_or_else(|| "Checker edge is absent".to_owned())?;
+    let role = edge
+        .id
+        .0
+         .0
+        .rsplit_once("/cfg:edge:")
+        .map(|(_, role)| role)
+        .ok_or_else(|| "Checker edge has no canonical role".to_owned())?;
+    let (mir_role, mir_node) = match role {
+        "if-then" | "if-else" => {
+            let expected_kind = if role == "if-then" {
+                crate::core::cfg::EdgeKind::Then
+            } else {
+                crate::core::cfg::EdgeKind::Else
+            };
+            if edge.kind != expected_kind {
+                return Err("if selector edge kind disagrees with its canonical role".into());
+            }
+            let (if_prefix, mir_node) =
+                ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &edge.source.node)?;
+            let arm_role = if role == "if-then" { "then" } else { "else" };
+            (format!("{if_prefix}.{arm_role}"), mir_node)
+        }
+        "if-then-join" | "if-else-join" => {
+            if edge.kind != crate::core::cfg::EdgeKind::Fallthrough
+                || source_role(&edge.to) != Some("if-join")
+            {
+                return Err("if join edge has a noncanonical target or kind".into());
+            }
+            let target = flow
+                .reachable_blocks
+                .get(&edge.to)
+                .ok_or_else(|| "Checker if join edge target is absent".to_owned())?;
+            let (if_prefix, mir_node) =
+                ordinary_map_owned_any_v2_if_mir_anchor(function, flow, &target.source.node)?;
+            let arm_role = if role == "if-then-join" {
+                "then"
+            } else {
+                "else"
+            };
+            (format!("{if_prefix}.{arm_role}.join"), mir_node)
+        }
+        _ => {
+            let node = if role.contains("match-arm-join") {
+                edge.source.node.clone()
+            } else if role.contains("join") {
+                flow.reachable_blocks
+                    .get(&edge.to)
+                    .ok_or_else(|| "Checker edge target is absent".to_owned())?
+                    .source
+                    .node
+                    .clone()
+            } else {
+                edge.source.node.clone()
+            };
+            (role.replace('-', "."), node)
+        }
+    };
+    MirEdgeId::new(format!("edge:{mir_role}:{}", mir_node.0)).map_err(|error| error.to_string())
+}
+
+fn validate_ordinary_map_owned_any_v2_mir_edge_and_terminator_binding(
+    function: &MirFunction,
+    receipt: &crate::core::OrdinaryMapOwnedAnyV2CfgReceipt,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+    source_to_mir: &BTreeMap<crate::core::cfg::BasicBlockId, MirBlockId>,
+    source_edge_to_mir: &impl Fn(&crate::core::cfg::EdgeId) -> Result<MirEdgeId, String>,
+    require_empty_match_bindings: bool,
+    errors: &mut Vec<MirValidationError>,
+    malformed: &impl Fn(&str) -> MirValidationError,
+) {
+    let result_branch_types = ordinary_map_owned_any_v2_flow_result_branches(flow).unwrap_or(&[]);
+    let mut expected_edges = BTreeMap::<MirEdgeId, (MirBlockId, MirBlockId)>::new();
+    for edge in flow.reachable_edges.values() {
+        let Ok(mir_edge) = source_edge_to_mir(&edge.id) else {
+            errors.push(malformed("contains an invalid canonical edge identity"));
+            continue;
+        };
+        let (Some(from), Some(to)) = (source_to_mir.get(&edge.from), source_to_mir.get(&edge.to))
+        else {
+            errors.push(malformed("edge endpoints have no MIR mapping"));
+            continue;
+        };
+        if expected_edges
+            .insert(mir_edge, (from.clone(), to.clone()))
+            .is_some()
+        {
+            errors.push(malformed("has colliding canonical edge identities"));
+        }
+    }
+    let mut actual_edges = BTreeMap::<MirEdgeId, (MirBlockId, MirBlockId)>::new();
+    for block in function.blocks.values() {
+        let mut add = |edge: &MirEdgeId, target: &MirBlockId| {
+            if actual_edges
+                .insert(edge.clone(), (block.id.clone(), target.clone()))
+                .is_some()
+            {
+                errors.push(malformed("MIR repeats an edge identity"));
+            }
+        };
+        match &block.terminator {
+            MirTerminator::Goto { edge, target, .. } => add(edge, target),
+            MirTerminator::Branch {
+                then_edge,
+                then_target,
+                else_edge,
+                else_target,
+                ..
+            } => {
+                add(then_edge, then_target);
+                add(else_edge, else_target);
+            }
+            MirTerminator::Switch { arms, .. } | MirTerminator::SwitchMove { arms, .. } => {
+                for arm in arms {
+                    add(&arm.edge, &arm.target);
+                }
+            }
+            MirTerminator::Return { .. }
+            | MirTerminator::Trap { .. }
+            | MirTerminator::Fault { .. }
+            | MirTerminator::Unreachable => {}
+        }
+    }
+    if expected_edges != actual_edges {
+        errors.push(malformed(
+            "edge identities or endpoints disagree with the Checker CFG",
+        ));
+    }
+    for (source_id, source_block) in &flow.reachable_blocks {
+        let Some(mir_id) = source_to_mir.get(source_id) else {
+            continue;
+        };
+        let Some(mir_block) = function.blocks.get(mir_id) else {
+            continue;
+        };
+        match (&source_block.terminator, &mir_block.terminator) {
+            (
+                crate::core::cfg::Terminator::Branch {
+                    condition,
+                    then_edge,
+                    else_edge,
+                },
+                MirTerminator::Branch {
+                    condition: actual_condition,
+                    then_edge: actual_then,
+                    else_edge: actual_else,
+                    ..
+                },
+            ) if MirValueId::new(format!("expr:{}", condition.0))
+                .ok()
+                .as_ref()
+                == Some(actual_condition)
+                && source_edge_to_mir(then_edge).ok().as_ref() == Some(actual_then)
+                && source_edge_to_mir(else_edge).ok().as_ref() == Some(actual_else) => {}
+            (
+                crate::core::cfg::Terminator::Match { scrutinee, arms },
+                MirTerminator::Switch {
+                    scrutinee: actual,
+                    arms: actual_arms,
+                }
+                | MirTerminator::SwitchMove {
+                    scrutinee: actual,
+                    arms: actual_arms,
+                },
+            ) if MirValueId::new(format!("expr:{}", scrutinee.0))
+                .ok()
+                .as_ref()
+                == Some(actual)
+                && arms.len() == 2
+                && actual_arms.len() == 2
+                && arms.iter().zip(actual_arms).all(|(edge, arm)| {
+                    source_edge_to_mir(edge).ok().as_ref() == Some(&arm.edge)
+                        && (!require_empty_match_bindings || arm.bindings.is_empty())
+                }) => {}
+            (
+                crate::core::cfg::Terminator::Goto { edge },
+                MirTerminator::Goto {
+                    edge: actual_edge, ..
+                },
+            ) if source_edge_to_mir(edge).ok().as_ref() == Some(actual_edge) => {}
+            (crate::core::cfg::Terminator::Return { .. }, MirTerminator::Return { .. }) => {}
+            _ => errors.push(malformed("MIR terminator disagrees with its Checker block")),
+        }
+        for parameter in &mir_block.parameters {
+            let parameter_type = function.values.get(&parameter.value).map(|value| &value.ty);
+            let allowed_switch_move_param = !require_empty_match_bindings
+                && parameter_type == Some(&types::ordinary_map_owned_any_v2_type_id())
+                && {
+                    let mut incoming_blocks = function.blocks.values().filter(|incoming| {
+                        matches!(
+                            &incoming.terminator,
+                            MirTerminator::Goto { target, .. } if target == &mir_block.id
+                        ) || matches!(
+                            &incoming.terminator,
+                            MirTerminator::Branch {
+                                then_target,
+                                else_target,
+                                ..
+                            } if then_target == &mir_block.id || else_target == &mir_block.id
+                        ) || matches!(
+                            &incoming.terminator,
+                            MirTerminator::Switch { arms, .. }
+                            | MirTerminator::SwitchMove { arms, .. }
+                                if arms.iter().any(|arm| arm.target == mir_block.id)
+                        )
+                    });
+                    let mut all_ok_switch_move = false;
+                    let mut all_valid = true;
+                    for incoming in &mut incoming_blocks {
+                        match &incoming.terminator {
+                            MirTerminator::SwitchMove { arms, .. } => {
+                                let matching_arms = arms
+                                    .iter()
+                                    .filter(|arm| arm.target == mir_block.id)
+                                    .collect::<Vec<_>>();
+                                if matching_arms.len() == 1
+                                    && matching_arms[0].arguments.is_empty()
+                                    && matching_arms[0].bindings.len() == 1
+                                    && matching_arms[0].bindings[0].parameter == parameter.value
+                                {
+                                    all_ok_switch_move = true;
+                                } else {
+                                    all_valid = false;
+                                }
+                            }
+                            _ => all_valid = false,
+                        }
+                    }
+                    all_ok_switch_move && all_valid && mir_block.parameters.len() == 1
+                };
+            if allowed_switch_move_param {
+                continue;
+            }
+            if parameter_type == Some(&types::ordinary_map_owned_any_v2_type_id())
+                || parameter_type == Some(&types::ordinary_map_owned_any_v2_root_result_type_id())
+                || receipt
+                    .result_receipts
+                    .iter()
+                    .any(|result| parameter_type == Some(&result.result_type))
+                || result_branch_types
+                    .iter()
+                    .any(|branch| parameter_type == Some(&branch.result_type))
+            {
+                errors.push(malformed(
+                    "branch diamond may not carry a V2 owner through block parameters",
+                ));
+            }
+        }
+    }
+}
+
+fn validate_ordinary_map_owned_any_v2_branch_local_set_diamond_cfg_flow(
+    function: &MirFunction,
+    receipt: &crate::core::OrdinaryMapOwnedAnyV2CfgReceipt,
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+    proof: &crate::core::ownership::OrdinaryMapOwnedAnyV2PersistentSetDiamondReceipt,
+) -> Vec<MirValidationError> {
+    use crate::core::cfg::{BasicBlockId as SourceBlockId, EdgeKind, Terminator};
+
+    let malformed = |message: &str| MirValidationError {
+        subject: function.owner.0.clone(),
+        message: format!("ordinary Map/Any v2 CFG flow receipt {message}"),
+    };
+    let mut errors = Vec::new();
+    let fail = |errors: &mut Vec<MirValidationError>, message: &str| {
+        errors.push(malformed(message));
+    };
+    if receipt.profile_version != crate::core::OrdinaryMapOwnedAnyV2ProfileVersion::V2
+        || receipt.owner != function.owner
+    {
+        fail(&mut errors, "has an invalid Checker owner or profile");
+        return errors;
+    }
+    let source_role = ordinary_map_cfg_block_role;
+    if !flow.reachable_blocks.contains_key(&flow.entry)
+        || source_role(&flow.entry) != Some("entry")
+        || flow.split == flow.entry
+        || !flow.reachable_blocks.contains_key(&flow.split)
+        || !flow.reachable_blocks.contains_key(&flow.join)
+        || flow.reachable_blocks.len() != 13
+        || flow.reachable_edges.len() != 16
+        || flow.arm_edges.len() != 2
+        || flow.reachable_blocks.len() != function.blocks.len()
+    {
+        fail(
+            &mut errors,
+            "does not describe a closed Result-wrapped persistent Set diamond CFG",
+        );
+        return errors;
+    }
+
+    let mut source_point_locations = BTreeMap::<NodeId, SourceBlockId>::new();
+    let mut source_point_positions = BTreeMap::<NodeId, (SourceBlockId, usize)>::new();
+    let mut referenced_edges = BTreeSet::new();
+    for (block_id, block) in &flow.reachable_blocks {
+        for (point_index, (point, _)) in block.points.iter().enumerate() {
+            if source_point_locations
+                .insert(point.clone(), block_id.clone())
+                .is_some()
+            {
+                fail(&mut errors, "repeats a source point across blocks");
+            }
+            if source_point_positions
+                .insert(point.clone(), (block_id.clone(), point_index))
+                .is_some()
+            {
+                fail(&mut errors, "repeats a source point position");
+            }
+        }
+        for edge_id in block.terminator.outgoing_edges() {
+            referenced_edges.insert(edge_id.clone());
+            let Some(edge) = flow.reachable_edges.get(edge_id) else {
+                fail(&mut errors, "terminator references an absent edge");
+                continue;
+            };
+            if &edge.from != block_id || !flow.reachable_blocks.contains_key(&edge.to) {
+                fail(&mut errors, "contains an inconsistent edge endpoint");
+            }
+        }
+        if let Terminator::Branch {
+            condition,
+            then_edge,
+            else_edge,
+        } = &block.terminator
+        {
+            if !block.points.iter().any(|(point, kind)| {
+                point == condition && *kind == crate::core::cfg::CfgPointKind::Condition
+            }) {
+                fail(
+                    &mut errors,
+                    "branch condition is absent from its source block points",
+                );
+            }
+            for (edge_id, expected_kind, expected_role) in [
+                (then_edge, EdgeKind::Then, "if-then"),
+                (else_edge, EdgeKind::Else, "if-else"),
+            ] {
+                if !flow.reachable_edges.get(edge_id).is_some_and(|edge| {
+                    edge.from == *block_id
+                        && edge.kind == expected_kind
+                        && source_role(&edge.to) == Some(expected_role)
+                }) {
+                    fail(
+                        &mut errors,
+                        "branch selector edge kind or target role is malformed",
+                    );
+                }
+            }
+        }
+    }
+    if referenced_edges.len() != flow.reachable_edges.len()
+        || referenced_edges != flow.reachable_edges.keys().cloned().collect()
+    {
+        fail(&mut errors, "contains unreachable or unreferenced edges");
+        return errors;
+    }
+
+    let mut indegree = flow
+        .reachable_blocks
+        .keys()
+        .cloned()
+        .map(|block| (block, 0usize))
+        .collect::<BTreeMap<_, _>>();
+    for edge in flow.reachable_edges.values() {
+        let Some(degree) = indegree.get_mut(&edge.to) else {
+            fail(&mut errors, "edge target is absent from the graph");
+            continue;
+        };
+        *degree += 1;
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(block, degree)| (*degree == 0).then_some(block.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut topological_order = Vec::with_capacity(flow.reachable_blocks.len());
+    while let Some(block) = ready.pop_first() {
+        topological_order.push(block.clone());
+        for edge in flow
+            .reachable_edges
+            .values()
+            .filter(|edge| edge.from == block)
+        {
+            let Some(degree) = indegree.get_mut(&edge.to) else {
+                continue;
+            };
+            let Some(next_degree) = degree.checked_sub(1) else {
+                fail(&mut errors, "topological edge indegree underflowed");
+                continue;
+            };
+            *degree = next_degree;
+            if next_degree == 0 {
+                ready.insert(edge.to.clone());
+            }
+        }
+    }
+    if topological_order.len() != flow.reachable_blocks.len() {
+        fail(&mut errors, "persistent Set diamond contains a cycle");
+    }
+    if !errors.is_empty() {
+        return errors;
+    }
+
+    let source_to_mir =
+        match map_ordinary_map_owned_any_v2_source_blocks_to_mir_errors(function, flow) {
+            Ok(mapping) => mapping,
+            Err(messages) => {
+                for message in messages {
+                    fail(&mut errors, &message);
+                }
+                return errors;
+            }
+        };
+    let source_edge_to_mir = |edge_id: &crate::core::cfg::EdgeId| {
+        ordinary_map_owned_any_v2_source_edge_to_mir(function, flow, edge_id)
+    };
+    validate_ordinary_map_owned_any_v2_mir_edge_and_terminator_binding(
+        function,
+        receipt,
+        flow,
+        &source_to_mir,
+        &source_edge_to_mir,
+        false,
+        &mut errors,
+        &malformed,
+    );
+    if !errors.is_empty() {
+        return errors;
+    }
+    errors.extend(
+        validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
+            function,
+            receipt,
+            flow,
+            proof,
+            &source_to_mir,
+            &source_point_locations,
+            &source_point_positions,
+            &source_edge_to_mir,
+        ),
+    );
     errors
 }
 
@@ -11185,6 +12187,7 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
     };
     let expression_value = |node: &NodeId| MirValueId::new(format!("expr:{}", node.0)).ok();
     let map_type = types::ordinary_map_owned_any_v2_type_id();
+    let root_result_type = types::ordinary_map_owned_any_v2_root_result_type_id();
     let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
     let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
     let base_root_id = format!("ordinary-map-owned-any-v2:{}", proof.base_local.0 .0);
@@ -11192,16 +12195,17 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         local: proof.base_local.clone(),
         resource: crate::core::ResourceId(crate::core::NodeId(base_root_id.clone())),
     };
-    let base_only = BTreeSet::from([base_owner]);
+    let base_only = BTreeSet::from([base_owner.clone()]);
     let empty = BTreeSet::new();
 
     if receipt.profile_version != Profile::V2
         || receipt.owner != function.owner
         || proof.owner != function.owner
         || proof.owner != receipt.owner
+        || proof.entry_match_split != flow.entry
         || proof.split != flow.split
-        || proof.join != flow.join
-        || flow.split != flow.entry
+        || proof.outer_join != flow.join
+        || proof.entry_match_split == proof.split
         || source_point_locations.len()
             != flow
                 .reachable_blocks
@@ -11214,16 +12218,17 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             "has forged owner, profile, split, join, or point identity",
         );
     }
-    if flow.reachable_blocks.len() != 4
-        || flow.reachable_edges.len() != 4
+    if flow.reachable_blocks.len() != 13
+        || flow.reachable_edges.len() != 16
         || flow.arm_edges.len() != 2
         || proof.arms.len() != 2
-        || receipt.actions.len() != 8
-        || receipt.attempts.len() != 8
+        || proof.result_branches.len() != 3
+        || receipt.actions.len() != 11
+        || receipt.attempts.len() != 11
     {
         fail(
             &mut errors,
-            "does not contain exactly four blocks, four edges, two arms, eight actions, and eight attempts",
+            "does not contain exactly thirteen blocks, sixteen edges, two arms, three Result branches, eleven actions, and eleven attempts",
         );
     }
 
@@ -11246,11 +12251,6 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         );
     }
 
-    let split = flow.reachable_blocks.get(&flow.split);
-    let split_condition = split.and_then(|block| match &block.terminator {
-        Terminator::Branch { condition, .. } => Some(condition),
-        _ => None,
-    });
     let source_point_kind = |point: &NodeId| {
         let block_id = source_point_locations.get(point)?;
         flow.reachable_blocks
@@ -11263,33 +12263,14 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
     let source_rank = |point: &NodeId| source_point_positions.get(point).map(|(_, rank)| *rank);
     let source_block = |point: &NodeId| source_point_locations.get(point);
 
-    let new_matches_split_prefix = split_condition.is_some_and(|condition| {
-        source_block(&proof.base_new.point) == Some(&flow.split)
-            && source_point_kind(&proof.base_new.point) == Some(CfgPointKind::Expression)
-            && source_rank(&proof.base_new.point)
-                .zip(source_rank(condition))
-                .is_some_and(|(new_rank, condition_rank)| new_rank < condition_rank)
-    });
-    if proof.base_local.0 .0.is_empty()
-        || proof.base_new.kind != ActionKind::New
-        || proof.base_new.local != proof.base_local
-        || proof.base_new.profile_version != Profile::V2
-        || proof.base_new.root.0 .0 != base_root_id
-        || !new_matches_split_prefix
-        || proof.base_drop.kind != ActionKind::Drop
-        || proof.base_drop.local != proof.base_local
-        || proof.base_drop.profile_version != Profile::V2
-        || proof.base_drop.root.0 .0 != base_root_id
-        || source_block(&proof.base_drop.point) != Some(&flow.join)
-        || source_point_kind(&proof.base_drop.point) != Some(CfgPointKind::ResourceAction)
-    {
-        fail(
-            &mut errors,
-            "base New is not before the if split or the exact base Drop is not in the join",
-        );
-    }
-
-    let action_has_no_operands = |action: &ActionReceipt| {
+    let action_has_no_operands = |action: &ActionReceipt, allow_result_source_meta: bool| {
+        let source_meta_ok = if allow_result_source_meta {
+            (action.source_node.is_none() && action.source_type.is_none())
+                || (action.source_node.as_ref() == Some(&action.point)
+                    && action.source_type.is_some())
+        } else {
+            action.source_node.is_none() && action.source_type.is_none()
+        };
         action.key.is_none()
             && action.key_type.is_none()
             && action.key_local.is_none()
@@ -11301,19 +12282,116 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             && !action.payload_clone
             && action.source_local.is_none()
             && action.source.is_none()
-            && action.source_node.is_none()
-            && action.source_type.is_none()
+            && source_meta_ok
             && action.result_type.is_none()
             && action.result_local.is_none()
     };
-    if !action_has_no_operands(&proof.base_new) || !action_has_no_operands(&proof.base_drop) {
+
+    let entry_block = flow.reachable_blocks.get(&proof.entry_match_split);
+    let split_block = flow.reachable_blocks.get(&proof.split);
+    let split_condition = split_block.and_then(|block| match &block.terminator {
+        Terminator::Branch { condition, .. } => Some(condition),
+        _ => None,
+    });
+    if split_condition.is_none() {
+        fail(&mut errors, "split is not a two-arm if branch");
+    }
+    let new_branch = proof.result_branches.iter().find(|branch| {
+        branch.kind == ActionKind::New
+            && branch.operation_point == proof.base_new.point
+            && branch.output_root == proof.base_local
+            && branch.input_root.is_none()
+    });
+    if new_branch.is_none() {
         fail(
             &mut errors,
-            "base New/Drop carries unrelated action operands",
+            "missing exact Result branch receipt for base map_new()",
+        );
+    }
+    let new_matches_entry = source_block(&proof.base_new.point) == Some(&proof.entry_match_split)
+        && source_point_kind(&proof.base_new.point) == Some(CfgPointKind::Condition)
+        && entry_block.is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Match { arms, scrutinee }
+                    if arms.len() == 2
+                        && new_branch.is_some_and(|branch| {
+                            scrutinee == &branch.scrutinee_node
+                                && arms.contains(&branch.ok.arm_entry_edge)
+                                && arms.contains(&branch.err.arm_entry_edge)
+                                && flow.reachable_edges.get(&branch.ok.arm_entry_edge).is_some_and(
+                                    |edge| {
+                                        edge.from == proof.entry_match_split
+                                            && edge.to == proof.split
+                                    },
+                                )
+                                && flow.reachable_edges.get(&branch.err.arm_entry_edge).is_some_and(
+                                    |edge| {
+                                        edge.from == proof.entry_match_split
+                                            && edge.to == proof.outer_err_block
+                                    },
+                                )
+                        })
+            )
+        });
+    let outer_err_goto_ok = flow
+        .reachable_blocks
+        .get(&proof.outer_err_block)
+        .is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Goto { edge }
+                    if flow.reachable_edges.get(edge).is_some_and(|edge| {
+                        edge.from == proof.outer_err_block
+                            && edge.to == proof.outer_join
+                            && edge.kind == EdgeKind::Fallthrough
+                    })
+            )
+        });
+    let if_join_goto_ok = flow.reachable_blocks.get(&proof.join).is_some_and(|block| {
+        matches!(
+            &block.terminator,
+            Terminator::Goto { edge }
+                if edge == &proof.if_join_to_outer_edge
+                    && flow.reachable_edges.get(edge).is_some_and(|edge| {
+                        edge.from == proof.join
+                            && edge.to == proof.outer_join
+                            && edge.kind == EdgeKind::Fallthrough
+                    })
+        )
+    });
+    let outer_join_returns = flow
+        .reachable_blocks
+        .get(&proof.outer_join)
+        .is_some_and(|block| matches!(&block.terminator, Terminator::Return { .. }));
+    if proof.base_local.0 .0.is_empty()
+        || proof.base_new.kind != ActionKind::New
+        || proof.base_new.local != proof.base_local
+        || proof.base_new.profile_version != Profile::V2
+        || proof.base_new.root.0 .0 != base_root_id
+        || !new_matches_entry
+        || !outer_err_goto_ok
+        || !if_join_goto_ok
+        || !outer_join_returns
+    {
+        fail(
+            &mut errors,
+            "base New or outer match diamond topology disagrees with the CFG",
+        );
+    }
+    let new_source_meta_ok = new_branch.is_some_and(|branch| {
+        (proof.base_new.source_node.is_none() && proof.base_new.source_type.is_none())
+            || (proof.base_new.source_node.as_ref() == Some(&proof.base_new.point)
+                && proof.base_new.source_type.as_ref() == Some(&branch.result_type))
+    });
+    if !action_has_no_operands(&proof.base_new, true) || !new_source_meta_ok {
+        fail(
+            &mut errors,
+            "base New carries unrelated or mismatched action operands",
         );
     }
 
-    let mut proof_actions = vec![&proof.base_new, &proof.base_drop];
+    let mut proof_actions = vec![&proof.base_new];
     let mut expected_attempts = BTreeSet::<Attempt>::new();
     expected_attempts.insert(Attempt {
         kind: AttemptKind::New,
@@ -11322,24 +12400,108 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         receiver_local: None,
         result_local: Some(proof.base_local.clone()),
     });
-    expected_attempts.insert(Attempt {
-        kind: AttemptKind::Drop,
-        point: proof.base_drop.point.clone(),
-        arguments: vec![proof.base_local.0.clone()],
-        receiver_local: Some(proof.base_local.clone()),
-        result_local: None,
-    });
 
     let mut child_locals = BTreeSet::new();
     let mut payload_loads = BTreeSet::new();
+    let mut matched_branches = new_branch
+        .map(|branch| BTreeSet::from([branch.operation_point.clone()]))
+        .unwrap_or_default();
     let mut payload_type_consistent = true;
     let mut source_type: Option<crate::core::ResolvedTypeId> = None;
+    let mut expected_block_ids = BTreeSet::from([
+        proof.entry_match_split.clone(),
+        proof.outer_err_block.clone(),
+        proof.split.clone(),
+        proof.join.clone(),
+        proof.outer_join.clone(),
+    ]);
+    let mut expected_arm_block_ids = BTreeMap::<
+        crate::core::cfg::BasicBlockId,
+        (
+            crate::core::cfg::BasicBlockId,
+            crate::core::cfg::BasicBlockId,
+            crate::core::cfg::BasicBlockId,
+            LiveOwner,
+            EdgeKind,
+            crate::core::cfg::EdgeId,
+            crate::core::cfg::EdgeId,
+        ),
+    >::new();
     for (edge_id, arm) in &proof.arms {
-        proof_actions.extend([&arm.set, &arm.size, &arm.drop]);
+        proof_actions.extend([
+            &arm.set,
+            &arm.size,
+            &arm.drop,
+            &arm.ok_base_drop,
+            &arm.err_base_drop,
+        ]);
+        expected_block_ids.extend([
+            arm.block.clone(),
+            arm.ok_block.clone(),
+            arm.err_block.clone(),
+            arm.match_join.clone(),
+        ]);
+        let set_branch = proof.result_branches.iter().find(|branch| {
+            branch.kind == ActionKind::Set
+                && branch.operation_point == arm.set.point
+                && branch.output_root == arm.set.local
+                && branch.input_root.as_ref() == Some(&proof.base_local)
+        });
+        if let Some(set_branch) = set_branch {
+            matched_branches.insert(set_branch.operation_point.clone());
+        } else {
+            fail(
+                &mut errors,
+                "missing exact Result branch receipt for diamond arm map_set()",
+            );
+        }
         let selector_edge = flow.reachable_edges.get(edge_id);
         let arm_block = flow.reachable_blocks.get(&arm.block);
+        let ok_block = flow.reachable_blocks.get(&arm.ok_block);
+        let err_block = flow.reachable_blocks.get(&arm.err_block);
+        let match_join_block = flow.reachable_blocks.get(&arm.match_join);
         let join_edge = flow.reachable_edges.get(&arm.join_edge);
-        let arm_goto_matches = arm_block.is_some_and(|block| {
+        let arm_match_matches = arm_block.is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Match { scrutinee, arms }
+                    if arms.len() == 2
+                        && set_branch.is_some_and(|branch| {
+                            scrutinee == &branch.scrutinee_node
+                                && arms.contains(&branch.ok.arm_entry_edge)
+                                && arms.contains(&branch.err.arm_entry_edge)
+                                && flow.reachable_edges.get(&branch.ok.arm_entry_edge).is_some_and(
+                                    |edge| edge.from == arm.block && edge.to == arm.ok_block,
+                                )
+                                && flow.reachable_edges.get(&branch.err.arm_entry_edge).is_some_and(
+                                    |edge| edge.from == arm.block && edge.to == arm.err_block,
+                                )
+                        })
+            )
+        });
+        let arm_ok_goto_matches = ok_block.is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Goto { edge }
+                    if flow.reachable_edges.get(edge).is_some_and(|edge| {
+                        edge.from == arm.ok_block
+                            && edge.to == arm.match_join
+                            && edge.kind == EdgeKind::Fallthrough
+                    })
+            )
+        });
+        let arm_err_goto_matches = err_block.is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                Terminator::Goto { edge }
+                    if flow.reachable_edges.get(edge).is_some_and(|edge| {
+                        edge.from == arm.err_block
+                            && edge.to == arm.match_join
+                            && edge.kind == EdgeKind::Fallthrough
+                    })
+            )
+        });
+        let match_join_goto_matches = match_join_block.is_some_and(|block| {
             matches!(
                 &block.terminator,
                 Terminator::Goto { edge } if edge == &arm.join_edge
@@ -11348,52 +12510,77 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         if edge_id != &arm.edge
             || !flow.arm_edges.contains(edge_id)
             || !selector_edge.is_some_and(|edge| {
-                edge.from == flow.split
+                edge.from == proof.split
                     && edge.to == arm.block
                     && matches!(edge.kind, EdgeKind::Then | EdgeKind::Else)
             })
-            || !arm_goto_matches
+            || !arm_match_matches
+            || !arm_ok_goto_matches
+            || !arm_err_goto_matches
+            || !match_join_goto_matches
             || !join_edge.is_some_and(|edge| {
-                edge.from == arm.block && edge.to == flow.join && edge.kind == EdgeKind::Fallthrough
+                edge.from == arm.match_join
+                    && edge.to == proof.join
+                    && edge.kind == EdgeKind::Fallthrough
             })
         {
             fail(
                 &mut errors,
-                "arm edge/block/join-edge identities disagree with the CFG",
+                "arm edge/block/Result/join-edge identities disagree with the CFG",
             );
         }
 
         let child_local = &arm.set.local;
         let child_root_id = format!("ordinary-map-owned-any-v2:{}", child_local.0 .0);
+        let child_owner = LiveOwner::Root {
+            local: child_local.clone(),
+            resource: crate::core::ResourceId(crate::core::NodeId(child_root_id.clone())),
+        };
+        if let Some(set_branch) = set_branch {
+            expected_arm_block_ids.insert(
+                arm.block.clone(),
+                (
+                    arm.ok_block.clone(),
+                    arm.err_block.clone(),
+                    arm.match_join.clone(),
+                    child_owner,
+                    selector_edge.map(|e| e.kind).unwrap_or(EdgeKind::Then),
+                    set_branch.ok.arm_entry_edge.clone(),
+                    set_branch.err.arm_entry_edge.clone(),
+                ),
+            );
+        }
         let child_is_unique = child_locals.insert(child_local.clone());
         let payload_is_unique = payload_loads.insert(arm.payload_load.clone());
         let set_source_node = arm.set.source_node.as_ref();
         let size_source_node = arm.size.source_node.as_ref();
         let arm_points_are_exact = source_block(&arm.set.point) == Some(&arm.block)
-            && source_block(&arm.size.point) == Some(&arm.block)
-            && source_block(&arm.drop.point) == Some(&arm.block)
             && source_block(&arm.payload_load) == Some(&arm.block)
-            && source_point_kind(&arm.set.point) == Some(CfgPointKind::Expression)
+            && source_block(&arm.size.point) == Some(&arm.ok_block)
+            && source_block(&arm.drop.point) == Some(&arm.ok_block)
+            && source_block(&arm.ok_base_drop.point) == Some(&arm.ok_block)
+            && source_block(&arm.err_base_drop.point) == Some(&arm.err_block)
+            && source_point_kind(&arm.set.point) == Some(CfgPointKind::Condition)
             && source_point_kind(&arm.size.point) == Some(CfgPointKind::Expression)
             && source_point_kind(&arm.drop.point) == Some(CfgPointKind::ResourceAction)
+            && source_point_kind(&arm.ok_base_drop.point) == Some(CfgPointKind::ResourceAction)
+            && source_point_kind(&arm.err_base_drop.point) == Some(CfgPointKind::ResourceAction)
             && source_point_kind(&arm.payload_load) == Some(CfgPointKind::Expression)
             && set_source_node.is_some_and(|point| {
                 source_block(point) == Some(&arm.block)
                     && source_point_kind(point) == Some(CfgPointKind::Expression)
             })
             && size_source_node.is_some_and(|point| {
-                source_block(point) == Some(&arm.block)
+                source_block(point) == Some(&arm.ok_block)
                     && source_point_kind(point) == Some(CfgPointKind::Expression)
             })
             && source_rank(&arm.payload_load)
                 .zip(source_rank(&arm.set.point))
                 .is_some_and(|(payload_rank, set_rank)| payload_rank < set_rank)
-            && source_rank(&arm.set.point)
-                .zip(source_rank(&arm.size.point))
+            && source_rank(&arm.size.point)
                 .zip(source_rank(&arm.drop.point))
-                .is_some_and(|((set_rank, size_rank), drop_rank)| {
-                    set_rank < size_rank && size_rank < drop_rank
-                });
+                .is_some_and(|(size_rank, drop_rank)| size_rank < drop_rank)
+            && arm.drop.point != arm.ok_base_drop.point;
         if !child_is_unique
             || !payload_is_unique
             || child_local == &proof.base_local
@@ -11451,12 +12638,26 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             && !arm.size.payload_clone
             && arm.size.result_type.is_none()
             && arm.size.result_local.is_none();
-        let drop_shape_matches = arm.drop.kind == ActionKind::Drop
+        let child_drop_matches = arm.drop.kind == ActionKind::Drop
             && arm.drop.profile_version == Profile::V2
             && arm.drop.local == *child_local
             && arm.drop.root.0 .0 == child_root_id
-            && action_has_no_operands(&arm.drop);
-        if !size_shape_matches || !drop_shape_matches {
+            && action_has_no_operands(&arm.drop, false);
+        let ok_base_drop_matches = arm.ok_base_drop.kind == ActionKind::Drop
+            && arm.ok_base_drop.profile_version == Profile::V2
+            && arm.ok_base_drop.local == proof.base_local
+            && arm.ok_base_drop.root.0 .0 == base_root_id
+            && action_has_no_operands(&arm.ok_base_drop, false);
+        let err_base_drop_matches = arm.err_base_drop.kind == ActionKind::Drop
+            && arm.err_base_drop.profile_version == Profile::V2
+            && arm.err_base_drop.local == proof.base_local
+            && arm.err_base_drop.root.0 .0 == base_root_id
+            && action_has_no_operands(&arm.err_base_drop, false);
+        if !size_shape_matches
+            || !child_drop_matches
+            || !ok_base_drop_matches
+            || !err_base_drop_matches
+        {
             fail(
                 &mut errors,
                 "arm Size/Drop action carries a forged root or extra operand",
@@ -11521,24 +12722,57 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             receiver_local: Some(child_local.clone()),
             result_local: None,
         });
+        expected_attempts.insert(Attempt {
+            kind: AttemptKind::Drop,
+            point: arm.ok_base_drop.point.clone(),
+            arguments: vec![proof.base_local.0.clone()],
+            receiver_local: Some(proof.base_local.clone()),
+            result_local: None,
+        });
+        expected_attempts.insert(Attempt {
+            kind: AttemptKind::Drop,
+            point: arm.err_base_drop.point.clone(),
+            arguments: vec![proof.base_local.0.clone()],
+            receiver_local: Some(proof.base_local.clone()),
+            result_local: None,
+        });
     }
     if proof.arms.keys().cloned().collect::<BTreeSet<_>>() != flow.arm_edges
-        || proof_actions.len() != 8
+        || proof_actions.len() != 11
+        || matched_branches.len() != 3
         || child_locals.len() != 2
         || payload_loads.len() != 2
         || !payload_type_consistent
-        || expected_attempts.len() != 8
+        || expected_attempts.len() != 11
         || expected_attempts != receipt.attempts
     {
         fail(
             &mut errors,
-            "arm set, shared types, actions, or exact attempts disagree",
+            "arm set, shared types, actions, Result branches, or exact attempts disagree",
         );
     }
+    for branch in &proof.result_branches {
+        let output_id = format!("ordinary-map-owned-any-v2:{}", branch.output_root.0 .0);
+        let input_valid = branch.input_root.as_ref().is_none_or(|root| {
+            let input_id = format!("ordinary-map-owned-any-v2:{}", root.0 .0);
+            branch.ok.roots_at_entry.contains(&input_id)
+                && branch.err.roots_at_entry.contains(&input_id)
+        });
+        if branch.ok_variant.0 != "builtin:variant:Result::Ok"
+            || branch.err_variant.0 != "builtin:variant:Result::Err"
+            || branch.err_payload_type != i32_type
+            || branch.ok.roots_at_exit != branch.err.roots_at_exit
+            || !branch.ok.roots_at_entry.contains(&output_id)
+            || branch.err.roots_at_entry.contains(&output_id)
+            || !input_valid
+        {
+            fail(
+                &mut errors,
+                "contains an inconsistent Result-branch entry inside diamond",
+            );
+        }
+    }
 
-    // Compare the proof's complete source actions as a multiset; comparing
-    // only the owner endpoints would let a duplicate or omitted Set/Drop
-    // action hide behind the same split/join owner facts.
     let mut unbound_actions = receipt.actions.clone();
     for action in &proof_actions {
         let matches = unbound_actions
@@ -11570,16 +12804,46 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
     let expected_blocks = {
         let mut expected_in = BTreeMap::new();
         let mut expected_out = BTreeMap::new();
+        let mut ok_blocks = BTreeMap::new();
+        let mut err_blocks = BTreeSet::new();
+        let mut match_joins = BTreeSet::new();
+        let mut dispatch_blocks = BTreeSet::new();
+        for (block_id, (ok_block, err_block, match_join, child_owner, _, _, _)) in
+            &expected_arm_block_ids
+        {
+            dispatch_blocks.insert(block_id.clone());
+            ok_blocks.insert(
+                ok_block.clone(),
+                BTreeSet::from([base_owner.clone(), child_owner.clone()]),
+            );
+            err_blocks.insert(err_block.clone());
+            match_joins.insert(match_join.clone());
+        }
         for block_id in flow.reachable_blocks.keys() {
-            if block_id == &flow.entry {
+            if !expected_block_ids.contains(block_id) {
+                fail(
+                    &mut errors,
+                    "owner-flow snapshot contains a non-diamond block",
+                );
+                continue;
+            }
+            if block_id == &proof.entry_match_split
+                || block_id == &proof.outer_err_block
+                || match_joins.contains(block_id)
+                || block_id == &proof.join
+                || block_id == &proof.outer_join
+            {
                 expected_in.insert(block_id.clone(), empty.clone());
+                expected_out.insert(block_id.clone(), empty.clone());
+            } else if block_id == &proof.split || dispatch_blocks.contains(block_id) {
+                expected_in.insert(block_id.clone(), base_only.clone());
                 expected_out.insert(block_id.clone(), base_only.clone());
-            } else if block_id == &flow.join {
+            } else if let Some(ok_entry_owners) = ok_blocks.get(block_id) {
+                expected_in.insert(block_id.clone(), ok_entry_owners.clone());
+                expected_out.insert(block_id.clone(), empty.clone());
+            } else if err_blocks.contains(block_id) {
                 expected_in.insert(block_id.clone(), base_only.clone());
                 expected_out.insert(block_id.clone(), empty.clone());
-            } else if proof.arms.values().any(|arm| &arm.block == block_id) {
-                expected_in.insert(block_id.clone(), base_only.clone());
-                expected_out.insert(block_id.clone(), base_only.clone());
             } else {
                 fail(
                     &mut errors,
@@ -11589,33 +12853,56 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         }
         (expected_in, expected_out)
     };
-    let expected_edges = flow
-        .reachable_edges
-        .iter()
-        .map(|(edge_id, edge)| {
-            let owners = if edge.from == flow.split
-                || proof.arms.values().any(|arm| arm.block == edge.from)
-            {
-                base_only.clone()
-            } else {
-                empty.clone()
-            };
-            (edge_id.clone(), owners)
-        })
-        .collect::<BTreeMap<_, _>>();
-    if flow.live_owners_in != expected_blocks.0
+    let expected_edges = {
+        let mut set_ok_edges = BTreeMap::new();
+        let mut set_err_edges = BTreeSet::new();
+        for (_, (_, _, _, child_owner, _, ok_edge, err_edge)) in &expected_arm_block_ids {
+            set_ok_edges.insert(
+                ok_edge.clone(),
+                BTreeSet::from([base_owner.clone(), child_owner.clone()]),
+            );
+            set_err_edges.insert(err_edge.clone());
+        }
+        let new_ok_edge = new_branch.map(|branch| branch.ok.arm_entry_edge.clone());
+        flow.reachable_edges
+            .iter()
+            .map(|(edge_id, edge)| {
+                let owners = if Some(edge_id) == new_ok_edge.as_ref()
+                    || (edge.from == proof.split && flow.arm_edges.contains(edge_id))
+                    || set_err_edges.contains(edge_id)
+                {
+                    base_only.clone()
+                } else if let Some(owners) = set_ok_edges.get(edge_id) {
+                    owners.clone()
+                } else {
+                    empty.clone()
+                };
+                (edge_id.clone(), owners)
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    if expected_block_ids
+        != flow
+            .reachable_blocks
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+        || flow.live_owners_in != expected_blocks.0
         || flow.live_owners_out != expected_blocks.1
         || flow.live_owners_on_edge != expected_edges
     {
         fail(
             &mut errors,
-            "Checker owner facts do not carry only the base root across split and settle it at join",
+            "Checker owner facts disagree with the Result-wrapped persistent Set diamond",
         );
     }
 
     let checker_actions = &function.ownership.checker_ordinary_map_owned_any_v2;
-    if checker_actions.len() != 8 {
-        fail(&mut errors, "MIR action receipt count is not exactly eight");
+    if checker_actions.len() != 11 {
+        fail(
+            &mut errors,
+            "MIR action receipt count is not exactly eleven",
+        );
     }
     let action_source_identity =
         |action: &ActionReceipt| action.source.as_ref().map(|source| source.0 .0.clone());
@@ -11729,7 +13016,7 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         .iter()
         .map(|instruction| instruction.id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    if observed_v2.len() != 8 || observed_ids != expected_mir_action_ids {
+    if observed_v2.len() != 11 || observed_ids != expected_mir_action_ids {
         fail(
             &mut errors,
             "MIR contains extra, missing, or duplicated V2 action instructions",
@@ -11777,13 +13064,11 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         let expected_value = action.value.as_ref().and_then(expression_value);
         let operation_matches = match (&action.kind, &instruction.kind) {
             (ActionKind::New, MirInstructionKind::OrdinaryMapOwnedAnyV2New { result }) => {
-                expected_local
-                    .as_ref()
-                    .is_some_and(|expected| result == expected)
+                expression_value(&action.point).as_ref() == Some(result)
                     && function
                         .values
                         .get(result)
-                        .is_some_and(|value| value.ty == map_type)
+                        .is_some_and(|value| value.ty == root_result_type)
             }
             (
                 ActionKind::Set,
@@ -11794,16 +13079,14 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
                     value,
                 },
             ) => {
-                expected_local
-                    .as_ref()
-                    .is_some_and(|expected| result == expected)
+                expression_value(&action.point).as_ref() == Some(result)
                     && Some(source) == action.source_local.as_ref().and_then(local_value).as_ref()
                     && Some(key) == expected_key.as_ref()
                     && Some(value) == expected_value.as_ref()
                     && function
                         .values
                         .get(result)
-                        .is_some_and(|value| value.ty == map_type)
+                        .is_some_and(|value| value.ty == root_result_type)
                     && function
                         .values
                         .get(source)
@@ -11848,39 +13131,49 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
     }
 
     let base_new_location = action_instruction_positions.get(&proof.base_new.point);
-    let base_drop_location = action_instruction_positions.get(&proof.base_drop.point);
-    if !base_new_location.is_some_and(|(block, _)| source_to_mir.get(&flow.split) == Some(block))
-        || !base_drop_location
-            .is_some_and(|(block, _)| source_to_mir.get(&flow.join) == Some(block))
+    if !base_new_location
+        .is_some_and(|(block, _)| source_to_mir.get(&proof.entry_match_split) == Some(block))
     {
         fail(
             &mut errors,
-            "base New/Drop instruction is in the wrong MIR block",
+            "base New instruction is not in the entry SwitchMove block",
         );
     }
-    if let (Some(condition), Some((new_block, new_index))) = (
-        split.and_then(|_| function.blocks.get(source_to_mir.get(&flow.split)?)),
-        base_new_location,
-    ) {
-        let selector = match &condition.terminator {
-            MirTerminator::Branch { condition, .. } => Some(condition),
-            _ => None,
-        };
-        if let Some(selector) = selector {
-            let selector_definition = condition.instructions.iter().position(|instruction| {
-                lower::instruction_results(&instruction.kind).contains(&selector)
-            });
-            if selector_definition
-                .is_some_and(|index| new_block == &condition.id && *new_index >= index)
-            {
-                fail(
-                    &mut errors,
-                    "base New MIR instruction follows the split selector value",
-                );
-            }
-        } else {
-            fail(&mut errors, "MIR split selector is not a Branch");
+    if let (Some(new_branch), Some(entry_mir)) =
+        (new_branch, source_to_mir.get(&proof.entry_match_split))
+    {
+        let scrutinee_id = expression_value(&new_branch.scrutinee_node);
+        let ok_edge = source_edge_to_mir(&new_branch.ok.arm_entry_edge).ok();
+        let err_edge = source_edge_to_mir(&new_branch.err.arm_entry_edge).ok();
+        let ok_mir = source_to_mir.get(&proof.split);
+        let err_mir = source_to_mir.get(&proof.outer_err_block);
+        let entry_switch_matches = function.blocks.get(entry_mir).is_some_and(|block| {
+            matches!(
+                &block.terminator,
+                MirTerminator::SwitchMove { scrutinee, arms }
+                    if Some(scrutinee) == scrutinee_id.as_ref()
+                        && arms.len() == 2
+                        && arms.iter().any(|arm| {
+                            Some(&arm.edge) == ok_edge.as_ref() && Some(&arm.target) == ok_mir
+                        })
+                        && arms.iter().any(|arm| {
+                            Some(&arm.edge) == err_edge.as_ref() && Some(&arm.target) == err_mir
+                        })
+            )
+        });
+        if !entry_switch_matches {
+            fail(
+                &mut errors,
+                "entry SwitchMove terminator disagrees with base New Result branch",
+            );
         }
+    }
+    if !source_to_mir
+        .get(&proof.split)
+        .and_then(|block| function.blocks.get(block))
+        .is_some_and(|block| matches!(&block.terminator, MirTerminator::Branch { .. }))
+    {
+        fail(&mut errors, "MIR split selector is not a Branch");
     }
 
     for arm in proof.arms.values() {
@@ -11891,6 +13184,14 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             continue;
         };
         let Some(drop_pos) = action_instruction_positions.get(&arm.drop.point) else {
+            continue;
+        };
+        let Some(ok_base_drop_pos) = action_instruction_positions.get(&arm.ok_base_drop.point)
+        else {
+            continue;
+        };
+        let Some(err_base_drop_pos) = action_instruction_positions.get(&arm.err_base_drop.point)
+        else {
             continue;
         };
         let Some(payload_id) =
@@ -11947,14 +13248,17 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
                 "arm payload load is not the exact direct-local MIR Clone before Set",
             );
         }
-        if set_pos.0 != size_pos.0
-            || size_pos.0 != drop_pos.0
-            || !(set_pos.1 < size_pos.1 && size_pos.1 < drop_pos.1)
-            || source_to_mir.get(&arm.block) != Some(&set_pos.0)
+        if source_to_mir.get(&arm.block) != Some(&set_pos.0)
+            || source_to_mir.get(&arm.ok_block) != Some(&size_pos.0)
+            || source_to_mir.get(&arm.ok_block) != Some(&drop_pos.0)
+            || source_to_mir.get(&arm.ok_block) != Some(&ok_base_drop_pos.0)
+            || source_to_mir.get(&arm.err_block) != Some(&err_base_drop_pos.0)
+            || size_pos.1 >= drop_pos.1
+            || drop_pos.1 == ok_base_drop_pos.1
         {
             fail(
                 &mut errors,
-                "arm MIR actions are not in exact Set/Size/Drop order",
+                "arm MIR actions are not in their exact Result blocks and Set/Size/Drop order",
             );
         }
         let Ok(mir_edge) = source_edge_to_mir(&arm.edge) else {
@@ -11966,7 +13270,7 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
             continue;
         };
         let selector_edge_matches = source_to_mir
-            .get(&flow.split)
+            .get(&proof.split)
             .and_then(|block| function.blocks.get(block))
             .is_some_and(|block| match &block.terminator {
                 MirTerminator::Branch {
@@ -11977,14 +13281,14 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
                 _ => false,
             });
         let join_edge_matches = source_to_mir
-            .get(&arm.block)
+            .get(&arm.match_join)
             .and_then(|block| function.blocks.get(block))
             .is_some_and(|block| {
                 matches!(
                     &block.terminator,
                     MirTerminator::Goto { edge, target, .. }
                         if edge == &mir_join_edge
-                            && source_to_mir.get(&flow.join) == Some(target)
+                            && source_to_mir.get(&proof.join) == Some(target)
                 )
             });
         if !selector_edge_matches || !join_edge_matches {
@@ -11995,15 +13299,8 @@ fn validate_ordinary_map_owned_any_v2_persistent_set_diamond_proof(
         }
     }
 
-    if let Some(base_drop_location) = base_drop_location {
-        if source_to_mir.get(&flow.join) != Some(&base_drop_location.0) {
-            fail(
-                &mut errors,
-                "base Drop MIR instruction is outside the common join",
-            );
-        }
-    }
     if proof.payload_type == map_type
+        || proof.payload_type == root_result_type
         || proof.payload_type == types::ordinary_map_owned_any_v2_get_result_type_id()
         || proof.payload_type == types::ordinary_map_owned_any_v2_values_type_id()
         || proof.payload_type == types::ordinary_map_owned_any_v2_payload_type_id()
@@ -13955,7 +15252,9 @@ fn ordinary_map_owned_get_fallthrough_match_arm(
         "{}/cfg:block:match-arm",
         edge.source.node.0
     )));
-    if edge.from != arm || !receipt.reachable_blocks.contains_key(&arm) {
+    if !receipt.reachable_blocks.contains_key(&edge.from)
+        || !receipt.reachable_blocks.contains_key(&arm)
+    {
         return None;
     }
     let mut incoming = receipt
@@ -14925,15 +16224,18 @@ fn validate_ordinary_map_owned_get_result_branch_receipts(
             ));
         }
 
+        let expected_source_record_type =
+            types::ordinary_map_owned_any_v2_source_record_type_id().ok();
         let expected_root_action = matches!(branch.kind, Action::New | Action::Set);
         if expected_root_action != branch.output_root.is_some()
-            || (branch.kind == Action::Set) != branch.input_root.is_some()
-            || (matches!(branch.kind, Action::GetI32 | Action::GetString)
-                && branch.input_root.is_none())
+            || matches!(
+                branch.kind,
+                Action::Set | Action::GetI32 | Action::GetString
+            ) != branch.input_root.is_some()
             || branch.output_root.as_ref().is_some_and(|local| {
                 let local_value = MirValueId::new(format!("local:{}", local.0 .0)).ok();
                 branch.ok_binding.as_ref() != Some(local)
-                    || branch.ok_payload_type != root_type
+                    || Some(&branch.ok_payload_type) != expected_source_record_type.as_ref()
                     || value_type(local) != Some(&root_type)
                     || local_value.as_ref() != Some(&action.local)
                     || action.root != format!("ordinary-map-owned-get-i32-string-v1:{}", local.0 .0)
@@ -15362,87 +16664,103 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
     let mut errors = Vec::new();
     let receipts = &cfg_receipt.string_match_receipts;
     if receipts.is_empty() {
-        let source_scrutinee = cfg_receipt
-            .reachable_blocks
-            .get(&cfg_receipt.entry)
-            .and_then(|block| match &block.terminator {
-                CfgTerminator::Match { scrutinee, arms } if arms.len() == 2 => {
-                    Some(scrutinee.clone())
-                }
-                _ => None,
-            });
         let result_ty = crate::core::ir::result_type_id(
             crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String),
             crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32),
         );
-        if let Some(source_scrutinee) = source_scrutinee {
-            if let Ok(scrutinee_value) = MirValueId::new(format!("expr:{}", source_scrutinee.0)) {
-                if let Some(entry) = function.blocks.get(&function.entry) {
-                    let direct_switch = function
-                        .values
-                        .get(&scrutinee_value)
-                        .is_some_and(|value| value.ty == result_ty)
-                        && matches!(
-                            &entry.terminator,
-                            MirTerminator::SwitchMove { scrutinee, .. }
-                                if scrutinee == &scrutinee_value
-                        );
-                    let direct_get_result = direct_switch
-                        && actions
+        for (cfg_block_id, cfg_block) in &cfg_receipt.reachable_blocks {
+            let CfgTerminator::Match { scrutinee, arms } = &cfg_block.terminator else {
+                continue;
+            };
+            if arms.len() != 2 {
+                continue;
+            }
+            let detached_dispatch = (cfg_receipt.profile_version == Profile::EntryClosedTailV1
+                && cfg_block_id == &cfg_receipt.entry)
+                || (cfg_receipt
+                    .live_roots_out
+                    .get(cfg_block_id)
+                    .is_some_and(BTreeSet::is_empty)
+                    && arms.iter().all(|edge_id| {
+                        cfg_receipt
+                            .live_roots_on_edge
+                            .get(edge_id)
+                            .is_some_and(BTreeSet::is_empty)
+                    }));
+            if !detached_dispatch {
+                continue;
+            }
+            let Ok(scrutinee_value) = MirValueId::new(format!("expr:{}", scrutinee.0)) else {
+                continue;
+            };
+            let Some(mir_block_id) = ordinary_map_owned_get_mir_block_id(cfg_receipt, cfg_block_id)
+            else {
+                continue;
+            };
+            let Some(mir_block) = function.blocks.get(&mir_block_id) else {
+                continue;
+            };
+            let direct_switch = function
+                .values
+                .get(&scrutinee_value)
+                .is_some_and(|value| value.ty == result_ty)
+                && matches!(
+                    &mir_block.terminator,
+                    MirTerminator::SwitchMove { scrutinee, .. }
+                        if scrutinee == &scrutinee_value
+                );
+            let direct_get_result = direct_switch
+                && actions
+                    .iter()
+                    .filter(|action| {
+                        action.kind == Action::GetString
+                            && action.result_type.as_ref() == Some(&result_ty)
+                    })
+                    .any(|action| {
+                        let Some(get_result) = action.result.as_ref() else {
+                            return false;
+                        };
+                        let Some(attempt) = cfg_receipt.attempts.iter().find(|attempt| {
+                            attempt.kind == Attempt::GetString && attempt.point == action.point
+                        }) else {
+                            return false;
+                        };
+                        let Some(local) = attempt.result_local.as_ref() else {
+                            return false;
+                        };
+                        let Ok(binding) = MirValueId::new(format!("local:{}", local.0 .0)) else {
+                            return false;
+                        };
+                        let binds_getter_result = mir_block
+                            .instructions
                             .iter()
-                            .filter(|action| {
-                                action.kind == Action::GetString
-                                    && action.result_type.as_ref() == Some(&result_ty)
+                            .filter(|instruction| {
+                                matches!(
+                                    &instruction.kind,
+                                    MirInstructionKind::Move { result, source }
+                                        if result == &binding && source == get_result
+                                )
                             })
-                            .any(|action| {
-                                let Some(get_result) = action.result.as_ref() else {
-                                    return false;
-                                };
-                                let Some(attempt) = cfg_receipt.attempts.iter().find(|attempt| {
-                                    attempt.kind == Attempt::GetString
-                                        && attempt.point == action.point
-                                }) else {
-                                    return false;
-                                };
-                                let Some(local) = attempt.result_local.as_ref() else {
-                                    return false;
-                                };
-                                let Ok(binding) = MirValueId::new(format!("local:{}", local.0 .0))
-                                else {
-                                    return false;
-                                };
-                                let binds_getter_result = entry
-                                    .instructions
-                                    .iter()
-                                    .filter(|instruction| {
-                                        matches!(
-                                            &instruction.kind,
-                                            MirInstructionKind::Move { result, source }
-                                                if result == &binding && source == get_result
-                                        )
-                                    })
-                                    .count()
-                                    == 1;
-                                let moves_binding_to_scrutinee = entry
-                                    .instructions
-                                    .iter()
-                                    .filter(|instruction| {
-                                        matches!(
-                                            &instruction.kind,
-                                            MirInstructionKind::Move { result, source }
-                                                if result == &scrutinee_value && source == &binding
-                                        )
-                                    })
-                                    .count()
-                                    == 1;
-                                binds_getter_result && moves_binding_to_scrutinee
-                            });
-                    if direct_get_result {
-                        errors.push(malformed(
-                            "is missing the Checker receipt for a direct GetString-to-SwitchMove match",
-                        ));
-                    }
-                }
+                            .count()
+                            == 1;
+                        let moves_binding_to_scrutinee = mir_block
+                            .instructions
+                            .iter()
+                            .filter(|instruction| {
+                                matches!(
+                                    &instruction.kind,
+                                    MirInstructionKind::Move { result, source }
+                                        if result == &scrutinee_value && source == &binding
+                                )
+                            })
+                            .count()
+                            == 1;
+                        binds_getter_result && moves_binding_to_scrutinee
+                    });
+            if direct_get_result {
+                errors.push(malformed(
+                    "is missing the Checker receipt for a direct GetString-to-SwitchMove match",
+                ));
             }
         }
         return errors;
@@ -15454,7 +16772,10 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
     let receipt = &receipts[0];
     if cfg_receipt.owner != function.owner
         || receipt.profile_version != crate::core::OrdinaryMapOwnedGetI32StringV1ProfileVersion::V1
-        || cfg_receipt.profile_version != Profile::EntryClosedTailV1
+        || !matches!(
+            cfg_receipt.profile_version,
+            Profile::EntryClosedTailV1 | Profile::ResultBranchV3
+        )
         || cfg_receipt.entry != cfg_receipt.map_operation_block
         || receipt.ok_arm == receipt.err_arm
         || receipt.ok_binding == receipt.err_binding
@@ -15497,47 +16818,89 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
         ));
     }
 
-    let Some(entry_cfg_block) = cfg_receipt.reachable_blocks.get(&cfg_receipt.entry) else {
-        errors.push(malformed("has no source entry block"));
+    let mut matching_dispatch =
+        cfg_receipt
+            .reachable_blocks
+            .iter()
+            .filter_map(|(block_id, block)| match &block.terminator {
+                CfgTerminator::Match { scrutinee, arms }
+                    if scrutinee == &receipt.scrutinee
+                        && arms.len() == 2
+                        && (cfg_receipt.profile_version != Profile::EntryClosedTailV1
+                            || *block_id == cfg_receipt.entry) =>
+                {
+                    Some((block_id, block, arms))
+                }
+                _ => None,
+            });
+    let Some((dispatch_cfg_block_id, dispatch_cfg_block, source_arm_edges)) =
+        matching_dispatch.next()
+    else {
+        errors.push(malformed(
+            "does not bind the direct exhaustive Result match at the owner dispatch block",
+        ));
         return errors;
     };
-    let (source_scrutinee, source_arm_edges) = match &entry_cfg_block.terminator {
-        CfgTerminator::Match { scrutinee, arms } if arms.len() == 2 => (scrutinee, arms),
-        _ => {
-            errors.push(malformed(
-                "does not bind the direct exhaustive Result match at the owner entry",
-            ));
-            return errors;
-        }
-    };
-    if source_scrutinee != &receipt.scrutinee {
-        errors.push(malformed(
-            "scrutinee identity disagrees with the Checker CFG Match",
-        ));
+    if matching_dispatch.next().is_some() {
+        errors.push(malformed("ambiguous source Result match dispatch block"));
+        return errors;
     }
-    let point_rank = entry_cfg_block
+    let source_scrutinee = &receipt.scrutinee;
+    let _ = source_scrutinee;
+    let point_rank = dispatch_cfg_block
         .points
         .iter()
         .enumerate()
         .map(|(rank, (point, _))| (point.clone(), rank))
         .collect::<BTreeMap<_, _>>();
-    let scrutinee_rank = entry_cfg_block
+    let mut reachable_after_dispatch = BTreeSet::new();
+    let mut pending_after_dispatch = dispatch_cfg_block
+        .terminator
+        .outgoing_edges()
+        .into_iter()
+        .filter_map(|edge_id| cfg_receipt.reachable_edges.get(edge_id))
+        .map(|edge| edge.to.clone())
+        .collect::<Vec<_>>();
+    while let Some(block_id) = pending_after_dispatch.pop() {
+        if block_id == *dispatch_cfg_block_id || !reachable_after_dispatch.insert(block_id.clone())
+        {
+            continue;
+        }
+        if let Some(block) = cfg_receipt.reachable_blocks.get(&block_id) {
+            for edge_id in block.terminator.outgoing_edges() {
+                if let Some(edge) = cfg_receipt.reachable_edges.get(edge_id) {
+                    pending_after_dispatch.push(edge.to.clone());
+                }
+            }
+        }
+    }
+    let scrutinee_rank = dispatch_cfg_block
         .points
         .iter()
         .position(|(point, kind)| point == &receipt.scrutinee && *kind == CfgPointKind::Condition);
     if let Some(scrutinee_rank) = scrutinee_rank {
-        if cfg_receipt.action_points.iter().any(|point| {
-            point_rank
-                .get(point)
-                .is_none_or(|rank| *rank >= scrutinee_rank)
-        }) {
+        let disallowed_after_scrutinee = cfg_receipt.action_points.iter().any(|point| {
+            if let Some(rank) = point_rank.get(point) {
+                *rank >= scrutinee_rank
+            } else {
+                reachable_after_dispatch.iter().any(|block_id| {
+                    cfg_receipt
+                        .reachable_blocks
+                        .get(block_id)
+                        .is_some_and(|block| {
+                            block.points.iter().any(|(candidate, _)| candidate == point)
+                        })
+                })
+            }
+        });
+        if disallowed_after_scrutinee {
             errors.push(malformed(
                 "allows a Map action after the result-match scrutinee",
             ));
         }
     } else {
         errors.push(malformed(
-            "scrutinee is absent from the source entry point sequence",
+            "scrutinee is absent from the source dispatch point sequence",
         ));
     }
     let created_roots = actions
@@ -15549,19 +16912,43 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
             )
         })
         .collect::<Vec<_>>();
-    if created_roots.is_empty()
-        || created_roots.iter().any(|created| {
-            actions
+    let drop_actions = actions
+        .iter()
+        .filter(|action| action.kind == Action::Drop)
+        .collect::<Vec<_>>();
+    let created_root_names = created_roots
+        .iter()
+        .map(|created| created.root.as_str())
+        .collect::<BTreeSet<_>>();
+    let drop_coverage_valid = if cfg_receipt.profile_version == Profile::EntryClosedTailV1 {
+        created_roots.iter().all(|created| {
+            drop_actions
                 .iter()
-                .filter(|action| action.kind == Action::Drop && action.root == created.root)
+                .filter(|action| action.root == created.root)
                 .count()
-                != 1
-        })
-        || actions
+                == 1
+        }) && drop_actions.len() == created_roots.len()
+    } else {
+        created_roots.iter().all(|created| {
+            drop_actions
+                .iter()
+                .any(|action| action.root == created.root)
+        }) && drop_actions
             .iter()
-            .filter(|action| action.kind == Action::Drop)
-            .count()
-            != created_roots.len()
+            .all(|action| created_root_names.contains(action.root.as_str()))
+            && cfg_receipt
+                .live_roots_out
+                .get(dispatch_cfg_block_id)
+                .is_some_and(BTreeSet::is_empty)
+            && source_arm_edges.iter().all(|edge_id| {
+                cfg_receipt
+                    .live_roots_on_edge
+                    .get(edge_id)
+                    .is_some_and(BTreeSet::is_empty)
+            })
+    };
+    if created_roots.is_empty()
+        || !drop_coverage_valid
         || cfg_receipt.attempts.iter().any(|attempt| {
             attempt.kind == Attempt::ScopeDrop
                 || (attempt.kind == Attempt::Drop
@@ -15586,7 +16973,7 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
             .reachable_edges
             .values()
             .filter(|edge| {
-                edge.from == cfg_receipt.entry
+                edge.from == *dispatch_cfg_block_id
                     && edge.kind == EdgeKind::MatchArm
                     && edge.source.node == *arm
             })
@@ -15621,20 +17008,57 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
         "{}/cfg:block:match-join",
         receipt.match_node.0
     )));
-    let match_join_contract = cfg_receipt
-        .reachable_blocks
-        .get(&match_join_source)
-        .is_some_and(|block| {
-            block.points.iter().any(|(point, kind)| {
-                point == &receipt.match_node && *kind == CfgPointKind::Expression
-            }) && matches!(
-                &block.terminator,
+    let match_join_contract = {
+        let mut cursor = Some(match_join_source.clone());
+        let mut expected_node = receipt.match_node.clone();
+        let mut seen_joins = BTreeSet::new();
+        let mut settled = false;
+        while let Some(block_id) = cursor.take() {
+            if !seen_joins.insert(block_id.clone()) {
+                break;
+            }
+            let Some(block) = cfg_receipt.reachable_blocks.get(&block_id) else {
+                break;
+            };
+            let Some((source_node, role)) = block_id.0 .0.rsplit_once("/cfg:block:") else {
+                break;
+            };
+            if role != "match-join"
+                || source_node != expected_node.0
+                || block
+                    .points
+                    .iter()
+                    .any(|(point, _)| cfg_receipt.action_points.contains(point))
+                || !block.points.iter().any(|(point, kind)| {
+                    point == &expected_node && *kind == CfgPointKind::Expression
+                })
+            {
+                break;
+            }
+            match &block.terminator {
                 CfgTerminator::Return {
-                    value: Some(value),
-                    ..
-                } if value == &receipt.match_node
-            )
-        });
+                    value: Some(value), ..
+                } if value == &expected_node => {
+                    settled = true;
+                    break;
+                }
+                CfgTerminator::Goto { edge }
+                    if cfg_receipt.profile_version == Profile::ResultBranchV3 =>
+                {
+                    if let Some(edge_data) = cfg_receipt.reachable_edges.get(edge) {
+                        if let Some((next_node, "match-join")) =
+                            edge_data.to.0 .0.rsplit_once("/cfg:block:")
+                        {
+                            expected_node = NodeId(next_node.to_string());
+                            cursor = Some(edge_data.to.clone());
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        settled
+    };
     if !match_join_contract {
         errors.push(malformed("has no source match join block"));
     }
@@ -15724,9 +17148,11 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
         return errors;
     }
     let (switch_block_id, switch_arms) = switches[0];
-    if switch_block_id != &function.entry || switch_arms.len() != 2 {
+    let expected_switch_block =
+        ordinary_map_owned_get_mir_block_id(cfg_receipt, dispatch_cfg_block_id);
+    if Some(switch_block_id) != expected_switch_block.as_ref() || switch_arms.len() != 2 {
         errors.push(malformed(
-            "SwitchMove is outside the owner entry or does not have two arms",
+            "SwitchMove is outside the owner dispatch block or does not have two arms",
         ));
         return errors;
     }
@@ -15938,12 +17364,66 @@ fn validate_ordinary_map_owned_get_string_match_receipts(
             "Err arm does not bind and settle the exact i32 payload as its scalar result",
         ));
     }
-    let join_contract = function.blocks.get(&expected_join).is_some_and(|block| {
-        block.parameters.len() == 1
-            && block.parameters[0].value == match_value
-            && function.values.get(&match_value).is_some_and(|value| value.ty == i32_ty)
-            && matches!(&block.terminator, MirTerminator::Return { value: Some(value) } if value == &match_value)
-    });
+    let join_contract = {
+        let mut cur_block_id = Some(expected_join.clone());
+        let mut cur_value = match_value.clone();
+        let mut seen_blocks = BTreeSet::new();
+        let mut returned = false;
+        while let Some(block_id) = cur_block_id.take() {
+            if !seen_blocks.insert(block_id.clone()) {
+                break;
+            }
+            let Some(block) = function.blocks.get(&block_id) else {
+                break;
+            };
+            if block.parameters.len() != 1
+                || block.parameters[0].value != cur_value
+                || !function
+                    .values
+                    .get(&cur_value)
+                    .is_some_and(|value| value.ty == i32_ty)
+            {
+                break;
+            }
+            match (&block.instructions[..], &block.terminator) {
+                ([], MirTerminator::Return { value: Some(value) }) if value == &cur_value => {
+                    returned = true;
+                    break;
+                }
+                (
+                    [instruction],
+                    MirTerminator::Goto {
+                        target, arguments, ..
+                    },
+                ) if cfg_receipt.profile_version == Profile::ResultBranchV3
+                    && target.as_str().starts_with("bb:match.join:")
+                    && arguments.len() == 1 =>
+                {
+                    if let MirInstructionKind::Move { result, source } = &instruction.kind {
+                        if source == &cur_value
+                            && result == &arguments[0]
+                            && function
+                                .values
+                                .get(result)
+                                .is_some_and(|value| value.ty == i32_ty)
+                        {
+                            if let Some(next_param) = function
+                                .blocks
+                                .get(target)
+                                .and_then(|next| next.parameters.first())
+                                .filter(|_| function.blocks[target].parameters.len() == 1)
+                            {
+                                cur_value = next_param.value.clone();
+                                cur_block_id = Some(target.clone());
+                            }
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        returned
+    };
     if !join_contract {
         errors.push(malformed(
             "match join does not return the exact scalar arm result",
@@ -19771,6 +21251,862 @@ pub(crate) fn validate_variant_move_payloads(
     errors
 }
 
+/// Return all `ResultBranchV1`-modeled Result branches carried by a CFG flow
+/// proof (`ResultBranchV1` linear spines and the Result-wrapped
+/// `BranchLocalPersistentSetDiamondV1`).
+pub(crate) fn ordinary_map_owned_any_v2_flow_result_branches(
+    flow: &crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt,
+) -> Option<&[crate::core::OrdinaryMapOwnedAnyV2ResultBranchReceipt]> {
+    match &flow.proof {
+        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(branches) => {
+            Some(branches.as_slice())
+        }
+        crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::BranchLocalPersistentSetDiamondV1(
+            proof,
+        ) if !proof.result_branches.is_empty() => Some(proof.result_branches.as_slice()),
+        _ => None,
+    }
+}
+
+/// Look up the unique `ResultBranchV1` receipt entry matching a lowered `New` or
+/// `Set` instruction's `expr:<operation_point>` result value.
+pub(crate) fn ordinary_map_owned_any_v2_result_branch_v1_for_op<'a>(
+    function: &'a MirFunction,
+    kind: crate::core::OrdinaryMapOwnedAnyV2ActionKind,
+    result: &MirValueId,
+) -> Option<&'a crate::core::OrdinaryMapOwnedAnyV2ResultBranchReceipt> {
+    let flow = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()?
+        .flow
+        .as_ref()?;
+    let branches = ordinary_map_owned_any_v2_flow_result_branches(flow)?;
+    let mut matching = branches.iter().filter(|branch| {
+        branch.kind == kind
+            && MirValueId::new(format!("expr:{}", branch.operation_point.0))
+                .ok()
+                .as_ref()
+                == Some(result)
+    });
+    let branch = matching.next()?;
+    matching.next().is_none().then_some(branch)
+}
+
+/// Verify the function's Checker-owned `ResultBranchV1` receipt and every
+/// synthetic `Result<owner-v2-root, i32>` TypeDesc against the MIR catalog.
+pub(crate) fn validate_ordinary_map_owned_any_v2_result_branch_v1_types(
+    type_catalog: &types::MirTypeCatalog,
+    function: &MirFunction,
+) -> Result<(), String> {
+    let cfg = function
+        .ownership
+        .ordinary_map_owned_any_v2_cfg_receipt()
+        .ok_or_else(|| {
+            "ordinary Map/Any owner-v2 ResultBranchV1 has no Checker CFG receipt".to_string()
+        })?;
+    if cfg.owner != function.owner {
+        return Err(
+            "ordinary Map/Any owner-v2 ResultBranchV1 receipt belongs to another callable".into(),
+        );
+    }
+    let Some(branches) = cfg
+        .flow
+        .as_ref()
+        .and_then(ordinary_map_owned_any_v2_flow_result_branches)
+    else {
+        return Err("ordinary Map/Any owner-v2 CFG receipt is not ResultBranchV1".into());
+    };
+    if branches.is_empty() {
+        return Err("ordinary Map/Any owner-v2 ResultBranchV1 receipt has no branches".into());
+    }
+    if let Some(error) = validate_ordinary_map_owned_any_v2_cfg_flow_receipt(function).first() {
+        return Err(error.message.clone());
+    }
+    let result_type = types::ordinary_map_owned_any_v2_root_result_type_id();
+    for branch in branches {
+        type_catalog
+            .validate_ordinary_map_owned_any_v2_root_result(&result_type, &branch.result_type)?;
+    }
+    Ok(())
+}
+
+pub(crate) struct LinearResultBranchV1Spines<'a> {
+    pub(crate) ok_instructions: Vec<&'a MirInstruction>,
+    pub(crate) err_arms: Vec<(
+        &'a crate::core::ownership::OrdinaryMapOwnedAnyV2ResultBranchReceipt,
+        usize,
+        Vec<&'a MirInstruction>,
+    )>,
+}
+
+/// Walks a single straight-line MIR block or a validated linear
+/// `ResultBranchV1` `Ok` spine, proving that all `Err` arms only perform safe
+/// cleanup/scalar exit operations without rejoining non-tail `Ok` blocks and
+/// that no unreachable or uninspected blocks remain.
+pub(crate) fn linear_result_branch_v1_ok_spine<'a>(
+    function: &'a MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<Vec<&'a MirInstruction>, String> {
+    Ok(linear_result_branch_v1_spines(function, type_catalog)?.ok_instructions)
+}
+
+pub(crate) fn linear_result_branch_v1_spines<'a>(
+    function: &'a MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<LinearResultBranchV1Spines<'a>, String> {
+    let entry_block = function
+        .blocks
+        .get(&function.entry)
+        .ok_or_else(|| "MIR function has no entry block".to_string())?;
+    let cfg_receipt = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref();
+    let result_branches = cfg_receipt
+        .and_then(|receipt| receipt.flow.as_ref())
+        .and_then(|flow| match &flow.proof {
+            crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(branches) => {
+                Some(branches.as_slice())
+            }
+            _ => None,
+        });
+
+    let Some(branches) = result_branches else {
+        if cfg_receipt.is_some_and(|receipt| receipt.flow.is_some()) || function.blocks.len() != 1 {
+            return Err(
+                "MIR function is neither one straight-line block nor a linear ResultBranchV1 spine"
+                    .into(),
+            );
+        }
+        if !matches!(&entry_block.terminator, MirTerminator::Return { .. }) {
+            return Err("straight-line MIR entry block must terminate in Return".into());
+        }
+        return Ok(LinearResultBranchV1Spines {
+            ok_instructions: entry_block.instructions.iter().collect(),
+            err_arms: Vec::new(),
+        });
+    };
+
+    if branches.is_empty() {
+        return Err("ResultBranchV1 flow receipt has no branches".into());
+    }
+    validate_ordinary_map_owned_any_v2_result_branch_v1_types(type_catalog, function)?;
+
+    let mut ok_spine_blocks = BTreeSet::new();
+    let mut scalar_tail_blocks = BTreeSet::new();
+    let mut ok_spine_order = BTreeMap::new();
+    let mut ok_spine_sequence = Vec::new();
+    let mut ok_instructions = Vec::new();
+    let mut seen_branches = BTreeSet::new();
+    let mut err_roots = Vec::new();
+    let mut entered_scalar_tail = false;
+    let mut current = function.entry.clone();
+
+    let scalar_tail_endpoints = match (
+        cfg_receipt.and_then(|receipt| receipt.flow.as_ref()),
+        cfg_receipt.and_then(|receipt| receipt.settled_scalar_tail()),
+    ) {
+        (Some(flow), Some(tail)) => {
+            let mapping = map_ordinary_map_owned_any_v2_source_blocks_to_mir(function, flow)?;
+            let split_mir = mapping
+                .get(&tail.split_block)
+                .cloned()
+                .ok_or_else(|| "ResultBranchV1 scalar tail split block is absent".to_string())?;
+            let return_mir = mapping
+                .get(&tail.return_block)
+                .cloned()
+                .ok_or_else(|| "ResultBranchV1 scalar tail return block is absent".to_string())?;
+            Some((split_mir, return_mir))
+        }
+        (Some(flow), None)
+            if cfg_receipt.is_some_and(|receipt| receipt.dynamic_keys_get_receipts.len() == 1) =>
+        {
+            let dynamic_keys = &cfg_receipt
+                .expect("checked len == 1")
+                .dynamic_keys_get_receipts[0];
+            let first_selector = dynamic_keys
+                .outcome_and_nodes
+                .first()
+                .ok_or_else(|| "DynamicKeysGet outcome_and_nodes is empty".to_string())?;
+            let last_selector = dynamic_keys
+                .outcome_and_nodes
+                .last()
+                .ok_or_else(|| "DynamicKeysGet outcome_and_nodes is empty".to_string())?;
+            let first_cond = MirValueId::new(format!("expr:{}", first_selector.left.0))
+                .map_err(|error| error.to_string())?;
+            let split_mir = function
+                .blocks
+                .iter()
+                .find_map(|(block_id, block)| {
+                    matches!(
+                        &block.terminator,
+                        MirTerminator::Branch { condition, .. } if condition == &first_cond
+                    )
+                    .then(|| block_id.clone())
+                })
+                .ok_or_else(|| "DynamicKeysGet scalar tail split block is absent".to_string())?;
+            let mapping = map_ordinary_map_owned_any_v2_source_blocks_to_mir(function, flow)?;
+            let final_join_source = crate::core::cfg::BasicBlockId(NodeId(format!(
+                "{}/cfg:block:if-join",
+                last_selector.expression.0
+            )));
+            let return_mir = mapping
+                .get(&final_join_source)
+                .cloned()
+                .ok_or_else(|| "DynamicKeysGet scalar tail return block is absent".to_string())?;
+            Some((split_mir, return_mir))
+        }
+        _ => None,
+    };
+
+    loop {
+        if !ok_spine_blocks.insert(current.clone()) {
+            return Err("ResultBranchV1 Ok spine contains a cycle".into());
+        }
+        let block = function
+            .blocks
+            .get(&current)
+            .ok_or_else(|| format!("ResultBranchV1 Ok spine block '{}' is missing", current.0))?;
+        ok_spine_order.insert(current.clone(), ok_spine_sequence.len());
+        ok_spine_sequence.push(block);
+        ok_instructions.extend(block.instructions.iter());
+        match &block.terminator {
+            MirTerminator::Return { .. } => break,
+            MirTerminator::Goto { target, .. } => {
+                current = target.clone();
+            }
+            MirTerminator::Branch {
+                then_target,
+                else_target,
+                ..
+            } if !entered_scalar_tail
+                && scalar_tail_endpoints
+                    .as_ref()
+                    .is_some_and(|(split_mir, _)| split_mir == &current) =>
+            {
+                let Some((_, return_mir)) = scalar_tail_endpoints.as_ref() else {
+                    unreachable!("checked is_some_and above");
+                };
+                entered_scalar_tail = true;
+                let mut queue =
+                    std::collections::VecDeque::from([then_target.clone(), else_target.clone()]);
+                while let Some(tail_block_id) = queue.pop_front() {
+                    if ok_spine_blocks.contains(&tail_block_id)
+                        || !scalar_tail_blocks.insert(tail_block_id.clone())
+                    {
+                        continue;
+                    }
+                    let tail_block = function.blocks.get(&tail_block_id).ok_or_else(|| {
+                        format!(
+                            "ResultBranchV1 scalar-tail block '{}' is missing",
+                            tail_block_id.0
+                        )
+                    })?;
+                    if &tail_block_id == return_mir {
+                        continue;
+                    }
+                    match &tail_block.terminator {
+                        MirTerminator::Branch {
+                            then_target,
+                            else_target,
+                            ..
+                        } => {
+                            queue.push_back(then_target.clone());
+                            queue.push_back(else_target.clone());
+                        }
+                        MirTerminator::Goto { target, .. } => {
+                            queue.push_back(target.clone());
+                        }
+                        _ => {
+                            return Err(
+                                "ResultBranchV1 scalar tail contains an unsupported terminator"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+                if !scalar_tail_blocks.contains(return_mir) {
+                    return Err(
+                        "ResultBranchV1 scalar-tail return block is unreachable from split".into(),
+                    );
+                }
+                let MirTerminator::Goto { target, .. } = &function.blocks[return_mir].terminator
+                else {
+                    return Err(
+                        "ResultBranchV1 scalar-tail return block must exit to its match-join"
+                            .into(),
+                    );
+                };
+                current = target.clone();
+            }
+            MirTerminator::SwitchMove { scrutinee, arms } if !entered_scalar_tail => {
+                let branch = branches
+                    .iter()
+                    .find(|branch| {
+                        MirValueId::new(format!("expr:{}", branch.operation_point.0))
+                            .is_ok_and(|expected| expected == *scrutinee)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "ResultBranchV1 SwitchMove scrutinee '{}' has no matching Checker branch receipt",
+                            scrutinee.0
+                        )
+                    })?;
+                if !seen_branches.insert(branch.operation_point.clone()) {
+                    return Err(format!(
+                        "ResultBranchV1 branch '{}' appears more than once on the Ok spine",
+                        branch.operation_point.0
+                    ));
+                }
+                if arms.len() != 2 {
+                    return Err("ResultBranchV1 SwitchMove must have exactly two arms".into());
+                }
+                let ok_arm = arms
+                    .iter()
+                    .find(|arm| {
+                        matches!(&arm.case, MirSwitchCase::Variant(variant) if variant == &branch.ok_variant)
+                    })
+                    .ok_or_else(|| "ResultBranchV1 SwitchMove has no Ok arm".to_string())?;
+                let err_arm = arms
+                    .iter()
+                    .find(|arm| {
+                        matches!(&arm.case, MirSwitchCase::Variant(variant) if variant == &branch.err_variant)
+                            || matches!(&arm.case, MirSwitchCase::Default)
+                    })
+                    .ok_or_else(|| "ResultBranchV1 SwitchMove has no Err arm".to_string())?;
+                if ok_arm.target == err_arm.target {
+                    return Err("ResultBranchV1 Ok and Err arms must target distinct blocks".into());
+                }
+                err_roots.push((branch, ok_instructions.len(), err_arm.target.clone()));
+                current = ok_arm.target.clone();
+            }
+            _ => {
+                return Err(
+                    "ResultBranchV1 Ok spine contains an unsupported block terminator".into(),
+                );
+            }
+        }
+    }
+
+    let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    let is_pure_i32_clone = |kind: &MirInstructionKind| {
+        matches!(
+            kind,
+            MirInstructionKind::Clone { result, source }
+                if function.values.get(result).is_some_and(|value| value.ty == i32_type)
+                    && function.values.get(source).is_some_and(|value| value.ty == i32_type)
+        )
+    };
+
+    let is_pure_join_tail = |join_start: usize| {
+        ok_spine_sequence[join_start..].iter().all(|block| {
+            matches!(
+                &block.terminator,
+                MirTerminator::Goto { .. } | MirTerminator::Return { .. }
+            ) && block.instructions.iter().all(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const { .. }
+                        | MirInstructionKind::Load { .. }
+                        | MirInstructionKind::Move { .. }
+                        | MirInstructionKind::Copy { .. }
+                        | MirInstructionKind::Unary { .. }
+                        | MirInstructionKind::Binary { .. }
+                        | MirInstructionKind::Construct { .. }
+                        | MirInstructionKind::ConstructVariant { .. }
+                        | MirInstructionKind::ConstructVariantMove { .. }
+                ) || matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Drop { value }
+                        if function
+                            .values
+                            .get(value)
+                            .is_some_and(|val| type_catalog.validate_owned_string(&val.ty).is_ok())
+                ) || is_pure_i32_clone(&instruction.kind)
+            })
+        })
+    };
+
+    let mut all_err_blocks = BTreeSet::new();
+    let mut err_arms = Vec::with_capacity(err_roots.len());
+    for (branch, switch_offset, err_root) in err_roots {
+        let mut chain_visited = BTreeSet::new();
+        let mut err_current = err_root;
+        let mut err_arm_instructions = Vec::new();
+        loop {
+            if let Some(&join_idx) = ok_spine_order.get(&err_current) {
+                if !is_pure_join_tail(join_idx) {
+                    return Err("ResultBranchV1 Err arm rejoins non-tail Ok spine block".into());
+                }
+                break;
+            }
+            if !chain_visited.insert(err_current.clone()) {
+                return Err("ResultBranchV1 Err arm contains a cycle".into());
+            }
+            if !all_err_blocks.insert(err_current.clone()) {
+                return Err("ResultBranchV1 Err arms share a non-tail cleanup block".into());
+            }
+            let err_block = function.blocks.get(&err_current).ok_or_else(|| {
+                format!("ResultBranchV1 Err block '{}' is missing", err_current.0)
+            })?;
+            for instruction in &err_block.instructions {
+                if !matches!(
+                    &instruction.kind,
+                    MirInstructionKind::Const { .. }
+                        | MirInstructionKind::Load { .. }
+                        | MirInstructionKind::Move { .. }
+                        | MirInstructionKind::Copy { .. }
+                        | MirInstructionKind::Unary { .. }
+                        | MirInstructionKind::Binary { .. }
+                        | MirInstructionKind::Drop { .. }
+                        | MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { .. }
+                        | MirInstructionKind::Construct { .. }
+                        | MirInstructionKind::ConstructVariant { .. }
+                        | MirInstructionKind::ConstructVariantMove { .. }
+                ) && !is_pure_i32_clone(&instruction.kind)
+                {
+                    return Err(format!(
+                        "ResultBranchV1 Err arm contains unauthorized instruction '{}'",
+                        instruction.id
+                    ));
+                }
+                err_arm_instructions.push(instruction);
+            }
+            match &err_block.terminator {
+                MirTerminator::Return { .. } => break,
+                MirTerminator::Goto { target, .. } => {
+                    err_current = target.clone();
+                }
+                _ => {
+                    return Err("ResultBranchV1 Err arm has an unsupported terminator".into());
+                }
+            }
+        }
+        err_arms.push((branch, switch_offset, err_arm_instructions));
+    }
+
+    if ok_spine_blocks
+        .iter()
+        .any(|block| scalar_tail_blocks.contains(block) || all_err_blocks.contains(block))
+        || scalar_tail_blocks
+            .iter()
+            .any(|block| all_err_blocks.contains(block))
+        || ok_spine_blocks.len() + scalar_tail_blocks.len() + all_err_blocks.len()
+            != function.blocks.len()
+    {
+        return Err("ResultBranchV1 function contains uninspected blocks outside the spine and Err cleanup arms".into());
+    }
+    if seen_branches.len() != branches.len() {
+        return Err(
+            "ResultBranchV1 Ok spine did not traverse all Checker-recorded Result branches".into(),
+        );
+    }
+
+    Ok(LinearResultBranchV1Spines {
+        ok_instructions,
+        err_arms,
+    })
+}
+
+pub(crate) struct PartitionedMirDrops<'f, 'a, T> {
+    pub(crate) spines: LinearResultBranchV1Spines<'f>,
+    pub(crate) ok_drops: Vec<&'a T>,
+    pub(crate) err_drops: Vec<(usize, &'a T)>,
+}
+
+struct DropActionView {
+    instruction_id: MirInstructionId,
+    local_value: MirValueId,
+    raw_local: String,
+    clean: bool,
+}
+
+fn partition_ordinary_map_owned_any_v2_drops_impl<'f, 'a, T>(
+    function: &'f MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+    items: impl IntoIterator<Item = &'a T>,
+    view: impl Fn(&'a T) -> Option<Result<DropActionView, String>>,
+) -> Result<PartitionedMirDrops<'f, 'a, T>, String> {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+
+    let spines = linear_result_branch_v1_spines(function, type_catalog)?;
+    let mut ok_drop_roots = BTreeMap::new();
+    for instruction in &spines.ok_instructions {
+        if let MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } = &instruction.kind {
+            if ok_drop_roots
+                .insert(instruction.id.clone(), root.clone())
+                .is_some()
+            {
+                return Err(
+                    "Ok spine contains duplicate OrdinaryMapOwnedAnyV2Drop instruction id".into(),
+                );
+            }
+        }
+    }
+    let mut err_drop_step_roots = BTreeMap::new();
+    for (step_idx, (_, _, err_instructions)) in spines.err_arms.iter().enumerate() {
+        for instruction in err_instructions {
+            if let MirInstructionKind::OrdinaryMapOwnedAnyV2Drop { root } = &instruction.kind {
+                if err_drop_step_roots
+                    .insert(instruction.id.clone(), (step_idx, root.clone()))
+                    .is_some()
+                {
+                    return Err(
+                        "Err arms contain duplicate OrdinaryMapOwnedAnyV2Drop instruction id"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+
+    let mut seen_ids = BTreeSet::new();
+    let mut ok_drops = Vec::new();
+    let mut err_drops = Vec::new();
+    for item in items {
+        let Some(parsed) = view(item) else {
+            continue;
+        };
+        let parsed = parsed?;
+        if !parsed.clean || !seen_ids.insert(parsed.instruction_id.clone()) {
+            return Err("OrdinaryMapOwnedAnyV2 Drop action is impure or duplicated".into());
+        }
+        if ok_drop_roots.get(&parsed.instruction_id) == Some(&parsed.local_value) {
+            ok_drops.push(item);
+        } else if let Some((step_idx, expected_root)) =
+            err_drop_step_roots.get(&parsed.instruction_id)
+        {
+            if expected_root != &parsed.local_value {
+                return Err(
+                    "Err-arm OrdinaryMapOwnedAnyV2Drop root local disagrees with action".into(),
+                );
+            }
+            let matching_mir = function
+                .ownership
+                .checker_ordinary_map_owned_any_v2
+                .iter()
+                .filter(|mir_action| {
+                    mir_action.profile_version == ProfileVersion::V2
+                        && mir_action.kind == ActionKind::Drop
+                        && mir_action.instruction == parsed.instruction_id
+                        && mir_action.local == parsed.local_value
+                        && mir_action.root
+                            == format!("ordinary-map-owned-any-v2:{}", parsed.raw_local)
+                })
+                .count();
+            if matching_mir != 1 {
+                return Err(
+                    "Err-arm OrdinaryMapOwnedAnyV2 Drop lacks unique projected MIR action".into(),
+                );
+            }
+            err_drops.push((*step_idx, item));
+        } else {
+            return Err("OrdinaryMapOwnedAnyV2 Drop action is outside validated Ok spine and Err cleanup arms".into());
+        }
+    }
+
+    if err_drops.len() != err_drop_step_roots.len() {
+        return Err("Err arms contain OrdinaryMapOwnedAnyV2Drop instruction without matching Checker Drop action".into());
+    }
+    let total_mir_err_drops = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|mir_action| {
+            mir_action.kind == ActionKind::Drop
+                && err_drop_step_roots.contains_key(&mir_action.instruction)
+        })
+        .count();
+    let total_mir_drops = function
+        .ownership
+        .checker_ordinary_map_owned_any_v2
+        .iter()
+        .filter(|mir_action| mir_action.kind == ActionKind::Drop)
+        .count();
+    let unaccounted_mir_drops = total_mir_drops.saturating_sub(
+        function
+            .ownership
+            .checker_ordinary_map_owned_any_v2
+            .iter()
+            .filter(|mir_action| {
+                mir_action.kind == ActionKind::Drop
+                    && ok_drop_roots.contains_key(&mir_action.instruction)
+            })
+            .count()
+            + total_mir_err_drops,
+    );
+    if total_mir_err_drops != err_drops.len() || unaccounted_mir_drops != 0 {
+        return Err("projected MIR Checker Drop actions disagree with Ok/Err Drop census".into());
+    }
+
+    Ok(PartitionedMirDrops {
+        spines,
+        ok_drops,
+        err_drops,
+    })
+}
+
+pub(crate) fn partition_ordinary_map_owned_any_v2_cfg_drops<'f, 'a>(
+    function: &'f MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+    actions: &'a [crate::core::OrdinaryMapOwnedAnyV2Action],
+) -> Result<PartitionedMirDrops<'f, 'a, crate::core::OrdinaryMapOwnedAnyV2Action>, String> {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    partition_ordinary_map_owned_any_v2_drops_impl(
+        function,
+        type_catalog,
+        actions.iter(),
+        |action| {
+            if action.kind != ActionKind::Drop {
+                return None;
+            }
+            Some((|| {
+                let local_value = MirValueId::new(format!("local:{}", action.local.0 .0))
+                    .map_err(|error| error.to_string())?;
+                let instruction_id = MirInstructionId::new(format!(
+                    "inst:ordinary_map_owned_any_v2_drop:{local_value}:{}",
+                    action.point.0
+                ))
+                .map_err(|error| error.to_string())?;
+                let clean = action.profile_version == ProfileVersion::V2
+                    && action.root.0 .0
+                        == format!("ordinary-map-owned-any-v2:{}", action.local.0 .0)
+                    && action.key.is_none()
+                    && action.key_type.is_none()
+                    && action.value.is_none()
+                    && action.value_type.is_none()
+                    && !action.payload_clone
+                    && action.source_local.is_none()
+                    && action.source.is_none()
+                    && action.source_node.is_none()
+                    && action.source_type.is_none()
+                    && action.result_local.is_none()
+                    && action.result_type.is_none();
+                Ok(DropActionView {
+                    instruction_id,
+                    local_value,
+                    raw_local: action.local.0 .0.clone(),
+                    clean,
+                })
+            })())
+        },
+    )
+}
+
+pub(super) fn partition_ordinary_map_owned_any_v2_mir_drops<'f>(
+    function: &'f MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<PartitionedMirDrops<'f, 'f, MirCheckerOrdinaryMapOwnedAnyV2Action>, String> {
+    use crate::core::OrdinaryMapOwnedAnyV2ActionKind as ActionKind;
+    use crate::core::OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion;
+    partition_ordinary_map_owned_any_v2_drops_impl(
+        function,
+        type_catalog,
+        function.ownership.checker_ordinary_map_owned_any_v2.iter(),
+        |mir_action| {
+            if mir_action.kind != ActionKind::Drop {
+                return None;
+            }
+            Some((|| {
+                let raw_local = mir_action
+                    .local
+                    .0
+                    .strip_prefix("local:")
+                    .ok_or_else(|| "MIR Drop local id lacks 'local:' prefix".to_string())?
+                    .to_string();
+                let expected_id = MirInstructionId::new(format!(
+                    "inst:ordinary_map_owned_any_v2_drop:{}:{}",
+                    mir_action.local, mir_action.point.0
+                ))
+                .map_err(|error| error.to_string())?;
+                let clean = mir_action.profile_version == ProfileVersion::V2
+                    && mir_action.instruction == expected_id
+                    && mir_action.root == format!("ordinary-map-owned-any-v2:{raw_local}")
+                    && mir_action.result.is_none()
+                    && mir_action.key_node.is_none()
+                    && mir_action.key.is_none()
+                    && mir_action.key_type.is_none()
+                    && mir_action.key_local.is_none()
+                    && mir_action.key_local_mutable.is_none()
+                    && mir_action.key_provenance.is_none()
+                    && mir_action.key_static_digest.is_none()
+                    && mir_action.value.is_none()
+                    && mir_action.value_type.is_none()
+                    && !mir_action.payload_clone
+                    && mir_action.source_local.is_none()
+                    && mir_action.source.is_none()
+                    && mir_action.source_node.is_none()
+                    && mir_action.source_type.is_none()
+                    && mir_action.result_source_type.is_none()
+                    && mir_action.result_local.is_none();
+                Ok(DropActionView {
+                    instruction_id: mir_action.instruction.clone(),
+                    local_value: mir_action.local.clone(),
+                    raw_local,
+                    clean,
+                })
+            })())
+        },
+    )
+}
+
+pub(crate) fn validate_ordinary_map_owned_any_v2_mir_err_drops_match_prior_roots(
+    function: &MirFunction,
+    spines: &LinearResultBranchV1Spines<'_>,
+    ordered_roots: &[(&crate::core::NodeId, &str)],
+    err_drops: &[(usize, &str)],
+) -> Result<(), String> {
+    if spines.err_arms.is_empty() {
+        return if err_drops.is_empty() {
+            Ok(())
+        } else {
+            Err("straight-line MIR function must not carry Err-arm Drop actions".into())
+        };
+    }
+
+    let ok_positions = spines
+        .ok_instructions
+        .iter()
+        .enumerate()
+        .map(|(idx, inst)| (inst.id.clone(), idx))
+        .collect::<BTreeMap<_, _>>();
+    let mut root_live_offsets = Vec::with_capacity(ordered_roots.len());
+    for (op_point, raw_local) in ordered_roots {
+        let local_value =
+            MirValueId::new(format!("local:{raw_local}")).map_err(|error| error.to_string())?;
+        let live_offset = if let Some((_, switch_offset, _)) = spines
+            .err_arms
+            .iter()
+            .find(|(branch, _, _)| branch.operation_point == **op_point)
+        {
+            *switch_offset
+        } else {
+            let matching_mir = function
+                .ownership
+                .checker_ordinary_map_owned_any_v2
+                .iter()
+                .filter(|mir_action| {
+                    mir_action.point == **op_point
+                        && mir_action.local == local_value
+                        && mir_action.kind != crate::core::OrdinaryMapOwnedAnyV2ActionKind::Drop
+                })
+                .collect::<Vec<_>>();
+            let [mir_action] = matching_mir.as_slice() else {
+                return Err("Ordered root operation lacks one unique Ok-spine MIR action".into());
+            };
+            if let Some(pos) = ok_positions.get(&mir_action.instruction).copied() {
+                pos
+            } else if mir_action.kind == crate::core::OrdinaryMapOwnedAnyV2ActionKind::Clone {
+                spines
+                    .ok_instructions
+                    .iter()
+                    .position(|inst| {
+                        matches!(
+                            &inst.kind,
+                            MirInstructionKind::Clone { result, .. } if result == &local_value
+                        ) && inst.id.0.ends_with(&format!(":{}", op_point.0))
+                    })
+                    .ok_or_else(|| {
+                        "Ordered Clone operation MIR instruction is absent from Ok spine"
+                            .to_string()
+                    })?
+            } else {
+                return Err(
+                    "Ordered root operation MIR instruction is absent from Ok spine".to_string(),
+                );
+            }
+        };
+        let ok_drop_offset = ok_positions
+            .iter()
+            .find(|(id, _)| {
+                id.0.starts_with(&format!(
+                    "inst:ordinary_map_owned_any_v2_drop:{local_value}:"
+                ))
+            })
+            .map(|(_, pos)| *pos);
+        root_live_offsets.push((live_offset, ok_drop_offset, (*raw_local).to_string()));
+    }
+
+    let mut expected = BTreeSet::new();
+    for (step_idx, (_, switch_offset, _)) in spines.err_arms.iter().enumerate() {
+        for (live_offset, ok_drop_offset, raw_local) in &root_live_offsets {
+            if *live_offset < *switch_offset
+                && ok_drop_offset.is_none_or(|drop_pos| *switch_offset <= drop_pos)
+            {
+                expected.insert((step_idx, raw_local.clone()));
+            }
+        }
+    }
+    let actual = err_drops
+        .iter()
+        .map(|(step_idx, raw_local)| (*step_idx, (*raw_local).to_string()))
+        .collect::<BTreeSet<_>>();
+    if err_drops.len() != expected.len() || actual != expected {
+        return Err(
+            "ResultBranchV1 Err-arm Drops do not match the exact prior live Map roots".into(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_ordinary_map_owned_any_v2_root_binding(
+    function: &MirFunction,
+    instruction_result: &MirValueId,
+) -> Option<MirValueId> {
+    let branches = match function
+        .ownership
+        .checker_ordinary_map_owned_any_v2_cfg_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.flow.as_ref())
+        .map(|flow| &flow.proof)
+    {
+        Some(crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(
+            branches,
+        )) if !branches.is_empty() => branches.as_slice(),
+        _ => return Some(instruction_result.clone()),
+    };
+    let branch = branches.iter().find(|branch| {
+        MirValueId::new(format!("expr:{}", branch.operation_point.0))
+            .is_ok_and(|scrutinee| scrutinee == *instruction_result)
+    })?;
+    let ok_binding = branch.ok_binding.as_ref()?;
+    let expected_local = MirValueId::new(format!("local:{}", ok_binding.0 .0)).ok()?;
+    let ok_arm_block = MirBlockId::new(format!("bb:match.arm:{}", branch.ok_arm.0)).ok()?;
+    let has_switch = function.blocks.values().any(|block| {
+        matches!(
+            &block.terminator,
+            MirTerminator::SwitchMove { scrutinee, arms }
+                if scrutinee == instruction_result
+                    && arms.iter().any(|arm| {
+                        matches!(&arm.case, MirSwitchCase::Variant(variant) if variant == &branch.ok_variant)
+                            && arm.target == ok_arm_block
+                    })
+        )
+    });
+    let ok_param_ok = function.blocks.get(&ok_arm_block).is_some_and(|block| {
+        block.parameters.as_slice()
+            == [MirBlockParameter {
+                value: expected_local.clone(),
+            }]
+    });
+    (has_switch && ok_param_ok).then_some(expected_local)
+}
+
+pub(crate) fn partition_ordinary_map_owned_any_v2_ok_err_drop_roots(
+    function: &MirFunction,
+    type_catalog: &types::MirTypeCatalog,
+) -> Result<(Vec<MirValueId>, usize), String> {
+    let partitioned = partition_ordinary_map_owned_any_v2_mir_drops(function, type_catalog)?;
+    let ok_roots = partitioned
+        .ok_drops
+        .into_iter()
+        .map(|drop| drop.local.clone())
+        .collect();
+    Ok((ok_roots, partitioned.err_drops.len()))
+}
+
 fn instruction_produces_owned_string(
     function: &MirFunction,
     type_catalog: &types::MirTypeCatalog,
@@ -22531,6 +24867,39 @@ impl<'a> MirValidator<'a> {
     }
 }
 
+/// Returns whether `program` references any Map/Any descriptor or ownership action.
+pub(crate) fn mir_program_touches_map_or_any(program: &reference::MirProgram) -> bool {
+    use types::MirTypeKind;
+
+    program.type_catalog().iter().any(|(_, descriptor)| {
+        matches!(
+            descriptor.kind,
+            MirTypeKind::MapRoot
+                | MirTypeKind::MapAnyOwnerV1
+                | MirTypeKind::OrdinaryMapOwnerLifecycleI32StringV1
+                | MirTypeKind::OrdinaryMapOwnedGetI32StringV1
+                | MirTypeKind::OrdinaryMapOwnedAnyV2
+                | MirTypeKind::OrdinaryMapOwnedAnyV2Payload
+                | MirTypeKind::OrdinaryMapOwnedAnyV2Values
+                | MirTypeKind::OrdinaryMapOwnedAnyV2ValuesElement
+                | MirTypeKind::ManagedAnyI32StringV1
+                | MirTypeKind::DynamicAny
+        )
+    }) || program.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+            || function.ownership.has_checker_map_root_actions()
+            || function.ownership.has_checker_map_any_owner_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owner_lifecycle_v1_actions()
+            || function
+                .ownership
+                .has_checker_ordinary_map_owned_get_i32_string_v1_actions()
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]
@@ -22547,9 +24916,23 @@ mod ordinary_map_owned_any_v2_statement_if_mapping_tests {
     use super::*;
 
     fn statement_if_function() -> MirFunction {
-        let tokens = crate::lexer::Lexer::new(include_str!(
-            "../../../tests/fixtures/mir_branch_local_persistent_map_set_diamond_true.mimi"
-        ))
+        let tokens = crate::lexer::Lexer::new(
+            r#"
+func main() -> i32 {
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            if found { } else { }
+            7
+        },
+        Err(status) => { status },
+    }
+}
+"#,
+        )
         .tokenize()
         .expect("statement-if fixture lexes");
         let file = crate::parser::Parser::new(tokens)
@@ -22570,7 +24953,10 @@ mod ordinary_map_owned_any_v2_statement_if_mapping_tests {
     ) -> NodeId {
         flow.reachable_edges
             .values()
-            .find(|edge| edge.from == flow.split && edge.kind == crate::core::cfg::EdgeKind::Then)
+            .find(|edge| {
+                edge.kind == crate::core::cfg::EdgeKind::Then
+                    && edge.source.node.0.ends_with("/control-expression")
+            })
             .expect("statement-if then selector edge")
             .source
             .node
@@ -22581,12 +24967,16 @@ mod ordinary_map_owned_any_v2_statement_if_mapping_tests {
         let tokens = crate::lexer::Lexer::new(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let found = pair.0
-    drop(pair)
-    drop(root)
-    if found { 1 } else { 0 }
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            if found { 1 } else { 0 }
+        },
+        Err(status) => { status },
+    }
 }
 "#,
         )
@@ -22692,7 +25082,8 @@ func main() -> i32 {
                 .expect("statement if uses synthetic control-expression identity")
                 .to_owned(),
         );
-        let join_id = flow.join.clone();
+        let join_id =
+            crate::core::cfg::BasicBlockId(NodeId(format!("{}/cfg:block:if-join", control_node.0)));
         let join = flow
             .reachable_blocks
             .get_mut(&join_id)
@@ -22752,11 +25143,20 @@ mod ordinary_map_owned_any_v2_dynamic_keys_flow_gate_tests {
             .checker_ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
             .expect("ordinary Map/Any V2 CFG receipt");
+        let flow = cfg
+            .flow
+            .as_ref()
+            .expect("DynamicKeysGet ResultBranchV1 CFG flow receipt");
         assert!(
-            cfg.flow.is_none(),
-            "DynamicKeysGet intentionally uses no generic flow receipt"
+            matches!(
+                &flow.proof,
+                crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(
+                    branches
+                ) if branches.len() == 2
+            ),
+            "DynamicKeysGet must carry a two-branch ResultBranchV1 flow proof"
         );
-        assert_eq!(function.blocks.len(), 10);
+        assert_eq!(function.blocks.len(), 16);
         assert_eq!(
             validate_dynamic_keys_get_owner_prefix_without_flow(&function, cfg),
             Ok(())
@@ -22795,7 +25195,12 @@ mod ordinary_map_owned_any_v2_dynamic_keys_flow_gate_tests {
                 .any(|point| point.source.node == then_point)));
 
         source.root_drops[0].point = then_point.clone();
-        cfg.actions[5].point = then_point.clone();
+        let old_action = cfg
+            .actions
+            .iter_mut()
+            .find(|action| action.point == old_drop_point)
+            .expect("one action for the first root Drop");
+        old_action.point = then_point.clone();
         let old_attempt = cfg
             .attempts
             .iter()
@@ -22809,8 +25214,8 @@ mod ordinary_map_owned_any_v2_dynamic_keys_flow_gate_tests {
         };
         assert!(cfg.attempts.insert(replacement_attempt));
         let nested_receipts = cfg.dynamic_keys_get_receipts.clone();
-        assert_eq!(cfg.actions.len(), 7);
-        assert_eq!(cfg.attempts.len(), 7);
+        assert_eq!(cfg.actions.len(), 8);
+        assert_eq!(cfg.attempts.len(), 8);
 
         function
             .ownership
@@ -22832,8 +25237,8 @@ mod ordinary_map_owned_any_v2_dynamic_keys_flow_gate_tests {
             }),
             "a root Drop moved to an existing then-arm point must fail the owner-prefix proof: {errors:?}"
         );
-        assert_eq!(cfg.actions.len(), 7);
-        assert_eq!(cfg.attempts.len(), 7);
+        assert_eq!(cfg.actions.len(), 8);
+        assert_eq!(cfg.attempts.len(), 8);
     }
 
     #[test]

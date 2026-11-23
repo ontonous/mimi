@@ -260,6 +260,36 @@ fn compile_checked_mir_native_for_route(
         )
     } else if receipt.profile
         == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+            .as_str()
+    {
+        // The V4 Result-branch Values index-one caller requires its exact
+        // CheckedProgram-bound V4 receipt and dedicated native adapter.
+        codegen.compile_checked_mir_native_with_values_result_crosscall_string_caller_index1_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+            .as_str()
+    {
+        // The V3 Result-branch Values index-zero caller requires its exact
+        // CheckedProgram-bound V3 receipt and dedicated native adapter.
+        codegen.compile_checked_mir_native_with_values_result_crosscall_string_caller_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
+            OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+            .as_str()
+    {
+        // The Result-branch Values one-length producer/caller requires its exact
+        // CheckedProgram-bound receipt and dedicated native adapter.
+        codegen.compile_checked_mir_native_with_values_result_producer_caller_route(
+            checked, canonical, receipt,
+        )
+    } else if receipt.profile
+        == mimi::core::mir::CanonicalMirRouteProfile::
             OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
             .as_str()
     {

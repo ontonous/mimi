@@ -2314,6 +2314,1041 @@ impl<'a> OrdinaryMapOwnerLifecycleChecker<'a> {
 /// it records every operation attempt before deciding whether the operation
 /// receives an action receipt. This keeps unsupported `to_list`,
 /// aliases, and non-concrete record payloads visible to route admission.
+fn resolve_result_ok_err_types(
+    types: &ResolvedTypeTable,
+    result_type: &ResolvedTypeId,
+) -> Option<(ResolvedTypeId, ResolvedTypeId)> {
+    match types.get(result_type) {
+        Some(ResolvedType::Result { ok, error }) => Some((ok.clone(), error.clone())),
+        Some(ResolvedType::Nominal {
+            item, arguments, ..
+        }) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
+            Some((arguments[0].clone(), arguments[1].clone()))
+        }
+        _ => None,
+    }
+}
+
+fn result_arm_payload<'b>(
+    arm: &'b MatchArm,
+    variant_name: &str,
+    payload_type: &ResolvedTypeId,
+    result_type: &ResolvedTypeId,
+) -> Option<(&'b ResolvedPattern, Option<ResolvedLocalId>)> {
+    let ResolvedPatternKind::Constructor { variant, fields } = &arm.pattern.kind else {
+        return None;
+    };
+    let [(field, payload)] = fields.as_slice() else {
+        return None;
+    };
+    if variant.0 != format!("builtin:variant:Result::{variant_name}")
+        || field.0 != format!("builtin:variant:Result::{variant_name}/payload:0")
+        || arm.guard.is_some()
+        || arm.pattern.ty != *result_type
+        || payload.ty != *payload_type
+    {
+        return None;
+    }
+    let local = match &payload.kind {
+        ResolvedPatternKind::Binding {
+            local,
+            by_reference: None,
+        } => Some(local.clone()),
+        ResolvedPatternKind::Wildcard => None,
+        _ => return None,
+    };
+    Some((payload, local))
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OrdinaryMapV2ResultChainStep<'a> {
+    pub(crate) match_expr: &'a ResolvedExpr,
+    pub(crate) scrutinee: &'a ResolvedExpr,
+    pub(crate) ok_arm: &'a MatchArm,
+    pub(crate) ok_binding: Option<ResolvedLocalId>,
+    pub(crate) err_arm: &'a MatchArm,
+    pub(crate) ok_statements: &'a [ResolvedStmt],
+    pub(crate) err_statements: &'a [ResolvedStmt],
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OrdinaryMapV2LinearRootBinding<'a> {
+    pub(crate) binding_point: &'a NodeId,
+    pub(crate) initializer: &'a ResolvedExpr,
+    pub(crate) order_node: &'a NodeId,
+    pub(crate) statement: Option<&'a ResolvedStmt>,
+}
+
+/// Unified linear view over a V2/V1 callable body: either a 1-block
+/// straight-line CFG or an acyclic linear chain of unguarded two-arm
+/// `Result::Ok` / `Result::Err` `Match` unwraps whose `Err` arms are flat.
+#[derive(Debug, Clone)]
+pub(crate) struct OrdinaryMapV2LinearChainScope<'a> {
+    pub(crate) preamble_statements: &'a [ResolvedStmt],
+    pub(crate) steps: Vec<OrdinaryMapV2ResultChainStep<'a>>,
+    pub(crate) leaf_statements: &'a [ResolvedStmt],
+    pub(crate) leaf_result: Option<&'a ResolvedExpr>,
+    pub(crate) combined_statements: Vec<&'a ResolvedStmt>,
+    pub(crate) is_straight_line: bool,
+    pub(crate) is_pure_linear: bool,
+    statement_orders: BTreeMap<NodeId, usize>,
+    timeline_orders: BTreeMap<NodeId, usize>,
+}
+
+impl<'a> OrdinaryMapV2LinearChainScope<'a> {
+    pub(crate) fn collect(
+        cfg: &CallableCfg,
+        body: &'a ResolvedBody,
+        types: &ResolvedTypeTable,
+    ) -> Option<Self> {
+        if !cfg.reachable.contains(&cfg.entry)
+            || OrdinaryMapOwnedAnyV2Checker::acyclic_v2_cfg_order(cfg).is_none()
+        {
+            return None;
+        }
+
+        if OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg) {
+            let combined_statements = body.root.statements.iter().collect::<Vec<_>>();
+            let leaf_result = body.root.result.as_deref();
+            let mut statement_orders = BTreeMap::new();
+            let mut timeline_orders = BTreeMap::new();
+            for (index, statement) in combined_statements.iter().enumerate() {
+                statement_orders.insert(statement.node_id.clone(), index);
+                timeline_orders.insert(statement.node_id.clone(), index);
+            }
+            if let Some(result) = leaf_result {
+                timeline_orders.insert(result.node_id.clone(), combined_statements.len());
+            }
+            return Some(Self {
+                preamble_statements: &body.root.statements,
+                steps: Vec::new(),
+                leaf_statements: &body.root.statements,
+                leaf_result,
+                combined_statements,
+                is_straight_line: true,
+                is_pure_linear: true,
+                statement_orders,
+                timeline_orders,
+            });
+        }
+
+        fn err_arm_is_flat(expression: &ResolvedExpr) -> bool {
+            fn stmt_is_flat(statement: &ResolvedStmt) -> bool {
+                match &statement.kind {
+                    ResolvedStmtKind::Bind { initializer, .. } => {
+                        initializer.as_ref().is_none_or(expr_is_flat)
+                    }
+                    ResolvedStmtKind::Assign { value, .. }
+                    | ResolvedStmtKind::Expr(value)
+                    | ResolvedStmtKind::Contract {
+                        condition: value, ..
+                    } => expr_is_flat(value),
+                    ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
+                        value.as_ref().is_none_or(expr_is_flat)
+                    }
+                    ResolvedStmtKind::Continue | ResolvedStmtKind::Drop(_) => true,
+                    ResolvedStmtKind::Math(values) => values.iter().all(expr_is_flat),
+                    ResolvedStmtKind::While { .. }
+                    | ResolvedStmtKind::WhileLet { .. }
+                    | ResolvedStmtKind::For { .. }
+                    | ResolvedStmtKind::IfLet { .. }
+                    | ResolvedStmtKind::Loop(_)
+                    | ResolvedStmtKind::Scope { .. }
+                    | ResolvedStmtKind::Pinned { .. }
+                    | ResolvedStmtKind::NestedCallable(_) => false,
+                }
+            }
+
+            fn expr_is_flat(expression: &ResolvedExpr) -> bool {
+                match &expression.kind {
+                    ResolvedExprKind::Block(block) => {
+                        block.statements.iter().all(stmt_is_flat)
+                            && block.result.as_deref().is_none_or(expr_is_flat)
+                    }
+                    ResolvedExprKind::Call(call) => {
+                        call.arguments.iter().all(|arg| expr_is_flat(&arg.value))
+                    }
+                    ResolvedExprKind::Binary { left, right, .. }
+                    | ResolvedExprKind::Range {
+                        start: left,
+                        end: right,
+                    } => expr_is_flat(left) && expr_is_flat(right),
+                    ResolvedExprKind::Unary { operand, .. }
+                    | ResolvedExprKind::TypeOf(operand)
+                    | ResolvedExprKind::Old(operand)
+                    | ResolvedExprKind::Try { value: operand, .. }
+                    | ResolvedExprKind::Cast { value: operand, .. }
+                    | ResolvedExprKind::OptionalChain {
+                        receiver: operand, ..
+                    } => expr_is_flat(operand),
+                    ResolvedExprKind::Project { value, projection } => {
+                        expr_is_flat(value)
+                            && match projection {
+                                ResolvedValueProjection::Index(index) => expr_is_flat(index),
+                                ResolvedValueProjection::Field(_)
+                                | ResolvedValueProjection::Tuple(_)
+                                | ResolvedValueProjection::Dereference => true,
+                            }
+                    }
+                    ResolvedExprKind::Slice { target, start, end } => {
+                        expr_is_flat(target)
+                            && start.as_deref().is_none_or(expr_is_flat)
+                            && end.as_deref().is_none_or(expr_is_flat)
+                    }
+                    ResolvedExprKind::FString(parts) => parts.iter().all(|part| match part {
+                        crate::core::ir::ResolvedFStringPart::Text(_) => true,
+                        crate::core::ir::ResolvedFStringPart::Interpolation(inner) => {
+                            expr_is_flat(inner)
+                        }
+                    }),
+                    ResolvedExprKind::Tuple(items)
+                    | ResolvedExprKind::List(items)
+                    | ResolvedExprKind::Set(items) => items.iter().all(expr_is_flat),
+                    ResolvedExprKind::Map(entries) => entries
+                        .iter()
+                        .all(|(k, v)| expr_is_flat(k) && expr_is_flat(v)),
+                    ResolvedExprKind::Record { fields, rest, .. } => {
+                        fields.iter().all(|f| expr_is_flat(&f.value))
+                            && rest.as_deref().is_none_or(expr_is_flat)
+                    }
+                    ResolvedExprKind::Load(_)
+                    | ResolvedExprKind::Literal(_)
+                    | ResolvedExprKind::Constant(_)
+                    | ResolvedExprKind::Callable(_)
+                    | ResolvedExprKind::DefaultArgument { .. }
+                    | ResolvedExprKind::ComptimeValue(_)
+                    | ResolvedExprKind::TypeValue(_) => true,
+                    ResolvedExprKind::If { .. }
+                    | ResolvedExprKind::Match { .. }
+                    | ResolvedExprKind::Scope { .. }
+                    | ResolvedExprKind::Comptime(_)
+                    | ResolvedExprKind::Quote(_)
+                    | ResolvedExprKind::Spawn(_)
+                    | ResolvedExprKind::Await(_)
+                    | ResolvedExprKind::Comprehension { .. }
+                    | ResolvedExprKind::Lambda(_) => false,
+                }
+            }
+
+            expr_is_flat(expression)
+        }
+
+        let mut steps = Vec::new();
+        let mut combined_statements = body.root.statements.iter().collect::<Vec<_>>();
+        let mut statement_orders = BTreeMap::new();
+        let mut timeline_orders = BTreeMap::new();
+        let mut next_timeline = 0usize;
+        for statement in &body.root.statements {
+            let stmt_idx = statement_orders.len();
+            statement_orders.insert(statement.node_id.clone(), stmt_idx);
+            timeline_orders.insert(statement.node_id.clone(), next_timeline);
+            next_timeline += 1;
+        }
+
+        let mut current_leaf_statements: &'a [ResolvedStmt] = &body.root.statements;
+        let mut current_expr: Option<&'a ResolvedExpr> = body.root.result.as_deref();
+        while let Some(expr) = current_expr {
+            let ResolvedExprKind::Match { scrutinee, arms } = &expr.kind else {
+                break;
+            };
+            if arms.len() != 2 {
+                break;
+            }
+            let Some((ok_type, err_type)) = resolve_result_ok_err_types(types, &scrutinee.ty)
+            else {
+                break;
+            };
+            let ok_arm = arms
+                .iter()
+                .filter_map(|arm| {
+                    result_arm_payload(arm, "Ok", &ok_type, &scrutinee.ty)
+                        .map(|(_, local)| (arm, local))
+                })
+                .collect::<Vec<_>>();
+            let err_arm = arms
+                .iter()
+                .filter_map(|arm| {
+                    result_arm_payload(arm, "Err", &err_type, &scrutinee.ty)
+                        .map(|(_, local)| (arm, local))
+                })
+                .collect::<Vec<_>>();
+            let [(ok_arm, ok_binding)] = ok_arm.as_slice() else {
+                break;
+            };
+            let [(err_arm, _)] = err_arm.as_slice() else {
+                break;
+            };
+            if ordinary_map_result_branch_edges(
+                cfg,
+                &scrutinee.node_id,
+                &expr.node_id,
+                &ok_arm.node_id,
+                &err_arm.node_id,
+            )
+            .is_none()
+                || !err_arm_is_flat(&err_arm.body)
+            {
+                return None;
+            }
+
+            let step_slot = next_timeline;
+            next_timeline += 1;
+            timeline_orders.insert(expr.node_id.clone(), step_slot);
+            timeline_orders.insert(scrutinee.node_id.clone(), step_slot);
+            timeline_orders.insert(ok_arm.node_id.clone(), step_slot);
+            timeline_orders.insert(ok_arm.pattern.node_id.clone(), step_slot);
+
+            let (ok_statements, next_expr, continue_walking): (
+                &'a [ResolvedStmt],
+                Option<&'a ResolvedExpr>,
+                bool,
+            ) = match &ok_arm.body.kind {
+                ResolvedExprKind::Block(block) => {
+                    (block.statements.as_slice(), block.result.as_deref(), true)
+                }
+                ResolvedExprKind::Match { .. } => (&[], Some(&ok_arm.body), true),
+                _ => (&[], Some(&ok_arm.body), false),
+            };
+            let err_statements: &'a [ResolvedStmt] = match &err_arm.body.kind {
+                ResolvedExprKind::Block(block) => block.statements.as_slice(),
+                _ => &[],
+            };
+
+            for statement in ok_statements {
+                let stmt_idx = combined_statements.len();
+                combined_statements.push(statement);
+                statement_orders.insert(statement.node_id.clone(), stmt_idx);
+                timeline_orders.insert(statement.node_id.clone(), next_timeline);
+                next_timeline += 1;
+            }
+            steps.push(OrdinaryMapV2ResultChainStep {
+                match_expr: expr,
+                scrutinee,
+                ok_arm,
+                ok_binding: ok_binding.clone(),
+                err_arm,
+                ok_statements,
+                err_statements,
+            });
+            current_leaf_statements = ok_statements;
+            current_expr = next_expr;
+            if !continue_walking {
+                break;
+            }
+        }
+
+        if steps.is_empty() {
+            return None;
+        }
+        if let Some(result) = current_expr {
+            timeline_orders.insert(result.node_id.clone(), next_timeline);
+        }
+
+        let step_scrutinees = steps
+            .iter()
+            .map(|step| step.scrutinee.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let is_pure_linear = ordinary_map_supports_result_branch_cfg(cfg, &step_scrutinees)
+            && !cfg.reachable.iter().any(|block_id| {
+                let Some(block) = cfg.blocks.get(block_id) else {
+                    return true;
+                };
+                match &block.terminator {
+                    Terminator::Goto { .. } | Terminator::Return { .. } => false,
+                    Terminator::Match { scrutinee, .. } => !step_scrutinees.contains(scrutinee),
+                    _ => true,
+                }
+            })
+            && !cfg.edges.values().any(|edge| {
+                cfg.reachable.contains(&edge.from)
+                    && !matches!(edge.kind, EdgeKind::Fallthrough | EdgeKind::MatchArm)
+            })
+            && cfg
+                .blocks
+                .iter()
+                .filter(|(id, _)| cfg.reachable.contains(*id))
+                .all(|(_, block)| {
+                    block
+                        .id
+                        .0
+                         .0
+                        .rsplit_once("/cfg:block:")
+                        .is_some_and(|(_, role)| {
+                            matches!(role, "entry" | "match-arm" | "match-join")
+                        })
+                });
+
+        Some(Self {
+            preamble_statements: &body.root.statements,
+            steps,
+            leaf_statements: current_leaf_statements,
+            leaf_result: current_expr,
+            combined_statements,
+            is_straight_line: false,
+            is_pure_linear,
+            statement_orders,
+            timeline_orders,
+        })
+    }
+
+    pub(crate) fn statement_orders(&self) -> &BTreeMap<NodeId, usize> {
+        &self.statement_orders
+    }
+
+    pub(crate) fn statement_order(&self, node: &NodeId) -> Option<usize> {
+        self.statement_orders.get(node).copied()
+    }
+
+    pub(crate) fn timeline_order(&self, node: &NodeId) -> Option<usize> {
+        self.timeline_orders.get(node).copied()
+    }
+
+    pub(crate) fn direct_binding(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
+        let mut matches = self.combined_statements.iter().filter_map(|statement| {
+            let ResolvedStmtKind::Bind {
+                pattern:
+                    ResolvedPattern {
+                        kind:
+                            ResolvedPatternKind::Binding {
+                                local: bound,
+                                by_reference: None,
+                            },
+                        ..
+                    },
+                initializer: Some(initializer),
+            } = &statement.kind
+            else {
+                return None;
+            };
+            (bound == local).then_some((*statement, initializer))
+        });
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
+    pub(crate) fn direct_binding_for_initializer(
+        &self,
+        initializer_node: &NodeId,
+    ) -> Option<(&'a ResolvedStmt, &'a ResolvedLocalId, &'a ResolvedExpr)> {
+        let mut matches = self.combined_statements.iter().filter_map(|statement| {
+            let ResolvedStmtKind::Bind {
+                pattern:
+                    ResolvedPattern {
+                        kind:
+                            ResolvedPatternKind::Binding {
+                                local,
+                                by_reference: None,
+                            },
+                        ..
+                    },
+                initializer: Some(initializer),
+            } = &statement.kind
+            else {
+                return None;
+            };
+            (initializer.node_id == *initializer_node).then_some((*statement, local, initializer))
+        });
+        let binding = matches.next()?;
+        matches.next().is_none().then_some(binding)
+    }
+
+    pub(crate) fn direct_or_ok_binding(
+        &self,
+        local: &ResolvedLocalId,
+    ) -> Option<OrdinaryMapV2LinearRootBinding<'a>> {
+        if let Some((statement, initializer)) = self.direct_binding(local) {
+            return Some(OrdinaryMapV2LinearRootBinding {
+                binding_point: &statement.node_id,
+                initializer,
+                order_node: &statement.node_id,
+                statement: Some(statement),
+            });
+        }
+        let mut step_matches = self
+            .steps
+            .iter()
+            .filter(|step| step.ok_binding.as_ref() == Some(local));
+        let step = step_matches.next()?;
+        step_matches
+            .next()
+            .is_none()
+            .then_some(OrdinaryMapV2LinearRootBinding {
+                binding_point: &step.ok_arm.pattern.node_id,
+                initializer: step.scrutinee,
+                order_node: &step.scrutinee.node_id,
+                statement: None,
+            })
+    }
+
+    pub(crate) fn binding_for_operation<'b>(
+        &'b self,
+        operation_node: &NodeId,
+    ) -> Option<(&'a NodeId, &'b ResolvedLocalId, &'a ResolvedExpr)> {
+        if let Some((statement, local, initializer)) =
+            self.direct_binding_for_initializer(operation_node)
+        {
+            return Some((&statement.node_id, local, initializer));
+        }
+        let mut matches = self.steps.iter().filter_map(|step| {
+            (step.scrutinee.node_id == *operation_node)
+                .then(|| {
+                    step.ok_binding
+                        .as_ref()
+                        .map(|local| (&step.scrutinee.node_id, local, step.scrutinee))
+                })
+                .flatten()
+        });
+        let found = matches.next()?;
+        matches.next().is_none().then_some(found)
+    }
+
+    pub(crate) fn whole_drop(&self, target: &ResolvedLocalId) -> Option<(NodeId, usize, usize)> {
+        let matches = self
+            .combined_statements
+            .iter()
+            .enumerate()
+            .flat_map(|(statement_order, statement)| {
+                let ResolvedStmtKind::Drop(places) = &statement.kind else {
+                    return Vec::new();
+                };
+                places
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, place)| &place.base == target && place.projections.is_empty())
+                    .map(|(place_index, _)| {
+                        (statement.node_id.clone(), place_index, statement_order)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let [found] = matches.as_slice() else {
+            return None;
+        };
+        Some(found.clone())
+    }
+
+    pub(crate) fn local_source_uses(
+        &self,
+        body: &ResolvedBody,
+        target: &ResolvedLocalId,
+    ) -> OrdinaryMapOwnedAnyV2LocalSourceUseCensus {
+        ordinary_map_owned_any_v2_local_source_uses_with_scope(body, target, Some(self))
+    }
+}
+
+fn is_ordinary_map_record_type(types: &ResolvedTypeTable, ty: &ResolvedTypeId) -> bool {
+    matches!(
+        types.get(ty),
+        Some(ResolvedType::Nominal { item, .. })
+            if item.as_str() == "builtin:type:Record"
+    )
+}
+
+fn ordinary_map_binding_matches_expr_type(
+    scope: &OrdinaryMapV2LinearChainScope<'_>,
+    types: &ResolvedTypeTable,
+    operation_point: &NodeId,
+    local: &ResolvedLocalId,
+    local_ty: &ResolvedTypeId,
+    expr_ty: &ResolvedTypeId,
+) -> bool {
+    if !is_ordinary_map_record_type(types, local_ty) {
+        return false;
+    }
+    if expr_ty == local_ty {
+        return true;
+    }
+    if scope.is_straight_line
+        || !scope.steps.iter().any(|step| {
+            step.scrutinee.node_id == *operation_point && step.ok_binding.as_ref() == Some(local)
+        })
+    {
+        return false;
+    }
+    let Some((ok_ty, err_ty)) = resolve_result_ok_err_types(types, expr_ty) else {
+        return false;
+    };
+    ok_ty == *local_ty
+        && matches!(
+            types.get(&err_ty),
+            Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
+        )
+}
+
+fn ordinary_map_v2_action_drop_matches_attempt(
+    attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    action: &OrdinaryMapOwnedAnyV2Action,
+) -> bool {
+    let matches = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.point == action.point
+                && attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Drop
+                && attempt.arguments == vec![action.local.0.clone()]
+                && attempt.receiver_local.as_ref() == Some(&action.local)
+                && attempt.result_local.is_none()
+        })
+        .collect::<Vec<_>>();
+    matches.len() == 1
+}
+
+pub(crate) fn partition_ordinary_map_v2_chain_drops<'a>(
+    scope: &OrdinaryMapV2LinearChainScope<'_>,
+    actions: &'a [OrdinaryMapOwnedAnyV2Action],
+    attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+) -> Option<(
+    Vec<&'a OrdinaryMapOwnedAnyV2Action>,
+    Vec<(usize, &'a OrdinaryMapOwnedAnyV2Action)>,
+)> {
+    let mut err_drop_step_by_point = BTreeMap::new();
+    for (step_idx, step) in scope.steps.iter().enumerate() {
+        for statement in step.err_statements {
+            let crate::core::ir::ResolvedStmtKind::Drop(places) = &statement.kind else {
+                continue;
+            };
+            for place in places {
+                if !place.projections.is_empty()
+                    || err_drop_step_by_point
+                        .insert((statement.node_id.clone(), place.base.clone()), step_idx)
+                        .is_some()
+                {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let mut seen_drop_keys = BTreeSet::new();
+    let mut ok_drops = Vec::new();
+    let mut err_drops = Vec::new();
+    for action in actions
+        .iter()
+        .filter(|action| action.kind == OrdinaryMapOwnedAnyV2ActionKind::Drop)
+    {
+        if !seen_drop_keys.insert((action.point.clone(), action.local.clone()))
+            || action.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
+            || action.root != OrdinaryMapOwnedAnyV2Checker::resource_identity(&action.local)
+            || action.key.is_some()
+            || action.key_type.is_some()
+            || action.value.is_some()
+            || action.value_type.is_some()
+            || action.payload_clone
+            || action.source_local.is_some()
+            || action.source.is_some()
+            || action.source_node.is_some()
+            || action.source_type.is_some()
+            || action.result_local.is_some()
+            || action.result_type.is_some()
+            || !ordinary_map_v2_action_drop_matches_attempt(attempts, action)
+        {
+            return None;
+        }
+        if scope.timeline_order(&action.point).is_some() {
+            ok_drops.push(action);
+        } else if !scope.is_straight_line {
+            let step_idx =
+                *err_drop_step_by_point.get(&(action.point.clone(), action.local.clone()))?;
+            err_drops.push((step_idx, action));
+        } else {
+            return None;
+        }
+    }
+
+    let drop_attempt_count = attempts
+        .iter()
+        .filter(|attempt| attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Drop)
+        .count();
+    if drop_attempt_count != ok_drops.len() + err_drops.len() {
+        return None;
+    }
+
+    Some((ok_drops, err_drops))
+}
+
+pub(crate) fn ordinary_map_v2_ok_spine_cfg_point_ranks(
+    cfg: &CallableCfg,
+    scope: &OrdinaryMapV2LinearChainScope<'_>,
+) -> Option<BTreeMap<NodeId, usize>> {
+    let mut ranks = BTreeMap::new();
+    let mut next_rank = 0usize;
+    let mut record_block = |block_id: &crate::core::cfg::BasicBlockId| -> Option<()> {
+        let block = cfg.blocks.get(block_id)?;
+        for point in &block.points {
+            ranks.entry(point.source.node.clone()).or_insert(next_rank);
+            next_rank += 1;
+        }
+        Some(())
+    };
+    let mut current = cfg.entry.clone();
+    record_block(&current)?;
+    for step in &scope.steps {
+        let (dispatch, _, _, ok_entry, _, _) = ordinary_map_result_branch_edges(
+            cfg,
+            &step.scrutinee.node_id,
+            &step.match_expr.node_id,
+            &step.ok_arm.node_id,
+            &step.err_arm.node_id,
+        )?;
+        if dispatch != current {
+            return None;
+        }
+        record_block(&ok_entry)?;
+        current = ok_entry;
+    }
+    Some(ranks)
+}
+
+pub(crate) fn partition_ordinary_map_v2_ok_spine<'a>(
+    scope: &OrdinaryMapV2LinearChainScope<'_>,
+    actions: &'a [OrdinaryMapOwnedAnyV2Action],
+    attempts: &'a BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+) -> Option<(
+    Vec<&'a OrdinaryMapOwnedAnyV2Action>,
+    Vec<&'a OrdinaryMapOwnedAnyV2Attempt>,
+    Vec<&'a OrdinaryMapOwnedAnyV2Action>,
+    Vec<(usize, &'a OrdinaryMapOwnedAnyV2Action)>,
+)> {
+    let (ok_drops, err_drops) = partition_ordinary_map_v2_chain_drops(scope, actions, attempts)?;
+    let ok_drop_keys = ok_drops
+        .iter()
+        .map(|drop| (drop.point.clone(), drop.local.clone()))
+        .collect::<BTreeSet<_>>();
+    let ok_actions = actions
+        .iter()
+        .filter(|action| {
+            action.kind != OrdinaryMapOwnedAnyV2ActionKind::Drop
+                || ok_drop_keys.contains(&(action.point.clone(), action.local.clone()))
+        })
+        .collect::<Vec<_>>();
+    let ok_attempts = attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.kind != OrdinaryMapOwnedAnyV2AttemptKind::Drop
+                || attempt.receiver_local.as_ref().is_some_and(|local| {
+                    ok_drop_keys.contains(&(attempt.point.clone(), local.clone()))
+                })
+        })
+        .collect::<Vec<_>>();
+    Some((ok_actions, ok_attempts, ok_drops, err_drops))
+}
+
+pub(crate) fn ordinary_map_v2_err_drops_match_prior_roots(
+    scope: &OrdinaryMapV2LinearChainScope<'_>,
+    ordered_roots: &[(&NodeId, &ResolvedLocalId)],
+    err_drops_by_step: &[(usize, &OrdinaryMapOwnedAnyV2Action)],
+) -> bool {
+    if scope.is_straight_line {
+        return err_drops_by_step.is_empty();
+    }
+    let mut root_intervals = Vec::with_capacity(ordered_roots.len());
+    for (op_point, root_local) in ordered_roots {
+        let Some((order_node, bound_local, _)) = scope.binding_for_operation(op_point) else {
+            return false;
+        };
+        if bound_local != *root_local {
+            return false;
+        }
+        let Some(create_timeline) = scope.timeline_order(order_node) else {
+            return false;
+        };
+        let drop_timeline = scope
+            .whole_drop(root_local)
+            .and_then(|(drop_point, _, _)| scope.timeline_order(&drop_point));
+        root_intervals.push((create_timeline, drop_timeline, (*root_local).clone()));
+    }
+    let mut expected = BTreeSet::new();
+    for (step_idx, step) in scope.steps.iter().enumerate() {
+        let Some(step_timeline) = scope.timeline_order(&step.scrutinee.node_id) else {
+            return false;
+        };
+        for (create_timeline, drop_timeline, root_local) in &root_intervals {
+            if *create_timeline < step_timeline
+                && drop_timeline.is_none_or(|drop_tl| step_timeline < drop_tl)
+            {
+                expected.insert((step_idx, root_local.clone()));
+            }
+        }
+    }
+    let actual = err_drops_by_step
+        .iter()
+        .map(|(step_idx, action)| (*step_idx, action.local.clone()))
+        .collect::<BTreeSet<_>>();
+    err_drops_by_step.len() == expected.len() && actual == expected
+}
+
+fn ordinary_map_supports_result_branch_cfg<'a>(
+    cfg: &CallableCfg,
+    attempt_points: impl IntoIterator<Item = &'a NodeId>,
+) -> bool {
+    if !cfg.reachable.contains(&cfg.entry) {
+        return false;
+    }
+    let allowed_roles = [
+        "entry",
+        "if-then",
+        "if-else",
+        "if-join",
+        "match-arm",
+        "match-join",
+    ];
+    if cfg.reachable.iter().any(|id| {
+        !cfg.blocks.get(id).is_some_and(|block| {
+            id.0 .0
+                .rsplit_once("/cfg:block:")
+                .is_some_and(|(_, role)| allowed_roles.contains(&role))
+                && matches!(
+                    &block.terminator,
+                    Terminator::Goto { .. }
+                        | Terminator::Branch { .. }
+                        | Terminator::Match { .. }
+                        | Terminator::Return { .. }
+                )
+        })
+    }) || cfg.edges.values().any(|edge| {
+        cfg.reachable.contains(&edge.from)
+            && (!cfg.reachable.contains(&edge.to)
+                || !matches!(
+                    edge.kind,
+                    EdgeKind::Then | EdgeKind::Else | EdgeKind::MatchArm | EdgeKind::Fallthrough
+                ))
+    }) {
+        return false;
+    }
+    let mut point_owners = BTreeMap::<NodeId, usize>::new();
+    for (block, value) in &cfg.blocks {
+        if !cfg.reachable.contains(block) {
+            continue;
+        }
+        for point in &value.points {
+            *point_owners.entry(point.source.node.clone()).or_default() += 1;
+        }
+    }
+    let mut any_attempt = false;
+    for point in attempt_points {
+        any_attempt = true;
+        if point_owners.get(point) != Some(&1) {
+            return false;
+        }
+    }
+    any_attempt && OrdinaryMapOwnedAnyV2Checker::acyclic_v2_cfg_order(cfg).is_some()
+}
+
+fn operations_match_expected_result_branch_l1(
+    operations: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    expected_non_drop: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    expected_root_results: &BTreeMap<NodeId, ResolvedLocalId>,
+    expected_drops: &BTreeSet<(NodeId, ResolvedLocalId)>,
+) -> bool {
+    if operations == expected_non_drop {
+        return true;
+    }
+    let mut normalized_non_drop = BTreeSet::new();
+    let mut observed_drops = BTreeSet::new();
+    for attempt in operations {
+        if attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Drop {
+            let Some(receiver) = attempt.receiver_local.as_ref() else {
+                return false;
+            };
+            if attempt.result_local.is_some()
+                || attempt.arguments.as_slice() != [receiver.0.clone()]
+                || !observed_drops.insert((attempt.point.clone(), receiver.clone()))
+            {
+                return false;
+            }
+            continue;
+        }
+        let mut normalized = attempt.clone();
+        if matches!(
+            attempt.kind,
+            OrdinaryMapOwnedAnyV2AttemptKind::New | OrdinaryMapOwnedAnyV2AttemptKind::Set
+        ) {
+            let Some(expected_local) = expected_root_results.get(&attempt.point) else {
+                return false;
+            };
+            if attempt.result_local.as_ref() != Some(expected_local) {
+                return false;
+            }
+            normalized.result_local = None;
+        }
+        if !normalized_non_drop.insert(normalized) {
+            return false;
+        }
+    }
+    &normalized_non_drop == expected_non_drop && &observed_drops == expected_drops
+}
+
+fn ordinary_map_result_branch_edges(
+    cfg: &CallableCfg,
+    scrutinee_node: &NodeId,
+    match_node: &NodeId,
+    ok_arm: &NodeId,
+    err_arm: &NodeId,
+) -> Option<(
+    crate::core::cfg::BasicBlockId,
+    crate::core::cfg::EdgeId,
+    crate::core::cfg::EdgeId,
+    crate::core::cfg::BasicBlockId,
+    crate::core::cfg::BasicBlockId,
+    crate::core::cfg::BasicBlockId,
+)> {
+    let mut dispatches = cfg.blocks.iter().filter_map(|(id, block)| {
+        matches!(
+            &block.terminator,
+            Terminator::Match { scrutinee, .. } if scrutinee == scrutinee_node
+        )
+        .then_some(id.clone())
+    });
+    let dispatch = dispatches.next()?;
+    if dispatches.next().is_some() {
+        return None;
+    }
+    let Terminator::Match { arms, .. } = &cfg.blocks.get(&dispatch)?.terminator else {
+        return None;
+    };
+    let edge_for = |arm: &NodeId| {
+        let mut matches = arms.iter().filter_map(|edge_id| {
+            let edge = cfg.edges.get(edge_id)?;
+            (edge.from == dispatch && edge.kind == EdgeKind::MatchArm && edge.source.node == *arm)
+                .then_some((edge.id.clone(), edge.to.clone()))
+        });
+        let result = matches.next()?;
+        matches.next().is_none().then_some(result)
+    };
+    let (ok_edge, ok_entry) = edge_for(ok_arm)?;
+    let (err_edge, err_entry) = edge_for(err_arm)?;
+    if ok_edge == err_edge || ok_entry == err_entry {
+        return None;
+    }
+    let distances = |start: &crate::core::cfg::BasicBlockId| {
+        let mut values = BTreeMap::from([(start.clone(), 0usize)]);
+        let mut queue = std::collections::VecDeque::from([start.clone()]);
+        while let Some(block) = queue.pop_front() {
+            let distance = values.get(&block).copied()?;
+            for edge in cfg.successors(&block) {
+                if !cfg.reachable.contains(&edge.to) || values.contains_key(&edge.to) {
+                    continue;
+                }
+                values.insert(edge.to.clone(), distance + 1);
+                queue.push_back(edge.to.clone());
+            }
+        }
+        Some(values)
+    };
+    let ok_distance = distances(&ok_entry)?;
+    let err_distance = distances(&err_entry)?;
+    let mut common = ok_distance
+        .iter()
+        .filter_map(|(block, distance)| {
+            let err = err_distance.get(block)?;
+            block
+                .0
+                 .0
+                .rsplit_once("/cfg:block:")
+                .is_some_and(|(_, role)| role == "match-join")
+                .then_some((block.clone(), (*distance).max(*err), distance + err))
+        })
+        .collect::<Vec<_>>();
+    common.sort_by_key(|(_, max_distance, total_distance)| (*max_distance, *total_distance));
+    let (join, min_max, min_total) = common.first()?.clone();
+    if common
+        .iter()
+        .filter(|(_, max, total)| *max == min_max && *total == min_total)
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let expected_join =
+        crate::core::cfg::BasicBlockId(NodeId(format!("{}/cfg:block:match-join", match_node.0)));
+    if join != expected_join {
+        return None;
+    }
+    Some((dispatch, ok_edge, err_edge, ok_entry, err_entry, join))
+}
+
+fn ordinary_map_result_branch_path_receipt(
+    cfg: &CallableCfg,
+    entry_edge: &crate::core::cfg::EdgeId,
+    entry: &crate::core::cfg::BasicBlockId,
+    join: &crate::core::cfg::BasicBlockId,
+    drop_points: &[NodeId],
+    point_location: &BTreeMap<NodeId, (crate::core::cfg::BasicBlockId, usize)>,
+    roots_on_edge: &BTreeMap<crate::core::cfg::EdgeId, BTreeSet<String>>,
+) -> Option<crate::core::OrdinaryMapOwnedGetResultBranchPathReceipt> {
+    let mut path_edges = BTreeSet::from([entry_edge.clone()]);
+    let mut path_blocks = BTreeSet::new();
+    let mut exit_edges = BTreeSet::new();
+    let mut pending = vec![entry.clone()];
+    while let Some(block) = pending.pop() {
+        if block == *join || !path_blocks.insert(block.clone()) {
+            continue;
+        }
+        for edge in cfg.successors(&block) {
+            if edge.to == *join {
+                path_edges.insert(edge.id.clone());
+                exit_edges.insert(edge.id.clone());
+            } else {
+                path_edges.insert(edge.id.clone());
+                pending.push(edge.to.clone());
+            }
+        }
+    }
+    let roots_at_entry = roots_on_edge.get(entry_edge)?.clone();
+    let mut exit_roots = exit_edges
+        .iter()
+        .map(|edge| roots_on_edge.get(edge).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    let roots_at_exit = exit_roots.pop()?;
+    if exit_roots.iter().any(|roots| roots != &roots_at_exit) {
+        return None;
+    }
+    let explicit_root_drops = drop_points
+        .iter()
+        .filter(|point| {
+            point_location
+                .get(*point)
+                .is_some_and(|(block, _)| path_blocks.contains(block))
+        })
+        .cloned()
+        .collect();
+    Some(crate::core::OrdinaryMapOwnedGetResultBranchPathReceipt {
+        arm_entry_edge: entry_edge.clone(),
+        arm_entry: entry.clone(),
+        join: join.clone(),
+        path_edges,
+        exit_edges,
+        roots_at_entry,
+        roots_at_exit,
+        explicit_root_drops,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct OrdinaryMapOwnedAnyV2ResultBranchCandidate {
+    kind: OrdinaryMapOwnedAnyV2ActionKind,
+    operation_point: NodeId,
+    result_node: NodeId,
+    result_type: ResolvedTypeId,
+    match_node: NodeId,
+    scrutinee_node: NodeId,
+    ok_arm: NodeId,
+    ok_variant: NodeId,
+    ok_pattern: NodeId,
+    ok_binding: Option<ResolvedLocalId>,
+    ok_payload_type: ResolvedTypeId,
+    err_arm: NodeId,
+    err_variant: NodeId,
+    err_pattern: NodeId,
+    err_binding: Option<ResolvedLocalId>,
+    err_payload_type: ResolvedTypeId,
+    input_root: Option<ResolvedLocalId>,
+    output_root: ResolvedLocalId,
+}
+
+#[derive(Debug, Clone)]
 struct OrdinaryMapOwnedAnyV2Checker<'a> {
     body: &'a ResolvedBody,
     types: &'a ResolvedTypeTable,
@@ -2333,6 +3368,8 @@ struct OrdinaryMapOwnedAnyV2Checker<'a> {
     temporary_root_receipts: Vec<crate::core::OrdinaryMapOwnedAnyV2TemporaryRootReceipt>,
     allowed_root_loads: BTreeSet<NodeId>,
     all_root_loads: Vec<(NodeId, ResolvedLocalId)>,
+    result_branch_candidates: Vec<OrdinaryMapOwnedAnyV2ResultBranchCandidate>,
+    result_branch_depth: usize,
     invalid: bool,
 }
 
@@ -2390,6 +3427,8 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             temporary_root_receipts: Vec::new(),
             allowed_root_loads: BTreeSet::new(),
             all_root_loads: Vec::new(),
+            result_branch_candidates: Vec::new(),
+            result_branch_depth: 0,
             invalid: false,
         };
         // V2 has a dedicated owner-flow proof for one acyclic diamond. Keep
@@ -2445,6 +3484,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 checker.returned_map_root_candidates.clear();
                 checker.temporary_roots.clear();
                 checker.temporary_root_receipts.clear();
+                checker.result_branch_candidates.clear();
                 checker.invalid = false;
                 values_result_producer_receipt = Some(collected.receipt);
             } else if let Some(collected) =
@@ -2495,6 +3535,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 checker.returned_map_root_candidates.clear();
                 checker.temporary_roots.clear();
                 checker.temporary_root_receipts.clear();
+                checker.result_branch_candidates.clear();
                 checker.invalid = !operation_census_matches;
                 map_set_drop_control_result_branch_receipt = Some(collected.receipt);
             } else if let Some(collected) = computed_string_key_owner_chain_result_branch::collect(
@@ -2540,6 +3581,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 checker.returned_map_root_candidates.clear();
                 checker.temporary_roots.clear();
                 checker.temporary_root_receipts.clear();
+                checker.result_branch_candidates.clear();
                 checker.invalid = !operation_census_matches;
                 computed_string_key_owner_chain_result_branch_receipt = Some(collected.receipt);
             } else if let Some(collected) = checked_record_field_ids.and_then(|field_ids| {
@@ -2586,6 +3628,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 checker.returned_map_root_candidates.clear();
                 checker.temporary_roots.clear();
                 checker.temporary_root_receipts.clear();
+                checker.result_branch_candidates.clear();
                 checker.invalid = !operation_census_matches;
                 values_unpack_result_branch_receipt = Some(collected.receipt);
             } else if let Some(collected) = values_local_index_i32_result_branch::collect(
@@ -2630,6 +3673,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 checker.returned_map_root_candidates.clear();
                 checker.temporary_roots.clear();
                 checker.temporary_root_receipts.clear();
+                checker.result_branch_candidates.clear();
                 checker.invalid = !operation_census_matches;
                 values_local_index_i32_result_branch_receipt = Some(collected.receipt);
             }
@@ -3005,7 +4049,9 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             );
         let found_observation_receipts =
             collect_ordinary_map_owned_any_v2_found_observation_receipts(
+                cfg,
                 body,
+                types,
                 &checker.actions,
                 &checker.operation_attempts,
                 &result_receipts,
@@ -3031,6 +4077,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         if keys_snapshot_receipts.len() + dynamic_keys_get_receipts.len() != keys_action_count
             || (keys_action_count != 0
                 && !Self::is_v2_straight_line_cfg(cfg)
+                && keys_snapshot_receipts.is_empty()
                 && dynamic_keys_get_receipts.len() != 1)
         {
             // Keys creates an owned aggregate beside the Map root. Each
@@ -3042,6 +4089,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
                 cfg,
                 body,
+                types,
                 &checker.actions,
                 &checker.operation_attempts,
                 &result_receipts,
@@ -3050,7 +4098,9 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             );
         let removed_key_checked_miss_receipt =
             collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
+                cfg,
                 body,
+                types,
                 &checker.actions,
                 &checker.operation_attempts,
                 &result_receipts,
@@ -3071,6 +4121,40 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         let has_exact_values_unpack_result_branch = values_unpack_result_branch_receipt.is_some();
         let has_exact_map_set_drop_control_result_branch =
             map_set_drop_control_result_branch_receipt.is_some();
+        let has_if_branch = cfg.reachable.iter().any(|block_id| {
+            cfg.blocks
+                .get(block_id)
+                .is_some_and(|block| matches!(block.terminator, Terminator::Branch { .. }))
+        });
+        let match_block_count = cfg
+            .reachable
+            .iter()
+            .filter(|block_id| {
+                cfg.blocks
+                    .get(block_id)
+                    .is_some_and(|block| matches!(block.terminator, Terminator::Match { .. }))
+            })
+            .count();
+        let unreceipted_result_branch_if_tail = !checker.result_branch_candidates.is_empty()
+            && (has_if_branch || match_block_count != checker.result_branch_candidates.len())
+            && scalar_tail.is_none()
+            && !has_exact_dynamic_keys_get_receipt
+            && values_result_producer_receipt.is_none()
+            && !has_exact_computed_string_key_owner_chain_result_branch
+            && !has_exact_map_set_drop_control_result_branch
+            && !has_exact_values_local_index_i32_result_branch
+            && !has_exact_values_unpack_result_branch
+            && !checker.actions.iter().any(|action| {
+                matches!(
+                    action.kind,
+                    OrdinaryMapOwnedAnyV2ActionKind::Set
+                        | OrdinaryMapOwnedAnyV2ActionKind::Clone
+                        | OrdinaryMapOwnedAnyV2ActionKind::Remove
+                )
+            });
+        if unreceipted_result_branch_if_tail {
+            checker.invalid = true;
+        }
         if !Self::is_v2_straight_line_cfg(cfg)
             && Self::ordinary_map_owned_any_v2_diamond_shape(cfg).is_none()
             && scalar_tail.is_none()
@@ -3080,6 +4164,14 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             && !has_exact_map_set_drop_control_result_branch
             && !has_exact_values_local_index_i32_result_branch
             && !has_exact_values_unpack_result_branch
+            && (checker.result_branch_candidates.is_empty()
+                || !ordinary_map_supports_result_branch_cfg(
+                    cfg,
+                    checker
+                        .operation_attempts
+                        .iter()
+                        .map(|attempt| &attempt.point),
+                ))
         {
             checker.invalid = true;
         }
@@ -3169,8 +4261,12 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 &result_receipts,
                 &unpack_receipts,
             );
+        let result_branch_scalar_tail = if !checker.result_branch_candidates.is_empty() {
+            scalar_tail.clone()
+        } else {
+            None
+        };
         let flow = if Self::is_v2_straight_line_cfg(cfg)
-            || has_exact_dynamic_keys_get_receipt
             || values_result_producer_receipt.is_some()
             || has_exact_computed_string_key_owner_chain_result_branch
             || has_exact_map_set_drop_control_result_branch
@@ -3183,6 +4279,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 cfg,
                 body,
                 types,
+                &checker.result_branch_candidates,
                 &checker.actions,
                 &checker.operation_attempts,
                 &result_receipts,
@@ -3207,6 +4304,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             &result_receipts,
             &values_unpack_receipts,
             flow.as_ref(),
+            result_branch_scalar_tail.as_ref(),
         );
         for temporary_root in &checker.temporary_root_receipts {
             let root_actions = checker
@@ -3271,12 +4369,14 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 }
             }
         }
-        checker.actions.sort_by_key(|action| {
-            point_order
-                .get(&action.point)
-                .copied()
-                .unwrap_or((usize::MAX, usize::MAX))
-        });
+        if !has_exact_computed_string_key_owner_chain_result_branch {
+            checker.actions.sort_by_key(|action| {
+                point_order
+                    .get(&action.point)
+                    .copied()
+                    .unwrap_or((usize::MAX, usize::MAX))
+            });
+        }
         if checker
             .actions
             .iter()
@@ -3322,6 +4422,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             zero_miss_i32_observation_receipt,
             removed_key_checked_miss_receipt,
             persistent_root_alias_replacement_receipt,
+            result_branch_scalar_tail,
             flow,
         });
         if checker.invalid {
@@ -3496,20 +4597,27 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         if body.owner.0 != "function:main"
             || !body.parameters.is_empty()
             || !body.captures.is_empty()
-            || !Self::is_v2_straight_line_cfg(cfg)
-            || body.root.statements.len() != 8
             || actions.len() != 4
             || attempts.len() != 4
         {
             return None;
         }
-        let entry = cfg.blocks.get(&cfg.entry)?;
-        let return_value = body.root.result.as_deref()?;
+        let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)?;
+        if !scope.is_pure_linear {
+            return None;
+        }
+        let return_value = scope.leaf_result?;
+        if scope.is_straight_line {
+            let entry = cfg.blocks.get(&cfg.entry)?;
+            if !matches!(
+                &entry.terminator,
+                Terminator::Return { value: Some(value), implicit: true }
+                    if value == &return_value.node_id
+            ) {
+                return None;
+            }
+        }
         if !matches!(
-            &entry.terminator,
-            Terminator::Return { value: Some(value), implicit: true }
-                if value == &return_value.node_id
-        ) || !matches!(
             &return_value.kind,
             ResolvedExprKind::Literal(ResolvedLiteral::Int(0))
         ) || !is_i32(types, &return_value.ty)
@@ -3518,17 +4626,51 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             return None;
         }
 
-        let binds = body.root.statements[..4]
+        let (root_binding_tuple, tail_slice): (
+            (NodeId, ResolvedLocalId, &ResolvedExpr),
+            &[ResolvedStmt],
+        ) = if scope.is_straight_line {
+            if scope.leaf_statements.len() != 8 {
+                return None;
+            }
+            let (local, value) = binding(&scope.leaf_statements[0])?;
+            (
+                (
+                    scope.leaf_statements[0].node_id.clone(),
+                    local.clone(),
+                    value,
+                ),
+                &scope.leaf_statements[1..],
+            )
+        } else {
+            if !scope.preamble_statements.is_empty()
+                || scope.steps.len() != 1
+                || scope.leaf_statements.len() != 7
+            {
+                return None;
+            }
+            let step = &scope.steps[0];
+            let local = step.ok_binding.as_ref()?;
+            (
+                (
+                    step.ok_arm.pattern.node_id.clone(),
+                    local.clone(),
+                    step.scrutinee,
+                ),
+                scope.leaf_statements,
+            )
+        };
+        let binds = tail_slice[..3]
             .iter()
             .map(|statement| {
                 let (local, value) = binding(statement)?;
                 Some((statement, local.clone(), value))
             })
             .collect::<Option<Vec<_>>>()?;
-        let root_binding = &binds[0];
-        let pair_binding = &binds[1];
-        let snapshot_binding = &binds[2];
-        let count_binding = &binds[3];
+        let root_binding = &root_binding_tuple;
+        let pair_binding = &binds[0];
+        let snapshot_binding = &binds[1];
+        let count_binding = &binds[2];
 
         let root_call = direct_call(root_binding.2)?;
         let ResolvedCallee::Builtin(root_builtin) = &root_call.callee else {
@@ -3734,17 +4876,9 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             || get_result.binding_point != pair_binding.0.node_id
             || values_result.binding_point != snapshot_binding.0.node_id
             || get_result.settlement_point.as_ref()
-                != body
-                    .root
-                    .statements
-                    .get(4)
-                    .map(|statement| &statement.node_id)
+                != tail_slice.get(3).map(|statement| &statement.node_id)
             || values_result.settlement_point.as_ref()
-                != body
-                    .root
-                    .statements
-                    .get(6)
-                    .map(|statement| &statement.node_id)
+                != tail_slice.get(5).map(|statement| &statement.node_id)
         {
             return None;
         }
@@ -3756,9 +4890,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             root_binding.1.clone(),
         ];
         let mut drops = Vec::with_capacity(4);
-        for (statement, expected_local) in
-            body.root.statements[4..].iter().zip(expected_drop_locals)
-        {
+        for (statement, expected_local) in tail_slice[3..].iter().zip(expected_drop_locals) {
             let ResolvedStmtKind::Drop(places) = &statement.kind else {
                 return None;
             };
@@ -3816,11 +4948,10 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             return None;
         }
 
-        let bindings = [root_binding, pair_binding, snapshot_binding, count_binding]
-            .into_iter()
-            .map(|(statement, local, value)| Binding {
+        let make_binding =
+            |statement: NodeId, local: &ResolvedLocalId, value: &ResolvedExpr| Binding {
                 local: local.clone(),
-                statement: statement.node_id.clone(),
+                statement,
                 operation: value.node_id.clone(),
                 ty: value.ty.clone(),
                 arguments: direct_call(value)
@@ -3831,8 +4962,19 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                             .collect()
                     })
                     .unwrap_or_default(),
-            })
-            .collect::<Vec<_>>();
+            };
+        let mut bindings = vec![make_binding(
+            root_binding.0.clone(),
+            &root_binding.1,
+            root_binding.2,
+        )];
+        bindings.extend(
+            [pair_binding, snapshot_binding, count_binding]
+                .into_iter()
+                .map(|(statement, local, value)| {
+                    make_binding(statement.node_id.clone(), local, value)
+                }),
+        );
         let bindings: [Binding; 4] = bindings.try_into().ok()?;
         let key = get_call.arguments[1].value.node_id.clone();
         Some(Receipt {
@@ -4008,6 +5150,11 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
     /// settled scalar tail: it requires an exact `if` shape, one carried
     /// base root, two concrete-payload Set children, one child size and
     /// explicit child Drop per arm, and an explicit base Drop in the join.
+    /// Admit one source-certified Result-wrapped persistent Set diamond:
+    /// `match map_new()` introduces `base` into an `if` diamond split whose two
+    /// arms each evaluate `match map_set(base, key, payload)`, inspect/drop
+    /// their `Ok` child and drop `base`, drop `base` in `Err`, and join cleanly
+    /// with empty Map owner state on all return paths.
     fn build_branch_local_persistent_set_diamond_flow_receipt(
         cfg: &CallableCfg,
         body: &ResolvedBody,
@@ -4018,12 +5165,14 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         unpacks: &[crate::core::OrdinaryMapOwnedAnyV2UnpackReceipt],
         values_unpacks: &[crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
         local_loads: &[(NodeId, ResolvedLocalId)],
+        result_branch_candidates: &[OrdinaryMapOwnedAnyV2ResultBranchCandidate],
     ) -> Option<crate::core::OrdinaryMapOwnedAnyV2CfgFlowReceipt> {
         use crate::core::cfg::{BasicBlockId, CfgPointKind, EdgeId, EdgeKind, Terminator};
         use crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof as FlowProof;
         use crate::core::ownership::{
             OrdinaryMapOwnedAnyV2PersistentSetArmReceipt as ArmReceipt,
             OrdinaryMapOwnedAnyV2PersistentSetDiamondReceipt as DiamondReceipt,
+            OrdinaryMapOwnedAnyV2ResultBranchReceipt as BranchReceipt,
         };
         use crate::core::{
             OrdinaryMapOwnedAnyV2ActionKind as Action,
@@ -4033,34 +5182,21 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         };
 
         if cfg.owner != body.owner
-            || actions.len() != 8
-            || attempts.len() != 8
+            || result_branch_candidates.len() != 3
+            || actions.len() != 11
+            || attempts.len() != 11
             || !results.is_empty()
             || !unpacks.is_empty()
             || !values_unpacks.is_empty()
-            || cfg.blocks.len() != cfg.reachable.len()
+            || cfg.blocks.len() != 13
+            || cfg.reachable.len() != 13
+            || cfg.edges.len() != 16
+            || !cfg.reachable.contains(&cfg.entry)
             || cfg.blocks.keys().ne(cfg.reachable.iter())
             || cfg.edges.values().any(|edge| {
                 !cfg.reachable.contains(&edge.from) || !cfg.reachable.contains(&edge.to)
             })
         {
-            return None;
-        }
-
-        let (split, join, arm_edges, arm_blocks) =
-            Self::ordinary_map_owned_any_v2_diamond_shape(cfg)?;
-        if split != cfg.entry || arm_edges.len() != 2 || arm_blocks.len() != 2 {
-            return None;
-        }
-        let Terminator::Branch {
-            condition,
-            then_edge,
-            else_edge,
-        } = &cfg.blocks.get(&split)?.terminator
-        else {
-            return None;
-        };
-        if arm_edges != BTreeSet::from([then_edge.clone(), else_edge.clone()]) {
             return None;
         }
 
@@ -4081,10 +5217,6 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                     return None;
                 }
             }
-        }
-        let (condition_block, condition_rank, condition_kind) = point_location.get(condition)?;
-        if condition_block != &split || *condition_kind != CfgPointKind::Condition {
-            return None;
         }
 
         let map_type = |ty: &ResolvedTypeId| {
@@ -4138,11 +5270,57 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         {
             return None;
         }
-        let (new_block, new_rank, new_kind) = point_location.get(&new.point)?;
-        if new_block != &split
-            || *new_rank >= *condition_rank
-            || *new_kind != CfgPointKind::Expression
+        let (new_block, _, new_kind) = point_location.get(&new.point)?;
+        if new_block != &cfg.entry || *new_kind != CfgPointKind::Condition {
+            return None;
+        }
+
+        let new_cand = result_branch_candidates.iter().find(|candidate| {
+            candidate.kind == Action::New
+                && candidate.operation_point == new.point
+                && candidate.output_root == base_local
+                && candidate.input_root.is_none()
+        })?;
+        let (new_dispatch, new_ok_edge, new_err_edge, split, outer_err_block, outer_join) =
+            ordinary_map_result_branch_edges(
+                cfg,
+                &new_cand.scrutinee_node,
+                &new_cand.match_node,
+                &new_cand.ok_arm,
+                &new_cand.err_arm,
+            )?;
+        if new_dispatch != cfg.entry {
+            return None;
+        }
+        let outer_err_exit = match &cfg.blocks.get(&outer_err_block)?.terminator {
+            Terminator::Goto { edge } => cfg.edges.get(edge)?,
+            _ => return None,
+        };
+        if outer_err_exit.from != outer_err_block
+            || outer_err_exit.to != outer_join
+            || outer_err_exit.kind != EdgeKind::Fallthrough
+            || !matches!(
+                &cfg.blocks.get(&outer_join)?.terminator,
+                Terminator::Return { .. }
+            )
         {
+            return None;
+        }
+
+        let Terminator::Branch {
+            condition,
+            then_edge,
+            else_edge,
+        } = &cfg.blocks.get(&split)?.terminator
+        else {
+            return None;
+        };
+        let arm_edges = BTreeSet::from([then_edge.clone(), else_edge.clone()]);
+        if arm_edges.len() != 2 {
+            return None;
+        }
+        let (condition_block, _, condition_kind) = point_location.get(condition)?;
+        if condition_block != &split || *condition_kind != CfgPointKind::Condition {
             return None;
         }
 
@@ -4160,7 +5338,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             .collect::<Vec<_>>();
         if sets.len() != 2
             || sizes.len() != 2
-            || drops.len() != 3
+            || drops.len() != 6
             || actions.iter().any(|action| {
                 !matches!(
                     action.kind,
@@ -4171,9 +5349,37 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             return None;
         }
 
+        let action_in_block =
+            |block_id: &BasicBlockId, kind: Action| -> Option<&OrdinaryMapOwnedAnyV2Action> {
+                let mut matching = actions.iter().filter(|action| {
+                    action.kind == kind
+                        && point_location
+                            .get(&action.point)
+                            .is_some_and(|(block, _, _)| block == block_id)
+                });
+                let action = matching.next()?;
+                matching.next().is_none().then_some(action)
+            };
+        let actions_in_block = |block_id: &BasicBlockId| {
+            let mut in_block = actions
+                .iter()
+                .filter_map(|action| {
+                    let (block, rank, _) = point_location.get(&action.point)?;
+                    (block == block_id).then_some((*rank, action))
+                })
+                .collect::<Vec<_>>();
+            in_block.sort_by_key(|(rank, _)| *rank);
+            in_block.into_iter().map(|(_, a)| a).collect::<Vec<_>>()
+        };
+        let no_map_actions = |block_id: &BasicBlockId| actions_in_block(block_id).is_empty();
+        if !no_map_actions(&outer_err_block) || !no_map_actions(&outer_join) {
+            return None;
+        }
+
         let mut arm_receipts = BTreeMap::<EdgeId, ArmReceipt>::new();
         let mut child_locals = BTreeSet::new();
         let mut payload_source: Option<(ResolvedLocalId, ResolvedTypeId)> = None;
+        let mut if_join: Option<BasicBlockId> = None;
         let mut expected_attempts = BTreeSet::new();
         expected_attempts.insert(OrdinaryMapOwnedAnyV2Attempt {
             kind: AttemptKind::New,
@@ -4183,40 +5389,105 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             result_local: Some(base_local.clone()),
         });
 
+        let mut branch_introductions = BTreeMap::<EdgeId, Vec<(NodeId, ResolvedLocalId)>>::new();
+        branch_introductions.insert(
+            new_ok_edge.clone(),
+            vec![(
+                new_cand.operation_point.clone(),
+                new_cand.output_root.clone(),
+            )],
+        );
+
+        let mut candidate_edges = vec![(
+            new_cand,
+            (
+                new_dispatch.clone(),
+                new_ok_edge.clone(),
+                new_err_edge.clone(),
+                split.clone(),
+                outer_err_block.clone(),
+                outer_join.clone(),
+            ),
+        )];
+
         for edge_id in [then_edge, else_edge] {
             let edge = cfg.edges.get(edge_id)?;
-            if edge.from != split || !matches!(edge.kind, EdgeKind::Then | EdgeKind::Else) {
+            let expected_role = match edge.kind {
+                EdgeKind::Then => "if-then",
+                EdgeKind::Else => "if-else",
+                _ => return None,
+            };
+            if edge.from != split
+                || edge
+                    .to
+                    .0
+                     .0
+                    .rsplit_once("/cfg:block:")
+                    .map(|(_, role)| role)
+                    != Some(expected_role)
+            {
                 return None;
             }
             let arm_block = edge.to.clone();
-            if !arm_blocks.contains(&arm_block) {
+            let set = action_in_block(&arm_block, Action::Set)?;
+            let set_cand = result_branch_candidates.iter().find(|candidate| {
+                candidate.kind == Action::Set
+                    && candidate.operation_point == set.point
+                    && candidate.output_root == set.local
+                    && candidate.input_root.as_ref() == Some(&base_local)
+            })?;
+            let (set_dispatch, set_ok_edge, set_err_edge, ok_block, err_block, match_join) =
+                ordinary_map_result_branch_edges(
+                    cfg,
+                    &set_cand.scrutinee_node,
+                    &set_cand.match_node,
+                    &set_cand.ok_arm,
+                    &set_cand.err_arm,
+                )?;
+            if set_dispatch != arm_block {
                 return None;
             }
-            let join_edge_id = match &cfg.blocks.get(&arm_block)?.terminator {
+            let ok_exit = match &cfg.blocks.get(&ok_block)?.terminator {
+                Terminator::Goto { edge } => cfg.edges.get(edge)?,
+                _ => return None,
+            };
+            let err_exit = match &cfg.blocks.get(&err_block)?.terminator {
+                Terminator::Goto { edge } => cfg.edges.get(edge)?,
+                _ => return None,
+            };
+            if ok_exit.from != ok_block
+                || ok_exit.to != match_join
+                || ok_exit.kind != EdgeKind::Fallthrough
+                || err_exit.from != err_block
+                || err_exit.to != match_join
+                || err_exit.kind != EdgeKind::Fallthrough
+            {
+                return None;
+            }
+            let join_edge_id = match &cfg.blocks.get(&match_join)?.terminator {
                 Terminator::Goto { edge } => edge.clone(),
                 _ => return None,
             };
             let join_edge = cfg.edges.get(&join_edge_id)?;
-            if join_edge.from != arm_block
-                || join_edge.to != join
-                || join_edge.kind != EdgeKind::Fallthrough
+            if join_edge.from != match_join || join_edge.kind != EdgeKind::Fallthrough {
+                return None;
+            }
+            if join_edge
+                .to
+                .0
+                 .0
+                .rsplit_once("/cfg:block:")
+                .map(|(_, role)| role)
+                != Some("if-join")
             {
                 return None;
             }
+            match &if_join {
+                Some(existing) if existing != &join_edge.to => return None,
+                None => if_join = Some(join_edge.to.clone()),
+                _ => {}
+            }
 
-            let action_in_arm = |kind: Action| -> Option<&OrdinaryMapOwnedAnyV2Action> {
-                let mut matching = actions.iter().filter(|action| {
-                    action.kind == kind
-                        && point_location
-                            .get(&action.point)
-                            .is_some_and(|(block, _, _)| block == &arm_block)
-                });
-                let action = matching.next()?;
-                matching.next().is_none().then_some(action)
-            };
-            let set = action_in_arm(Action::Set)?;
-            let size = action_in_arm(Action::Size)?;
-            let drop = action_in_arm(Action::Drop)?;
             let child_local = set.local.clone();
             let child_root = Self::resource_identity(&child_local);
             let child_type = body.locals.get(&child_local)?.ty.clone();
@@ -4258,13 +5529,51 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 _ => {}
             }
 
+            let ok_actions = actions_in_block(&ok_block);
+            let [size, drop, ok_base_drop] = ok_actions.as_slice() else {
+                return None;
+            };
+            let err_actions = actions_in_block(&err_block);
+            let [err_base_drop] = err_actions.as_slice() else {
+                return None;
+            };
+            if !no_map_actions(&match_join) || actions_in_block(&arm_block).len() != 1 {
+                return None;
+            }
+
+            let is_plain_drop =
+                |drop_act: &OrdinaryMapOwnedAnyV2Action,
+                 expected_local: &ResolvedLocalId,
+                 expected_root: &crate::core::ResourceId| {
+                    drop_act.kind == Action::Drop
+                        && drop_act.profile_version == Profile::V2
+                        && drop_act.local == *expected_local
+                        && drop_act.root == *expected_root
+                        && drop_act.key.is_none()
+                        && drop_act.key_type.is_none()
+                        && drop_act.key_local.is_none()
+                        && drop_act.key_local_mutable.is_none()
+                        && drop_act.key_provenance.is_none()
+                        && drop_act.key_static_digest.is_none()
+                        && drop_act.value.is_none()
+                        && drop_act.value_type.is_none()
+                        && !drop_act.payload_clone
+                        && drop_act.source_local.is_none()
+                        && drop_act.source.is_none()
+                        && drop_act.source_node.is_none()
+                        && drop_act.source_type.is_none()
+                        && drop_act.result_type.is_none()
+                        && drop_act.result_local.is_none()
+                };
+
             let set_source_node = set.source_node.as_ref()?;
             let set_key = set.key.as_ref()?;
-            if size.profile_version != Profile::V2
+            if size.kind != Action::Size
+                || size.profile_version != Profile::V2
                 || size.root != child_root
                 || size.local != child_local
                 || size.source_local.is_some()
-                || size.source.as_ref().is_some()
+                || size.source.is_some()
                 || size.source_node.is_none()
                 || size.source_type.as_ref() != Some(&base_type)
                 || size.key.is_some()
@@ -4278,39 +5587,25 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 || size.payload_clone
                 || size.result_type.is_some()
                 || size.result_local.is_some()
-                || drop.profile_version != Profile::V2
-                || drop.root != child_root
-                || drop.local != child_local
-                || drop.key.is_some()
-                || drop.key_type.is_some()
-                || drop.key_local.is_some()
-                || drop.key_local_mutable.is_some()
-                || drop.key_provenance.is_some()
-                || drop.key_static_digest.is_some()
-                || drop.value.is_some()
-                || drop.value_type.is_some()
-                || drop.payload_clone
-                || drop.source_local.is_some()
-                || drop.source.is_some()
-                || drop.source_node.is_some()
-                || drop.source_type.is_some()
-                || drop.result_type.is_some()
-                || drop.result_local.is_some()
+                || !is_plain_drop(drop, &child_local, &child_root)
+                || !is_plain_drop(ok_base_drop, &base_local, &base_root)
+                || !is_plain_drop(err_base_drop, &base_local, &base_root)
             {
                 return None;
             }
 
-            let (set_block, set_rank, set_kind) = point_location.get(&set.point)?;
-            let (size_block, size_rank, size_kind) = point_location.get(&size.point)?;
-            let (drop_block, drop_rank, drop_kind) = point_location.get(&drop.point)?;
+            let (_, _, set_kind) = point_location.get(&set.point)?;
+            let (_, size_rank, size_kind) = point_location.get(&size.point)?;
+            let (_, drop_rank, drop_kind) = point_location.get(&drop.point)?;
+            let (_, ok_base_rank, ok_base_kind) = point_location.get(&ok_base_drop.point)?;
+            let (_, _, err_base_kind) = point_location.get(&err_base_drop.point)?;
             let size_source_node = size.source_node.as_ref()?;
-            if set_block != &arm_block
-                || size_block != &arm_block
-                || drop_block != &arm_block
-                || *set_kind != CfgPointKind::Expression
+            if *set_kind != CfgPointKind::Condition
                 || *size_kind != CfgPointKind::Expression
                 || *drop_kind != CfgPointKind::ResourceAction
-                || !(set_rank < size_rank && size_rank < drop_rank)
+                || *ok_base_kind != CfgPointKind::ResourceAction
+                || *err_base_kind != CfgPointKind::ResourceAction
+                || !(size_rank < drop_rank && drop_rank < ok_base_rank)
                 || local_loads
                     .iter()
                     .filter(|(node, local)| node == size_source_node && local == &child_local)
@@ -4350,16 +5645,55 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 receiver_local: Some(child_local.clone()),
                 result_local: None,
             });
+            expected_attempts.insert(OrdinaryMapOwnedAnyV2Attempt {
+                kind: AttemptKind::Drop,
+                point: ok_base_drop.point.clone(),
+                arguments: vec![base_local.0.clone()],
+                receiver_local: Some(base_local.clone()),
+                result_local: None,
+            });
+            expected_attempts.insert(OrdinaryMapOwnedAnyV2Attempt {
+                kind: AttemptKind::Drop,
+                point: err_base_drop.point.clone(),
+                arguments: vec![base_local.0.clone()],
+                receiver_local: Some(base_local.clone()),
+                result_local: None,
+            });
+
+            branch_introductions.insert(
+                set_ok_edge.clone(),
+                vec![(
+                    set_cand.operation_point.clone(),
+                    set_cand.output_root.clone(),
+                )],
+            );
+            candidate_edges.push((
+                set_cand,
+                (
+                    set_dispatch,
+                    set_ok_edge,
+                    set_err_edge,
+                    ok_block.clone(),
+                    err_block.clone(),
+                    match_join.clone(),
+                ),
+            ));
+
             if arm_receipts
                 .insert(
                     edge_id.clone(),
                     ArmReceipt {
                         edge: edge_id.clone(),
                         block: arm_block,
+                        ok_block,
+                        err_block,
+                        match_join,
                         join_edge: join_edge_id,
-                        set: set.clone(),
-                        size: size.clone(),
-                        drop: drop.clone(),
+                        set: (*set).clone(),
+                        size: (*size).clone(),
+                        drop: (*drop).clone(),
+                        ok_base_drop: (*ok_base_drop).clone(),
+                        err_base_drop: (*err_base_drop).clone(),
                         payload_load: payload_node.clone(),
                     },
                 )
@@ -4369,46 +5703,22 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             }
         }
 
-        let base_drop = drops.iter().find(|action| action.local == base_local)?;
-        if drops
-            .iter()
-            .filter(|action| action.local == base_local)
-            .count()
-            != 1
+        let if_join = if_join?;
+        if !no_map_actions(&if_join) {
+            return None;
+        }
+        let if_join_to_outer_edge = match &cfg.blocks.get(&if_join)?.terminator {
+            Terminator::Goto { edge } => edge.clone(),
+            _ => return None,
+        };
+        let outer_edge = cfg.edges.get(&if_join_to_outer_edge)?;
+        if outer_edge.from != if_join
+            || outer_edge.to != outer_join
+            || outer_edge.kind != EdgeKind::Fallthrough
         {
             return None;
         }
-        let (base_drop_block, _, base_drop_kind) = point_location.get(&base_drop.point)?;
-        if base_drop_block != &join
-            || *base_drop_kind != CfgPointKind::ResourceAction
-            || base_drop.profile_version != Profile::V2
-            || base_drop.root != base_root
-            || base_drop.key.is_some()
-            || base_drop.key_type.is_some()
-            || base_drop.key_local.is_some()
-            || base_drop.key_local_mutable.is_some()
-            || base_drop.key_provenance.is_some()
-            || base_drop.key_static_digest.is_some()
-            || base_drop.value.is_some()
-            || base_drop.value_type.is_some()
-            || base_drop.payload_clone
-            || base_drop.source_local.is_some()
-            || base_drop.source.is_some()
-            || base_drop.source_node.is_some()
-            || base_drop.source_type.is_some()
-            || base_drop.result_type.is_some()
-            || base_drop.result_local.is_some()
-        {
-            return None;
-        }
-        expected_attempts.insert(OrdinaryMapOwnedAnyV2Attempt {
-            kind: AttemptKind::Drop,
-            point: base_drop.point.clone(),
-            arguments: vec![base_local.0.clone()],
-            receiver_local: Some(base_local.clone()),
-            result_local: None,
-        });
-        if expected_attempts.len() != 8 || &expected_attempts != attempts {
+        if expected_attempts.len() != 11 || &expected_attempts != attempts {
             return None;
         }
         let (payload_local, payload_type) = payload_source?;
@@ -4433,11 +5743,6 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             );
         }
         let reachable_edges = cfg.edges.clone();
-        let mut live_roots = BTreeSet::<ResolvedLocalId>::new();
-        let mut ever_created = BTreeSet::<ResolvedLocalId>::new();
-        let mut live_owners_in = BTreeMap::new();
-        let mut live_owners_out = BTreeMap::new();
-        let mut live_owners_on_edge = BTreeMap::new();
         let owners = |roots: &BTreeSet<ResolvedLocalId>| {
             roots
                 .iter()
@@ -4447,49 +5752,48 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 })
                 .collect::<BTreeSet<_>>()
         };
+        let root_ids = |roots: &BTreeSet<ResolvedLocalId>| {
+            roots
+                .iter()
+                .map(|local| Self::resource_identity(local).0 .0)
+                .collect::<BTreeSet<_>>()
+        };
 
+        let mut live_owners_in = BTreeMap::new();
+        let mut live_owners_out = BTreeMap::new();
+        let mut live_roots_on_edge_sources = BTreeMap::<EdgeId, BTreeSet<ResolvedLocalId>>::new();
+        let mut ever_created = BTreeSet::<ResolvedLocalId>::new();
         for block_id in &order {
             let incoming = reachable_edges
                 .iter()
                 .filter(|(_, edge)| &edge.to == block_id)
                 .map(|(edge_id, _)| edge_id)
                 .collect::<Vec<_>>();
-            if block_id == &cfg.entry {
-                if !incoming.is_empty() {
-                    return None;
-                }
-                live_roots.clear();
-            } else {
-                let mut facts = incoming
-                    .iter()
-                    .map(|edge| live_owners_on_edge.get(*edge).cloned())
-                    .collect::<Option<Vec<_>>>()?;
-                let first = facts.pop()?;
-                if facts.iter().any(|fact| fact != &first) {
-                    return None;
-                }
-                let (roots, result_owners) =
-                    Self::ordinary_map_owned_any_v2_decode_live_owners(&first)?;
-                if !result_owners.is_empty() {
-                    return None;
-                }
-                live_roots = roots;
-            }
-            live_owners_in.insert(block_id.clone(), owners(&live_roots));
-            let block = cfg.blocks.get(block_id)?;
-            let mut block_actions = actions
+            let mut incoming_facts = incoming
                 .iter()
-                .filter_map(|action| {
-                    let (_, rank, _) = point_location.get(&action.point)?;
-                    (point_location.get(&action.point)?.0 == *block_id).then_some((*rank, action))
-                })
-                .collect::<Vec<_>>();
-            block_actions.sort_by_key(|(rank, _)| *rank);
-            for (_, action) in block_actions {
+                .map(|edge_id| live_roots_on_edge_sources.get(*edge_id).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            let mut live_roots = if block_id == &cfg.entry {
+                if !incoming_facts.is_empty() {
+                    return None;
+                }
+                BTreeSet::new()
+            } else {
+                if incoming_facts.is_empty() {
+                    return None;
+                }
+                let first = incoming_facts.pop()?;
+                if incoming_facts.iter().any(|fact| fact != &first) {
+                    return None;
+                }
+                first
+            };
+            live_owners_in.insert(block_id.clone(), owners(&live_roots));
+            for action in actions_in_block(block_id) {
                 match action.kind {
                     Action::New => {
                         if !ever_created.insert(action.local.clone())
-                            || !live_roots.insert(action.local.clone())
+                            || live_roots.contains(&action.local)
                         {
                             return None;
                         }
@@ -4499,7 +5803,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                         if !live_roots.contains(source)
                             || source == &action.local
                             || !ever_created.insert(action.local.clone())
-                            || !live_roots.insert(action.local.clone())
+                            || live_roots.contains(&action.local)
                         {
                             return None;
                         }
@@ -4517,31 +5821,137 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                     _ => return None,
                 }
             }
-            let live = owners(&live_roots);
-            live_owners_out.insert(block_id.clone(), live.clone());
-            for (edge_id, edge) in &reachable_edges {
-                if &edge.from == block_id {
-                    live_owners_on_edge.insert(edge_id.clone(), live.clone());
-                }
-            }
+            let block = cfg.blocks.get(block_id)?;
             if matches!(block.terminator, Terminator::Return { .. }) && !live_roots.is_empty() {
                 return None;
             }
+            live_owners_out.insert(block_id.clone(), owners(&live_roots));
+            for edge in reachable_edges
+                .values()
+                .filter(|edge| &edge.from == block_id)
+            {
+                let mut edge_live = live_roots.clone();
+                if let Some(introductions) = branch_introductions.get(&edge.id) {
+                    for (point, local) in introductions {
+                        let action = actions.iter().find(|action| action.point == *point)?;
+                        if action.local != *local
+                            || !ever_created.contains(local)
+                            || !edge_live.insert(local.clone())
+                        {
+                            return None;
+                        }
+                    }
+                }
+                live_roots_on_edge_sources.insert(edge.id.clone(), edge_live);
+            }
+        }
+        let mut roots_on_edge_strs = BTreeMap::new();
+        let mut live_owners_on_edge = BTreeMap::new();
+        for (edge, roots) in live_roots_on_edge_sources {
+            roots_on_edge_strs.insert(edge.clone(), root_ids(&roots));
+            live_owners_on_edge.insert(edge, owners(&roots));
+        }
+
+        let point_block_only: BTreeMap<NodeId, (BasicBlockId, usize)> = point_location
+            .iter()
+            .map(|(k, (b, r, _))| (k.clone(), (b.clone(), *r)))
+            .collect();
+        let drop_points = drops
+            .iter()
+            .map(|drop| drop.point.clone())
+            .collect::<Vec<_>>();
+        let mut result_branches = Vec::with_capacity(3);
+        for (candidate, (dispatch, ok_edge, err_edge, ok_entry, err_entry, join)) in candidate_edges
+        {
+            if !matches!(
+                &cfg.blocks.get(&dispatch)?.terminator,
+                Terminator::Match { scrutinee, .. } if scrutinee == &candidate.scrutinee_node
+            ) {
+                return None;
+            }
+            let ok = ordinary_map_result_branch_path_receipt(
+                cfg,
+                &ok_edge,
+                &ok_entry,
+                &join,
+                &drop_points,
+                &point_block_only,
+                &roots_on_edge_strs,
+            )?;
+            let err = ordinary_map_result_branch_path_receipt(
+                cfg,
+                &err_edge,
+                &err_entry,
+                &join,
+                &drop_points,
+                &point_block_only,
+                &roots_on_edge_strs,
+            )?;
+            let output_id = Self::resource_identity(&candidate.output_root).0 .0;
+            if ok.roots_at_exit != err.roots_at_exit
+                || !ok.roots_at_entry.contains(&output_id)
+                || err.roots_at_entry.contains(&output_id)
+                || candidate.input_root.as_ref().is_some_and(|root| {
+                    let input_id = Self::resource_identity(root).0 .0;
+                    !ok.roots_at_entry.contains(&input_id)
+                        || !err.roots_at_entry.contains(&input_id)
+                })
+            {
+                return None;
+            }
+            result_branches.push(BranchReceipt {
+                kind: candidate.kind,
+                operation_point: candidate.operation_point.clone(),
+                result_node: candidate.result_node.clone(),
+                result_type: candidate.result_type.clone(),
+                match_node: candidate.match_node.clone(),
+                scrutinee_node: candidate.scrutinee_node.clone(),
+                ok_arm: candidate.ok_arm.clone(),
+                ok_variant: candidate.ok_variant.clone(),
+                ok_pattern: candidate.ok_pattern.clone(),
+                ok_binding: candidate.ok_binding.clone(),
+                ok_payload_type: candidate.ok_payload_type.clone(),
+                err_arm: candidate.err_arm.clone(),
+                err_variant: candidate.err_variant.clone(),
+                err_pattern: candidate.err_pattern.clone(),
+                err_binding: candidate.err_binding.clone(),
+                err_payload_type: candidate.err_payload_type.clone(),
+                input_root: candidate.input_root.clone(),
+                output_root: candidate.output_root.clone(),
+                ok,
+                err,
+            });
         }
 
         let base_owner = Owner::Root {
             local: base_local.clone(),
-            resource: base_root.clone(),
+            resource: base_root,
         };
         let base_only = BTreeSet::from([base_owner]);
-        if live_owners_out.get(&split) != Some(&base_only)
-            || live_owners_in.get(&join) != Some(&base_only)
-            || !live_owners_out.get(&join)?.is_empty()
+        if live_owners_in.get(&split) != Some(&base_only)
+            || live_owners_out.get(&split) != Some(&base_only)
+            || !live_owners_in.get(&if_join)?.is_empty()
+            || !live_owners_out.get(&if_join)?.is_empty()
+            || !live_owners_in.get(&outer_join)?.is_empty()
+            || !live_owners_out.get(&outer_join)?.is_empty()
             || arm_receipts.keys().cloned().collect::<BTreeSet<_>>() != arm_edges
             || arm_receipts.values().any(|arm| {
                 live_owners_in.get(&arm.block) != Some(&base_only)
                     || live_owners_out.get(&arm.block) != Some(&base_only)
                     || live_owners_on_edge.get(&arm.edge) != Some(&base_only)
+                    || live_owners_in.get(&arm.err_block) != Some(&base_only)
+                    || !live_owners_out
+                        .get(&arm.err_block)
+                        .is_some_and(|s| s.is_empty())
+                    || !live_owners_out
+                        .get(&arm.ok_block)
+                        .is_some_and(|s| s.is_empty())
+                    || !live_owners_in
+                        .get(&arm.match_join)
+                        .is_some_and(|s| s.is_empty())
+                    || !live_owners_out
+                        .get(&arm.match_join)
+                        .is_some_and(|s| s.is_empty())
             })
             || live_owners_in.len() != reachable_blocks.len()
             || live_owners_out.len() != reachable_blocks.len()
@@ -4552,20 +5962,412 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
 
         let proof = FlowProof::BranchLocalPersistentSetDiamondV1(DiamondReceipt {
             owner: body.owner.clone(),
+            entry_match_split: cfg.entry.clone(),
+            outer_err_block,
+            outer_join: outer_join.clone(),
             split: split.clone(),
-            join: join.clone(),
+            join: if_join,
+            if_join_to_outer_edge,
             base_local,
             base_new: new.clone(),
-            base_drop: (**base_drop).clone(),
             payload_local,
             payload_type,
+            result_branches,
             arms: arm_receipts,
         });
         Some(crate::core::OrdinaryMapOwnedAnyV2CfgFlowReceipt {
             proof,
             entry: cfg.entry.clone(),
             split,
-            join,
+            join: outer_join,
+            arm_edges,
+            reachable_blocks,
+            reachable_edges,
+            live_owners_in,
+            live_owners_out,
+            live_owners_on_edge,
+        })
+    }
+
+    fn build_result_branch_flow_receipt(
+        cfg: &CallableCfg,
+        actions: &[OrdinaryMapOwnedAnyV2Action],
+        attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+        results: &[crate::core::OrdinaryMapOwnedAnyV2ResultReceipt],
+        unpacks: &[crate::core::OrdinaryMapOwnedAnyV2UnpackReceipt],
+        values_unpacks: &[crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
+        result_branch_candidates: &[OrdinaryMapOwnedAnyV2ResultBranchCandidate],
+    ) -> Option<crate::core::OrdinaryMapOwnedAnyV2CfgFlowReceipt> {
+        use crate::core::cfg::Terminator;
+        use crate::core::{
+            OrdinaryMapOwnedAnyV2ActionKind as Action, OrdinaryMapOwnedAnyV2AttemptKind as Attempt,
+            OrdinaryMapOwnedAnyV2CfgBlock as ReceiptBlock,
+            OrdinaryMapOwnedAnyV2CfgFlowProof as FlowProof,
+            OrdinaryMapOwnedAnyV2LiveOwner as Owner,
+            OrdinaryMapOwnedAnyV2ResultBranchReceipt as BranchReceipt,
+        };
+
+        if result_branch_candidates.is_empty()
+            || actions.is_empty()
+            || !ordinary_map_supports_result_branch_cfg(
+                cfg,
+                attempts.iter().map(|attempt| &attempt.point),
+            )
+        {
+            return None;
+        }
+        let order = Self::acyclic_v2_cfg_order(cfg)?;
+        let reachable_blocks = cfg
+            .reachable
+            .iter()
+            .map(|id| {
+                let block = cfg.blocks.get(id)?;
+                Some((
+                    id.clone(),
+                    ReceiptBlock {
+                        source: block.source.clone(),
+                        points: block
+                            .points
+                            .iter()
+                            .map(|point| (point.source.node.clone(), point.kind))
+                            .collect(),
+                        terminator: block.terminator.clone(),
+                    },
+                ))
+            })
+            .collect::<Option<BTreeMap<_, _>>>()?;
+        let reachable_edges = cfg
+            .edges
+            .iter()
+            .filter(|(_, edge)| cfg.reachable.contains(&edge.from))
+            .map(|(id, edge)| (id.clone(), edge.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if reachable_edges.len() != cfg.edges.len() {
+            return None;
+        }
+
+        let mut point_location = BTreeMap::new();
+        for block_id in &order {
+            let block = cfg.blocks.get(block_id)?;
+            for (point_index, point) in block.points.iter().enumerate() {
+                if point_location
+                    .insert(point.source.node.clone(), (block_id.clone(), point_index))
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+        }
+        if attempts
+            .iter()
+            .any(|attempt| !point_location.contains_key(&attempt.point))
+            || actions
+                .iter()
+                .any(|action| !point_location.contains_key(&action.point))
+            || results.iter().any(|result| {
+                !result.settlement.is_receipted()
+                    || !point_location.contains_key(&result.operation)
+                    || !point_location.contains_key(&result.binding_point)
+                    || result
+                        .settlement_point
+                        .as_ref()
+                        .is_none_or(|point| !point_location.contains_key(point))
+            })
+            || unpacks.iter().any(|unpack| {
+                !point_location.contains_key(&unpack.operation)
+                    || !point_location.contains_key(&unpack.pair_binding_point)
+                    || !point_location.contains_key(&unpack.unpack_binding_point)
+                    || !point_location.contains_key(&unpack.projection)
+                    || !point_location.contains_key(&unpack.cast)
+                    || !point_location.contains_key(&unpack.settlement_point)
+            })
+            || values_unpacks.iter().any(|unpack| {
+                !point_location.contains_key(&unpack.operation)
+                    || !point_location.contains_key(&unpack.snapshot_binding_point)
+                    || !point_location.contains_key(&unpack.unpack_binding_point)
+                    || !point_location.contains_key(&unpack.index_projection)
+                    || !point_location.contains_key(&unpack.cast)
+                    || !point_location.contains_key(&unpack.settlement_point)
+            })
+        {
+            return None;
+        }
+
+        let mut expected_events = BTreeMap::new();
+        for attempt in attempts {
+            let action_kind = match attempt.kind {
+                Attempt::New => Action::New,
+                Attempt::Set => Action::Set,
+                Attempt::Remove => Action::Remove,
+                Attempt::Size => Action::Size,
+                Attempt::HasKey => Action::HasKey,
+                Attempt::IsEmpty => Action::IsEmpty,
+                Attempt::GetAny => Action::GetAny,
+                Attempt::Values => Action::Values,
+                Attempt::Keys => Action::Keys,
+                Attempt::Clone => Action::Clone,
+                Attempt::Drop | Attempt::ScopeDrop => Action::Drop,
+                Attempt::ToList
+                | Attempt::FromList
+                | Attempt::MapLiteral
+                | Attempt::GetOrDefaultI32
+                | Attempt::GetOrDefaultString => return None,
+            };
+            *expected_events
+                .entry((attempt.point.clone(), action_kind))
+                .or_insert(0usize) += 1;
+        }
+        let mut actual_events = BTreeMap::new();
+        for action in actions {
+            *actual_events
+                .entry((action.point.clone(), action.kind))
+                .or_insert(0usize) += 1;
+        }
+        if expected_events != actual_events {
+            return None;
+        }
+
+        let branch_edges = result_branch_candidates
+            .iter()
+            .map(|candidate| {
+                ordinary_map_result_branch_edges(
+                    cfg,
+                    &candidate.scrutinee_node,
+                    &candidate.match_node,
+                    &candidate.ok_arm,
+                    &candidate.err_arm,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut branch_introductions =
+            BTreeMap::<crate::core::cfg::EdgeId, Vec<(NodeId, ResolvedLocalId)>>::new();
+        let mut arm_edges = BTreeSet::new();
+        for (candidate, (_, ok_edge, err_edge, _, _, _)) in
+            result_branch_candidates.iter().zip(&branch_edges)
+        {
+            arm_edges.insert(ok_edge.clone());
+            arm_edges.insert(err_edge.clone());
+            branch_introductions
+                .entry(ok_edge.clone())
+                .or_default()
+                .push((
+                    candidate.operation_point.clone(),
+                    candidate.output_root.clone(),
+                ));
+        }
+
+        let owners = |roots: &BTreeSet<ResolvedLocalId>| {
+            roots
+                .iter()
+                .map(|local| Owner::Root {
+                    local: local.clone(),
+                    resource: Self::resource_identity(local),
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let root_ids = |roots: &BTreeSet<ResolvedLocalId>| {
+            roots
+                .iter()
+                .map(|local| Self::resource_identity(local).0 .0)
+                .collect::<BTreeSet<_>>()
+        };
+
+        let mut live_owners_in = BTreeMap::new();
+        let mut live_owners_out = BTreeMap::new();
+        let mut live_roots_on_edge_sources =
+            BTreeMap::<crate::core::cfg::EdgeId, BTreeSet<ResolvedLocalId>>::new();
+        let mut ever_created = BTreeSet::new();
+        for block_id in &order {
+            let block = cfg.blocks.get(block_id)?;
+            let incoming = reachable_edges
+                .iter()
+                .filter(|(_, edge)| &edge.to == block_id)
+                .map(|(edge_id, _)| edge_id)
+                .collect::<Vec<_>>();
+            let mut incoming_facts = incoming
+                .iter()
+                .map(|edge_id| live_roots_on_edge_sources.get(*edge_id).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            let live_in = if block_id == &cfg.entry {
+                if !incoming_facts.is_empty() {
+                    return None;
+                }
+                BTreeSet::new()
+            } else {
+                if incoming_facts.is_empty() {
+                    return None;
+                }
+                let first = incoming_facts.pop()?;
+                if incoming_facts.iter().any(|fact| fact != &first) {
+                    return None;
+                }
+                first
+            };
+            live_owners_in.insert(block_id.clone(), owners(&live_in));
+            let mut live = live_in;
+            let mut block_actions = actions
+                .iter()
+                .filter_map(|action| {
+                    let (owner_block, point_index) = point_location.get(&action.point)?;
+                    (owner_block == block_id).then_some((*point_index, action))
+                })
+                .collect::<Vec<_>>();
+            block_actions.sort_by_key(|(point_index, _)| *point_index);
+            for (_, action) in block_actions {
+                match action.kind {
+                    Action::New | Action::Clone | Action::Set | Action::Remove => {
+                        if !ever_created.insert(action.local.clone())
+                            || live.contains(&action.local)
+                        {
+                            return None;
+                        }
+                        if matches!(action.kind, Action::Clone | Action::Set | Action::Remove) {
+                            let source = action.source_local.as_ref()?;
+                            if source == &action.local || !live.contains(source) {
+                                return None;
+                            }
+                        } else if action.source_local.is_some() {
+                            return None;
+                        }
+                        if matches!(action.kind, Action::New | Action::Set) {
+                            let candidate = result_branch_candidates
+                                .iter()
+                                .find(|candidate| candidate.operation_point == action.point)?;
+                            if candidate.kind != action.kind
+                                || candidate.output_root != action.local
+                                || candidate.input_root != action.source_local
+                            {
+                                return None;
+                            }
+                        } else {
+                            live.insert(action.local.clone());
+                        }
+                    }
+                    Action::Drop => {
+                        if !live.remove(&action.local) {
+                            return None;
+                        }
+                    }
+                    Action::Size
+                    | Action::HasKey
+                    | Action::IsEmpty
+                    | Action::GetAny
+                    | Action::Values
+                    | Action::Keys => {
+                        if !live.contains(&action.local) {
+                            return None;
+                        }
+                    }
+                }
+            }
+            if matches!(&block.terminator, Terminator::Return { .. }) && !live.is_empty() {
+                return None;
+            }
+            live_owners_out.insert(block_id.clone(), owners(&live));
+            for edge in reachable_edges
+                .values()
+                .filter(|edge| &edge.from == block_id)
+            {
+                let mut edge_live = live.clone();
+                if let Some(introductions) = branch_introductions.get(&edge.id) {
+                    for (point, local) in introductions {
+                        let action = actions.iter().find(|action| action.point == *point)?;
+                        if action.local != *local
+                            || !ever_created.contains(local)
+                            || !edge_live.insert(local.clone())
+                        {
+                            return None;
+                        }
+                    }
+                }
+                live_roots_on_edge_sources.insert(edge.id.clone(), edge_live);
+            }
+        }
+        let mut roots_on_edge_strs = BTreeMap::new();
+        let mut live_owners_on_edge = BTreeMap::new();
+        for (edge, roots) in live_roots_on_edge_sources {
+            roots_on_edge_strs.insert(edge.clone(), root_ids(&roots));
+            live_owners_on_edge.insert(edge, owners(&roots));
+        }
+        if live_owners_in.len() != reachable_blocks.len()
+            || live_owners_out.len() != reachable_blocks.len()
+            || live_owners_on_edge.len() != reachable_edges.len()
+        {
+            return None;
+        }
+        let drop_points = actions
+            .iter()
+            .filter(|action| action.kind == Action::Drop)
+            .map(|action| action.point.clone())
+            .collect::<Vec<_>>();
+        let mut result_branches = Vec::with_capacity(result_branch_candidates.len());
+        for (candidate, (dispatch, ok_edge, err_edge, ok_entry, err_entry, join)) in
+            result_branch_candidates.iter().zip(&branch_edges)
+        {
+            if !matches!(
+                &cfg.blocks.get(dispatch)?.terminator,
+                Terminator::Match { scrutinee, .. } if scrutinee == &candidate.scrutinee_node
+            ) {
+                return None;
+            }
+            let ok = ordinary_map_result_branch_path_receipt(
+                cfg,
+                ok_edge,
+                ok_entry,
+                join,
+                &drop_points,
+                &point_location,
+                &roots_on_edge_strs,
+            )?;
+            let err = ordinary_map_result_branch_path_receipt(
+                cfg,
+                err_edge,
+                err_entry,
+                join,
+                &drop_points,
+                &point_location,
+                &roots_on_edge_strs,
+            )?;
+            let output_id = Self::resource_identity(&candidate.output_root).0 .0;
+            if ok.roots_at_exit != err.roots_at_exit
+                || !ok.roots_at_entry.contains(&output_id)
+                || err.roots_at_entry.contains(&output_id)
+                || candidate.input_root.as_ref().is_some_and(|root| {
+                    let input_id = Self::resource_identity(root).0 .0;
+                    !ok.roots_at_entry.contains(&input_id)
+                        || !err.roots_at_entry.contains(&input_id)
+                })
+            {
+                return None;
+            }
+            result_branches.push(BranchReceipt {
+                kind: candidate.kind,
+                operation_point: candidate.operation_point.clone(),
+                result_node: candidate.result_node.clone(),
+                result_type: candidate.result_type.clone(),
+                match_node: candidate.match_node.clone(),
+                scrutinee_node: candidate.scrutinee_node.clone(),
+                ok_arm: candidate.ok_arm.clone(),
+                ok_variant: candidate.ok_variant.clone(),
+                ok_pattern: candidate.ok_pattern.clone(),
+                ok_binding: candidate.ok_binding.clone(),
+                ok_payload_type: candidate.ok_payload_type.clone(),
+                err_arm: candidate.err_arm.clone(),
+                err_variant: candidate.err_variant.clone(),
+                err_pattern: candidate.err_pattern.clone(),
+                err_binding: candidate.err_binding.clone(),
+                err_payload_type: candidate.err_payload_type.clone(),
+                input_root: candidate.input_root.clone(),
+                output_root: candidate.output_root.clone(),
+                ok,
+                err,
+            });
+        }
+        Some(crate::core::OrdinaryMapOwnedAnyV2CfgFlowReceipt {
+            proof: FlowProof::ResultBranchV1(result_branches),
+            entry: cfg.entry.clone(),
+            split: branch_edges[0].0.clone(),
+            join: branch_edges[0].5.clone(),
             arm_edges,
             reachable_blocks,
             reachable_edges,
@@ -4579,6 +6381,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         cfg: &CallableCfg,
         body: &ResolvedBody,
         types: &ResolvedTypeTable,
+        result_branch_candidates: &[OrdinaryMapOwnedAnyV2ResultBranchCandidate],
         actions: &[OrdinaryMapOwnedAnyV2Action],
         attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
         results: &[crate::core::OrdinaryMapOwnedAnyV2ResultReceipt],
@@ -4594,6 +6397,31 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement,
         };
 
+        if let Some(flow) = Self::build_branch_local_persistent_set_diamond_flow_receipt(
+            cfg,
+            body,
+            types,
+            actions,
+            attempts,
+            results,
+            unpacks,
+            values_unpacks,
+            local_loads,
+            result_branch_candidates,
+        ) {
+            return Some(flow);
+        }
+        if !result_branch_candidates.is_empty() {
+            return Self::build_result_branch_flow_receipt(
+                cfg,
+                actions,
+                attempts,
+                results,
+                unpacks,
+                values_unpacks,
+                result_branch_candidates,
+            );
+        }
         if let Some(tail) = scalar_tail {
             return Self::build_settled_scalar_branch_flow_receipt(
                 cfg,
@@ -4605,19 +6433,6 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 local_loads,
                 tail,
             );
-        }
-        if let Some(flow) = Self::build_branch_local_persistent_set_diamond_flow_receipt(
-            cfg,
-            body,
-            types,
-            actions,
-            attempts,
-            results,
-            unpacks,
-            values_unpacks,
-            local_loads,
-        ) {
-            return Some(flow);
         }
         let (split, join, arm_edges, arm_blocks) =
             Self::ordinary_map_owned_any_v2_diamond_shape(cfg)?;
@@ -4935,6 +6750,7 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
         };
 
         if cfg.owner != tail.owner
+            || tail.split_block != cfg.entry
             || cfg.blocks.len() != cfg.reachable.len()
             || cfg.blocks.keys().ne(cfg.reachable.iter())
             || cfg.edges.values().any(|edge| {
@@ -5554,10 +7370,24 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
                 else_block,
             } => {
                 self.visit_expr(condition, None);
-                self.visit_block(then_block);
-                self.visit_block(else_block);
+                if (!self.result_branch_candidates.is_empty() || self.result_branch_depth > 0)
+                    && self.roots.values().any(|dropped| !*dropped)
+                {
+                    let prefixes = self.exclusive_branch_prefixes();
+                    let mut then_checker = self.clone();
+                    let mut else_checker = self.clone();
+                    then_checker.visit_block(then_block);
+                    else_checker.visit_block(else_block);
+                    self.merge_exclusive_branch_pair(prefixes, then_checker, else_checker, None);
+                } else {
+                    self.visit_block(then_block);
+                    self.visit_block(else_block);
+                }
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
+                if self.visit_result_map_match(expression, scrutinee, arms) {
+                    return;
+                }
                 self.visit_expr(scrutinee, None);
                 for arm in arms {
                     if let Some(guard) = &arm.guard {
@@ -5599,6 +7429,290 @@ impl<'a> OrdinaryMapOwnedAnyV2Checker<'a> {
             | ResolvedExprKind::ComptimeValue(_)
             | ResolvedExprKind::TypeValue(_) => {}
         }
+    }
+
+    fn visit_result_map_match(
+        &mut self,
+        expression: &ResolvedExpr,
+        scrutinee: &ResolvedExpr,
+        arms: &[MatchArm],
+    ) -> bool {
+        use OrdinaryMapOwnedAnyV2ActionKind as Kind;
+
+        let Some((ok_type, err_type)) = resolve_result_ok_err_types(self.types, &scrutinee.ty)
+        else {
+            return false;
+        };
+        if !self.is_i32(&err_type) || arms.len() != 2 {
+            return false;
+        }
+        let Some(ok_arm) = arms.iter().find(|arm| {
+            matches!(
+                &arm.pattern.kind,
+                ResolvedPatternKind::Constructor { variant, .. }
+                    if variant.0 == "builtin:variant:Result::Ok"
+            )
+        }) else {
+            return false;
+        };
+        let Some(err_arm) = arms.iter().find(|arm| {
+            matches!(
+                &arm.pattern.kind,
+                ResolvedPatternKind::Constructor { variant, .. }
+                    if variant.0 == "builtin:variant:Result::Err"
+            )
+        }) else {
+            return false;
+        };
+        if ok_arm.node_id == err_arm.node_id {
+            return false;
+        }
+        let Some((ok_pattern, ok_binding)) =
+            result_arm_payload(ok_arm, "Ok", &ok_type, &scrutinee.ty)
+        else {
+            return false;
+        };
+        let Some((err_pattern, err_binding)) =
+            result_arm_payload(err_arm, "Err", &err_type, &scrutinee.ty)
+        else {
+            return false;
+        };
+        let ResolvedExprKind::Call(call) = &scrutinee.kind else {
+            return false;
+        };
+        let ResolvedCallee::Builtin(name) = &call.callee else {
+            return false;
+        };
+        let kind = match name.as_str() {
+            "map_new" => Kind::New,
+            "map_set" => Kind::Set,
+            _ => return false,
+        };
+        let Some(output_root) = ok_binding.clone() else {
+            return false;
+        };
+        if !self.is_map_root(&ok_type)
+            || !self
+                .body
+                .locals
+                .get(&output_root)
+                .is_some_and(|local| local.ty == ok_type)
+            || err_binding.as_ref().is_some_and(|local| {
+                self.body
+                    .locals
+                    .get(local)
+                    .is_none_or(|binding| !self.is_i32(&binding.ty))
+            })
+        {
+            return false;
+        }
+
+        let prefixes = self.exclusive_branch_prefixes();
+        let mut ok_checker = self.clone();
+        ok_checker.result_branch_depth += 1;
+        let mut err_checker = self.clone();
+        let input_root = if kind == Kind::New {
+            ok_checker.record_attempt(
+                scrutinee,
+                call,
+                OrdinaryMapOwnedAnyV2AttemptKind::New,
+                Some(&output_root),
+            );
+            for argument in &call.arguments {
+                ok_checker.visit_expr(&argument.value, None);
+            }
+            if !call.arguments.is_empty() || ok_checker.roots.contains_key(&output_root) {
+                ok_checker.invalid = true;
+            } else {
+                ok_checker.roots.insert(output_root.clone(), false);
+                ok_checker.actions.push(ok_checker.action(
+                    Kind::New,
+                    scrutinee.node_id.clone(),
+                    output_root.clone(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                ));
+            }
+            None
+        } else {
+            ok_checker.record_attempt(
+                scrutinee,
+                call,
+                OrdinaryMapOwnedAnyV2AttemptKind::Set,
+                Some(&output_root),
+            );
+            if call.arguments.len() != 3 || ok_checker.roots.contains_key(&output_root) {
+                ok_checker.invalid = true;
+                for argument in &call.arguments {
+                    ok_checker.visit_expr(&argument.value, None);
+                }
+                None
+            } else {
+                let source = &call.arguments[0].value;
+                let key = &call.arguments[1].value;
+                let value = &call.arguments[2].value;
+                let source_local = ok_checker.live_root_load(source);
+                if source_local.is_some() {
+                    ok_checker.allow_root_load(source);
+                }
+                for argument in &call.arguments {
+                    ok_checker.visit_expr(&argument.value, None);
+                }
+                if let Some(source_local) = source_local.clone().filter(|_| {
+                    ok_checker.is_map_root(&source.ty)
+                        && ok_checker.valid_key(key)
+                        && ok_checker.valid_payload(value)
+                }) {
+                    ok_checker.roots.insert(output_root.clone(), false);
+                    let mut action = ok_checker.action(
+                        Kind::Set,
+                        scrutinee.node_id.clone(),
+                        output_root.clone(),
+                        Some(key.node_id.clone()),
+                        Some(key.ty.clone()),
+                        Some(value.node_id.clone()),
+                        Some(value.ty.clone()),
+                        true,
+                        Some(source_local.clone()),
+                    );
+                    action.source_node = Some(source.node_id.clone());
+                    action.source_type = Some(source.ty.clone());
+                    ok_checker.set_key_metadata(&mut action, key);
+                    ok_checker.actions.push(action);
+                    Some(source_local)
+                } else {
+                    ok_checker.invalid = true;
+                    source_local
+                }
+            }
+        };
+
+        for (checker, arm) in [(&mut ok_checker, ok_arm), (&mut err_checker, err_arm)] {
+            if let ResolvedExprKind::Block(block) = &arm.body.kind {
+                checker.visit_block(block);
+            } else {
+                checker.visit_expr(&arm.body, None);
+            }
+            if let Some(guard) = &arm.guard {
+                checker.visit_expr(guard, None);
+            }
+        }
+        let parent_candidate = OrdinaryMapOwnedAnyV2ResultBranchCandidate {
+            kind,
+            operation_point: scrutinee.node_id.clone(),
+            result_node: scrutinee.node_id.clone(),
+            result_type: scrutinee.ty.clone(),
+            match_node: expression.node_id.clone(),
+            scrutinee_node: scrutinee.node_id.clone(),
+            ok_arm: ok_arm.node_id.clone(),
+            ok_variant: NodeId("builtin:variant:Result::Ok".into()),
+            ok_pattern: ok_pattern.node_id.clone(),
+            ok_binding,
+            ok_payload_type: ok_type,
+            err_arm: err_arm.node_id.clone(),
+            err_variant: NodeId("builtin:variant:Result::Err".into()),
+            err_pattern: err_pattern.node_id.clone(),
+            err_binding,
+            err_payload_type: err_type,
+            input_root,
+            output_root,
+        };
+        self.merge_exclusive_branch_pair(prefixes, ok_checker, err_checker, Some(parent_candidate));
+        true
+    }
+
+    fn exclusive_branch_prefixes(&self) -> (usize, usize, usize, usize) {
+        (
+            self.actions.len(),
+            self.result_branch_candidates.len(),
+            self.all_root_loads.len(),
+            self.temporary_root_receipts.len(),
+        )
+    }
+
+    fn merge_exclusive_branch_pair(
+        &mut self,
+        prefixes: (usize, usize, usize, usize),
+        first: Self,
+        second: Self,
+        parent_candidate: Option<OrdinaryMapOwnedAnyV2ResultBranchCandidate>,
+    ) {
+        let (action_prefix_len, candidate_prefix_len, load_prefix_len, temp_prefix_len) = prefixes;
+        let live = |checker: &Self| {
+            checker
+                .roots
+                .iter()
+                .filter_map(|(local, dropped)| (!*dropped).then_some(local.clone()))
+                .collect::<BTreeSet<_>>()
+        };
+        let first_live = live(&first);
+        let second_live = live(&second);
+        if first.invalid || second.invalid || first_live != second_live {
+            self.invalid = true;
+        }
+
+        let mut actions = self.actions.clone();
+        actions.extend(first.actions.into_iter().skip(action_prefix_len));
+        actions.extend(second.actions.into_iter().skip(action_prefix_len));
+        let mut attempts = first.operation_attempts;
+        attempts.extend(second.operation_attempts);
+        let mut allowed_loads = first.allowed_root_loads;
+        allowed_loads.extend(second.allowed_root_loads);
+        let mut all_loads = self.all_root_loads.clone();
+        all_loads.extend(first.all_root_loads.into_iter().skip(load_prefix_len));
+        all_loads.extend(second.all_root_loads.into_iter().skip(load_prefix_len));
+        let mut temp_receipts = self.temporary_root_receipts.clone();
+        temp_receipts.extend(
+            first
+                .temporary_root_receipts
+                .into_iter()
+                .skip(temp_prefix_len),
+        );
+        temp_receipts.extend(
+            second
+                .temporary_root_receipts
+                .into_iter()
+                .skip(temp_prefix_len),
+        );
+        let mut temp_roots = first.temporary_roots;
+        for (k, v) in second.temporary_roots {
+            temp_roots.entry(k).or_insert(v);
+        }
+        let mut candidates = self.result_branch_candidates.clone();
+        if let Some(parent) = parent_candidate {
+            candidates.push(parent);
+        }
+        candidates.extend(
+            first
+                .result_branch_candidates
+                .into_iter()
+                .skip(candidate_prefix_len),
+        );
+        candidates.extend(
+            second
+                .result_branch_candidates
+                .into_iter()
+                .skip(candidate_prefix_len),
+        );
+        let mut roots = first.roots;
+        for (local, dropped) in second.roots {
+            roots.entry(local).or_insert(dropped);
+        }
+        for (local, dropped) in &mut roots {
+            *dropped = !first_live.contains(local);
+        }
+        self.actions = actions;
+        self.operation_attempts = attempts;
+        self.allowed_root_loads = allowed_loads;
+        self.all_root_loads = all_loads;
+        self.temporary_root_receipts = temp_receipts;
+        self.temporary_roots = temp_roots;
+        self.roots = roots;
+        self.result_branch_candidates = candidates;
     }
 
     fn visit_new(
@@ -6889,7 +9003,7 @@ struct OrdinaryMapOwnedAnyV2LocalPlaceUse {
 }
 
 #[derive(Debug, Default)]
-struct OrdinaryMapOwnedAnyV2LocalSourceUseCensus {
+pub(crate) struct OrdinaryMapOwnedAnyV2LocalSourceUseCensus {
     loads: Vec<OrdinaryMapOwnedAnyV2LocalLoadUse>,
     places: Vec<OrdinaryMapOwnedAnyV2LocalPlaceUse>,
     captures: Vec<NodeId>,
@@ -6915,6 +9029,14 @@ fn ordinary_map_owned_any_v2_local_source_uses(
     body: &ResolvedBody,
     target: &ResolvedLocalId,
 ) -> OrdinaryMapOwnedAnyV2LocalSourceUseCensus {
+    ordinary_map_owned_any_v2_local_source_uses_with_scope(body, target, None)
+}
+
+fn ordinary_map_owned_any_v2_local_source_uses_with_scope(
+    body: &ResolvedBody,
+    target: &ResolvedLocalId,
+    scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
+) -> OrdinaryMapOwnedAnyV2LocalSourceUseCensus {
     use crate::core::ir::{
         MatchArm, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFStringPart, ResolvedStmt,
         ResolvedStmtKind, ResolvedValueProjection,
@@ -6924,6 +9046,7 @@ fn ordinary_map_owned_any_v2_local_source_uses(
         value: &ResolvedExpr,
         target: &ResolvedLocalId,
         census: &mut OrdinaryMapOwnedAnyV2LocalSourceUseCensus,
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
     ) {
         match &value.kind {
             ResolvedExprKind::Load(place) => {
@@ -6955,15 +9078,15 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                         return;
                     }
                 }
-                expression(base, target, census);
+                expression(base, target, census, scope);
                 if let ResolvedValueProjection::Index(index) = projection {
-                    expression(index, target, census);
+                    expression(index, target, census, scope);
                 }
             }
             ResolvedExprKind::FString(parts) => {
                 for part in parts {
                     if let ResolvedFStringPart::Interpolation(nested) = part {
-                        expression(nested, target, census);
+                        expression(nested, target, census, scope);
                     }
                 }
             }
@@ -6972,31 +9095,31 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                 start: left,
                 end: right,
             } => {
-                expression(left, target, census);
-                expression(right, target, census);
+                expression(left, target, census, scope);
+                expression(right, target, census, scope);
             }
             ResolvedExprKind::Unary { operand, .. }
             | ResolvedExprKind::TypeOf(operand)
             | ResolvedExprKind::Old(operand)
             | ResolvedExprKind::Try { value: operand, .. }
             | ResolvedExprKind::Spawn(operand)
-            | ResolvedExprKind::Await(operand) => expression(operand, target, census),
+            | ResolvedExprKind::Await(operand) => expression(operand, target, census, scope),
             ResolvedExprKind::Call(call) => {
                 for argument in &call.arguments {
-                    expression(&argument.value, target, census);
+                    expression(&argument.value, target, census, scope);
                 }
             }
             ResolvedExprKind::Tuple(values)
             | ResolvedExprKind::List(values)
             | ResolvedExprKind::Set(values) => {
                 for nested in values {
-                    expression(nested, target, census);
+                    expression(nested, target, census, scope);
                 }
             }
             ResolvedExprKind::Map(values) => {
                 for (key, nested) in values {
-                    expression(key, target, census);
-                    expression(nested, target, census);
+                    expression(key, target, census, scope);
+                    expression(nested, target, census, scope);
                 }
             }
             ResolvedExprKind::Comprehension {
@@ -7005,40 +9128,65 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                 guard,
                 ..
             } => {
-                expression(value, target, census);
-                expression(iterable, target, census);
+                expression(value, target, census, scope);
+                expression(iterable, target, census, scope);
                 if let Some(guard) = guard {
-                    expression(guard, target, census);
+                    expression(guard, target, census, scope);
                 }
             }
             ResolvedExprKind::OptionalChain { receiver, .. } => {
-                expression(receiver, target, census)
+                expression(receiver, target, census, scope)
             }
             ResolvedExprKind::Record { fields, rest, .. } => {
                 for field in fields {
-                    expression(&field.value, target, census);
+                    expression(&field.value, target, census, scope);
                 }
                 if let Some(rest) = rest {
-                    expression(rest, target, census);
+                    expression(rest, target, census, scope);
                 }
             }
             ResolvedExprKind::Block(block)
             | ResolvedExprKind::Scope { body: block, .. }
             | ResolvedExprKind::Comptime(block)
-            | ResolvedExprKind::Quote(block) => statement_block(block, target, census),
+            | ResolvedExprKind::Quote(block) => statement_block(block, target, census, scope),
             ResolvedExprKind::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                expression(condition, target, census);
-                statement_block(then_block, target, census);
-                statement_block(else_block, target, census);
+                expression(condition, target, census, scope);
+                statement_block(then_block, target, census, scope);
+                statement_block(else_block, target, census, scope);
             }
             ResolvedExprKind::Match { scrutinee, arms } => {
-                expression(scrutinee, target, census);
-                for arm in arms {
-                    match_arm(arm, target, census);
+                expression(scrutinee, target, census, scope);
+                if let Some(step) = scope.and_then(|chain| {
+                    chain
+                        .steps
+                        .iter()
+                        .find(|step| step.match_expr.node_id == value.node_id)
+                }) {
+                    match_arm(step.ok_arm, target, census, scope);
+                    let mut err_census = OrdinaryMapOwnedAnyV2LocalSourceUseCensus::default();
+                    match_arm(step.err_arm, target, &mut err_census, scope);
+                    let clean_err_cleanup = !err_census.has_nested_callable
+                        && err_census.captures.is_empty()
+                        && err_census.loads.is_empty()
+                        && err_census.places.len() <= 1
+                        && err_census.places.iter().all(|place| {
+                            place.kind == OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
+                                && place.unprojected
+                        });
+                    if !clean_err_cleanup {
+                        census.has_nested_callable |= err_census.has_nested_callable;
+                        census.captures.extend(err_census.captures);
+                        census.loads.extend(err_census.loads);
+                        census.places.extend(err_census.places);
+                    }
+                } else {
+                    for arm in arms {
+                        match_arm(arm, target, census, scope);
+                    }
                 }
             }
             ResolvedExprKind::Slice {
@@ -7046,20 +9194,22 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                 start,
                 end,
             } => {
-                expression(base, target, census);
+                expression(base, target, census, scope);
                 if let Some(start) = start {
-                    expression(start, target, census);
+                    expression(start, target, census, scope);
                 }
                 if let Some(end) = end {
-                    expression(end, target, census);
+                    expression(end, target, census, scope);
                 }
             }
-            ResolvedExprKind::Cast { value: nested, .. } => expression(nested, target, census),
+            ResolvedExprKind::Cast { value: nested, .. } => {
+                expression(nested, target, census, scope)
+            }
             ResolvedExprKind::Lambda(lambda) => {
                 if lambda.captures.contains(target) {
                     census.captures.push(lambda.owner.clone());
                 }
-                statement_block(&lambda.body, target, census);
+                statement_block(&lambda.body, target, census, scope);
             }
             ResolvedExprKind::Literal(_)
             | ResolvedExprKind::Constant(_)
@@ -7074,17 +9224,19 @@ fn ordinary_map_owned_any_v2_local_source_uses(
         arm: &MatchArm,
         target: &ResolvedLocalId,
         census: &mut OrdinaryMapOwnedAnyV2LocalSourceUseCensus,
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
     ) {
         if let Some(guard) = &arm.guard {
-            expression(guard, target, census);
+            expression(guard, target, census, scope);
         }
-        expression(&arm.body, target, census);
+        expression(&arm.body, target, census, scope);
     }
 
     fn statement_block(
         block: &ResolvedBlock,
         target: &ResolvedLocalId,
         census: &mut OrdinaryMapOwnedAnyV2LocalSourceUseCensus,
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
     ) {
         let root_orders = block
             .statements
@@ -7093,15 +9245,14 @@ fn ordinary_map_owned_any_v2_local_source_uses(
             .map(|(order, statement)| (statement.node_id.clone(), order))
             .collect::<BTreeMap<_, _>>();
         for statement in &block.statements {
-            statement_use(
-                statement,
-                target,
-                census,
-                root_orders.get(&statement.node_id).copied(),
+            let order = scope.map_or_else(
+                || root_orders.get(&statement.node_id).copied(),
+                |chain| chain.statement_order(&statement.node_id),
             );
+            statement_use(statement, target, census, order, scope);
         }
         if let Some(result) = &block.result {
-            expression(result, target, census);
+            expression(result, target, census, scope);
         }
     }
 
@@ -7110,11 +9261,12 @@ fn ordinary_map_owned_any_v2_local_source_uses(
         target: &ResolvedLocalId,
         census: &mut OrdinaryMapOwnedAnyV2LocalSourceUseCensus,
         statement_order: Option<usize>,
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
     ) {
         match &statement.kind {
             ResolvedStmtKind::Bind { initializer, .. } => {
                 if let Some(initializer) = initializer {
-                    expression(initializer, target, census);
+                    expression(initializer, target, census, scope);
                 }
             }
             ResolvedStmtKind::Assign {
@@ -7131,21 +9283,21 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                         unprojected: place.projections.is_empty(),
                     });
                 }
-                expression(value, target, census);
+                expression(value, target, census, scope);
             }
             ResolvedStmtKind::Return { value, .. } | ResolvedStmtKind::Break(value) => {
                 if let Some(value) = value {
-                    expression(value, target, census);
+                    expression(value, target, census, scope);
                 }
             }
             ResolvedStmtKind::Continue => {}
             ResolvedStmtKind::Expr(value)
             | ResolvedStmtKind::Contract {
                 condition: value, ..
-            } => expression(value, target, census),
+            } => expression(value, target, census, scope),
             ResolvedStmtKind::While { condition, body } => {
-                expression(condition, target, census);
-                statement_block(body, target, census);
+                expression(condition, target, census, scope);
+                statement_block(body, target, census, scope);
             }
             ResolvedStmtKind::WhileLet {
                 initializer, body, ..
@@ -7155,8 +9307,8 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                 body,
                 ..
             } => {
-                expression(initializer, target, census);
-                statement_block(body, target, census);
+                expression(initializer, target, census, scope);
+                statement_block(body, target, census, scope);
             }
             ResolvedStmtKind::IfLet {
                 initializer,
@@ -7164,14 +9316,14 @@ fn ordinary_map_owned_any_v2_local_source_uses(
                 else_block,
                 ..
             } => {
-                expression(initializer, target, census);
-                statement_block(then_block, target, census);
+                expression(initializer, target, census, scope);
+                statement_block(then_block, target, census, scope);
                 if let Some(else_block) = else_block {
-                    statement_block(else_block, target, census);
+                    statement_block(else_block, target, census, scope);
                 }
             }
             ResolvedStmtKind::Loop(block) | ResolvedStmtKind::Scope { body: block, .. } => {
-                statement_block(block, target, census)
+                statement_block(block, target, census, scope)
             }
             ResolvedStmtKind::Drop(places) => {
                 for (place_index, place) in places.iter().enumerate() {
@@ -7188,12 +9340,12 @@ fn ordinary_map_owned_any_v2_local_source_uses(
             }
             ResolvedStmtKind::Math(expressions) => {
                 for expression_value in expressions {
-                    expression(expression_value, target, census);
+                    expression(expression_value, target, census, scope);
                 }
             }
             ResolvedStmtKind::Pinned { value, body, .. } => {
-                expression(value, target, census);
-                statement_block(body, target, census);
+                expression(value, target, census, scope);
+                statement_block(body, target, census, scope);
             }
             ResolvedStmtKind::NestedCallable(_) => {
                 // The nested callable's capture environment is owned by a
@@ -7208,13 +9360,13 @@ fn ordinary_map_owned_any_v2_local_source_uses(
     if body.captures.contains(target) {
         census.captures.push(body.owner.clone());
     }
-    statement_block(&body.root, target, &mut census);
+    statement_block(&body.root, target, &mut census, scope);
     for expression_value in body
         .place_inputs
         .values()
         .chain(body.default_values.values())
     {
-        expression(expression_value, target, &mut census);
+        expression(expression_value, target, &mut census, scope);
     }
     census
 }
@@ -7242,9 +9394,13 @@ fn collect_ordinary_map_owned_any_v2_persistent_root_alias_replacement_receipt(
     let string_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String);
     let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
     let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return None;
+    };
     if body.owner != owner
         || cfg.owner != owner
-        || !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
         || result_receipts.len() != 2
         || result_receipts
             .iter()
@@ -7258,30 +9414,6 @@ fn collect_ordinary_map_owned_any_v2_persistent_root_alias_replacement_receipt(
     {
         return None;
     }
-
-    let drop_site = |local: &ResolvedLocalId| {
-        let mut matches = body
-            .root
-            .statements
-            .iter()
-            .enumerate()
-            .flat_map(|(order, statement)| match &statement.kind {
-                ResolvedStmtKind::Drop(places) => places
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(place_index, place)| {
-                        (place.base == *local && place.projections.is_empty()).then_some((
-                            statement.node_id.clone(),
-                            place_index,
-                            order,
-                        ))
-                    })
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    };
 
     let mut field_reads = Vec::with_capacity(2);
     for checker_unpack in unpack_receipts {
@@ -7342,12 +9474,13 @@ fn collect_ordinary_map_owned_any_v2_persistent_root_alias_replacement_receipt(
         let [result] = matching_results.as_slice() else {
             return None;
         };
-        let (pair_drop_point, pair_drop_place_index, _) = drop_site(&checker_unpack.pair_binding)?;
+        let (pair_drop_point, pair_drop_place_index, _) =
+            scope.whole_drop(&checker_unpack.pair_binding)?;
         if result.settlement_point.as_ref() != Some(&pair_drop_point) {
             return None;
         }
         let mut matching_reads = Vec::new();
-        for (statement_order, statement) in body.root.statements.iter().enumerate() {
+        for (statement_order, statement) in scope.combined_statements.iter().enumerate() {
             let ResolvedStmtKind::Expr(expression) = &statement.kind else {
                 continue;
             };
@@ -7426,8 +9559,7 @@ fn collect_ordinary_map_owned_any_v2_persistent_root_alias_replacement_receipt(
             return None;
         };
 
-        let source_uses =
-            ordinary_map_owned_any_v2_local_source_uses(body, &checker_unpack.unpack_binding);
+        let source_uses = scope.local_source_uses(body, &checker_unpack.unpack_binding);
         if source_uses.has_nested_callable
             || !source_uses.captures.is_empty()
             || !source_uses.has_unique_load_nodes()
@@ -7641,32 +9773,6 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         }
     }
 
-    fn direct_binding<'a>(
-        body: &'a ResolvedBody,
-        local: &ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local: bound,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(initializer),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (bound == local).then_some((statement, initializer))
-        });
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
-    }
-
     fn direct_call<'a>(expression: &'a ResolvedExpr, expected: &str) -> Option<&'a ResolvedCall> {
         match &expression.kind {
             ResolvedExprKind::Call(call) if matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == expected) => {
@@ -7687,11 +9793,12 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     fn owner_drop(
         cfg: &CallableCfg,
         body: &ResolvedBody,
+        scope: &OrdinaryMapV2LinearChainScope<'_>,
         local: &ResolvedLocalId,
         expected_loads: &[NodeId],
         projected_load: bool,
     ) -> Option<(NodeId, usize, usize)> {
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+        let census = scope.local_source_uses(body, local);
         let actual_loads = census
             .loads
             .iter()
@@ -7715,7 +9822,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
             return None;
         };
         let order = place.statement_order?;
-        let statement = body.root.statements.get(order)?;
+        let statement = scope.combined_statements.get(order)?;
         if place.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
             || !place.unprojected
             || statement.node_id != place.statement
@@ -7727,11 +9834,11 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         Some((place.statement.clone(), place.place_index, order))
     }
 
-    fn one_action(
-        actions: &[OrdinaryMapOwnedAnyV2Action],
+    fn one_action<'a>(
+        actions: &[&'a OrdinaryMapOwnedAnyV2Action],
         kind: ActionKind,
-    ) -> Option<&OrdinaryMapOwnedAnyV2Action> {
-        let mut found = actions.iter().filter(|action| action.kind == kind);
+    ) -> Option<&'a OrdinaryMapOwnedAnyV2Action> {
+        let mut found = actions.iter().copied().filter(|action| action.kind == kind);
         let action = found.next()?;
         found.next().is_none().then_some(action)
     }
@@ -7796,17 +9903,20 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
             && action.result_local.is_none()
     }
 
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || !body.parameters.is_empty()
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)?;
+    let (ok_actions, ok_attempts, ok_drops, err_drops) =
+        partition_ordinary_map_v2_ok_spine(&scope, actions, attempts)?;
+    let leaf_result = scope.leaf_result;
+    if !body.parameters.is_empty()
         || !body.captures.is_empty()
-        || body.root.statements.len() != 9
         || body.root.ty != i32_type()
         || !matches!(
-            body.root.result.as_deref().map(|result| &result.kind),
+            leaf_result.map(|result| &result.kind),
             Some(ResolvedExprKind::Literal(ResolvedLiteral::Int(0)))
         )
-        || actions.len() != 5
-        || attempts.len() != 5
+        || ok_actions.len() != 5
+        || ok_attempts.len() != 5
         || actions
             .iter()
             .map(|action| action.point.clone())
@@ -7828,7 +9938,12 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         (ActionKind::Keys, 1),
         (ActionKind::Drop, 2),
     ] {
-        if actions.iter().filter(|action| action.kind == kind).count() != expected {
+        if ok_actions
+            .iter()
+            .filter(|action| action.kind == kind)
+            .count()
+            != expected
+        {
             return None;
         }
     }
@@ -7838,7 +9953,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         (AttemptKind::Keys, 1),
         (AttemptKind::Drop, 2),
     ] {
-        if attempts
+        if ok_attempts
             .iter()
             .filter(|attempt| attempt.kind == kind)
             .count()
@@ -7848,34 +9963,62 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         }
     }
 
-    let statements = &body.root.statements;
-    let (new_local, set_local, snapshot_local, key_local) = (
-        bound_local(&statements[0])?,
-        bound_local(&statements[1])?,
-        bound_local(&statements[2])?,
-        bound_local(&statements[5])?,
-    );
-    let (new_binding, new_initializer) = direct_binding(body, new_local)?;
-    let (set_binding, set_initializer) = direct_binding(body, set_local)?;
-    let (snapshot_binding, keys_initializer) = direct_binding(body, snapshot_local)?;
-    let (key_binding, key_initializer) = direct_binding(body, key_local)?;
-    if new_binding.node_id != statements[0].node_id
-        || set_binding.node_id != statements[1].node_id
-        || snapshot_binding.node_id != statements[2].node_id
-        || key_binding.node_id != statements[5].node_id
+    let (new_local, set_local, tail_statements) = if scope.is_straight_line {
+        if scope.leaf_statements.len() != 9 {
+            return None;
+        }
+        (
+            bound_local(&scope.leaf_statements[0])?,
+            bound_local(&scope.leaf_statements[1])?,
+            &scope.leaf_statements[2..],
+        )
+    } else {
+        if !scope.preamble_statements.is_empty()
+            || scope.steps.len() != 2
+            || !scope.steps[0].ok_statements.is_empty()
+            || scope.leaf_statements.len() != 7
+        {
+            return None;
+        }
+        (
+            scope.steps[0].ok_binding.as_ref()?,
+            scope.steps[1].ok_binding.as_ref()?,
+            scope.leaf_statements,
+        )
+    };
+    let snapshot_local = bound_local(&tail_statements[0])?;
+    let key_local = bound_local(&tail_statements[3])?;
+    let new_binding_info = scope.direct_or_ok_binding(new_local)?;
+    let set_binding_info = scope.direct_or_ok_binding(set_local)?;
+    let new_initializer = new_binding_info.initializer;
+    let set_initializer = set_binding_info.initializer;
+    let new_binding_point = new_binding_info.binding_point;
+    let set_binding_point = set_binding_info.binding_point;
+    let (snapshot_binding, keys_initializer) = scope.direct_binding(snapshot_local)?;
+    let (key_binding, key_initializer) = scope.direct_binding(key_local)?;
+    if snapshot_binding.node_id != tail_statements[0].node_id
+        || key_binding.node_id != tail_statements[3].node_id
     {
         return None;
     }
 
-    let new = one_action(actions, ActionKind::New)?;
-    let set = one_action(actions, ActionKind::Set)?;
-    let keys = one_action(actions, ActionKind::Keys)?;
-    let root_drops = actions
-        .iter()
-        .filter(|action| action.kind == ActionKind::Drop)
-        .collect::<Vec<_>>();
-    let [new_drop, root_drop] = root_drops.as_slice() else {
+    let new = one_action(&ok_actions, ActionKind::New)?;
+    let set = one_action(&ok_actions, ActionKind::Set)?;
+    let keys = one_action(&ok_actions, ActionKind::Keys)?;
+    if !ordinary_map_v2_err_drops_match_prior_roots(
+        &scope,
+        &[(&new.point, &new.local), (&set.point, &set.local)],
+        &err_drops,
+    ) {
         return None;
+    }
+    let [first_drop, second_drop] = ok_drops.as_slice() else {
+        return None;
+    };
+    let (new_drop, root_drop) = if first_drop.local == *new_local {
+        (*first_drop, *second_drop)
+    } else {
+        (*second_drop, *first_drop)
     };
     if new.local != *new_local
         || set.local != *set_local
@@ -7927,6 +10070,8 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     let string = string_type();
     let int = i32_type();
     let unit = unit_type();
+    let new_local_def = body.locals.get(new_local)?;
+    let set_local_def = body.locals.get(set_local)?;
     let expected_key_digest = blake3::hash(static_key.as_bytes()).to_hex().to_string();
     if !root_action_is_exact(new, ActionKind::New, &new_initializer.node_id, new_local)
         || !root_action_is_exact(new_drop, ActionKind::Drop, &new_drop.point, new_local)
@@ -7974,24 +10119,34 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         || !new_call.arguments.is_empty()
         || new_call.result != new_initializer.ty
         || new_initializer.node_id != new.point
-        || !is_map_root(types, &new_initializer.ty)
-        || body
-            .locals
-            .get(new_local)
-            .is_none_or(|local| local.ty != new_initializer.ty || local.mutable)
+        || new_local_def.mutable
+        || !is_map_root(types, &new_local_def.ty)
+        || !ordinary_map_binding_matches_expr_type(
+            &scope,
+            types,
+            &new.point,
+            new_local,
+            &new_local_def.ty,
+            &new_initializer.ty,
+        )
         || !matches!(&set_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_set")
         || set_initializer.node_id != set.point
         || set_call.result != set_initializer.ty
         || set_call.permission.is_some()
         || !set_call.type_arguments.is_empty()
         || !set_call.session.is_empty()
-        || !is_map_root(types, &set_initializer.ty)
-        || body
-            .locals
-            .get(set_local)
-            .is_none_or(|local| local.ty != set_initializer.ty || local.mutable)
+        || set_local_def.mutable
+        || !is_map_root(types, &set_local_def.ty)
+        || !ordinary_map_binding_matches_expr_type(
+            &scope,
+            types,
+            &set.point,
+            set_local,
+            &set_local_def.ty,
+            &set_initializer.ty,
+        )
         || !direct_local_load(&set_root_argument.value, new_local)
-        || set_root_argument.value.ty != new_initializer.ty
+        || set_root_argument.value.ty != new_local_def.ty
         || set_root_argument.conversion.kind != CheckedConversionKind::Identity
         || set_key_argument.value.ty != string
         || set_value_argument.value.ty != int
@@ -8016,7 +10171,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         || !keys_call.type_arguments.is_empty()
         || !keys_call.session.is_empty()
         || !direct_local_load(&keys_root_argument.value, set_local)
-        || keys_root_argument.value.ty != set_initializer.ty
+        || keys_root_argument.value.ty != set_local_def.ty
         || keys_root_argument.conversion.kind != CheckedConversionKind::Identity
         || keys.result_type.as_ref() != Some(&keys_initializer.ty)
         || keys.source_node.as_ref() != Some(&keys_root_argument.value.node_id)
@@ -8045,8 +10200,10 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &new.point) != 1
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &set.point) != 1
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &keys.point) != 1
-        || ordinary_map_owned_any_v2_cfg_point_count(cfg, &new_binding.node_id) != 1
-        || ordinary_map_owned_any_v2_cfg_point_count(cfg, &set_binding.node_id) != 1
+        || (new_binding_info.statement.is_some()
+            && ordinary_map_owned_any_v2_cfg_point_count(cfg, new_binding_point) != 1)
+        || (set_binding_info.statement.is_some()
+            && ordinary_map_owned_any_v2_cfg_point_count(cfg, set_binding_point) != 1)
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &snapshot_binding.node_id) != 1
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &key_binding.node_id) != 1
         || !action_attempt_matches(cfg, attempts, new, &[], None, Some(new_local))
@@ -8084,7 +10241,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         return None;
     }
 
-    let observation_statement = &statements[7];
+    let observation_statement = &tail_statements[5];
     let ResolvedStmtKind::Expr(observation_expression) = &observation_statement.kind else {
         return None;
     };
@@ -8123,6 +10280,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     let (new_drop_point, new_drop_place_index, new_drop_order) = owner_drop(
         cfg,
         body,
+        &scope,
         new_local,
         std::slice::from_ref(&set_root_argument.value.node_id),
         false,
@@ -8130,6 +10288,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     let (root_drop_point, root_drop_place_index, root_drop_order) = owner_drop(
         cfg,
         body,
+        &scope,
         set_local,
         std::slice::from_ref(&keys_root_argument.value.node_id),
         false,
@@ -8137,6 +10296,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     let (snapshot_drop_point, snapshot_drop_place_index, snapshot_drop_order) = owner_drop(
         cfg,
         body,
+        &scope,
         snapshot_local,
         std::slice::from_ref(&snapshot_load.node_id),
         false,
@@ -8144,6 +10304,7 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
     let (key_drop_point, key_drop_place_index, key_drop_order) = owner_drop(
         cfg,
         body,
+        &scope,
         key_local,
         std::slice::from_ref(&observation_argument.value.node_id),
         false,
@@ -8168,36 +10329,38 @@ fn collect_ordinary_map_owned_any_v2_keys_snapshot_receipts(
         index.node_id.clone(),
         observation_expression.node_id.clone(),
         observation_argument.value.node_id.clone(),
-        new_binding.node_id.clone(),
-        set_binding.node_id.clone(),
+        new_binding_point.clone(),
+        set_binding_point.clone(),
         snapshot_binding.node_id.clone(),
         key_binding.node_id.clone(),
-        statements[3].node_id.clone(),
-        statements[4].node_id.clone(),
-        statements[6].node_id.clone(),
-        statements[7].node_id.clone(),
-        statements[8].node_id.clone(),
+        tail_statements[1].node_id.clone(),
+        tail_statements[2].node_id.clone(),
+        tail_statements[4].node_id.clone(),
+        tail_statements[5].node_id.clone(),
+        tail_statements[6].node_id.clone(),
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
 
-    if statements[3].node_id != new_drop_point
-        || statements[4].node_id != root_drop_point
-        || statements[6].node_id != snapshot_drop_point
-        || statements[8].node_id != key_drop_point
-        || !matches!(&statements[3].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *new_local && places[0].projections.is_empty())
-        || !matches!(&statements[4].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *set_local && places[0].projections.is_empty())
-        || !matches!(&statements[6].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *snapshot_local && places[0].projections.is_empty())
-        || !matches!(&statements[8].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *key_local && places[0].projections.is_empty())
+    let key_binding_order = scope.statement_order(&key_binding.node_id)?;
+    let observation_order = scope.statement_order(&observation_statement.node_id)?;
+    if tail_statements[1].node_id != new_drop_point
+        || tail_statements[2].node_id != root_drop_point
+        || tail_statements[4].node_id != snapshot_drop_point
+        || tail_statements[6].node_id != key_drop_point
+        || !matches!(&tail_statements[1].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *new_local && places[0].projections.is_empty())
+        || !matches!(&tail_statements[2].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *set_local && places[0].projections.is_empty())
+        || !matches!(&tail_statements[4].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *snapshot_local && places[0].projections.is_empty())
+        || !matches!(&tail_statements[6].kind, ResolvedStmtKind::Drop(places) if places.len() == 1 && places[0].base == *key_local && places[0].projections.is_empty())
         || new_drop_place_index != 0
         || root_drop_place_index != 0
         || snapshot_drop_place_index != 0
         || key_drop_place_index != 0
         || !(new_drop_order < root_drop_order
-            && root_drop_order < 5
-            && 5 < snapshot_drop_order
-            && snapshot_drop_order < 7
-            && 7 < key_drop_order)
+            && root_drop_order < key_binding_order
+            && key_binding_order < snapshot_drop_order
+            && snapshot_drop_order < observation_order
+            && observation_order < key_drop_order)
         || !matches!(
             (
                 ordinary_map_owned_any_v2_cfg_point_index(cfg, &new.point),
@@ -8343,29 +10506,10 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         )
     }
     fn direct_binding<'a>(
-        body: &'a ResolvedBody,
+        scope: &'a OrdinaryMapV2LinearChainScope<'a>,
         local: &ResolvedLocalId,
     ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut found = body.root.statements.iter().filter_map(|statement| {
-            let Stmt::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            Pattern::Binding {
-                                local: bound,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(initializer),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (bound == local).then_some((statement, initializer))
-        });
-        let binding = found.next()?;
-        found.next().is_none().then_some(binding)
+        scope.direct_binding(local)
     }
 
     fn bound_local(statement: &ResolvedStmt) -> Option<&ResolvedLocalId> {
@@ -8401,6 +10545,8 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
     fn exact_dynamic_keys_get_outcome_cfg(
         cfg: &CallableCfg,
         body: &ResolvedBody,
+        scope: &OrdinaryMapV2LinearChainScope<'_>,
+        err_drop_point: &NodeId,
         and_nodes: &[OrdinaryMapOwnedAnyV2DynamicKeysGetAndNode],
     ) -> bool {
         use crate::core::cfg::{BasicBlockId, CfgPointKind, EdgeId};
@@ -8458,7 +10604,16 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             })
         }
 
-        if and_nodes.len() != 3 || body.root.statements.len() != 25 {
+        if and_nodes.len() != 3
+            || scope.is_straight_line
+            || scope.steps.len() != 2
+            || scope.preamble_statements.len() != 3
+            || !scope.steps[0].ok_statements.is_empty()
+            || !scope.steps[0].err_statements.is_empty()
+            || scope.steps[1].err_statements.len() != 1
+            || scope.leaf_statements.len() != 20
+            || scope.combined_statements.len() != 23
+        {
             return false;
         }
         let block_id = |node: &NodeId, role: &str| BasicBlockId(derived(node, "block", role));
@@ -8466,9 +10621,67 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         let Some(root_result) = body.root.result.as_deref() else {
             return false;
         };
+        let Some(leaf_result) = scope.leaf_result else {
+            return false;
+        };
+        fn step_err_result<'a>(
+            step: &'a OrdinaryMapV2ResultChainStep<'a>,
+        ) -> Option<&'a ResolvedExpr> {
+            match &step.err_arm.body.kind {
+                ResolvedExprKind::Block(block) => block.result.as_deref(),
+                _ => Some(&step.err_arm.body),
+            }
+        }
+        let Some(new_err_result) = step_err_result(&scope.steps[0]) else {
+            return false;
+        };
+        let Some(set_err_result) = step_err_result(&scope.steps[1]) else {
+            return false;
+        };
+        let new_step = &scope.steps[0];
+        let set_step = &scope.steps[1];
+        if new_step.match_expr.node_id != root_result.node_id {
+            return false;
+        }
+        let new_ok_edge = edge_id(&new_step.ok_arm.node_id, "match-arm");
+        let new_err_edge = edge_id(&new_step.err_arm.node_id, "match-arm");
+        let new_ok_block = cfg.edges.get(&new_ok_edge).map(|edge| edge.to.clone());
+        let new_err_block = cfg.edges.get(&new_err_edge).map(|edge| edge.to.clone());
+        let new_join = block_id(&new_step.match_expr.node_id, "match-join");
+        let set_ok_edge = edge_id(&set_step.ok_arm.node_id, "match-arm");
+        let set_err_edge = edge_id(&set_step.err_arm.node_id, "match-arm");
+        let set_ok_block = cfg.edges.get(&set_ok_edge).map(|edge| edge.to.clone());
+        let set_err_block = cfg.edges.get(&set_err_edge).map(|edge| edge.to.clone());
+        let set_join = block_id(&set_step.match_expr.node_id, "match-join");
+        let (Some(new_ok_block), Some(new_err_block), Some(set_ok_block), Some(set_err_block)) =
+            (new_ok_block, new_err_block, set_ok_block, set_err_block)
+        else {
+            return false;
+        };
+        let new_err_join_edge = edge_id(&new_step.err_arm.node_id, "match-arm-join");
+        let new_ok_join_edge = edge_id(&new_step.ok_arm.node_id, "match-arm-join");
+        let set_err_join_edge = edge_id(&set_step.err_arm.node_id, "match-arm-join");
+        let set_ok_join_edge = edge_id(&set_step.ok_arm.node_id, "match-arm-join");
         let final_join = block_id(&and_nodes[2].expression, "if-join");
-        let mut expected_blocks = BTreeSet::from([cfg.entry.clone()]);
-        let mut expected_edges = BTreeSet::new();
+        let mut expected_blocks = BTreeSet::from([
+            cfg.entry.clone(),
+            new_ok_block.clone(),
+            new_err_block.clone(),
+            new_join.clone(),
+            set_ok_block.clone(),
+            set_err_block.clone(),
+            set_join.clone(),
+        ]);
+        let mut expected_edges = BTreeSet::from([
+            new_ok_edge.clone(),
+            new_err_edge.clone(),
+            new_err_join_edge.clone(),
+            new_ok_join_edge.clone(),
+            set_ok_edge.clone(),
+            set_err_edge.clone(),
+            set_err_join_edge.clone(),
+            set_ok_join_edge.clone(),
+        ]);
         for node in and_nodes {
             let shortcut = NodeId(format!("{}/short-circuit", node.expression.0));
             expected_blocks.insert(block_id(&node.right, "if-then"));
@@ -8479,17 +10692,122 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             expected_edges.insert(edge_id(&node.right, "if-then-join"));
             expected_edges.insert(edge_id(&shortcut, "if-else-join"));
         }
-        if expected_blocks.len() != 10
-            || expected_edges.len() != 12
+        if expected_blocks.len() != 16
+            || expected_edges.len() != 20
             || cfg.blocks.keys().cloned().collect::<BTreeSet<_>>() != expected_blocks
             || cfg.reachable != expected_blocks
             || cfg.edges.keys().cloned().collect::<BTreeSet<_>>() != expected_edges
+            || !edge_is_exact(
+                cfg,
+                &new_ok_edge,
+                &cfg.entry,
+                &new_ok_block,
+                EdgeKind::MatchArm,
+                &new_step.ok_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &new_err_edge,
+                &cfg.entry,
+                &new_err_block,
+                EdgeKind::MatchArm,
+                &new_step.err_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &new_err_join_edge,
+                &new_err_block,
+                &new_join,
+                EdgeKind::Fallthrough,
+                &new_step.err_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &new_ok_join_edge,
+                &set_join,
+                &new_join,
+                EdgeKind::Fallthrough,
+                &new_step.ok_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &set_ok_edge,
+                &new_ok_block,
+                &set_ok_block,
+                EdgeKind::MatchArm,
+                &set_step.ok_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &set_err_edge,
+                &new_ok_block,
+                &set_err_block,
+                EdgeKind::MatchArm,
+                &set_step.err_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &set_err_join_edge,
+                &set_err_block,
+                &set_join,
+                EdgeKind::Fallthrough,
+                &set_step.err_arm.node_id,
+            )
+            || !edge_is_exact(
+                cfg,
+                &set_ok_join_edge,
+                &final_join,
+                &set_join,
+                EdgeKind::Fallthrough,
+                &set_step.ok_arm.node_id,
+            )
         {
+            return false;
+        }
+        if !matches!(
+            &cfg.blocks[&cfg.entry].terminator,
+            Terminator::Match { scrutinee, arms }
+                if scrutinee == &new_step.scrutinee.node_id
+                    && arms.len() == 2
+                    && arms.contains(&new_ok_edge)
+                    && arms.contains(&new_err_edge)
+        ) || !matches!(
+            &cfg.blocks[&new_ok_block].terminator,
+            Terminator::Match { scrutinee, arms }
+                if scrutinee == &set_step.scrutinee.node_id
+                    && arms.len() == 2
+                    && arms.contains(&set_ok_edge)
+                    && arms.contains(&set_err_edge)
+        ) || !matches!(
+            &cfg.blocks[&new_err_block].terminator,
+            Terminator::Goto { edge } if edge == &new_err_join_edge
+        ) || !matches!(
+            &cfg.blocks[&set_err_block].terminator,
+            Terminator::Goto { edge } if edge == &set_err_join_edge
+        ) || !matches!(
+            &cfg.blocks[&set_join].terminator,
+            Terminator::Goto { edge } if edge == &new_ok_join_edge
+        ) || !has_point(
+            cfg,
+            &new_err_block,
+            &new_err_result.node_id,
+            CfgPointKind::Expression,
+        ) || !has_point(
+            cfg,
+            &set_err_block,
+            err_drop_point,
+            CfgPointKind::ResourceAction,
+        ) || !has_point(
+            cfg,
+            &set_err_block,
+            &set_err_result.node_id,
+            CfgPointKind::Expression,
+        ) {
             return false;
         }
         for (index, node) in and_nodes.iter().enumerate() {
             let head = if index == 0 {
-                cfg.entry.clone()
+                set_ok_block.clone()
             } else {
                 block_id(&and_nodes[index - 1].expression, "if-join")
             };
@@ -8577,15 +10895,22 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
                 return false;
             }
         }
-        if body.root.statements[..23]
+        if scope.combined_statements[..3]
             .iter()
             .any(|statement| !point_is_only_in(cfg, &cfg.entry, &statement.node_id))
-            || body.root.statements[23..]
+            || scope.combined_statements[3..21]
+                .iter()
+                .any(|statement| !point_is_only_in(cfg, &set_ok_block, &statement.node_id))
+            || scope.combined_statements[21..]
                 .iter()
                 .any(|statement| !point_is_only_in(cfg, &final_join, &statement.node_id))
-            || !point_is_only_in(cfg, &final_join, &root_result.node_id)
+            || !point_is_only_in(cfg, &final_join, &leaf_result.node_id)
             || !matches!(
                 cfg.blocks.get(&final_join).map(|block| &block.terminator),
+                Some(Terminator::Goto { edge }) if edge == &set_ok_join_edge
+            )
+            || !matches!(
+                cfg.blocks.get(&new_join).map(|block| &block.terminator),
                 Some(Terminator::Return { value: Some(value), implicit: true })
                     if value == &root_result.node_id
             )
@@ -8666,11 +10991,12 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
     fn local_drop(
         cfg: &CallableCfg,
         body: &ResolvedBody,
+        scope: &OrdinaryMapV2LinearChainScope<'_>,
         local: &ResolvedLocalId,
         expected_loads: &[NodeId],
         expected_drop_point: &NodeId,
     ) -> Option<usize> {
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+        let census = scope.local_source_uses(body, local);
         let actual = census
             .loads
             .iter()
@@ -8689,7 +11015,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             return None;
         };
         let order = place.statement_order?;
-        let statement = body.root.statements.get(order)?;
+        let statement = scope.combined_statements.get(order)?;
         if place.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
             || !place.unprojected
             || place.place_index != 0
@@ -8744,16 +11070,37 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         })
     }
     let owner = NodeId("function:main".into());
-    let statements = &body.root.statements;
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)?;
+    fn step_err_result<'a>(step: &'a OrdinaryMapV2ResultChainStep<'a>) -> Option<&'a ResolvedExpr> {
+        match &step.err_arm.body.kind {
+            Expr::Block(block) => block.result.as_deref(),
+            _ => Some(&step.err_arm.body),
+        }
+    }
     if body.owner != owner
         || cfg.owner != owner
         || !body.parameters.is_empty()
         || !body.captures.is_empty()
-        || statements.len() != 25
-        || body.locals.len() != 14
+        || scope.is_straight_line
+        || scope.steps.len() != 2
+        || scope.preamble_statements.len() != 3
+        || !scope.steps[0].ok_statements.is_empty()
+        || !scope.steps[0].err_statements.is_empty()
+        || !matches!(
+            step_err_result(&scope.steps[0]).map(|expr| &expr.kind),
+            Some(Expr::Literal(Literal::Bool(false)))
+        )
+        || scope.steps[1].err_statements.len() != 1
+        || !matches!(
+            step_err_result(&scope.steps[1]).map(|expr| &expr.kind),
+            Some(Expr::Literal(Literal::Bool(false)))
+        )
+        || scope.leaf_statements.len() != 20
+        || scope.combined_statements.len() != 23
+        || body.locals.len() != 16
         || body.root.ty != bool_type()
-        || actions.len() != 7
-        || attempts.len() != 7
+        || actions.len() != 8
+        || attempts.len() != 8
         || results.len() != 2
         || unpacks.len() != 2
         || found_observations.len() != 2
@@ -8786,6 +11133,15 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
     {
         return None;
     }
+    let (ok_actions, ok_attempts, ok_drops, err_drops) =
+        partition_ordinary_map_v2_ok_spine(&scope, actions, attempts)?;
+    if ok_actions.len() != 7
+        || ok_attempts.len() != 7
+        || ok_drops.len() != 2
+        || err_drops.len() != 1
+    {
+        return None;
+    }
     for (kind, expected) in [
         (ActionKind::New, 1),
         (ActionKind::Set, 1),
@@ -8793,7 +11149,12 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         (ActionKind::Keys, 1),
         (ActionKind::Drop, 2),
     ] {
-        if actions.iter().filter(|action| action.kind == kind).count() != expected {
+        if ok_actions
+            .iter()
+            .filter(|action| action.kind == kind)
+            .count()
+            != expected
+        {
             return None;
         }
     }
@@ -8804,7 +11165,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         (AttemptKind::Keys, 1),
         (AttemptKind::Drop, 2),
     ] {
-        if attempts
+        if ok_attempts
             .iter()
             .filter(|attempt| attempt.kind == kind)
             .count()
@@ -8813,28 +11174,49 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             return None;
         }
     }
-    let statements = statements.as_slice();
+    let statements = scope.combined_statements.as_slice();
+    let new_step = &scope.steps[0];
+    let set_step = &scope.steps[1];
+    let empty_local = new_step.ok_binding.as_ref()?.clone();
+    let root_local = set_step.ok_binding.as_ref()?.clone();
+    let arm_err_binding = |arm: &crate::core::ir::MatchArm| match &arm.pattern.kind {
+        ResolvedPatternKind::Constructor { fields, .. } => {
+            fields.first().and_then(|(_, p)| match &p.kind {
+                ResolvedPatternKind::Binding {
+                    local,
+                    by_reference: None,
+                } => Some(local.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    let new_err_local = arm_err_binding(new_step.err_arm)?;
+    let set_err_local = arm_err_binding(set_step.err_arm)?;
     let locals = [
-        bound_local(&statements[0])?.clone(),
-        bound_local(&statements[1])?.clone(),
-        bound_local(&statements[2])?.clone(),
-        bound_local(&statements[3])?.clone(),
-        bound_local(&statements[4])?.clone(),
-        bound_local(&statements[5])?.clone(),
-        bound_local(&statements[6])?.clone(),
-        bound_local(&statements[7])?.clone(),
-        bound_local(&statements[8])?.clone(),
-        bound_local(&statements[15])?.clone(),
-        bound_local(&statements[16])?.clone(),
-        bound_local(&statements[17])?.clone(),
-        bound_local(&statements[18])?.clone(),
-        bound_local(&statements[23])?.clone(),
+        bound_local(statements[0])?.clone(),
+        bound_local(statements[1])?.clone(),
+        bound_local(statements[2])?.clone(),
+        empty_local.clone(),
+        bound_local(statements[3])?.clone(),
+        root_local.clone(),
+        bound_local(statements[4])?.clone(),
+        bound_local(statements[5])?.clone(),
+        bound_local(statements[6])?.clone(),
+        bound_local(statements[13])?.clone(),
+        bound_local(statements[14])?.clone(),
+        bound_local(statements[15])?.clone(),
+        bound_local(statements[16])?.clone(),
+        bound_local(statements[21])?.clone(),
+        new_err_local.clone(),
+        set_err_local.clone(),
     ];
-    let [prefix_local, suffix_local, key_local, empty_local, miss_pair_local, root_local, snapshot_local, copied_key_local, hit_pair_local, miss_found_local, miss_payload_local, hit_found_local, hit_payload_local, outcome_local] =
+    let [prefix_local, suffix_local, key_local, empty_local, miss_pair_local, root_local, snapshot_local, copied_key_local, hit_pair_local, miss_found_local, miss_payload_local, hit_found_local, hit_payload_local, outcome_local, new_err_local, set_err_local] =
         locals.as_slice()
     else {
         return None;
     };
+    let leaf_result = scope.leaf_result?;
     if locals.iter().collect::<BTreeSet<_>>().len() != locals.len()
         || locals.iter().any(|local| {
             body.locals
@@ -8843,48 +11225,47 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         })
         || locals.iter().collect::<BTreeSet<_>>() != body.locals.keys().collect()
         || body
-            .root
-            .result
-            .as_deref()
-            .is_none_or(|result| result.ty != bool_type() || !direct_load(result, outcome_local))
+            .locals
+            .get(new_err_local)
+            .is_none_or(|definition| definition.ty != i32_type())
+        || body
+            .locals
+            .get(set_err_local)
+            .is_none_or(|definition| definition.ty != i32_type())
+        || leaf_result.ty != bool_type()
+        || !direct_load(leaf_result, outcome_local)
     {
         return None;
     }
-    let bindings = locals
-        .iter()
-        .map(|local| direct_binding(body, local))
-        .collect::<Option<Vec<_>>>()?;
-    if bindings.iter().enumerate().any(|(index, (statement, _))| {
-        let expected_statement = match index {
-            0 => 0,
-            1 => 1,
-            2 => 2,
-            3 => 3,
-            4 => 4,
-            5 => 5,
-            6 => 6,
-            7 => 7,
-            8 => 8,
-            9 => 15,
-            10 => 16,
-            11 => 17,
-            12 => 18,
-            13 => 23,
-            _ => usize::MAX,
-        };
-        statement.node_id != statements[expected_statement].node_id
-    }) {
-        return None;
+    let direct_locals = [
+        (prefix_local, 0usize),
+        (suffix_local, 1),
+        (key_local, 2),
+        (miss_pair_local, 3),
+        (snapshot_local, 4),
+        (copied_key_local, 5),
+        (hit_pair_local, 6),
+        (miss_found_local, 13),
+        (miss_payload_local, 14),
+        (hit_found_local, 15),
+        (hit_payload_local, 16),
+        (outcome_local, 21),
+    ];
+    let mut direct_inits = Vec::with_capacity(direct_locals.len());
+    for (local, expected_statement) in direct_locals {
+        let (statement, initializer) = direct_binding(&scope, local)?;
+        if statement.node_id != statements[expected_statement].node_id {
+            return None;
+        }
+        direct_inits.push(initializer);
     }
-    let init = bindings
-        .iter()
-        .map(|(_, initializer)| *initializer)
-        .collect::<Vec<_>>();
-    let [prefix_init, suffix_init, key_init, new_init, miss_init, set_init, keys_init, copied_init, hit_init, miss_found_init, miss_payload_init, hit_found_init, hit_payload_init, outcome_init] =
-        init.as_slice()
+    let [prefix_init, suffix_init, key_init, miss_init, keys_init, copied_init, hit_init, miss_found_init, miss_payload_init, hit_found_init, hit_payload_init, outcome_init] =
+        direct_inits.as_slice()
     else {
         return None;
     };
+    let new_init = new_step.scrutinee;
+    let set_init = set_step.scrutinee;
     let ResolvedExprKind::Project {
         value: args_expression,
         projection: ResolvedValueProjection::Index(args_index),
@@ -8934,7 +11315,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         return None;
     }
 
-    let map_root_type = new_init.ty.clone();
+    let map_root_type = body.locals.get(empty_local)?.ty.clone();
     let new_call = direct_call(new_init, "map_new")?;
     let miss_call = direct_call(miss_init, "map_get")?;
     let set_call = direct_call(set_init, "map_set")?;
@@ -8954,7 +11335,11 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
     };
     if !new_call.arguments.is_empty()
         || !is_map_root(types, &map_root_type)
-        || new_call.result != map_root_type
+        || new_init.ty != new_call.result
+        || resolve_result_ok_err_types(types, &new_init.ty)
+            != Some((map_root_type.clone(), i32_type()))
+        || resolve_result_ok_err_types(types, &set_init.ty)
+            != Some((map_root_type.clone(), i32_type()))
         || body
             .locals
             .get(empty_local)
@@ -8983,7 +11368,6 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         || !matches!(&set_value_arg.value.kind, Expr::Literal(Literal::Int(0)))
         || set_value_arg.value.ty != i32_type()
         || set_value_arg.conversion.kind != CheckedConversionKind::Identity
-        || set_init.ty != map_root_type
         || !is_keys_list(types, &keys_init.ty)
         || body
             .locals
@@ -9022,22 +11406,40 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
     let set_action = action_at(actions, &set_init.node_id)?;
     let keys_action = action_at(actions, &keys_init.node_id)?;
     let hit_get_action = action_at(actions, &hit_init.node_id)?;
-    let empty_drop_action = action_at(actions, &statements[9].node_id)?;
-    let root_drop_action = action_at(actions, &statements[10].node_id)?;
+    let empty_drop_action = action_at(actions, &statements[7].node_id)?;
+    let root_drop_action = action_at(actions, &statements[8].node_id)?;
+    let [(_, err_empty_drop_action)] = err_drops.as_slice() else {
+        return None;
+    };
+    let err_empty_drop_point = &set_step.err_statements[0].node_id;
     let empty_resource = OrdinaryMapOwnedAnyV2Checker::resource_identity(empty_local);
     let root_resource = OrdinaryMapOwnedAnyV2Checker::resource_identity(root_local);
     if !action_is_empty_root(new_action, ActionKind::New, &new_init.node_id, empty_local)
         || !action_is_empty_root(
             empty_drop_action,
             ActionKind::Drop,
-            &statements[9].node_id,
+            &statements[7].node_id,
             empty_local,
         )
         || !action_is_empty_root(
             root_drop_action,
             ActionKind::Drop,
-            &statements[10].node_id,
+            &statements[8].node_id,
             root_local,
+        )
+        || !action_is_empty_root(
+            err_empty_drop_action,
+            ActionKind::Drop,
+            err_empty_drop_point,
+            empty_local,
+        )
+        || !ordinary_map_v2_err_drops_match_prior_roots(
+            &scope,
+            &[
+                (&new_action.point, empty_local),
+                (&set_action.point, root_local),
+            ],
+            &err_drops,
         )
         || set_action.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
         || set_action.kind != ActionKind::Set
@@ -9187,6 +11589,13 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             Some(root_local),
             None,
         ),
+        (
+            err_empty_drop_action,
+            AttemptKind::Drop,
+            vec![empty_local.0.clone()],
+            Some(empty_local),
+            None,
+        ),
     ];
     if expected_attempts
         .iter()
@@ -9213,7 +11622,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         unpack_for(unpacks, &hit_init.node_id)?,
         found_for(found_observations, &hit_init.node_id)?,
     );
-    let pair_drop_points = [&statements[19].node_id, &statements[20].node_id];
+    let pair_drop_points = [&statements[17].node_id, &statements[18].node_id];
     for (index, (action, pair_local, payload_local, found_local, pair_drop)) in [
         (
             miss_get_action,
@@ -9248,7 +11657,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             || result.result != action.point
             || result.result_type != action.result_type.as_ref()?.clone()
             || result.binding != *pair_local
-            || result.binding_point != statements[if index == 0 { 4 } else { 8 }].node_id
+            || result.binding_point != statements[if index == 0 { 3 } else { 6 }].node_id
             || result.payload_println.is_some()
             || result.settlement != Settlement::ExplicitDrop
             || result.settlement_point.as_ref() != Some(pair_drop)
@@ -9256,7 +11665,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             || unpack.operation != action.point
             || unpack.pair_binding_point != result.binding_point
             || unpack.pair_binding != *pair_local
-            || unpack.unpack_binding_point != statements[if index == 0 { 16 } else { 18 }].node_id
+            || unpack.unpack_binding_point != statements[if index == 0 { 14 } else { 16 }].node_id
             || unpack.unpack_binding != *payload_local
             || unpack.conversion_kind != CheckedConversionKind::DynamicAnyUnpack
             || unpack.conversion_to != i32_type()
@@ -9266,7 +11675,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             || found.operation != action.point
             || found.pair_binding_point != result.binding_point
             || found.pair_binding != *pair_local
-            || found.found_binding_point != statements[if index == 0 { 15 } else { 17 }].node_id
+            || found.found_binding_point != statements[if index == 0 { 13 } else { 15 }].node_id
             || found.found_binding != *found_local
             || found.outcome_node != outcome_init.node_id
             || ordinary_map_owned_any_v2_cfg_point_count(cfg, &unpack.projection) != 1
@@ -9469,16 +11878,22 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         || miss_found.found_source_uses != BTreeSet::from([outcome_terms[2].operand.clone()])
         || hit_found.outcome_node != outcome_and_nodes[2].expression
         || miss_found.outcome_node != outcome_and_nodes[2].expression
-        || !exact_dynamic_keys_get_outcome_cfg(cfg, body, &outcome_and_nodes)
+        || !exact_dynamic_keys_get_outcome_cfg(
+            cfg,
+            body,
+            &scope,
+            err_empty_drop_point,
+            &outcome_and_nodes,
+        )
     {
         return None;
     }
 
-    let println_copied = match &statements[21].kind {
+    let println_copied = match &statements[19].kind {
         Stmt::Expr(expression) => expression,
         _ => return None,
     };
-    let println_outcome = match &statements[24].kind {
+    let println_outcome = match &statements[22].kind {
         Stmt::Expr(expression) => expression,
         _ => return None,
     };
@@ -9500,16 +11915,16 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         || outcome_argument.value.ty != bool_type()
         || outcome_call.result != unit_type()
         || println_outcome.ty != unit_type()
-        || !matches!(&statements[21].kind, Stmt::Expr(expression) if expression.node_id == println_copied.node_id)
-        || !matches!(&statements[22].kind, Stmt::Drop(places)
+        || !matches!(&statements[19].kind, Stmt::Expr(expression) if expression.node_id == println_copied.node_id)
+        || !matches!(&statements[20].kind, Stmt::Drop(places)
             if matches!(places.as_slice(), [place] if place.base == *copied_key_local && place.projections.is_empty()))
     {
         return None;
     }
     let [miss_pair_drop, hit_pair_drop] = pair_drop_points;
-    for (statement_index, local, expected) in [
+    let local_drop_checks: [(usize, &ResolvedLocalId, Vec<NodeId>); 7] = [
         (
-            9usize,
+            7usize,
             empty_local,
             vec![
                 set_root_arg.value.node_id.clone(),
@@ -9517,18 +11932,18 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             ],
         ),
         (
-            10usize,
+            8usize,
             root_local,
             vec![
                 keys_root_arg.value.node_id.clone(),
                 hit_root_arg.value.node_id.clone(),
             ],
         ),
-        (11usize, snapshot_local, vec![snapshot_load.node_id.clone()]),
-        (12usize, prefix_local, vec![concat_prefix.node_id.clone()]),
-        (13usize, suffix_local, vec![concat_suffix.node_id.clone()]),
+        (9usize, snapshot_local, vec![snapshot_load.node_id.clone()]),
+        (10usize, prefix_local, vec![concat_prefix.node_id.clone()]),
+        (11usize, suffix_local, vec![concat_suffix.node_id.clone()]),
         (
-            14usize,
+            12usize,
             key_local,
             vec![
                 miss_key_arg.value.node_id.clone(),
@@ -9537,16 +11952,18 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             ],
         ),
         (
-            22usize,
+            20usize,
             copied_key_local,
             vec![copied_argument.value.node_id.clone()],
         ),
-    ] {
+    ];
+    for (statement_index, local, expected) in local_drop_checks {
         if local_drop(
             cfg,
             body,
+            &scope,
             local,
-            &expected,
+            expected.as_slice(),
             &statements[statement_index].node_id,
         )
         .is_none()
@@ -9554,7 +11971,7 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             return None;
         }
     }
-    for (statement_index, local) in [(19usize, miss_pair_local), (20usize, hit_pair_local)] {
+    for (statement_index, local) in [(17usize, miss_pair_local), (18usize, hit_pair_local)] {
         if !matches!(&statements[statement_index].kind, Stmt::Drop(places)
             if matches!(places.as_slice(), [place] if place.base == *local && place.projections.is_empty()))
             || ordinary_map_owned_any_v2_cfg_point_count(cfg, &statements[statement_index].node_id)
@@ -9567,54 +11984,60 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         local_drop(
             cfg,
             body,
+            &scope,
             empty_local,
             &[
                 set_root_arg.value.node_id.clone(),
                 miss_root_arg.value.node_id.clone(),
             ],
-            &statements[9].node_id,
+            &statements[7].node_id,
         )?,
         local_drop(
             cfg,
             body,
+            &scope,
             root_local,
             &[
                 keys_root_arg.value.node_id.clone(),
                 hit_root_arg.value.node_id.clone(),
             ],
+            &statements[8].node_id,
+        )?,
+        local_drop(
+            cfg,
+            body,
+            &scope,
+            snapshot_local,
+            std::slice::from_ref(&snapshot_load.node_id),
+            &statements[9].node_id,
+        )?,
+        local_drop(
+            cfg,
+            body,
+            &scope,
+            prefix_local,
+            std::slice::from_ref(&concat_prefix.node_id),
             &statements[10].node_id,
         )?,
         local_drop(
             cfg,
             body,
-            snapshot_local,
-            std::slice::from_ref(&snapshot_load.node_id),
+            &scope,
+            suffix_local,
+            std::slice::from_ref(&concat_suffix.node_id),
             &statements[11].node_id,
         )?,
         local_drop(
             cfg,
             body,
-            prefix_local,
-            std::slice::from_ref(&concat_prefix.node_id),
-            &statements[12].node_id,
-        )?,
-        local_drop(
-            cfg,
-            body,
-            suffix_local,
-            std::slice::from_ref(&concat_suffix.node_id),
-            &statements[13].node_id,
-        )?,
-        local_drop(
-            cfg,
-            body,
+            &scope,
             key_local,
             &[
                 miss_key_arg.value.node_id.clone(),
                 set_key_arg.value.node_id.clone(),
                 hit_key_arg.value.node_id.clone(),
             ],
-            &statements[14].node_id,
+            &statements[12].node_id,
         )?,
     ];
     if !(drop_positions[0] < drop_positions[1]
@@ -9622,13 +12045,13 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         && drop_positions[2] < drop_positions[3]
         && drop_positions[3] < drop_positions[4]
         && drop_positions[4] < drop_positions[5]
-        && drop_positions[5] < 21)
+        && drop_positions[5] < 19)
     {
         return None;
     }
 
     let mut source_identity_nodes = BTreeSet::new();
-    for statement in statements {
+    for statement in ordinary_map_owned_any_v2_nested_statements(body) {
         source_identity_nodes.insert(statement.node_id.clone());
         match &statement.kind {
             Stmt::Bind {
@@ -9642,9 +12065,17 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
             _ => {}
         }
     }
-    let root_result = body.root.result.as_deref()?;
-    let root_nodes = root_result.eager_source_nodes();
-    source_identity_nodes.extend(root_nodes);
+    let _root_result = body.root.result.as_deref()?;
+    source_identity_nodes.extend(leaf_result.eager_source_nodes());
+    for step in &scope.steps {
+        source_identity_nodes.insert(step.match_expr.node_id.clone());
+        source_identity_nodes.extend(step.scrutinee.eager_source_nodes());
+        source_identity_nodes.insert(step.ok_arm.body.node_id.clone());
+        source_identity_nodes.insert(step.err_arm.body.node_id.clone());
+        if let Some(err_result) = step_err_result(step) {
+            source_identity_nodes.extend(err_result.eager_source_nodes());
+        }
+    }
     let expected_calls = [
         (args_expression.node_id.clone(), "args"),
         (new_init.node_id.clone(), "map_new"),
@@ -9671,24 +12102,29 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         args_index: args_index.node_id.clone(),
         prefix_binding_point: statements[0].node_id.clone(),
         prefix_local: prefix_local.clone(),
-        prefix_drop_point: statements[12].node_id.clone(),
+        prefix_drop_point: statements[10].node_id.clone(),
         suffix_binding_point: statements[1].node_id.clone(),
         suffix_local: suffix_local.clone(),
         suffix_literal_node: suffix_init.node_id.clone(),
-        suffix_drop_point: statements[13].node_id.clone(),
+        suffix_drop_point: statements[11].node_id.clone(),
         key_binding_point: statements[2].node_id.clone(),
         key_local: key_local.clone(),
         key_concat: key_init.node_id.clone(),
         key_concat_prefix: concat_prefix.node_id.clone(),
         key_concat_suffix: concat_suffix.node_id.clone(),
-        key_drop_point: statements[14].node_id.clone(),
+        key_drop_point: statements[12].node_id.clone(),
         key_suffix_utf8: vec![0, 0xe9, 0x9b, 0xaa],
+        new_binding_point: new_step.ok_arm.pattern.node_id.clone(),
+        set_binding_point: set_step.ok_arm.pattern.node_id.clone(),
+        new_err_local: new_err_local.clone(),
+        set_err_local: set_err_local.clone(),
         new_action: new_action.clone(),
         set_action: set_action.clone(),
         miss_get_action: miss_get_action.clone(),
         keys_action: keys_action.clone(),
         hit_get_action: hit_get_action.clone(),
         root_drops: [empty_drop_action.clone(), root_drop_action.clone()],
+        err_root_drops: vec![(*err_empty_drop_action).clone()],
         miss_result: miss_result.clone(),
         miss_found: miss_found.clone(),
         miss_unpack: miss_unpack.clone(),
@@ -9700,20 +12136,20 @@ fn collect_ordinary_map_owned_any_v2_dynamic_keys_get_receipt(
         outcome_local: outcome_local.clone(),
         outcome_observation_call: println_outcome.node_id.clone(),
         outcome_observation_load: outcome_argument.value.node_id.clone(),
-        return_load: body.root.result.as_deref()?.node_id.clone(),
+        return_load: leaf_result.node_id.clone(),
         outcome_terms,
         outcome_and_nodes,
         keys_snapshot: OrdinaryMapOwnedAnyV2KeysSnapshotOwnerReceipt {
-            snapshot_binding_point: statements[6].node_id.clone(),
+            snapshot_binding_point: statements[4].node_id.clone(),
             snapshot_local: snapshot_local.clone(),
             snapshot_type: keys_init.ty.clone(),
-            snapshot_drop_point: statements[11].node_id.clone(),
+            snapshot_drop_point: statements[9].node_id.clone(),
             copied_key_projection: copied_init.node_id.clone(),
             snapshot_source_load: snapshot_load.node_id.clone(),
             copied_key_index: index.node_id.clone(),
-            copied_key_binding_point: statements[7].node_id.clone(),
+            copied_key_binding_point: statements[5].node_id.clone(),
             copied_key_local: copied_key_local.clone(),
-            copied_key_drop_point: statements[22].node_id.clone(),
+            copied_key_drop_point: statements[20].node_id.clone(),
             copied_key_type: string_type(),
             observation_call: println_copied.node_id.clone(),
             observation_load: copied_argument.value.node_id.clone(),
@@ -9812,22 +12248,21 @@ fn ordinary_map_owned_any_v2_explicit_string_drop_proof(
     local: &ResolvedLocalId,
     binding_point: &NodeId,
 ) -> Option<OrdinaryMapOwnedAnyV2ExplicitStringDropProof> {
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || !matches!(
-            body.locals
-                .get(local)
-                .and_then(|local| types.get(&local.ty)),
-            Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
-        )
-    {
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return None;
+    };
+    if !matches!(
+        body.locals
+            .get(local)
+            .and_then(|local| types.get(&local.ty)),
+        Some(ResolvedType::Primitive(crate::core::PrimitiveType::String))
+    ) {
         return None;
     }
-    let binding_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| &statement.node_id == binding_point)?;
-    let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+    let binding_order = scope.statement_order(binding_point)?;
+    let census = scope.local_source_uses(body, local);
     if census.has_nested_callable
         || !census.captures.is_empty()
         || !census.has_unique_load_nodes()
@@ -9845,9 +12280,8 @@ fn ordinary_map_owned_any_v2_explicit_string_drop_proof(
         return None;
     }
     let drop_order = drop.statement_order?;
-    let mut reads = body
-        .root
-        .statements
+    let mut reads = scope
+        .combined_statements
         .iter()
         .enumerate()
         .filter_map(|(order, statement)| {
@@ -9884,7 +12318,7 @@ fn ordinary_map_owned_any_v2_explicit_string_drop_proof(
     {
         return None;
     }
-    let root_drop = body.root.statements.get(drop_order)?;
+    let root_drop = scope.combined_statements.get(drop_order)?;
     if root_drop.node_id != drop.statement
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &drop.statement) != 1
     {
@@ -9907,18 +12341,14 @@ fn ordinary_map_owned_any_v2_explicit_string_drop_proof(
 fn ordinary_map_owned_any_v2_whole_drop_proof(
     cfg: &CallableCfg,
     body: &ResolvedBody,
+    types: &ResolvedTypeTable,
     local: &ResolvedLocalId,
     binding_point: &NodeId,
 ) -> Option<(NodeId, usize)> {
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg) {
-        return None;
-    }
-    let binding_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| &statement.node_id == binding_point)?;
-    let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)?;
+    let binding_order = scope.statement_order(binding_point)?;
+    let census = scope.local_source_uses(body, local);
     if census.has_nested_callable
         || !census.captures.is_empty()
         || !census.loads.is_empty()
@@ -9929,11 +12359,7 @@ fn ordinary_map_owned_any_v2_whole_drop_proof(
     let [drop] = census.places.as_slice() else {
         return None;
     };
-    let root_drop_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == drop.statement)?;
+    let root_drop_order = scope.statement_order(&drop.statement)?;
     if drop.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
         || !drop.unprojected
         || drop.statement_order != Some(root_drop_order)
@@ -9954,18 +12380,14 @@ fn ordinary_map_owned_any_v2_whole_drop_proof(
 fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
     cfg: &CallableCfg,
     body: &ResolvedBody,
+    types: &ResolvedTypeTable,
     local: &ResolvedLocalId,
     binding_point: &NodeId,
 ) -> Option<(NodeId, usize, BTreeSet<NodeId>)> {
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg) {
-        return None;
-    }
-    let binding_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| &statement.node_id == binding_point)?;
-    let source_census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)?;
+    let binding_order = scope.statement_order(binding_point)?;
+    let source_census = scope.local_source_uses(body, local);
     if source_census.has_nested_callable
         || !source_census.captures.is_empty()
         || !source_census.has_unique_load_nodes()
@@ -9983,11 +12405,7 @@ fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
     let [source_drop] = source_census.places.as_slice() else {
         return None;
     };
-    let source_drop_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == source_drop.statement)?;
+    let source_drop_order = scope.statement_order(&source_drop.statement)?;
     if source_drop.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
         || !source_drop.unprojected
         || source_drop.statement_order != Some(source_drop_order)
@@ -9998,9 +12416,8 @@ fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
         return None;
     }
 
-    let aliases = body
-        .root
-        .statements
+    let aliases = scope
+        .combined_statements
         .iter()
         .filter_map(|statement| {
             let ResolvedStmtKind::Bind {
@@ -10024,7 +12441,7 @@ fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
             (initializer.node_id == source_load.node
                 && place.base == *local
                 && place.projections.is_empty())
-            .then_some((statement, alias))
+            .then_some((*statement, alias))
         })
         .collect::<Vec<_>>();
     let [(alias_binding, alias_local)] = aliases.as_slice() else {
@@ -10036,11 +12453,7 @@ fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
     {
         return None;
     }
-    let alias_binding_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == alias_binding.node_id)?;
+    let alias_binding_order = scope.statement_order(&alias_binding.node_id)?;
     if alias_binding_order <= binding_order
         || alias_binding_order >= source_drop_order
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &alias_binding.node_id) != 1
@@ -10060,7 +12473,9 @@ fn ordinary_map_owned_any_v2_whole_drop_alias_candidate(
 /// separate from broad V2 ownership admission: failure to prove this shape
 /// withholds only this credential and never clears otherwise valid actions.
 fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
+    cfg: &CallableCfg,
     body: &ResolvedBody,
+    types: &ResolvedTypeTable,
     actions: &[OrdinaryMapOwnedAnyV2Action],
     attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
     results: &[OrdinaryMapOwnedAnyV2ResultReceipt],
@@ -10075,11 +12490,14 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
         OrdinaryMapOwnedAnyV2ProfileVersion as ProfileVersion, PrimitiveType,
     };
 
-    fn direct_binding<'a>(
-        body: &'a ResolvedBody,
-        local: &ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types);
+    let statements: Vec<&ResolvedStmt> = scope.as_ref().map_or_else(
+        || body.root.statements.iter().collect(),
+        |s| s.combined_statements.clone(),
+    );
+
+    let direct_binding = |local: &ResolvedLocalId| -> Option<(&ResolvedStmt, &ResolvedExpr)> {
+        let mut matches = statements.iter().filter_map(|statement| {
             let ResolvedStmtKind::Bind {
                 pattern:
                     ResolvedPattern {
@@ -10095,11 +12513,11 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
             else {
                 return None;
             };
-            (bound == local).then_some((statement, initializer))
+            (bound == local).then_some((*statement, initializer))
         });
         let binding = matches.next()?;
         matches.next().is_none().then_some(binding)
-    }
+    };
 
     let bool_type = crate::core::ir::primitive_type_id(PrimitiveType::Bool);
     let get_actions = actions
@@ -10121,7 +12539,10 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
         return Vec::new();
     }
 
-    let Some(root_result) = body.root.result.as_deref() else {
+    let Some(root_result) = scope
+        .as_ref()
+        .map_or(body.root.result.as_deref(), |s| s.leaf_result)
+    else {
         return Vec::new();
     };
     let ResolvedExprKind::Load(root_place) = &root_result.kind else {
@@ -10134,7 +12555,7 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
     let Some(outcome_info) = body.locals.get(&outcome_local) else {
         return Vec::new();
     };
-    let Some((_, outcome_formula)) = direct_binding(body, &outcome_local) else {
+    let Some((_, outcome_formula)) = direct_binding(&outcome_local) else {
         return Vec::new();
     };
     if outcome_info.ty != bool_type || outcome_info.mutable || outcome_formula.ty != bool_type {
@@ -10189,7 +12610,7 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
         {
             return Vec::new();
         }
-        let Some((pair_statement, pair_initializer)) = direct_binding(body, &result.binding) else {
+        let Some((pair_statement, pair_initializer)) = direct_binding(&result.binding) else {
             return Vec::new();
         };
         if pair_statement.node_id != result.binding_point
@@ -10217,9 +12638,7 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
             return Vec::new();
         }
 
-        let projections = body
-            .root
-            .statements
+        let projections = statements
             .iter()
             .filter_map(|statement| {
                 let ResolvedStmtKind::Bind {
@@ -10255,7 +12674,7 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
                     ),
                     _ => false,
                 };
-                exact_pair_zero.then_some((statement, local, initializer))
+                exact_pair_zero.then_some((*statement, local, initializer))
             })
             .collect::<Vec<_>>();
         let [(found_statement, found_local, projection)] = projections.as_slice() else {
@@ -10269,7 +12688,10 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
         {
             return Vec::new();
         }
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, found_local);
+        let census = scope.as_ref().map_or_else(
+            || ordinary_map_owned_any_v2_local_source_uses(body, found_local),
+            |s| s.local_source_uses(body, found_local),
+        );
         if census.has_nested_callable
             || !census.captures.is_empty()
             || !census.places.is_empty()
@@ -10314,7 +12736,9 @@ fn collect_ordinary_map_owned_any_v2_found_observation_receipts(
 /// expression observes both the found bit and canonical i32 zero without
 /// introducing a branch-flow exemption.
 fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
+    cfg: &CallableCfg,
     body: &ResolvedBody,
+    types: &ResolvedTypeTable,
     actions: &[OrdinaryMapOwnedAnyV2Action],
     attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
     results: &[OrdinaryMapOwnedAnyV2ResultReceipt],
@@ -10323,8 +12747,7 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
 ) -> Option<crate::core::ownership::OrdinaryMapOwnedAnyV2RemovedKeyCheckedMissReceipt> {
     use crate::core::ir::{
         ResolvedBinaryOp as Binary, ResolvedCallee, ResolvedExprKind as Expr,
-        ResolvedLiteral as Literal, ResolvedPatternKind as Pattern, ResolvedStmtKind as Statement,
-        ResolvedUnaryOp as Unary,
+        ResolvedLiteral as Literal, ResolvedStmtKind as Statement, ResolvedUnaryOp as Unary,
     };
     use crate::core::ownership::{
         OrdinaryMapOwnedAnyV2ActionKind as Action, OrdinaryMapOwnedAnyV2AttemptKind as Attempt,
@@ -10336,28 +12759,6 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement,
     };
 
-    fn binding_initializer<'a>(
-        body: &'a ResolvedBody,
-        local: &crate::core::ResolvedLocalId,
-    ) -> Option<(
-        &'a crate::core::ir::ResolvedStmt,
-        &'a crate::core::ir::ResolvedExpr,
-    )> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let Statement::Bind {
-                pattern: crate::core::ir::ResolvedPattern { kind, .. },
-                initializer: Some(initializer),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            matches!(kind, Pattern::Binding { local: bound, by_reference: None } if bound == local)
-                .then_some((statement, initializer))
-        });
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
-    }
-
     fn direct_load(
         expression: &crate::core::ir::ResolvedExpr,
         local: &crate::core::ResolvedLocalId,
@@ -10366,7 +12767,7 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
     }
 
     fn call_for<'a>(
-        body: &'a ResolvedBody,
+        scope: &OrdinaryMapV2LinearChainScope<'a>,
         action: &OrdinaryMapOwnedAnyV2Action,
         builtin_name: &str,
     ) -> Option<&'a crate::core::ir::ResolvedCall> {
@@ -10375,12 +12776,8 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         } else {
             &action.local
         };
-        let (statement, initializer) = binding_initializer(body, binding_local)?;
-        // The action is keyed to the initializer expression NodeId. The Bind
-        // statement has its own NodeId, so binding_initializer is the exact
-        // local/statement identity check; equating those two IDs would make
-        // every legitimate binding impossible to receipt.
-        let _binding_statement = statement;
+        let binding = scope.direct_or_ok_binding(binding_local)?;
+        let initializer = binding.initializer;
         if initializer.node_id != action.point {
             return None;
         }
@@ -10395,8 +12792,14 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
     if body.owner != owner || !body.parameters.is_empty() || !body.captures.is_empty() {
         return None;
     }
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)?;
+    let (ok_actions, ok_attempts, ok_drops, err_drops) =
+        partition_ordinary_map_v2_ok_spine(&scope, actions, attempts)?;
     let find_one = |kind| {
-        let mut matching = actions.iter().filter(|action| action.kind == kind);
+        let mut matching = ok_actions
+            .iter()
+            .copied()
+            .filter(|action| action.kind == kind);
         let action = matching.next()?;
         matching.next().is_none().then_some(action)
     };
@@ -10404,15 +12807,20 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
     let set = find_one(Action::Set)?;
     let remove = find_one(Action::Remove)?;
     let get = find_one(Action::GetAny)?;
-    if actions.len() != 7
-        || actions.iter().any(|action| {
+    if ok_actions.len() != 7
+        || !ordinary_map_v2_err_drops_match_prior_roots(
+            &scope,
+            &[(&new.point, &new.local), (&set.point, &set.local)],
+            &err_drops,
+        )
+        || ok_actions.iter().any(|action| {
             !matches!(
                 action.kind,
                 Action::New | Action::Set | Action::Remove | Action::GetAny | Action::Drop
             )
         })
-        || attempts.len() != 7
-        || attempts.iter().any(|attempt| {
+        || ok_attempts.len() != 7
+        || ok_attempts.iter().any(|attempt| {
             !matches!(
                 attempt.kind,
                 Attempt::New | Attempt::Set | Attempt::Remove | Attempt::GetAny | Attempt::Drop
@@ -10427,7 +12835,13 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         ]
         .into_iter()
         .zip([1usize, 1, 1, 1, 3])
-        .any(|(kind, count)| actions.iter().filter(|action| action.kind == kind).count() != count)
+        .any(|(kind, count)| {
+            ok_actions
+                .iter()
+                .filter(|action| action.kind == kind)
+                .count()
+                != count
+        })
         || [
             Attempt::New,
             Attempt::Set,
@@ -10438,7 +12852,7 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         .into_iter()
         .zip([1usize, 1, 1, 1, 3])
         .any(|(kind, count)| {
-            attempts
+            ok_attempts
                 .iter()
                 .filter(|attempt| attempt.kind == kind)
                 .count()
@@ -10472,9 +12886,9 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         return None;
     }
 
-    let set_call = call_for(body, set, "map_set")?;
-    let remove_call = call_for(body, remove, "map_remove")?;
-    let get_call = call_for(body, get, "map_get")?;
+    let set_call = call_for(&scope, set, "map_set")?;
+    let remove_call = call_for(&scope, remove, "map_remove")?;
+    let get_call = call_for(&scope, get, "map_get")?;
     if set_call.arguments.len() != 3
         || remove_call.arguments.len() != 2
         || get_call.arguments.len() != 2
@@ -10542,14 +12956,10 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
     {
         return None;
     }
-    let drop_actions = actions
-        .iter()
-        .filter(|action| action.kind == Action::Drop)
-        .collect::<Vec<_>>();
     let root_settlements = [new, set, remove]
         .into_iter()
         .map(|root| {
-            let mut matching = drop_actions
+            let mut matching = ok_drops
                 .iter()
                 .copied()
                 .filter(|drop| drop.local == root.local && drop.root == root.root);
@@ -10557,7 +12967,7 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
             matching.next().is_none().then_some(drop)
         })
         .collect::<Option<Vec<_>>>()?;
-    if drop_actions.len() != 3
+    if ok_drops.len() != 3
         || root_settlements
             .iter()
             .any(|drop| drop.key.is_some() || drop.key_type.is_some() || drop.value.is_some())
@@ -10565,14 +12975,14 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
         return None;
     }
 
-    let root_result = body.root.result.as_deref()?;
+    let root_result = scope.leaf_result?;
     let Expr::Load(outcome_place) = &root_result.kind else {
         return None;
     };
     if !outcome_place.projections.is_empty() || root_result.ty != bool_type {
         return None;
     }
-    let (outcome_statement, outcome) = binding_initializer(body, &outcome_place.base)?;
+    let (outcome_statement, outcome) = scope.direct_binding(&outcome_place.base)?;
     if outcome.node_id != found_observation.outcome_node || outcome.ty != bool_type {
         return None;
     }
@@ -10613,20 +13023,14 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
     {
         return None;
     }
-    if body
-        .root
-        .statements
+    if scope
+        .combined_statements
         .iter()
         .any(|statement| !matches!(statement.kind, Statement::Bind { .. } | Statement::Drop(_)))
     {
         return None;
     }
-    let statement_index = |node: &crate::core::NodeId| {
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == *node)
-    };
+    let statement_index = |node: &crate::core::NodeId| scope.statement_order(node);
     let outcome_index = statement_index(&outcome_statement.node_id)?;
     let pair_settlement_index = statement_index(get_result.settlement_point.as_ref()?)?;
     if pair_settlement_index >= outcome_index
@@ -10667,6 +13071,7 @@ fn collect_ordinary_map_owned_any_v2_removed_key_checked_miss_receipt(
 fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
     cfg: &CallableCfg,
     body: &ResolvedBody,
+    types: &ResolvedTypeTable,
     actions: &[OrdinaryMapOwnedAnyV2Action],
     attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
     results: &[crate::core::OrdinaryMapOwnedAnyV2ResultReceipt],
@@ -10676,8 +13081,7 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
     use crate::core::cfg::{CfgPointKind, Terminator};
     use crate::core::ir::{
         ResolvedBinaryOp as Binary, ResolvedCallee, ResolvedExpr, ResolvedExprKind as Expr,
-        ResolvedLiteral as Literal, ResolvedPattern, ResolvedPatternKind as Pattern, ResolvedStmt,
-        ResolvedStmtKind as Statement, ResolvedUnaryOp as Unary,
+        ResolvedLiteral as Literal, ResolvedUnaryOp as Unary,
     };
     use crate::core::ownership::{
         OrdinaryMapOwnedAnyV2ActionKind as Action, OrdinaryMapOwnedAnyV2AttemptKind as Attempt,
@@ -10685,32 +13089,6 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
         OrdinaryMapOwnedAnyV2ResultSettlementKind as Settlement,
         OrdinaryMapOwnedAnyV2ZeroMissI32ObservationReceipt as Receipt,
     };
-
-    fn direct_binding<'a>(
-        body: &'a ResolvedBody,
-        local: &crate::core::ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let Statement::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            Pattern::Binding {
-                                local: bound,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(initializer),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (bound == local).then_some((statement, initializer))
-        });
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
-    }
 
     fn direct_load(expression: &ResolvedExpr, local: &crate::core::ResolvedLocalId) -> bool {
         matches!(
@@ -10750,23 +13128,33 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
     let bool_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::Bool);
     let hit_digest = blake3::hash(b"hit").to_hex().to_string();
     let miss_digest = blake3::hash(b"absent").to_hex().to_string();
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)?;
+    let (ok_actions, ok_attempts, ok_drops, err_drops) =
+        partition_ordinary_map_v2_ok_spine(&scope, actions, attempts)?;
+    let valid_shape = (scope.is_straight_line && scope.leaf_statements.len() == 14)
+        || (!scope.is_straight_line
+            && scope.preamble_statements.is_empty()
+            && scope.steps.len() == 2
+            && scope.steps[0].ok_statements.is_empty()
+            && scope.leaf_statements.len() == 12);
     if body.owner != owner
         || body.parameters.len() != 0
         || body.captures.len() != 0
-        || body.root.statements.len() != 14
+        || !valid_shape
         || cfg.owner != owner
-        || actions.len() != 6
-        || attempts.len() != 6
+        || ok_actions.len() != 6
+        || ok_attempts.len() != 6
+        || ok_drops.len() != 2
         || results.len() != 2
         || unpacks.len() != 2
         || observations.len() != 2
-        || actions.iter().any(|action| {
+        || ok_actions.iter().any(|action| {
             !matches!(
                 action.kind,
                 Action::New | Action::Set | Action::GetAny | Action::Drop
             )
         })
-        || attempts.iter().any(|attempt| {
+        || ok_attempts.iter().any(|attempt| {
             !matches!(
                 attempt.kind,
                 Attempt::New | Attempt::Set | Attempt::GetAny | Attempt::Drop
@@ -10784,7 +13172,12 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
         (Action::GetAny, 2),
         (Action::Drop, 2),
     ] {
-        if actions.iter().filter(|action| action.kind == kind).count() != expected {
+        if ok_actions
+            .iter()
+            .filter(|action| action.kind == kind)
+            .count()
+            != expected
+        {
             return None;
         }
     }
@@ -10794,7 +13187,7 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
         (Attempt::GetAny, 2),
         (Attempt::Drop, 2),
     ] {
-        if attempts
+        if ok_attempts
             .iter()
             .filter(|attempt| attempt.kind == kind)
             .count()
@@ -10804,20 +13197,29 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
         }
     }
 
-    let new_actions = actions
+    let new_actions = ok_actions
         .iter()
+        .copied()
         .filter(|action| action.kind == Action::New)
         .collect::<Vec<_>>();
     let [new] = new_actions.as_slice() else {
         return None;
     };
-    let set_actions = actions
+    let set_actions = ok_actions
         .iter()
+        .copied()
         .filter(|action| action.kind == Action::Set)
         .collect::<Vec<_>>();
     let [set] = set_actions.as_slice() else {
         return None;
     };
+    if !ordinary_map_v2_err_drops_match_prior_roots(
+        &scope,
+        &[(&new.point, &new.local), (&set.point, &set.local)],
+        &err_drops,
+    ) {
+        return None;
+    }
     if set.source_local.as_ref() != Some(&new.local)
         || set.source.as_ref() != Some(&new.root)
         || set.key_static_digest.as_deref() != Some(hit_digest.as_str())
@@ -10826,7 +13228,7 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
     {
         return None;
     }
-    let (_, set_expression) = direct_binding(body, &set.local)?;
+    let set_expression = scope.direct_or_ok_binding(&set.local)?.initializer;
     let Expr::Call(set_call) = &set_expression.kind else {
         return None;
     };
@@ -10896,14 +13298,14 @@ fn collect_ordinary_map_owned_any_v2_zero_miss_i32_observation_receipt(
         return None;
     }
 
-    let root_result = body.root.result.as_deref()?;
+    let root_result = scope.leaf_result?;
     let Expr::Load(outcome_place) = &root_result.kind else {
         return None;
     };
     if !outcome_place.projections.is_empty() || root_result.ty != bool_type {
         return None;
     }
-    let (_, formula) = direct_binding(body, &outcome_place.base)?;
+    let (_, formula) = scope.direct_binding(&outcome_place.base)?;
     if formula.ty != bool_type
         || body
             .locals
@@ -11705,15 +14107,10 @@ fn collect_ordinary_map_owned_any_v2_computed_string_key_owner_chain_receipt(
         if !path_ids_match || path_drop_points != action_drop_points {
             return None;
         }
-        let success_drop_points = success_drops[0]
-            .drops
-            .iter()
-            .map(|drop| drop.settlement_point.clone())
-            .collect::<BTreeSet<_>>();
-        map_root_drop_actions.retain(|action| success_drop_points.contains(&action.point));
     }
+    let expected_drop_count = if result_branch.is_some() { 4 } else { 3 };
     if has_key_actions.len() != 3
-        || map_root_drop_actions.len() != 3
+        || map_root_drop_actions.len() != expected_drop_count
         || actions.iter().any(|action| {
             !matches!(
                 action.kind,
@@ -12412,7 +14809,7 @@ fn collect_ordinary_map_owned_any_v2_computed_string_key_owner_chain_receipt(
         return None;
     }
     map_root_drop_actions.sort_by_key(|action| point_index(cfg, &action.point));
-    let mut map_root_drops = Vec::with_capacity(3);
+    let mut map_root_drops = Vec::with_capacity(map_root_drop_actions.len());
     for drop_action in &map_root_drop_actions {
         let local = &drop_action.local;
         let binding_action = ([&map_new, &map_set, &map_remove]
@@ -12446,13 +14843,10 @@ fn collect_ordinary_map_owned_any_v2_computed_string_key_owner_chain_receipt(
             return None;
         }
         let root_drop_receipt = if let Some(branch) = result_branch {
-            let success_path = branch.paths.iter().find(|path| {
-                path.kind
-                    == crate::core::ownership::OrdinaryMapOwnedAnyV2ComputedStringKeyOwnerChainResultPathKind::Success
-            })?;
-            let branch_drop = success_path
-                .drops
+            let branch_drop = branch
+                .paths
                 .iter()
+                .flat_map(|path| path.drops.iter())
                 .find(|drop| drop.local == *local && drop.settlement_point == drop_action.point)?;
             let mut source_uses = expected_loads.clone();
             if !source_uses.insert(branch_drop.settlement_point.clone()) {
@@ -12626,40 +15020,6 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         crate::core::ir::primitive_type_id(PrimitiveType::Bool)
     }
 
-    fn map_root_type(types: &ResolvedTypeTable, ty: &ResolvedTypeId) -> bool {
-        matches!(
-            types.get(ty),
-            Some(ResolvedType::Nominal { item, .. })
-                if item.as_str() == "builtin:type:Record"
-        )
-    }
-
-    fn direct_binding<'a>(
-        body: &'a ResolvedBody,
-        local: &ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local: bound,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(initializer),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (bound == local).then_some((statement, initializer))
-        });
-        let binding = matches.next()?;
-        matches.next().is_none().then_some(binding)
-    }
-
     fn direct_call<'a>(expression: &'a ResolvedExpr, expected: &str) -> Option<&'a ResolvedCall> {
         match &expression.kind {
             ResolvedExprKind::Call(call) if matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == expected) => {
@@ -12678,20 +15038,23 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         }
     }
 
-    fn exact_attempt(
-        attempts: &BTreeSet<OrdinaryMapOwnedAnyV2Attempt>,
+    fn exact_attempt<'a>(
+        attempts: &[&'a OrdinaryMapOwnedAnyV2Attempt],
         kind: OrdinaryMapOwnedAnyV2AttemptKind,
-    ) -> Option<&OrdinaryMapOwnedAnyV2Attempt> {
-        let mut matches = attempts.iter().filter(|attempt| attempt.kind == kind);
+    ) -> Option<&'a OrdinaryMapOwnedAnyV2Attempt> {
+        let mut matches = attempts
+            .iter()
+            .copied()
+            .filter(|attempt| attempt.kind == kind);
         let found = matches.next()?;
         matches.next().is_none().then_some(found)
     }
 
-    fn exact_action(
-        actions: &[OrdinaryMapOwnedAnyV2Action],
+    fn exact_action<'a>(
+        actions: &[&'a OrdinaryMapOwnedAnyV2Action],
         kind: OrdinaryMapOwnedAnyV2ActionKind,
-    ) -> Option<&OrdinaryMapOwnedAnyV2Action> {
-        let mut matches = actions.iter().filter(|action| action.kind == kind);
+    ) -> Option<&'a OrdinaryMapOwnedAnyV2Action> {
+        let mut matches = actions.iter().copied().filter(|action| action.kind == kind);
         let found = matches.next()?;
         matches.next().is_none().then_some(found)
     }
@@ -12699,6 +15062,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     fn direct_string_add_receipt(
         cfg: &CallableCfg,
         body: &ResolvedBody,
+        scope: &OrdinaryMapV2LinearChainScope<'_>,
         types: &ResolvedTypeTable,
         local: &ResolvedLocalId,
         expected_loads: &BTreeSet<NodeId>,
@@ -12708,7 +15072,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         if local_info.ty != string || local_info.mutable {
             return None;
         }
-        let (binding, initializer) = direct_binding(body, local)?;
+        let (binding, initializer) = scope.direct_binding(local)?;
         if initializer.ty != string {
             return None;
         }
@@ -12744,7 +15108,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
             return None;
         }
 
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+        let census = scope.local_source_uses(body, local);
         if census.has_nested_callable
             || !census.captures.is_empty()
             || !census.has_unique_load_nodes()
@@ -12767,15 +15131,11 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
             return None;
         };
         let drop_order = drop.statement_order?;
-        let binding_order = body
-            .root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == binding.node_id)?;
+        let binding_order = scope.statement_order(&binding.node_id)?;
         if drop.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
             || !drop.unprojected
             || drop_order <= binding_order
-            || body.root.statements.get(drop_order)?.node_id != drop.statement
+            || scope.combined_statements.get(drop_order)?.node_id != drop.statement
             || ordinary_map_owned_any_v2_cfg_point_count(cfg, &drop.statement) != 1
         {
             return None;
@@ -12797,13 +15157,23 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         })
     }
 
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || cfg.owner != body.owner
-        || actions.len() != 5
-        || attempts.len() != 5
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return Vec::new();
+    };
+    let Some((ok_actions, ok_attempts, ok_drops, err_drops)) =
+        partition_ordinary_map_v2_ok_spine(&scope, actions, attempts)
+    else {
+        return Vec::new();
+    };
+    if cfg.owner != body.owner
+        || ok_actions.len() != 5
+        || ok_attempts.len() != 5
+        || ok_drops.len() != 2
         || results.len() != 1
         || unpacks.len() != 1
-        || actions.iter().any(|action| {
+        || ok_actions.iter().any(|action| {
             !matches!(
                 action.kind,
                 OrdinaryMapOwnedAnyV2ActionKind::New
@@ -12812,7 +15182,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
                     | OrdinaryMapOwnedAnyV2ActionKind::Drop
             )
         })
-        || attempts.iter().any(|attempt| {
+        || ok_attempts.iter().any(|attempt| {
             !matches!(
                 attempt.kind,
                 OrdinaryMapOwnedAnyV2AttemptKind::New
@@ -12825,30 +15195,30 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         return Vec::new();
     }
 
-    let Some(new) = exact_action(actions, OrdinaryMapOwnedAnyV2ActionKind::New) else {
+    let Some(new) = exact_action(&ok_actions, OrdinaryMapOwnedAnyV2ActionKind::New) else {
         return Vec::new();
     };
-    let Some(set) = exact_action(actions, OrdinaryMapOwnedAnyV2ActionKind::Set) else {
+    let Some(set) = exact_action(&ok_actions, OrdinaryMapOwnedAnyV2ActionKind::Set) else {
         return Vec::new();
     };
-    let Some(get) = exact_action(actions, OrdinaryMapOwnedAnyV2ActionKind::GetAny) else {
+    let Some(get) = exact_action(&ok_actions, OrdinaryMapOwnedAnyV2ActionKind::GetAny) else {
         return Vec::new();
     };
-    let drops = actions
-        .iter()
-        .filter(|action| action.kind == OrdinaryMapOwnedAnyV2ActionKind::Drop)
-        .collect::<Vec<_>>();
-    if drops.len() != 2 {
+    if !ordinary_map_v2_err_drops_match_prior_roots(
+        &scope,
+        &[(&new.point, &new.local), (&set.point, &set.local)],
+        &err_drops,
+    ) {
         return Vec::new();
     }
-    let Some(new_drop) = drops
+    let Some(new_drop) = ok_drops
         .iter()
         .copied()
         .find(|action| action.local == new.local)
     else {
         return Vec::new();
     };
-    let Some(set_drop) = drops
+    let Some(set_drop) = ok_drops
         .iter()
         .copied()
         .find(|action| action.local == set.local)
@@ -12856,14 +15226,15 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         return Vec::new();
     };
     let (Some(new_attempt), Some(set_attempt), Some(get_attempt)) = (
-        exact_attempt(attempts, OrdinaryMapOwnedAnyV2AttemptKind::New),
-        exact_attempt(attempts, OrdinaryMapOwnedAnyV2AttemptKind::Set),
-        exact_attempt(attempts, OrdinaryMapOwnedAnyV2AttemptKind::GetAny),
+        exact_attempt(&ok_attempts, OrdinaryMapOwnedAnyV2AttemptKind::New),
+        exact_attempt(&ok_attempts, OrdinaryMapOwnedAnyV2AttemptKind::Set),
+        exact_attempt(&ok_attempts, OrdinaryMapOwnedAnyV2AttemptKind::GetAny),
     ) else {
         return Vec::new();
     };
-    let drop_attempts = attempts
+    let drop_attempts = ok_attempts
         .iter()
+        .copied()
         .filter(|attempt| attempt.kind == OrdinaryMapOwnedAnyV2AttemptKind::Drop)
         .collect::<Vec<_>>();
     if drop_attempts.len() != 2 {
@@ -12884,19 +15255,17 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         return Vec::new();
     };
 
-    let Some((_new_binding, new_initializer)) = direct_binding(body, &new.local) else {
+    let (Some(new_binding_info), Some(set_binding_info), Some((get_binding, get_initializer))) = (
+        scope.direct_or_ok_binding(&new.local),
+        scope.direct_or_ok_binding(&set.local),
+        get.result_local
+            .as_ref()
+            .and_then(|local| scope.direct_binding(local)),
+    ) else {
         return Vec::new();
     };
-    let Some((set_binding, set_initializer)) = direct_binding(body, &set.local) else {
-        return Vec::new();
-    };
-    let Some((get_binding, get_initializer)) = get
-        .result_local
-        .as_ref()
-        .and_then(|local| direct_binding(body, local))
-    else {
-        return Vec::new();
-    };
+    let new_initializer = new_binding_info.initializer;
+    let set_initializer = set_binding_info.initializer;
     let (Some(new_call), Some(set_call), Some(get_call)) = (
         direct_call(new_initializer, "map_new"),
         direct_call(set_initializer, "map_set"),
@@ -12932,12 +15301,13 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         get_key_arg.value.node_id.clone(),
     ]);
     let payload_loads = BTreeSet::from([set_payload_arg.value.node_id.clone()]);
-    let Some(key_receipt) = direct_string_add_receipt(cfg, body, types, &key_local, &key_loads)
+    let Some(key_receipt) =
+        direct_string_add_receipt(cfg, body, &scope, types, &key_local, &key_loads)
     else {
         return Vec::new();
     };
     let Some(payload_receipt) =
-        direct_string_add_receipt(cfg, body, types, &payload_local, &payload_loads)
+        direct_string_add_receipt(cfg, body, &scope, types, &payload_local, &payload_loads)
     else {
         return Vec::new();
     };
@@ -12950,16 +15320,26 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         || new_initializer.node_id != new.point
         || set_initializer.node_id != set.point
         || get_initializer.node_id != get.point
-        || !map_root_type(types, &new_initializer.ty)
-        || !map_root_type(types, &set_initializer.ty)
-        || body
-            .locals
-            .get(&new.local)
-            .is_none_or(|local| local.ty != new_initializer.ty)
-        || body
-            .locals
-            .get(&set.local)
-            .is_none_or(|local| local.ty != set_initializer.ty)
+        || body.locals.get(&new.local).is_none_or(|local| {
+            !ordinary_map_binding_matches_expr_type(
+                &scope,
+                types,
+                &new.point,
+                &new.local,
+                &local.ty,
+                &new_initializer.ty,
+            )
+        })
+        || body.locals.get(&set.local).is_none_or(|local| {
+            !ordinary_map_binding_matches_expr_type(
+                &scope,
+                types,
+                &set.point,
+                &set.local,
+                &local.ty,
+                &set_initializer.ty,
+            )
+        })
         || new.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
         || set.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
         || get.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
@@ -13050,7 +15430,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
                              action: &OrdinaryMapOwnedAnyV2Action,
                              expected_load: &NodeId|
      -> Option<usize> {
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, local);
+        let census = scope.local_source_uses(body, local);
         if census.has_nested_callable
             || !census.captures.is_empty()
             || !census.has_unique_load_nodes()
@@ -13104,14 +15484,14 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     let Some(pair_local) = get.result_local.as_ref() else {
         return Vec::new();
     };
-    let Some((pair_binding, pair_initializer)) = direct_binding(body, pair_local) else {
+    let Some((pair_binding, pair_initializer)) = scope.direct_binding(pair_local) else {
         return Vec::new();
     };
-    let Some((unpack_binding, unpack_initializer)) = direct_binding(body, &unpack.unpack_binding)
+    let Some((unpack_binding, unpack_initializer)) = scope.direct_binding(&unpack.unpack_binding)
     else {
         return Vec::new();
     };
-    let pair_census = ordinary_map_owned_any_v2_local_source_uses(body, pair_local);
+    let pair_census = scope.local_source_uses(body, pair_local);
     if pair_census.has_nested_callable
         || !pair_census.captures.is_empty()
         || !pair_census.has_unique_load_nodes()
@@ -13172,18 +15552,21 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         return Vec::new();
     }
     let (Some(pair_order), Some(unpack_order)) = (
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == pair_binding.node_id),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == unpack_binding.node_id),
+        scope.timeline_order(&pair_binding.node_id),
+        scope.timeline_order(&unpack_binding.node_id),
     ) else {
         return Vec::new();
     };
     let Some(pair_binding_pos) = position(&pair_binding.node_id) else {
+        return Vec::new();
+    };
+    let Some(pair_drop_timeline) = scope.timeline_order(&pair_drop.statement) else {
+        return Vec::new();
+    };
+    let Some(new_drop_timeline) = scope.timeline_order(&new_drop.point) else {
+        return Vec::new();
+    };
+    let Some(set_drop_timeline) = scope.timeline_order(&set_drop.point) else {
         return Vec::new();
     };
     let (
@@ -13194,30 +15577,12 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         Some(key_drop_order),
         Some(payload_drop_order),
     ) = (
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == set_binding.node_id),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == get_binding.node_id),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == key_receipt.binding_point),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == payload_receipt.binding_point),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == key_receipt.settlement_point),
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == payload_receipt.settlement_point),
+        scope.timeline_order(set_binding_info.order_node),
+        scope.timeline_order(&get_binding.node_id),
+        scope.timeline_order(&key_receipt.binding_point),
+        scope.timeline_order(&payload_receipt.binding_point),
+        scope.timeline_order(&key_receipt.settlement_point),
+        scope.timeline_order(&payload_receipt.settlement_point),
     )
     else {
         return Vec::new();
@@ -13229,19 +15594,19 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         && set_statement_order < payload_drop_order
         && payload_drop_order < get_statement_order
         && get_statement_order < key_drop_order
-        && new_drop_order(body, new_drop) < key_drop_order
-        && new_drop_order(body, set_drop) < key_drop_order
+        && new_drop_timeline < key_drop_order
+        && set_drop_timeline < key_drop_order
         && key_drop_order < unpack_order
         && get_pos < pair_binding_pos
         && pair_order < unpack_order
-        && unpack_order < pair_drop_order
-        && get_statement_order < new_drop_order(body, new_drop)
-        && get_statement_order < new_drop_order(body, set_drop))
+        && unpack_order < pair_drop_timeline
+        && get_statement_order < new_drop_timeline
+        && get_statement_order < set_drop_timeline)
     {
         return Vec::new();
     }
 
-    let value_census = ordinary_map_owned_any_v2_local_source_uses(body, &unpack.unpack_binding);
+    let value_census = scope.local_source_uses(body, &unpack.unpack_binding);
     if value_census.has_nested_callable
         || !value_census.captures.is_empty()
         || !value_census.has_unique_load_nodes()
@@ -13255,9 +15620,8 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     let [value_drop] = value_census.places.as_slice() else {
         return Vec::new();
     };
-    let value_reads = body
-        .root
-        .statements
+    let value_reads = scope
+        .combined_statements
         .iter()
         .enumerate()
         .filter_map(|(order, statement)| {
@@ -13267,9 +15631,8 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     let [value_read] = value_reads.as_slice() else {
         return Vec::new();
     };
-    let mut observation_bindings = body
-        .root
-        .statements
+    let mut observation_bindings = scope
+        .combined_statements
         .iter()
         .filter_map(|statement| match &statement.kind {
             ResolvedStmtKind::Bind {
@@ -13284,7 +15647,7 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
                     },
                 initializer: Some(initializer),
             } if initializer.node_id == value_read.operation => {
-                Some((statement, local.clone(), initializer))
+                Some((*statement, local.clone(), initializer))
             }
             _ => None,
         })
@@ -13301,14 +15664,14 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     if observation_bindings.next().is_some() {
         return Vec::new();
     }
-    let Some(result_expression) = body.root.result.as_deref() else {
+    let Some(result_expression) = scope.leaf_result else {
         return Vec::new();
     };
     let observation_result_local = match &result_expression.kind {
         ResolvedExprKind::Load(place) if place.projections.is_empty() => &place.base,
         _ => return Vec::new(),
     };
-    let observation_census = ordinary_map_owned_any_v2_local_source_uses(body, &observation_local);
+    let observation_census = scope.local_source_uses(body, &observation_local);
     let Some(value_drop_order) = value_drop.statement_order else {
         return Vec::new();
     };
@@ -13327,9 +15690,8 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         || value_drop.kind != OrdinaryMapOwnedAnyV2LocalPlaceUseKind::Drop
         || !value_drop.unprojected
         || value_drop_order <= value_read.statement_order
-        || body
-            .root
-            .statements
+        || scope
+            .combined_statements
             .get(value_drop_order)
             .is_none_or(|statement| statement.node_id != value_drop.statement)
         || ordinary_map_owned_any_v2_cfg_point_count(cfg, &value_drop.statement) != 1
@@ -13352,13 +15714,9 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
         settlement_point: value_drop.statement.clone(),
         settlement_place_index: value_drop.place_index,
     };
-    let (Some(value_read_order), Some(value_drop_order)) = (
-        body.root
-            .statements
-            .iter()
-            .position(|statement| statement.node_id == value_read.statement),
-        value_drop.statement_order,
-    ) else {
+    let (Some(value_read_order), Some(value_drop_order)) =
+        (Some(value_read.statement_order), value_drop.statement_order)
+    else {
         return Vec::new();
     };
     if !(pair_drop_order < value_read_order && value_read_order < value_drop_order)
@@ -13387,14 +15745,6 @@ fn collect_ordinary_map_owned_any_v2_computed_key_string_get_receipts(
     vec![receipt]
 }
 
-fn new_drop_order(body: &ResolvedBody, action: &OrdinaryMapOwnedAnyV2Action) -> usize {
-    body.root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == action.point)
-        .unwrap_or(usize::MAX)
-}
-
 fn ordinary_map_owned_any_v2_field_string_move_proof(
     cfg: &CallableCfg,
     body: &ResolvedBody,
@@ -13409,9 +15759,11 @@ fn ordinary_map_owned_any_v2_field_string_move_proof(
 )> {
     use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesUnpackFieldMoveReceipt as FieldMove;
 
-    if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg) {
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
         return None;
-    }
+    };
     let Some(ResolvedType::Nominal {
         item, arguments, ..
     }) = types.get(parent_type)
@@ -13427,14 +15779,10 @@ fn ordinary_map_owned_any_v2_field_string_move_proof(
     {
         return None;
     }
-    let parent_binding_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| &statement.node_id == parent_binding_point)?;
+    let parent_binding_order = scope.statement_order(parent_binding_point)?;
 
     let mut field_bindings = Vec::new();
-    for (statement_order, statement) in body.root.statements.iter().enumerate() {
+    for (statement_order, statement) in scope.combined_statements.iter().enumerate() {
         let ResolvedStmtKind::Bind {
             pattern:
                 ResolvedPattern {
@@ -13500,7 +15848,7 @@ fn ordinary_map_owned_any_v2_field_string_move_proof(
     if *text_binding_order <= parent_binding_order {
         return None;
     }
-    let parent_census = ordinary_map_owned_any_v2_local_source_uses(body, parent);
+    let parent_census = scope.local_source_uses(body, parent);
     if parent_census.has_nested_callable
         || !parent_census.captures.is_empty()
         || !parent_census.has_unique_load_nodes()
@@ -13605,7 +15953,11 @@ fn ordinary_map_owned_any_v2_values_unpack_owner_settlement(
                     field_move: None,
                 });
             }
-            let census = ordinary_map_owned_any_v2_local_source_uses(body, unpack_binding);
+            let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types);
+            let census = scope.as_ref().map_or_else(
+                || ordinary_map_owned_any_v2_local_source_uses(body, unpack_binding),
+                |s| s.local_source_uses(body, unpack_binding),
+            );
             if census
                 .places
                 .iter()
@@ -13615,9 +15967,10 @@ fn ordinary_map_owned_any_v2_values_unpack_owner_settlement(
                 // Checker census must not fall through to compiler cleanup.
                 return None;
             }
-            body.root
-                .result
+            scope
                 .as_ref()
+                .and_then(|s| s.leaf_result)
+                .or(body.root.result.as_deref())
                 .map(|result| OrdinaryMapOwnedAnyV2ValuesUnpackOwnerProof {
                     settlement: Settlement::CompilerOwnedStringDrop,
                     point: Some(result.node_id.clone()),
@@ -13705,6 +16058,7 @@ fn ordinary_map_owned_any_v2_values_unpack_owner_settlement(
             if let Some((point, place_index)) = ordinary_map_owned_any_v2_whole_drop_proof(
                 cfg,
                 body,
+                types,
                 unpack_binding,
                 unpack_binding_point,
             ) {
@@ -13723,6 +16077,7 @@ fn ordinary_map_owned_any_v2_values_unpack_owner_settlement(
                 ordinary_map_owned_any_v2_whole_drop_alias_candidate(
                     cfg,
                     body,
+                    types,
                     unpack_binding,
                     unpack_binding_point,
                 )
@@ -13761,8 +16116,8 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     values_unpacks: &[crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
 ) -> Vec<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesMixedSnapshotReceipt> {
     use crate::core::ir::{
-        CheckedConversionKind, ResolvedBinaryOp, ResolvedExprKind, ResolvedLiteral,
-        ResolvedPatternKind, ResolvedType, ResolvedValueProjection,
+        CheckedConversionKind, ResolvedBinaryOp, ResolvedExprKind, ResolvedLiteral, ResolvedType,
+        ResolvedValueProjection,
     };
     use crate::core::ownership::{
         OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
@@ -13774,58 +16129,6 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         OrdinaryMapOwnedAnyV2ValuesPayloadOwnerSettlementReceipt as PayloadSettlement,
         OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind as OwnerSettlement,
     };
-
-    fn direct_binding_for_initializer<'a>(
-        body: &'a ResolvedBody,
-        initializer: &NodeId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedLocalId, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(value),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (value.node_id == *initializer).then_some((statement, local, value))
-        });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    }
-
-    fn direct_binding_for_local<'a>(
-        body: &'a ResolvedBody,
-        target: &ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(value),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (local == target).then_some((statement, value))
-        });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    }
 
     fn direct_call(expression: &ResolvedExpr) -> Option<&ResolvedCall> {
         match &expression.kind {
@@ -13841,41 +16144,6 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
             }
             _ => None,
         }
-    }
-
-    fn whole_drop(body: &ResolvedBody, target: &ResolvedLocalId) -> Option<(NodeId, usize, usize)> {
-        let matches = body
-            .root
-            .statements
-            .iter()
-            .enumerate()
-            .flat_map(|(statement_order, statement)| {
-                let ResolvedStmtKind::Drop(places) = &statement.kind else {
-                    return Vec::new();
-                };
-                places
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, place)| &place.base == target && place.projections.is_empty())
-                    .map(|(place_index, _)| {
-                        (statement.node_id.clone(), place_index, statement_order)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let [found] = matches.as_slice() else {
-            return None;
-        };
-        Some(found.clone())
-    }
-
-    fn statement_orders(body: &ResolvedBody) -> BTreeMap<NodeId, usize> {
-        body.root
-            .statements
-            .iter()
-            .enumerate()
-            .map(|(order, statement)| (statement.node_id.clone(), order))
-            .collect()
     }
 
     fn static_string(
@@ -13948,13 +16216,23 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     }
 
     let empty = Vec::new();
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return empty;
+    };
+    let Some((ok_drop_actions, err_drops_by_step)) =
+        partition_ordinary_map_v2_chain_drops(&scope, actions, attempts)
+    else {
+        return empty;
+    };
+    let err_drop_count = err_drops_by_step.len();
     if body.owner.0 != "function:main"
         || body.owner != cfg.owner
         || !body.parameters.is_empty()
         || !body.captures.is_empty()
-        || !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || actions.len() != 9
-        || attempts.len() != 9
+        || actions.len() != 9 + err_drop_count
+        || attempts.len() != 9 + err_drop_count
         || results.len() != 1
         || values_unpacks.len() != 3
     {
@@ -13962,10 +16240,17 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     }
 
     let count = |kind| actions.iter().filter(|action| action.kind == kind).count();
+    let attempt_count = |kind| {
+        attempts
+            .iter()
+            .filter(|attempt| attempt.kind == kind)
+            .count()
+    };
     if count(ActionKind::New) != 1
         || count(ActionKind::Set) != 3
         || count(ActionKind::Values) != 1
-        || count(ActionKind::Drop) != 4
+        || count(ActionKind::Drop) != 4 + err_drop_count
+        || attempt_count(AttemptKind::Drop) != 4 + err_drop_count
         || actions
             .iter()
             .any(|action| action.profile_version != ProfileVersion::V2)
@@ -13979,7 +16264,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         return empty;
     }
 
-    let orders = statement_orders(body);
+    let orders = scope.statement_orders();
     let new_actions = actions
         .iter()
         .filter(|action| action.kind == ActionKind::New)
@@ -13992,16 +16277,12 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         .iter()
         .filter(|action| action.kind == ActionKind::Values)
         .collect::<Vec<_>>();
-    let drop_actions = actions
-        .iter()
-        .filter(|action| action.kind == ActionKind::Drop)
-        .collect::<Vec<_>>();
     let ([new_action], [values_action]) = (new_actions.as_slice(), values_actions.as_slice())
     else {
         return empty;
     };
-    let Some((_new_statement, new_local, new_expression)) =
-        direct_binding_for_initializer(body, &new_action.point)
+    let Some((_new_order_node, new_local, new_expression)) =
+        scope.binding_for_operation(&new_action.point)
     else {
         return empty;
     };
@@ -14009,11 +16290,19 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         return empty;
     };
     if new_local != &new_action.local
-        || body.locals.get(new_local).is_none_or(|local| local.mutable)
-        || new_expression.ty != body.locals[new_local].ty
+        || !body.locals.get(new_local).is_some_and(|local| {
+            !local.mutable
+                && ordinary_map_binding_matches_expr_type(
+                    &scope,
+                    types,
+                    &new_action.point,
+                    new_local,
+                    &local.ty,
+                    &new_expression.ty,
+                )
+        })
         || !matches!(&new_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_new")
         || !new_call.arguments.is_empty()
-        || !is_map_root(types, &new_expression.ty)
         || new_action.root != OrdinaryMapOwnedAnyV2Checker::resource_identity(new_local)
         || new_action.key.is_some()
         || new_action.key_type.is_some()
@@ -14039,16 +16328,16 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
 
     let mut ordered_sets = set_actions;
     ordered_sets.sort_by_key(|action| {
-        direct_binding_for_initializer(body, &action.point)
-            .and_then(|(statement, _, _)| orders.get(&statement.node_id).copied())
+        scope
+            .binding_for_operation(&action.point)
+            .and_then(|(order_node, _, _)| scope.timeline_order(order_node))
             .unwrap_or(usize::MAX)
     });
     let expected_keys = ["a-number", "b-text", "z-label"];
     let mut set_details = Vec::new();
     let mut previous_root = new_local.clone();
     for (index, action) in ordered_sets.iter().enumerate() {
-        let Some((statement, local, expression)) =
-            direct_binding_for_initializer(body, &action.point)
+        let Some((_order_node, local, expression)) = scope.binding_for_operation(&action.point)
         else {
             return empty;
         };
@@ -14056,8 +16345,6 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
             return empty;
         };
         if local != &action.local
-            || body.locals.get(local).is_none_or(|binding| binding.mutable)
-            || body.locals.get(local).map(|binding| &binding.ty) != Some(&expression.ty)
             || !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_set")
             || call.arguments.len() != 3
         {
@@ -14070,7 +16357,18 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         let key_text = static_string(&key_arg.value, constants);
         if direct_local(&source_arg.value).as_ref() != Some(&previous_root)
             || !is_map_root(types, &source_arg.value.ty)
-            || !is_map_root(types, &expression.ty)
+            || !body.locals.get(local).is_some_and(|binding| {
+                !binding.mutable
+                    && binding.ty == source_arg.value.ty
+                    && ordinary_map_binding_matches_expr_type(
+                        &scope,
+                        types,
+                        &action.point,
+                        local,
+                        &binding.ty,
+                        &expression.ty,
+                    )
+            })
             || !identity_conversion(source_arg)
             || !identity_conversion(key_arg)
             || key_text.as_deref() != Some(expected_key)
@@ -14154,7 +16452,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         if key_arg.value.ty != key_string_type {
             return empty;
         }
-        set_details.push((action, statement, local, expression, key_arg, value_arg));
+        set_details.push((action, _order_node, local, expression, key_arg, value_arg));
         previous_root = local.clone();
     }
     if set_details.len() != 3 {
@@ -14162,7 +16460,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     }
 
     let Some((snapshot_statement, snapshot_local, snapshot_expression)) =
-        direct_binding_for_initializer(body, &values_action.point)
+        scope.direct_binding_for_initializer(&values_action.point)
     else {
         return empty;
     };
@@ -14251,7 +16549,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         return empty;
     }
     let Some((snapshot_drop_point, snapshot_drop_index, snapshot_drop_order)) =
-        whole_drop(body, snapshot_local)
+        scope.whole_drop(snapshot_local)
     else {
         return empty;
     };
@@ -14281,7 +16579,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
             return empty;
         }
         let Some((binding, unpack_local, cast_expression)) =
-            direct_binding_for_initializer(body, &unpack.cast)
+            scope.direct_binding_for_initializer(&unpack.cast)
         else {
             return empty;
         };
@@ -14336,7 +16634,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     {
         return empty;
     }
-    let snapshot_census = ordinary_map_owned_any_v2_local_source_uses(body, snapshot_local);
+    let snapshot_census = scope.local_source_uses(body, snapshot_local);
     if snapshot_census.has_nested_callable
         || !snapshot_census.captures.is_empty()
         || !snapshot_census.has_unique_load_nodes()
@@ -14353,6 +16651,18 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
         return empty;
     }
 
+    let ordered_root_steps = std::iter::once((&new_action.point, new_local))
+        .chain(
+            ordered_sets
+                .iter()
+                .map(|action| (&action.point, &action.local)),
+        )
+        .collect::<Vec<_>>();
+    if !ordinary_map_v2_err_drops_match_prior_roots(&scope, &ordered_root_steps, &err_drops_by_step)
+    {
+        return empty;
+    }
+
     let mut root_locals = vec![new_local.clone()];
     root_locals.extend(
         set_details
@@ -14360,7 +16670,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
             .map(|(_, _, local, _, _, _)| (*local).clone()),
     );
     let root_local_set = root_locals.iter().cloned().collect::<BTreeSet<_>>();
-    if root_local_set.len() != 4 || drop_actions.len() != 4 {
+    if root_local_set.len() != 4 || ok_drop_actions.len() != 4 {
         return empty;
     }
     let first_unpack_order = unpack_by_index
@@ -14379,14 +16689,15 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     }
     let mut map_root_settlements = Vec::new();
     for root_local in &root_locals {
-        let matching_drops = drop_actions
+        let matching_drops = ok_drop_actions
             .iter()
+            .copied()
             .filter(|action| action.local == *root_local)
             .collect::<Vec<_>>();
         let [drop_action] = matching_drops.as_slice() else {
             return empty;
         };
-        let Some((drop_point, drop_place_index, drop_order)) = whole_drop(body, root_local) else {
+        let Some((drop_point, drop_place_index, drop_order)) = scope.whole_drop(root_local) else {
             return empty;
         };
         if drop_place_index != 0
@@ -14474,7 +16785,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
                     return empty;
                 };
                 let Some((actual_drop, drop_index, drop_order)) =
-                    whole_drop(body, &unpack.unpack_binding)
+                    scope.whole_drop(&unpack.unpack_binding)
                 else {
                     return empty;
                 };
@@ -14524,13 +16835,12 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
                 let Some(label_local) = direct_local(&value_argument.value) else {
                     return empty;
                 };
-                let Some((label_binding, label_expression)) =
-                    direct_binding_for_local(body, &label_local)
+                let Some((label_binding, label_expression)) = scope.direct_binding(&label_local)
                 else {
                     return empty;
                 };
                 let Some((label_drop_point, label_drop_index, label_drop_order)) =
-                    whole_drop(body, &label_local)
+                    scope.whole_drop(&label_local)
                 else {
                     return empty;
                 };
@@ -14565,7 +16875,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
                 else {
                     return empty;
                 };
-                let label_census = ordinary_map_owned_any_v2_local_source_uses(body, &label_local);
+                let label_census = scope.local_source_uses(body, &label_local);
                 if arguments.len() != 0
                     || nominal.as_str() != item.as_str()
                     || record_fields.len() != 1
@@ -14638,7 +16948,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     else {
         return empty;
     };
-    if body.root.result.as_deref().is_none_or(|result| {
+    if scope.leaf_result.is_none_or(|result| {
         !matches!(
             &result.kind,
             ResolvedExprKind::Literal(ResolvedLiteral::Int(0))
@@ -14652,34 +16962,29 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
     let Some(entry_block) = cfg.blocks.get(&cfg.entry) else {
         return empty;
     };
-    let Some(return_value) = body.root.result.as_deref() else {
+    let Some(return_value) = scope.leaf_result else {
         return empty;
     };
-    if !matches!(
-        &entry_block.terminator,
-        Terminator::Return { value: Some(value), implicit: true } if value == &return_value.node_id
-    ) || !matches!(
-        snapshot_result.settlement_point.as_ref(),
-        Some(point) if point == &snapshot_drop_point
-    ) {
+    if (scope.is_straight_line
+        && !matches!(
+            &entry_block.terminator,
+            Terminator::Return { value: Some(value), implicit: true } if value == &return_value.node_id
+        ))
+        || !matches!(
+            snapshot_result.settlement_point.as_ref(),
+            Some(point) if point == &snapshot_drop_point
+        )
+    {
         return empty;
     }
-    let Some((source_label_drop_order_point, source_label_drop_order)) = body
-        .root
-        .statements
-        .iter()
-        .enumerate()
-        .find(|(_, statement)| statement.node_id == source_label_drop_point)
-        .map(|(order, statement)| (statement.node_id.clone(), order))
-    else {
+    let Some(source_label_drop_order) = scope.statement_order(&source_label_drop_point) else {
         return empty;
     };
     let last_unpack_order = unpack_by_index
         .values()
         .filter_map(|unpack| orders.get(&unpack.unpack_binding_point).copied())
         .max();
-    if source_label_drop_order_point != source_label_drop_point
-        || source_label_drop_order <= values_order
+    if source_label_drop_order <= values_order
         || source_label_drop_order >= first_unpack_order
         || last_unpack_order.is_none_or(|last_unpack| snapshot_drop_order <= last_unpack)
     {
@@ -14722,9 +17027,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
     results: &[OrdinaryMapOwnedAnyV2ResultReceipt],
     values_unpacks: &[crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
 ) -> Vec<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesMixedSnapshotRemoveReceipt> {
-    use crate::core::ir::{
-        CheckedConversionKind, ResolvedExprKind, ResolvedLiteral, ResolvedPatternKind, ResolvedType,
-    };
+    use crate::core::ir::{CheckedConversionKind, ResolvedExprKind, ResolvedLiteral, ResolvedType};
     use crate::core::ownership::{
         OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
         OrdinaryMapOwnedAnyV2AttemptKind as AttemptKind,
@@ -14732,32 +17035,6 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         OrdinaryMapOwnedAnyV2ValuesMapRootSettlementReceipt as RootSettlement,
         OrdinaryMapOwnedAnyV2ValuesMixedSnapshotRemoveReceipt as RemoveReceipt,
     };
-
-    fn direct_binding_for_initializer<'a>(
-        body: &'a ResolvedBody,
-        initializer: &NodeId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedLocalId, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(value),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (value.node_id == *initializer).then_some((statement, local, value))
-        });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    }
 
     fn direct_local(expression: &ResolvedExpr) -> Option<ResolvedLocalId> {
         match &expression.kind {
@@ -14800,40 +17077,24 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
             && matches[0].result_local.as_ref() == result
     }
 
-    fn whole_drop(body: &ResolvedBody, target: &ResolvedLocalId) -> Option<(NodeId, usize, usize)> {
-        let matches = body
-            .root
-            .statements
-            .iter()
-            .enumerate()
-            .flat_map(|(statement_order, statement)| {
-                let ResolvedStmtKind::Drop(places) = &statement.kind else {
-                    return Vec::new();
-                };
-                places
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, place)| &place.base == target && place.projections.is_empty())
-                    .map(|(place_index, _)| {
-                        (statement.node_id.clone(), place_index, statement_order)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let [found] = matches.as_slice() else {
-            return None;
-        };
-        Some(found.clone())
-    }
-
     let empty = Vec::new();
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return empty;
+    };
+    let Some((ok_drop_actions, err_drops_by_step)) =
+        partition_ordinary_map_v2_chain_drops(&scope, actions, attempts)
+    else {
+        return empty;
+    };
+    let err_drop_count = err_drops_by_step.len();
     if body.owner.0 != "function:main"
         || body.owner != cfg.owner
         || !body.parameters.is_empty()
         || !body.captures.is_empty()
-        || !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || actions.len() != 11
-        || attempts.len() != 11
+        || actions.len() != 11 + err_drop_count
+        || attempts.len() != 11 + err_drop_count
         || results.len() != 1
         || values_unpacks.len() != 3
     {
@@ -14851,7 +17112,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         || action_count(ActionKind::Set) != 3
         || action_count(ActionKind::Values) != 1
         || action_count(ActionKind::Remove) != 1
-        || action_count(ActionKind::Drop) != 5
+        || action_count(ActionKind::Drop) != 5 + err_drop_count
         || actions.iter().any(|action| {
             action.profile_version != ProfileVersion::V2
                 || !matches!(
@@ -14867,7 +17128,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         || attempt_count(AttemptKind::Set) != 3
         || attempt_count(AttemptKind::Values) != 1
         || attempt_count(AttemptKind::Remove) != 1
-        || attempt_count(AttemptKind::Drop) != 5
+        || attempt_count(AttemptKind::Drop) != 5 + err_drop_count
     {
         return empty;
     }
@@ -14880,7 +17141,7 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         return empty;
     };
     let Some((remove_statement, remove_local, remove_expression)) =
-        direct_binding_for_initializer(body, &remove_action.point)
+        scope.direct_binding_for_initializer(&remove_action.point)
     else {
         return empty;
     };
@@ -14950,14 +17211,15 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         return empty;
     }
 
-    let remove_drop_actions = actions
+    let remove_drop_actions = ok_drop_actions
         .iter()
-        .filter(|action| action.kind == ActionKind::Drop && action.local == *remove_local)
+        .copied()
+        .filter(|action| action.local == *remove_local)
         .collect::<Vec<_>>();
     let [remove_drop_action] = remove_drop_actions.as_slice() else {
         return empty;
     };
-    let Some((drop_point, drop_place_index, drop_order)) = whole_drop(body, remove_local) else {
+    let Some((drop_point, drop_place_index, drop_order)) = scope.whole_drop(remove_local) else {
         return empty;
     };
     if drop_place_index != 0
@@ -15003,7 +17265,8 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
         })
         .cloned()
         .collect::<BTreeSet<_>>();
-    if snapshot_actions.len() != 9 || snapshot_attempts.len() != 9 {
+    if snapshot_actions.len() != actions.len() - 2 || snapshot_attempts.len() != attempts.len() - 2
+    {
         return empty;
     }
     let mut snapshots = collect_ordinary_map_owned_any_v2_values_mixed_snapshot_receipts(
@@ -15020,24 +17283,11 @@ fn collect_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_receipts(
     let [snapshot] = snapshots.as_mut_slice() else {
         return empty;
     };
-    let remove_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == remove_statement.node_id);
-    let snapshot_order = body
-        .root
-        .statements
-        .iter()
-        .position(|statement| statement.node_id == snapshot.snapshot_binding_point);
+    let remove_order = scope.statement_order(&remove_statement.node_id);
+    let snapshot_order = scope.statement_order(&snapshot.snapshot_binding_point);
     let first_unpack_order = values_unpacks
         .iter()
-        .filter_map(|unpack| {
-            body.root
-                .statements
-                .iter()
-                .position(|statement| statement.node_id == unpack.unpack_binding_point)
-        })
+        .filter_map(|unpack| scope.statement_order(&unpack.unpack_binding_point))
         .min();
     let (Some(remove_order), Some(snapshot_order), Some(first_unpack_order)) =
         (remove_order, snapshot_order, first_unpack_order)
@@ -15092,8 +17342,8 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     values_unpacks: &[crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
 ) -> Vec<crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesSnapshotReplacementReceipt> {
     use crate::core::ir::{
-        CheckedConversionKind, ResolvedExprKind, ResolvedLiteral, ResolvedPatternKind,
-        ResolvedType, ResolvedValueProjection,
+        CheckedConversionKind, ResolvedExprKind, ResolvedLiteral, ResolvedType,
+        ResolvedValueProjection,
     };
     use crate::core::ownership::{
         OrdinaryMapOwnedAnyV2ActionKind as ActionKind,
@@ -15106,58 +17356,6 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         OrdinaryMapOwnedAnyV2ValuesSnapshotReplacementReceipt as SnapshotReceipt,
         OrdinaryMapOwnedAnyV2ValuesUnpackOwnerSettlementKind as OwnerSettlement,
     };
-
-    fn direct_binding_for_initializer<'a>(
-        body: &'a ResolvedBody,
-        initializer: &NodeId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedLocalId, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(value),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (value.node_id == *initializer).then_some((statement, local, value))
-        });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    }
-
-    fn direct_binding_for_local<'a>(
-        body: &'a ResolvedBody,
-        target: &ResolvedLocalId,
-    ) -> Option<(&'a ResolvedStmt, &'a ResolvedExpr)> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
-            let ResolvedStmtKind::Bind {
-                pattern:
-                    ResolvedPattern {
-                        kind:
-                            ResolvedPatternKind::Binding {
-                                local,
-                                by_reference: None,
-                            },
-                        ..
-                    },
-                initializer: Some(value),
-            } = &statement.kind
-            else {
-                return None;
-            };
-            (local == target).then_some((statement, value))
-        });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
-    }
 
     fn direct_call(expression: &ResolvedExpr) -> Option<&ResolvedCall> {
         match &expression.kind {
@@ -15173,32 +17371,6 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
             }
             _ => None,
         }
-    }
-
-    fn whole_drop(body: &ResolvedBody, target: &ResolvedLocalId) -> Option<(NodeId, usize, usize)> {
-        let matches = body
-            .root
-            .statements
-            .iter()
-            .enumerate()
-            .flat_map(|(statement_order, statement)| {
-                let ResolvedStmtKind::Drop(places) = &statement.kind else {
-                    return Vec::new();
-                };
-                places
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, place)| &place.base == target && place.projections.is_empty())
-                    .map(|(place_index, _)| {
-                        (statement.node_id.clone(), place_index, statement_order)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        let [found] = matches.as_slice() else {
-            return None;
-        };
-        Some(found.clone())
     }
 
     fn is_map_root(types: &ResolvedTypeTable, ty: &ResolvedTypeId) -> bool {
@@ -15266,13 +17438,23 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     }
 
     let empty = Vec::new();
+    let Some(scope) = OrdinaryMapV2LinearChainScope::collect(cfg, body, types)
+        .filter(|scope| scope.is_pure_linear)
+    else {
+        return empty;
+    };
+    let Some((ok_drop_actions, err_drops_by_step)) =
+        partition_ordinary_map_v2_chain_drops(&scope, actions, attempts)
+    else {
+        return empty;
+    };
+    let err_drop_count = err_drops_by_step.len();
     if body.owner.0 != "function:main"
         || body.owner != cfg.owner
         || !body.parameters.is_empty()
         || !body.captures.is_empty()
-        || !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-        || actions.len() != 9
-        || attempts.len() != 9
+        || actions.len() != 9 + err_drop_count
+        || attempts.len() != 9 + err_drop_count
         || results.len() != 1
         || values_unpacks.len() != 2
     {
@@ -15289,7 +17471,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     if action_count(ActionKind::New) != 1
         || action_count(ActionKind::Set) != 3
         || action_count(ActionKind::Values) != 1
-        || action_count(ActionKind::Drop) != 4
+        || action_count(ActionKind::Drop) != 4 + err_drop_count
         || actions.iter().any(|action| {
             action.profile_version != ProfileVersion::V2
                 || !matches!(
@@ -15300,18 +17482,12 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         || attempt_count(AttemptKind::New) != 1
         || attempt_count(AttemptKind::Set) != 3
         || attempt_count(AttemptKind::Values) != 1
-        || attempt_count(AttemptKind::Drop) != 4
+        || attempt_count(AttemptKind::Drop) != 4 + err_drop_count
     {
         return empty;
     }
 
-    let orders = body
-        .root
-        .statements
-        .iter()
-        .enumerate()
-        .map(|(order, statement)| (statement.node_id.clone(), order))
-        .collect::<BTreeMap<_, _>>();
+    let orders = scope.statement_orders();
     let new_actions = actions
         .iter()
         .filter(|action| action.kind == ActionKind::New)
@@ -15324,16 +17500,12 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         .iter()
         .filter(|action| action.kind == ActionKind::Values)
         .collect::<Vec<_>>();
-    let drop_actions = actions
-        .iter()
-        .filter(|action| action.kind == ActionKind::Drop)
-        .collect::<Vec<_>>();
     let ([new_action], [values_action]) = (new_actions.as_slice(), values_actions.as_slice())
     else {
         return empty;
     };
-    let Some((new_statement, initial_local, new_expression)) =
-        direct_binding_for_initializer(body, &new_action.point)
+    let Some((new_order_node, initial_local, new_expression)) =
+        scope.binding_for_operation(&new_action.point)
     else {
         return empty;
     };
@@ -15341,14 +17513,19 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         return empty;
     };
     if initial_local != &new_action.local
-        || body
-            .locals
-            .get(initial_local)
-            .is_none_or(|local| local.mutable)
-        || body.locals.get(initial_local).map(|local| &local.ty) != Some(&new_expression.ty)
+        || !body.locals.get(initial_local).is_some_and(|local| {
+            !local.mutable
+                && ordinary_map_binding_matches_expr_type(
+                    &scope,
+                    types,
+                    &new_action.point,
+                    initial_local,
+                    &local.ty,
+                    &new_expression.ty,
+                )
+        })
         || !matches!(&new_call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_new")
         || !new_call.arguments.is_empty()
-        || !is_map_root(types, &new_expression.ty)
         || new_action.point != new_expression.node_id
         || new_action.root != OrdinaryMapOwnedAnyV2Checker::resource_identity(initial_local)
         || !clear_non_set_fields(new_action)
@@ -15369,15 +17546,16 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     let mut label_type: Option<ResolvedTypeId> = None;
     let mut seen_label_locals = BTreeSet::new();
     set_actions.sort_by_key(|action| {
-        direct_binding_for_initializer(body, &action.point)
-            .and_then(|(statement, _, _)| orders.get(&statement.node_id).copied())
+        scope
+            .binding_for_operation(&action.point)
+            .and_then(|(order_node, _, _)| scope.timeline_order(order_node))
             .unwrap_or(usize::MAX)
     });
     let mut set_details = Vec::new();
     let mut previous_root = initial_local.clone();
     for (index, action) in set_actions.iter().enumerate() {
-        let Some((statement, result_local, expression)) =
-            direct_binding_for_initializer(body, &action.point)
+        let Some((order_node, result_local, expression)) =
+            scope.binding_for_operation(&action.point)
         else {
             return empty;
         };
@@ -15390,8 +17568,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         let Some(label_local) = direct_local(&value_argument.value) else {
             return empty;
         };
-        let Some((label_binding, label_expression)) = direct_binding_for_local(body, &label_local)
-        else {
+        let Some((label_binding, label_expression)) = scope.direct_binding(&label_local) else {
             return empty;
         };
         let Some(ResolvedType::Nominal {
@@ -15433,15 +17610,20 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         }
         label_type.get_or_insert_with(|| value_argument.value.ty.clone());
         if result_local != &action.local
-            || body
-                .locals
-                .get(result_local)
-                .is_none_or(|local| local.mutable)
-            || body.locals.get(result_local).map(|local| &local.ty) != Some(&expression.ty)
+            || !body.locals.get(result_local).is_some_and(|local| {
+                !local.mutable
+                    && local.ty == source_argument.value.ty
+                    && ordinary_map_binding_matches_expr_type(
+                        &scope,
+                        types,
+                        &action.point,
+                        result_local,
+                        &local.ty,
+                        &expression.ty,
+                    )
+            })
             || !matches!(&call.callee, ResolvedCallee::Builtin(name) if name.as_str() == "map_set")
             || !is_map_root(types, &source_argument.value.ty)
-            || !is_map_root(types, &expression.ty)
-            || source_argument.value.ty != expression.ty
             || body.locals.get(&previous_root).map(|local| &local.ty)
                 != Some(&source_argument.value.ty)
             || direct_local(&source_argument.value).as_ref() != Some(&previous_root)
@@ -15496,9 +17678,10 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
             || body.locals.get(&label_local).map(|local| &local.ty)
                 != Some(&value_argument.value.ty)
             || !seen_label_locals.insert(label_local.clone())
-            || orders
-                .get(&label_binding.node_id)
-                .is_none_or(|binding_order| *binding_order >= orders[&statement.node_id])
+            || scope
+                .timeline_order(&label_binding.node_id)
+                .zip(scope.timeline_order(order_node))
+                .is_none_or(|(binding_order, set_order)| binding_order >= set_order)
             || !attempt_matches_action(
                 attempts,
                 action,
@@ -15515,7 +17698,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         }
         set_details.push((
             action,
-            statement,
+            order_node,
             result_local,
             expression,
             key_argument,
@@ -15530,7 +17713,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     }
 
     let Some((snapshot_statement, snapshot_local, snapshot_expression)) =
-        direct_binding_for_initializer(body, &values_action.point)
+        scope.direct_binding_for_initializer(&values_action.point)
     else {
         return empty;
     };
@@ -15623,7 +17806,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         return empty;
     }
     let Some((snapshot_drop_point, snapshot_drop_index, snapshot_drop_order)) =
-        whole_drop(body, snapshot_local)
+        scope.whole_drop(snapshot_local)
     else {
         return empty;
     };
@@ -15652,7 +17835,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
             return empty;
         }
         let Some((binding, unpack_local, cast_expression)) =
-            direct_binding_for_initializer(body, &unpack.cast)
+            scope.direct_binding_for_initializer(&unpack.cast)
         else {
             return empty;
         };
@@ -15709,7 +17892,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     if unpack_by_index.len() != 2 || unpack_by_index.keys().copied().collect::<Vec<_>>() != [0, 1] {
         return empty;
     }
-    let snapshot_census = ordinary_map_owned_any_v2_local_source_uses(body, snapshot_local);
+    let snapshot_census = scope.local_source_uses(body, snapshot_local);
     if snapshot_census.has_nested_callable
         || !snapshot_census.captures.is_empty()
         || !snapshot_census.has_unique_load_nodes()
@@ -15735,15 +17918,20 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     let Some(values_order) = orders.get(&snapshot_statement.node_id).copied() else {
         return empty;
     };
-    if set_details[..2].iter().any(|(_, statement, ..)| {
-        orders
-            .get(&statement.node_id)
-            .is_none_or(|order| *order >= values_order)
-    }) || set_details.iter().any(|(_, statement, ..)| {
-        orders
-            .get(&new_statement.node_id)
-            .zip(orders.get(&statement.node_id))
-            .is_none_or(|(new_order, set_order)| new_order >= set_order)
+    let Some(values_timeline) = scope.timeline_order(&snapshot_statement.node_id) else {
+        return empty;
+    };
+    let Some(new_timeline) = scope.timeline_order(new_order_node) else {
+        return empty;
+    };
+    if set_details[..2].iter().any(|(_, order_node, ..)| {
+        scope
+            .timeline_order(order_node)
+            .is_none_or(|order| order >= values_timeline)
+    }) || set_details.iter().any(|(_, order_node, ..)| {
+        scope
+            .timeline_order(order_node)
+            .is_none_or(|set_order| new_timeline >= set_order)
     }) {
         return empty;
     }
@@ -15760,13 +17948,21 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     else {
         return empty;
     };
-    let Some(replacement_order) = orders.get(&set_details[2].1.node_id).copied() else {
+    let replacement_order_node = set_details[2].1;
+    let Some(replacement_timeline) = scope.timeline_order(replacement_order_node) else {
+        return empty;
+    };
+    let Some(first_unpack_timeline) = unpack_by_index
+        .values()
+        .filter_map(|unpack| scope.timeline_order(&unpack.unpack_binding_point))
+        .min()
+    else {
         return empty;
     };
     if first_unpack_order <= values_order
         || snapshot_drop_order <= last_unpack_order
-        || replacement_order <= values_order
-        || replacement_order >= first_unpack_order
+        || replacement_timeline <= values_timeline
+        || replacement_timeline >= first_unpack_timeline
         || orders
             .get(&unpack_by_index[&0].unpack_binding_point)
             .zip(orders.get(&unpack_by_index[&1].unpack_binding_point))
@@ -15775,22 +17971,35 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         return empty;
     }
 
+    let ordered_root_steps = std::iter::once((&new_action.point, initial_local))
+        .chain(
+            set_details
+                .iter()
+                .map(|(action, _, result_local, ..)| (&action.point, *result_local)),
+        )
+        .collect::<Vec<_>>();
+    if !ordinary_map_v2_err_drops_match_prior_roots(&scope, &ordered_root_steps, &err_drops_by_step)
+    {
+        return empty;
+    }
+
     let mut root_locals = vec![initial_local.clone()];
     root_locals.extend(set_details.iter().map(|(_, _, local, ..)| (*local).clone()));
     let root_local_set = root_locals.iter().cloned().collect::<BTreeSet<_>>();
-    if root_local_set.len() != 4 {
+    if root_local_set.len() != 4 || ok_drop_actions.len() != 4 {
         return empty;
     }
     let mut map_root_settlements = Vec::new();
     for root_local in &root_locals {
-        let matching_drops = drop_actions
+        let matching_drops = ok_drop_actions
             .iter()
+            .copied()
             .filter(|action| action.local == *root_local)
             .collect::<Vec<_>>();
         let [drop_action] = matching_drops.as_slice() else {
             return empty;
         };
-        let Some((drop_point, drop_place_index, drop_order)) = whole_drop(body, root_local) else {
+        let Some((drop_point, drop_place_index, drop_order)) = scope.whole_drop(root_local) else {
             return empty;
         };
         if drop_place_index != 0
@@ -15805,7 +18014,9 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
                 Some(root_local),
                 None,
             )
-            || drop_order <= replacement_order
+            || scope
+                .timeline_order(&drop_point)
+                .is_none_or(|drop_tl| drop_tl <= replacement_timeline)
             || drop_order >= first_unpack_order
         {
             return empty;
@@ -15817,7 +18028,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
             drop_place_index,
         });
 
-        let census = ordinary_map_owned_any_v2_local_source_uses(body, root_local);
+        let census = scope.local_source_uses(body, root_local);
         let mut expected_loads = actions
             .iter()
             .filter(|action| {
@@ -15891,11 +18102,11 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
             return empty;
         }
         let Some((label_drop_point, label_drop_index, label_drop_order)) =
-            whole_drop(body, source_label)
+            scope.whole_drop(source_label)
         else {
             return empty;
         };
-        let source_census = ordinary_map_owned_any_v2_local_source_uses(body, source_label);
+        let source_census = scope.local_source_uses(body, source_label);
         if source_census.has_nested_callable
             || !source_census.captures.is_empty()
             || !source_census.has_unique_load_nodes()
@@ -15914,7 +18125,9 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
                     unprojected: true,
                 }]
             || label_drop_index != 0
-            || label_drop_order <= replacement_order
+            || scope
+                .timeline_order(&label_drop_point)
+                .is_none_or(|label_tl| label_tl <= replacement_timeline)
             || label_drop_order >= first_unpack_order
         {
             return empty;
@@ -15989,7 +18202,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     let replacement_detail = &set_details[2];
     let (
         replacement_action,
-        replacement_statement,
+        replacement_statement_node,
         replacement_local,
         replacement_expression,
         replacement_key,
@@ -15997,16 +18210,25 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         replacement_payload_local,
         replacement_payload_text,
     ) = replacement_detail;
-    if orders.get(&replacement_statement.node_id).copied() != Some(replacement_order)
-        || replacement_order <= values_order
-        || replacement_order >= first_unpack_order
+    if scope.timeline_order(replacement_statement_node) != Some(replacement_timeline)
+        || replacement_timeline <= values_timeline
+        || replacement_timeline >= first_unpack_timeline
+        || *replacement_statement_node != replacement_order_node
         || replacement_action.source_local.as_ref() != Some(values_source_local)
         || replacement_payload_text.as_str() == entries[0].payload_text.as_str()
         || entries[0].key_bytes.as_slice() != &b"a-label"[..]
         || replacement_key.value.node_id == entries[0].key_expression
         || replacement_action.point == entries[0].set_point
-        || body.locals.get(replacement_local).map(|local| &local.ty)
-            != Some(&replacement_expression.ty)
+        || !body.locals.get(replacement_local).is_some_and(|local| {
+            ordinary_map_binding_matches_expr_type(
+                &scope,
+                types,
+                &replacement_action.point,
+                replacement_local,
+                &local.ty,
+                &replacement_expression.ty,
+            )
+        })
         || direct_local(&replacement_value.value).as_ref() != Some(replacement_payload_local)
     {
         return empty;
@@ -16035,7 +18257,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     {
         return empty;
     }
-    let replacement_payload_binding = direct_binding_for_local(body, replacement_payload_local);
+    let replacement_payload_binding = scope.direct_binding(replacement_payload_local);
     let Some((replacement_payload_statement, replacement_payload_expression)) =
         replacement_payload_binding
     else {
@@ -16045,12 +18267,11 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         replacement_payload_drop_point,
         replacement_payload_drop_index,
         replacement_payload_drop_order,
-    )) = whole_drop(body, replacement_payload_local)
+    )) = scope.whole_drop(replacement_payload_local)
     else {
         return empty;
     };
-    let replacement_payload_census =
-        ordinary_map_owned_any_v2_local_source_uses(body, replacement_payload_local);
+    let replacement_payload_census = scope.local_source_uses(body, replacement_payload_local);
     if replacement_payload_census.has_nested_callable
         || !replacement_payload_census.captures.is_empty()
         || !replacement_payload_census.has_unique_load_nodes()
@@ -16069,11 +18290,13 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
                 unprojected: true,
             }]
         || replacement_payload_drop_index != 0
-        || replacement_payload_drop_order <= replacement_order
+        || scope
+            .timeline_order(&replacement_payload_drop_point)
+            .is_none_or(|drop_tl| drop_tl <= replacement_timeline)
         || replacement_payload_drop_order >= first_unpack_order
-        || orders
-            .get(&replacement_payload_statement.node_id)
-            .is_none_or(|order| *order >= replacement_order)
+        || scope
+            .timeline_order(&replacement_payload_statement.node_id)
+            .is_none_or(|order| order >= replacement_timeline)
         || replacement_payload_expression.ty != replacement_value.value.ty
     {
         return empty;
@@ -16132,7 +18355,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
         source_type: replacement_source_type,
         result_local: (*replacement_local).clone(),
         result: replacement_action.root.clone(),
-        result_type: replacement_expression.ty.clone(),
+        result_type: body.locals[replacement_local].ty.clone(),
         payload_node: replacement_value.value.node_id.clone(),
         payload_type: replacement_value.value.ty.clone(),
         payload_text: replacement_payload_text.clone(),
@@ -16149,7 +18372,7 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     {
         return empty;
     }
-    let Some(result_value) = body.root.result.as_deref() else {
+    let Some(result_value) = scope.leaf_result else {
         return empty;
     };
     if !matches!(
@@ -16165,10 +18388,12 @@ fn collect_ordinary_map_owned_any_v2_values_snapshot_replacement_receipts(
     let Some(entry_block) = cfg.blocks.get(&cfg.entry) else {
         return empty;
     };
-    if !matches!(
-        &entry_block.terminator,
-        Terminator::Return { value: Some(value), implicit: true } if value == &result_value.node_id
-    ) {
+    if scope.is_straight_line
+        && !matches!(
+            &entry_block.terminator,
+            Terminator::Return { value: Some(value), implicit: true } if value == &result_value.node_id
+        )
+    {
         return empty;
     }
 
@@ -16373,11 +18598,202 @@ fn ordinary_map_owned_any_v2_values_index_selects_payload_type(
     crate::core::OrdinaryMapOwnedAnyV2ValuesIndexDisposition,
     Option<NodeId>,
 )> {
+    fn collect_expr_match_initializers<'a>(
+        expression: &'a ResolvedExpr,
+        action: &OrdinaryMapOwnedAnyV2Action,
+        out: &mut Vec<&'a ResolvedExpr>,
+    ) {
+        match &expression.kind {
+            ResolvedExprKind::Match { scrutinee, arms } => {
+                if scrutinee.node_id == action.point
+                    && arms.iter().any(|arm| {
+                        matches!(
+                            &arm.pattern.kind,
+                            ResolvedPatternKind::Constructor { fields, .. }
+                                if fields.iter().any(|(_, field_pattern)| matches!(
+                                    &field_pattern.kind,
+                                    ResolvedPatternKind::Binding { local, by_reference: None }
+                                        if local == &action.local
+                                ))
+                        )
+                    })
+                {
+                    out.push(scrutinee);
+                }
+                collect_expr_match_initializers(scrutinee, action, out);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        collect_expr_match_initializers(guard, action, out);
+                    }
+                    collect_expr_match_initializers(&arm.body, action, out);
+                }
+            }
+            ResolvedExprKind::Block(block)
+            | ResolvedExprKind::Scope { body: block, .. }
+            | ResolvedExprKind::Comptime(block)
+            | ResolvedExprKind::Quote(block) => {
+                collect_block_match_initializers(block, action, out);
+            }
+            ResolvedExprKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_expr_match_initializers(condition, action, out);
+                collect_block_match_initializers(then_block, action, out);
+                collect_block_match_initializers(else_block, action, out);
+            }
+            ResolvedExprKind::Call(call) => {
+                for argument in &call.arguments {
+                    collect_expr_match_initializers(&argument.value, action, out);
+                }
+            }
+            ResolvedExprKind::Binary { left, right, .. } => {
+                collect_expr_match_initializers(left, action, out);
+                collect_expr_match_initializers(right, action, out);
+            }
+            ResolvedExprKind::Unary { operand, .. }
+            | ResolvedExprKind::Cast { value: operand, .. }
+            | ResolvedExprKind::OptionalChain {
+                receiver: operand, ..
+            }
+            | ResolvedExprKind::TypeOf(operand)
+            | ResolvedExprKind::Old(operand)
+            | ResolvedExprKind::Try { value: operand, .. }
+            | ResolvedExprKind::Spawn(operand)
+            | ResolvedExprKind::Await(operand) => {
+                collect_expr_match_initializers(operand, action, out);
+            }
+            ResolvedExprKind::Project { value, projection } => {
+                collect_expr_match_initializers(value, action, out);
+                if let ResolvedValueProjection::Index(index) = projection {
+                    collect_expr_match_initializers(index, action, out);
+                }
+            }
+            ResolvedExprKind::Tuple(items)
+            | ResolvedExprKind::List(items)
+            | ResolvedExprKind::Set(items) => {
+                for item in items {
+                    collect_expr_match_initializers(item, action, out);
+                }
+            }
+            ResolvedExprKind::Map(entries) => {
+                for (key, value) in entries {
+                    collect_expr_match_initializers(key, action, out);
+                    collect_expr_match_initializers(value, action, out);
+                }
+            }
+            ResolvedExprKind::Record { fields, rest, .. } => {
+                for field in fields {
+                    collect_expr_match_initializers(&field.value, action, out);
+                }
+                if let Some(rest) = rest {
+                    collect_expr_match_initializers(rest, action, out);
+                }
+            }
+            ResolvedExprKind::Range { start, end } => {
+                collect_expr_match_initializers(start, action, out);
+                collect_expr_match_initializers(end, action, out);
+            }
+            ResolvedExprKind::Slice { target, start, end } => {
+                collect_expr_match_initializers(target, action, out);
+                if let Some(start) = start {
+                    collect_expr_match_initializers(start, action, out);
+                }
+                if let Some(end) = end {
+                    collect_expr_match_initializers(end, action, out);
+                }
+            }
+            ResolvedExprKind::Comprehension {
+                value,
+                iterable,
+                guard,
+                ..
+            } => {
+                collect_expr_match_initializers(value, action, out);
+                collect_expr_match_initializers(iterable, action, out);
+                if let Some(guard) = guard {
+                    collect_expr_match_initializers(guard, action, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_block_match_initializers<'a>(
+        block: &'a ResolvedBlock,
+        action: &OrdinaryMapOwnedAnyV2Action,
+        out: &mut Vec<&'a ResolvedExpr>,
+    ) {
+        for statement in &block.statements {
+            match &statement.kind {
+                ResolvedStmtKind::Bind {
+                    initializer: Some(expr),
+                    ..
+                }
+                | ResolvedStmtKind::Assign { value: expr, .. }
+                | ResolvedStmtKind::Expr(expr)
+                | ResolvedStmtKind::Contract {
+                    condition: expr, ..
+                }
+                | ResolvedStmtKind::Return {
+                    value: Some(expr), ..
+                }
+                | ResolvedStmtKind::Break(Some(expr)) => {
+                    collect_expr_match_initializers(expr, action, out);
+                }
+                ResolvedStmtKind::While { condition, body } => {
+                    collect_expr_match_initializers(condition, action, out);
+                    collect_block_match_initializers(body, action, out);
+                }
+                ResolvedStmtKind::WhileLet {
+                    initializer, body, ..
+                }
+                | ResolvedStmtKind::For {
+                    iterable: initializer,
+                    body,
+                    ..
+                } => {
+                    collect_expr_match_initializers(initializer, action, out);
+                    collect_block_match_initializers(body, action, out);
+                }
+                ResolvedStmtKind::IfLet {
+                    initializer,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    collect_expr_match_initializers(initializer, action, out);
+                    collect_block_match_initializers(then_block, action, out);
+                    if let Some(else_block) = else_block {
+                        collect_block_match_initializers(else_block, action, out);
+                    }
+                }
+                ResolvedStmtKind::Loop(body) | ResolvedStmtKind::Scope { body, .. } => {
+                    collect_block_match_initializers(body, action, out);
+                }
+                ResolvedStmtKind::Pinned { value, body, .. } => {
+                    collect_expr_match_initializers(value, action, out);
+                    collect_block_match_initializers(body, action, out);
+                }
+                ResolvedStmtKind::Math(expressions) => {
+                    for expr in expressions {
+                        collect_expr_match_initializers(expr, action, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(result) = &block.result {
+            collect_expr_match_initializers(result, action, out);
+        }
+    }
+
     fn direct_binding<'a>(
         body: &'a ResolvedBody,
         action: &OrdinaryMapOwnedAnyV2Action,
     ) -> Option<&'a ResolvedExpr> {
-        let mut matches = ordinary_map_owned_any_v2_nested_statements(body)
+        let mut found_matches = ordinary_map_owned_any_v2_nested_statements(body)
             .into_iter()
             .filter_map(|statement| {
                 let ResolvedStmtKind::Bind {
@@ -16397,9 +18813,13 @@ fn ordinary_map_owned_any_v2_values_index_selects_payload_type(
                 };
                 (local == &action.local && initializer.node_id == action.point)
                     .then_some(initializer)
-            });
-        let found = matches.next()?;
-        matches.next().is_none().then_some(found)
+            })
+            .collect::<Vec<_>>();
+        collect_block_match_initializers(&body.root, action, &mut found_matches);
+        let [found] = found_matches.as_slice() else {
+            return None;
+        };
+        Some(*found)
     }
 
     fn literal_key(body: &ResolvedBody, action: &OrdinaryMapOwnedAnyV2Action) -> Option<Vec<u8>> {
@@ -17350,13 +19770,18 @@ fn collect_ordinary_map_owned_any_v2_unpack_receipts(
             &mut seen,
         );
     }
-    let statement_order = body
-        .root
-        .statements
-        .iter()
-        .enumerate()
-        .map(|(index, statement)| (statement.node_id.clone(), index))
-        .collect::<BTreeMap<_, _>>();
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types);
+    let statement_order = scope.as_ref().map_or_else(
+        || {
+            body.root
+                .statements
+                .iter()
+                .enumerate()
+                .map(|(index, statement)| (statement.node_id.clone(), index))
+                .collect::<BTreeMap<_, _>>()
+        },
+        |linear| linear.statement_orders().clone(),
+    );
 
     let mut receipts = Vec::new();
     let mut values_receipts = Vec::new();
@@ -17455,14 +19880,32 @@ fn collect_ordinary_map_owned_any_v2_unpack_receipts(
                 continue;
             };
             let snapshot_is_dropped_after_unpack =
-                ordinary_map_owned_any_v2_cfg_points_strictly_ordered_in_same_block(
-                    cfg,
-                    &[
+                if let Some(linear) = scope.as_ref().filter(|linear| linear.is_pure_linear) {
+                    [
                         snapshot_binding_point,
                         &unpack_binding_point,
                         settlement_point,
-                    ],
-                );
+                    ]
+                    .into_iter()
+                    .all(|point| ordinary_map_owned_any_v2_cfg_point_count(cfg, point) == 1)
+                        && matches!(
+                            (
+                                linear.statement_order(snapshot_binding_point),
+                                linear.statement_order(&unpack_binding_point),
+                                linear.statement_order(settlement_point),
+                            ),
+                            (Some(s), Some(u), Some(d)) if s < u && u < d
+                        )
+                } else {
+                    ordinary_map_owned_any_v2_cfg_points_strictly_ordered_in_same_block(
+                        cfg,
+                        &[
+                            snapshot_binding_point,
+                            &unpack_binding_point,
+                            settlement_point,
+                        ],
+                    )
+                };
             let index_selection = if values_local_index_i32_result_branch_receipt.is_some()
                 && values_unpack_result_branch_receipt.is_some()
             {
@@ -17615,83 +20058,104 @@ fn collect_ordinary_map_owned_any_v2_unpack_receipts(
                 all_attempts_match = false;
                 continue;
             }
-            let local_index_i32_receipt = index_local.as_ref().and_then(|index_local| {
-                let index_type =
-                    crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
-                let local = body.locals.get(index_local)?;
-                if local.mutable || local.ty != index_type || index.ty != index_type {
-                    return None;
-                }
-                let mut bindings = ordinary_map_owned_any_v2_nested_statements(body)
-                    .into_iter()
-                    .filter_map(|statement| {
-                        let ResolvedStmtKind::Bind {
-                            pattern:
-                                ResolvedPattern {
-                                    kind:
-                                        ResolvedPatternKind::Binding {
-                                            local: bound,
-                                            by_reference: None,
-                                        },
-                                    ..
-                                },
-                            initializer: Some(initializer),
-                        } = &statement.kind
-                        else {
-                            return None;
-                        };
-                        (bound == index_local).then_some((statement, initializer))
-                    });
-                let (binding_statement, initializer) = bindings.next()?;
-                if bindings.next().is_some()
-                    || !matches!(
-                        initializer.kind,
-                        ResolvedExprKind::Literal(crate::core::ir::ResolvedLiteral::Int(0))
-                    )
-                    || initializer.ty != index_type
-                    || ordinary_map_owned_any_v2_cfg_point_count(cfg, &binding_statement.node_id)
-                        != 1
-                    || ordinary_map_owned_any_v2_cfg_point_count(cfg, &initializer.node_id) != 1
-                {
-                    return None;
-                }
-                let census = ordinary_map_owned_any_v2_local_source_uses(body, index_local);
-                if census.has_nested_callable
-                    || !census.captures.is_empty()
-                    || !census.has_unique_load_nodes()
-                    || census.loads.as_slice()
-                        != [OrdinaryMapOwnedAnyV2LocalLoadUse {
-                            node: index.node_id.clone(),
-                            direct_field: None,
-                            unprojected: true,
-                        }]
-                    || !census.places.is_empty()
-                {
-                    return None;
-                }
-                ordinary_map_owned_any_v2_cfg_points_strictly_ordered_in_same_block(
-                    cfg,
-                    &[&binding_statement.node_id, &unpack_binding_point],
-                )
-                .then(|| {
-                    crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32Receipt {
-                        profile_version: OrdinaryMapOwnedAnyV2ProfileVersion::V2,
-                        owner: body.owner.clone(),
-                        binding_point: binding_statement.node_id.clone(),
-                        binding: index_local.clone(),
-                        binding_mutable: local.mutable,
-                        initializer: initializer.node_id.clone(),
-                        literal_value: 0,
-                        index_type,
-                        index_expression: index.node_id.clone(),
-                        unpack_cast: attempt.cast.clone(),
-                        unpack_binding_point: unpack_binding_point.clone(),
-                        unpack_binding: unpack_binding.clone(),
-                        snapshot_binding: snapshot_binding.clone(),
-                        source_uses: BTreeSet::from([index.node_id.clone()]),
+            let local_index_i32_receipt = values_unpack_result_branch_receipt
+                .is_none()
+                .then_some(())
+                .and(index_local.as_ref())
+                .and_then(|index_local| {
+                    let index_type =
+                        crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+                    let local = body.locals.get(index_local)?;
+                    if local.mutable || local.ty != index_type || index.ty != index_type {
+                        return None;
                     }
-                })
-            });
+                    let mut bindings = ordinary_map_owned_any_v2_nested_statements(body)
+                        .into_iter()
+                        .filter_map(|statement| {
+                            let ResolvedStmtKind::Bind {
+                                pattern:
+                                    ResolvedPattern {
+                                        kind:
+                                            ResolvedPatternKind::Binding {
+                                                local: bound,
+                                                by_reference: None,
+                                            },
+                                        ..
+                                    },
+                                initializer: Some(initializer),
+                            } = &statement.kind
+                            else {
+                                return None;
+                            };
+                            (bound == index_local).then_some((statement, initializer))
+                        });
+                    let (binding_statement, initializer) = bindings.next()?;
+                    if bindings.next().is_some()
+                        || !matches!(
+                            initializer.kind,
+                            ResolvedExprKind::Literal(crate::core::ir::ResolvedLiteral::Int(0))
+                        )
+                        || initializer.ty != index_type
+                        || ordinary_map_owned_any_v2_cfg_point_count(
+                            cfg,
+                            &binding_statement.node_id,
+                        ) != 1
+                        || ordinary_map_owned_any_v2_cfg_point_count(cfg, &initializer.node_id) != 1
+                    {
+                        return None;
+                    }
+                    let census = scope.as_ref().map_or_else(
+                        || ordinary_map_owned_any_v2_local_source_uses(body, index_local),
+                        |linear| linear.local_source_uses(body, index_local),
+                    );
+                    if census.has_nested_callable
+                        || !census.captures.is_empty()
+                        || !census.has_unique_load_nodes()
+                        || census.loads.as_slice()
+                            != [OrdinaryMapOwnedAnyV2LocalLoadUse {
+                                node: index.node_id.clone(),
+                                direct_field: None,
+                                unprojected: true,
+                            }]
+                        || !census.places.is_empty()
+                    {
+                        return None;
+                    }
+                    let index_strictly_ordered = if scope
+                        .as_ref()
+                        .is_some_and(|s| !s.is_straight_line)
+                    {
+                        ordinary_map_owned_any_v2_cfg_point_index(cfg, &binding_statement.node_id)
+                            .zip(ordinary_map_owned_any_v2_cfg_point_index(
+                                cfg,
+                                &unpack_binding_point,
+                            ))
+                            .is_some_and(|(bind_pos, unpack_pos)| bind_pos < unpack_pos)
+                    } else {
+                        ordinary_map_owned_any_v2_cfg_points_strictly_ordered_in_same_block(
+                            cfg,
+                            &[&binding_statement.node_id, &unpack_binding_point],
+                        )
+                    };
+                    index_strictly_ordered.then(|| {
+                        crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32Receipt {
+                            profile_version: OrdinaryMapOwnedAnyV2ProfileVersion::V2,
+                            owner: body.owner.clone(),
+                            binding_point: binding_statement.node_id.clone(),
+                            binding: index_local.clone(),
+                            binding_mutable: local.mutable,
+                            initializer: initializer.node_id.clone(),
+                            literal_value: 0,
+                            index_type,
+                            index_expression: index.node_id.clone(),
+                            unpack_cast: attempt.cast.clone(),
+                            unpack_binding_point: unpack_binding_point.clone(),
+                            unpack_binding: unpack_binding.clone(),
+                            snapshot_binding: snapshot_binding.clone(),
+                            source_uses: BTreeSet::from([index.node_id.clone()]),
+                        }
+                    })
+                });
             if let Some(receipt) = local_index_i32_receipt {
                 values_local_index_i32_receipts.push(receipt);
             }
@@ -17805,37 +20269,44 @@ fn collect_ordinary_map_owned_any_v2_unpack_receipts(
             payload_provenance == OrdinaryMapOwnedAnyV2GetAnyPayloadProvenance::SelectedSetPayload;
         let direct_returned_map_root_string_candidate = attempt.conversion_to
             == crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
-            && body.root.statements.iter().any(|statement| {
-                let ResolvedStmtKind::Bind {
-                    pattern:
-                        ResolvedPattern {
-                            kind:
-                                ResolvedPatternKind::Binding {
-                                    local,
-                                    by_reference: None,
-                                },
-                            ..
-                        },
-                    initializer: Some(initializer),
-                } = &statement.kind
-                else {
-                    return false;
-                };
-                if local != &action.local
-                    || action
-                        .source_type
-                        .as_ref()
-                        .is_none_or(|source_type| &initializer.ty != source_type)
-                {
-                    return false;
-                }
-                let ResolvedExprKind::Call(call) = &initializer.kind else {
-                    return false;
-                };
-                matches!(&call.callee, ResolvedCallee::Function(_))
-                    && call.arguments.is_empty()
-                    && call.type_arguments.is_empty()
-            });
+            && scope
+                .as_ref()
+                .map_or_else(
+                    || body.root.statements.iter().collect::<Vec<_>>(),
+                    |linear| linear.combined_statements.clone(),
+                )
+                .into_iter()
+                .any(|statement| {
+                    let ResolvedStmtKind::Bind {
+                        pattern:
+                            ResolvedPattern {
+                                kind:
+                                    ResolvedPatternKind::Binding {
+                                        local,
+                                        by_reference: None,
+                                    },
+                                ..
+                            },
+                        initializer: Some(initializer),
+                    } = &statement.kind
+                    else {
+                        return false;
+                    };
+                    if local != &action.local
+                        || action
+                            .source_type
+                            .as_ref()
+                            .is_none_or(|source_type| &initializer.ty != source_type)
+                    {
+                        return false;
+                    }
+                    let ResolvedExprKind::Call(call) = &initializer.kind else {
+                        return false;
+                    };
+                    matches!(&call.callee, ResolvedCallee::Function(_))
+                        && call.arguments.is_empty()
+                        && call.type_arguments.is_empty()
+                });
         let exact_computed_string_owner_chain_unpack = result_receipt
             .computed_string_key_owner_chain
             .as_deref()
@@ -18043,6 +20514,9 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
     result_receipts: &[OrdinaryMapOwnedAnyV2ResultReceipt],
     values_unpack_receipts: &[crate::core::OrdinaryMapOwnedAnyV2ValuesUnpackReceipt],
     flow: Option<&crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowReceipt>,
+    result_branch_scalar_tail: Option<
+        &crate::core::ownership::OrdinaryMapOwnedAnyV2ScalarTailReceipt,
+    >,
 ) -> Vec<crate::core::ownership::OrdinaryMapOwnedAnyV2StaticKeyGetReceipt> {
     use crate::core::ir::{CheckedConversionKind, ResolvedCallee, ResolvedExpr, ResolvedExprKind};
     use crate::core::ownership::{
@@ -18099,12 +20573,17 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
     }
 
     fn direct_binding_initializer<'a>(
+        scope: Option<&OrdinaryMapV2LinearChainScope<'a>>,
         body: &'a ResolvedBody,
         point: &NodeId,
         local: &ResolvedLocalId,
         initializer_node: &NodeId,
     ) -> Option<&'a ResolvedExpr> {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
+        let statements: Vec<&ResolvedStmt> = scope.map_or_else(
+            || body.root.statements.iter().collect(),
+            |chain| chain.combined_statements.clone(),
+        );
+        let mut matches = statements.into_iter().filter_map(|statement| {
             if &statement.node_id != point {
                 return None;
             }
@@ -18130,10 +20609,19 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
     }
 
     fn direct_action_binding_initializer<'a>(
+        scope: Option<&OrdinaryMapV2LinearChainScope<'a>>,
         body: &'a ResolvedBody,
         local: &ResolvedLocalId,
         initializer_node: &NodeId,
     ) -> Option<&'a ResolvedExpr> {
+        if let Some(chain) = scope {
+            return chain.binding_for_operation(initializer_node).and_then(
+                |(_, bound, initializer)| {
+                    (bound == local && &initializer.node_id == initializer_node)
+                        .then_some(initializer)
+                },
+            );
+        }
         let mut matches = body.root.statements.iter().filter_map(|statement| {
             let ResolvedStmtKind::Bind {
                 pattern:
@@ -18167,8 +20655,17 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
             .then_some(call)
     }
 
-    fn explicit_pair_drop(body: &ResolvedBody, point: &NodeId, pair: &ResolvedLocalId) -> bool {
-        let mut matches = body.root.statements.iter().filter_map(|statement| {
+    fn explicit_pair_drop(
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
+        body: &ResolvedBody,
+        point: &NodeId,
+        pair: &ResolvedLocalId,
+    ) -> bool {
+        let statements: Vec<&ResolvedStmt> = scope.map_or_else(
+            || body.root.statements.iter().collect(),
+            |chain| chain.combined_statements.clone(),
+        );
+        let mut matches = statements.into_iter().filter_map(|statement| {
             if &statement.node_id != point {
                 return None;
             }
@@ -18239,6 +20736,7 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
     }
 
     fn exact_root_chain(
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
         cfg: &CallableCfg,
         body: &ResolvedBody,
         types: &ResolvedTypeTable,
@@ -18277,12 +20775,27 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
                 return None;
             }
             let Some(initializer) =
-                direct_action_binding_initializer(body, &action.local, &action.point)
+                direct_action_binding_initializer(scope, body, &action.local, &action.point)
             else {
                 return None;
             };
             let map_type = body.locals.get(&current)?.ty.clone();
-            if initializer.ty != map_type
+            let initializer_matches_map_type = if action.kind == ActionKind::Clone {
+                initializer.ty == map_type
+            } else {
+                initializer.ty == map_type
+                    || matches!(
+                        types.get(&initializer.ty),
+                        Some(crate::core::ResolvedType::Result { ok, .. }) if ok == &map_type
+                    )
+                    || matches!(
+                        types.get(&initializer.ty),
+                        Some(crate::core::ResolvedType::Nominal { item, arguments, .. })
+                            if item.as_str() == "builtin:type:Result"
+                                && arguments.first() == Some(&map_type)
+                    )
+            };
+            if !initializer_matches_map_type
                 || !matches!(
                     types.get(&map_type),
                     Some(crate::core::ResolvedType::Nominal { item, .. })
@@ -18399,44 +20912,82 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
         Some(reverse_chain)
     }
 
-    let straight_line = OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg);
+    let linear_scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types);
+    let straight_line = linear_scope
+        .as_ref()
+        .is_some_and(|scope| scope.is_pure_linear);
     if straight_line {
-        if flow.is_some() {
+        if flow.is_some_and(|flow| {
+            !matches!(
+                flow.proof,
+                crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(_)
+            )
+        }) {
             return Vec::new();
         }
     } else {
-        let exact_multi_checked_get = actions.len() == 6
-            && attempts.len() == 6
-            && actions
+        let partitioned_ok = linear_scope.as_ref().and_then(|scope| {
+            let (ok_actions, ok_attempts, _, err_drops) =
+                partition_ordinary_map_v2_ok_spine(scope, actions, attempts)?;
+            let new_action = ok_actions
+                .iter()
+                .find(|action| action.kind == ActionKind::New)
+                .copied()?;
+            let set_action = ok_actions
+                .iter()
+                .find(|action| action.kind == ActionKind::Set)
+                .copied()?;
+            ordinary_map_v2_err_drops_match_prior_roots(
+                scope,
+                &[
+                    (&new_action.point, &new_action.local),
+                    (&set_action.point, &set_action.local),
+                ],
+                &err_drops,
+            )
+            .then_some((ok_actions, ok_attempts))
+        });
+        let (spine_actions, spine_attempts): (
+            Vec<&OrdinaryMapOwnedAnyV2Action>,
+            Vec<&OrdinaryMapOwnedAnyV2Attempt>,
+        ) = match (linear_scope.as_ref(), partitioned_ok) {
+            (Some(_), Some((ok_actions, ok_attempts))) => (ok_actions, ok_attempts),
+            (Some(_), None) => return Vec::new(),
+            (None, _) => (actions.iter().collect(), attempts.iter().collect()),
+        };
+        let exact_multi_checked_get = spine_actions.len() == 6
+            && spine_attempts.len() == 6
+            && spine_actions
                 .iter()
                 .filter(|action| action.kind == ActionKind::New)
                 .count()
                 == 1
-            && actions
+            && spine_actions
                 .iter()
                 .filter(|action| action.kind == ActionKind::Set)
                 .count()
                 == 1
-            && actions
+            && spine_actions
                 .iter()
                 .filter(|action| action.kind == ActionKind::GetAny)
                 .count()
                 == 2
-            && actions
+            && spine_actions
                 .iter()
                 .filter(|action| action.kind == ActionKind::Drop)
                 .count()
                 == 2
-            && actions.iter().all(|action| {
+            && spine_actions.iter().all(|action| {
                 action.profile_version == ProfileVersion::V2
                     && matches!(
                         action.kind,
                         ActionKind::New | ActionKind::Set | ActionKind::GetAny | ActionKind::Drop
                     )
             })
-            && actions.iter().all(|action| {
-                let matches = attempts
+            && spine_actions.iter().all(|action| {
+                let matches = spine_attempts
                     .iter()
+                    .copied()
                     .filter(|attempt| attempt.point == action.point)
                     .collect::<Vec<_>>();
                 let [attempt] = matches.as_slice() else {
@@ -18518,6 +21069,7 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
                     &result_refs,
                     &unpack_refs,
                     &[],
+                    result_branch_scalar_tail,
                 )
             });
         if !exact_multi_checked_get {
@@ -18555,6 +21107,7 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
             continue;
         };
         let Some(pair_initializer) = direct_binding_initializer(
+            linear_scope.as_ref(),
             body,
             pair_binding_point,
             &unpack.pair_binding,
@@ -18607,7 +21160,12 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
             || result.settlement != Settlement::ExplicitDrop
             || result.settlement_point.as_ref() != Some(&unpack.settlement_point)
             || unpack.operation != get_action.point
-            || !explicit_pair_drop(body, &unpack.settlement_point, &unpack.pair_binding)
+            || !explicit_pair_drop(
+                linear_scope.as_ref(),
+                body,
+                &unpack.settlement_point,
+                &unpack.pair_binding,
+            )
         {
             continue;
         }
@@ -18625,6 +21183,7 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
         }
 
         let Some(unpack_initializer) = direct_binding_initializer(
+            linear_scope.as_ref(),
             body,
             &unpack.unpack_binding_point,
             &unpack.unpack_binding,
@@ -18657,9 +21216,15 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
             continue;
         }
 
-        let Some(root_chain) =
-            exact_root_chain(cfg, body, types, constants, actions, &get_action.local)
-        else {
+        let Some(root_chain) = exact_root_chain(
+            linear_scope.as_ref(),
+            cfg,
+            body,
+            types,
+            constants,
+            actions,
+            &get_action.local,
+        ) else {
             continue;
         };
         let Some(get_index) = ordinary_map_owned_any_v2_cfg_point_index(cfg, &get_action.point)
@@ -18680,9 +21245,12 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
             match action.kind {
                 ActionKind::New => {}
                 ActionKind::Set => {
-                    let Some(initializer) =
-                        direct_action_binding_initializer(body, &action.local, &action.point)
-                    else {
+                    let Some(initializer) = direct_action_binding_initializer(
+                        linear_scope.as_ref(),
+                        body,
+                        &action.local,
+                        &action.point,
+                    ) else {
                         replay_valid = false;
                         break;
                     };
@@ -18706,9 +21274,12 @@ fn collect_ordinary_map_owned_any_v2_static_key_get_receipts(
                     entries.insert(key_digest, action.clone());
                 }
                 ActionKind::Remove => {
-                    let Some(initializer) =
-                        direct_action_binding_initializer(body, &action.local, &action.point)
-                    else {
+                    let Some(initializer) = direct_action_binding_initializer(
+                        linear_scope.as_ref(),
+                        body,
+                        &action.local,
+                        &action.point,
+                    ) else {
                         replay_valid = false;
                         break;
                     };
@@ -19674,6 +22245,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         tuple_projections: Vec<(ResolvedLocalId, usize, NodeId)>,
         effects_are_finite: bool,
         closed: bool,
+        result_branch_match_arms: BTreeMap<NodeId, (NodeId, NodeId)>,
     }
 
     let mut states = actions
@@ -19716,6 +22288,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
     }
 
     fn direct_print_observation(
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
         body: &ResolvedBody,
         expression: &ResolvedExpr,
         states: &BTreeMap<NodeId, OrdinaryMapOwnedAnyV2ResultUseState>,
@@ -19776,10 +22349,12 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         let (operation, state) = matching_states[0];
         let binding_point = state.binding_point.as_ref()?;
         let pair_type = state.action.result_type.as_ref()?;
-        let binding_statements = body
-            .root
-            .statements
-            .iter()
+        let statements: Vec<&ResolvedStmt> = scope.map_or_else(
+            || body.root.statements.iter().collect(),
+            |chain| chain.combined_statements.clone(),
+        );
+        let binding_statements = statements
+            .into_iter()
             .filter(|statement| &statement.node_id == binding_point)
             .collect::<Vec<_>>();
         if binding_statements.len() != 1 {
@@ -19870,6 +22445,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
     fn exact_direct_print_size_observation(
         cfg: &CallableCfg,
         body: &ResolvedBody,
+        scope: Option<&OrdinaryMapV2LinearChainScope<'_>>,
         types: &ResolvedTypeTable,
         action: &OrdinaryMapOwnedAnyV2Action,
         attempt: &OrdinaryMapOwnedAnyV2Attempt,
@@ -19883,8 +22459,10 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
 
         let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
         let get_action = &result_state.action;
-        if !OrdinaryMapOwnedAnyV2Checker::is_v2_straight_line_cfg(cfg)
-            || action.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
+        let Some(scope) = scope.filter(|chain| chain.is_pure_linear) else {
+            return false;
+        };
+        if action.profile_version != OrdinaryMapOwnedAnyV2ProfileVersion::V2
             || action.kind != Action::Size
             || action.local != get_action.local
             || action.root != get_action.root
@@ -19916,9 +22494,8 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
             return false;
         }
 
-        let size_bindings = body
-            .root
-            .statements
+        let size_bindings = scope
+            .combined_statements
             .iter()
             .enumerate()
             .filter(|(_, statement)| {
@@ -20010,9 +22587,8 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         let Some(get_binding_point) = result_state.binding_point.as_ref() else {
             return false;
         };
-        let get_binding_orders = body
-            .root
-            .statements
+        let get_binding_orders = scope
+            .combined_statements
             .iter()
             .enumerate()
             .filter(|(_, statement)| &statement.node_id == get_binding_point)
@@ -20022,7 +22598,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
             return false;
         };
         let get_order = *get_order;
-        let get_statement = &body.root.statements[get_order];
+        let get_statement = scope.combined_statements[get_order];
         let ResolvedStmtKind::Bind {
             pattern: get_pattern,
             initializer: Some(get_initializer),
@@ -20053,9 +22629,8 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         {
             return false;
         }
-        let print_orders = body
-            .root
-            .statements
+        let print_orders = scope
+            .combined_statements
             .iter()
             .enumerate()
             .filter_map(|(order, statement)| match &statement.kind {
@@ -20065,9 +22640,8 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let pair_drop_orders = body
-            .root
-            .statements
+        let pair_drop_orders = scope
+            .combined_statements
             .iter()
             .enumerate()
             .filter(|(_, statement)| &statement.node_id == pair_drop_point)
@@ -20120,10 +22694,43 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
     ) {
         use crate::core::ir::CheckedConversionKind;
 
+        fn mark_values_return(
+            expression: &ResolvedExpr,
+            settlement_point: &NodeId,
+            actions: &[OrdinaryMapOwnedAnyV2Action],
+            states: &mut BTreeMap<NodeId, OrdinaryMapOwnedAnyV2ResultUseState>,
+        ) {
+            let ResolvedExprKind::Load(place) = &expression.kind else {
+                return;
+            };
+            if !place.projections.is_empty() {
+                return;
+            }
+            let matching_actions = actions
+                .iter()
+                .filter(|action| {
+                    action.kind == OrdinaryMapOwnedAnyV2ActionKind::Values
+                        && action.result_local.as_ref() == Some(&place.base)
+                        && action.result_type.as_ref() == Some(&expression.ty)
+                })
+                .collect::<Vec<_>>();
+            let [action] = matching_actions.as_slice() else {
+                return;
+            };
+            if let Some(state) = states.get_mut(&action.point) {
+                settle_state(
+                    state,
+                    OrdinaryMapOwnedAnyV2ResultSettlementKind::Return,
+                    settlement_point,
+                );
+            }
+        }
+
         fn mark(
             expression: &ResolvedExpr,
             actions: &[OrdinaryMapOwnedAnyV2Action],
             states: &mut BTreeMap<NodeId, OrdinaryMapOwnedAnyV2ResultUseState>,
+            enclosing_erase: Option<&ResolvedTypeId>,
         ) {
             match &expression.kind {
                 ResolvedExprKind::Cast { value, conversion }
@@ -20132,29 +22739,17 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                         && conversion.to == expression.ty
                         && conversion.from != conversion.to =>
                 {
-                    let ResolvedExprKind::Load(place) = &value.kind else {
-                        return;
-                    };
-                    if !place.projections.is_empty() {
-                        return;
+                    if matches!(&value.kind, ResolvedExprKind::Load(_)) {
+                        mark_values_return(value, &expression.node_id, actions, states);
+                    } else if enclosing_erase.is_none() {
+                        mark(value, actions, states, Some(&conversion.from));
                     }
-                    let matching_actions = actions
-                        .iter()
-                        .filter(|action| {
-                            action.kind == OrdinaryMapOwnedAnyV2ActionKind::Values
-                                && action.result_local.as_ref() == Some(&place.base)
-                                && action.result_type.as_ref() == Some(&value.ty)
-                        })
-                        .collect::<Vec<_>>();
-                    let [action] = matching_actions.as_slice() else {
-                        return;
-                    };
-                    if let Some(state) = states.get_mut(&action.point) {
-                        settle_state(
-                            state,
-                            OrdinaryMapOwnedAnyV2ResultSettlementKind::Return,
-                            &expression.node_id,
-                        );
+                }
+                ResolvedExprKind::Load(_) => {
+                    if let Some(erase_from) = enclosing_erase {
+                        if &expression.ty == erase_from {
+                            mark_values_return(expression, &expression.node_id, actions, states);
+                        }
                     }
                 }
                 ResolvedExprKind::Match { arms, .. } => {
@@ -20164,13 +22759,13 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                             _ => Some(&arm.body),
                         };
                         if let Some(result) = result {
-                            mark(result, actions, states);
+                            mark(result, actions, states, enclosing_erase);
                         }
                     }
                 }
                 ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
                     if let Some(result) = block.result.as_deref() {
-                        mark(result, actions, states);
+                        mark(result, actions, states, enclosing_erase);
                     }
                 }
                 _ => {}
@@ -20178,7 +22773,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         }
 
         if let Some(expression) = body.root.result.as_deref() {
-            mark(expression, actions, states);
+            mark(expression, actions, states, None);
         }
     }
 
@@ -20240,9 +22835,17 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
             },
             _ => None,
         };
+        let container_with_visited_children =
+            matches!(&expression.kind, ResolvedExprKind::Block(_))
+                || (matches!(&expression.kind, ResolvedExprKind::Match { .. })
+                    && census
+                        .result_branch_match_arms
+                        .contains_key(&expression.node_id));
         let effectful_call = matches!(call_name.as_deref(), Some("map_set" | "println"));
         if !finite_print_effects(&expression.effects)
-            || (!expression.effects.is_empty() && !effectful_call)
+            || (!expression.effects.is_empty()
+                && !effectful_call
+                && !container_with_visited_children)
         {
             census.effects_are_finite = false;
         }
@@ -20446,16 +23049,82 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                     states,
                     census,
                 );
-                for arm in arms {
-                    if let Some(guard) = &arm.guard {
-                        visit_expr(
-                            guard,
-                            OrdinaryMapOwnedGetResultUseContext::Observe,
-                            states,
-                            census,
-                        );
+                if let Some((ok_arm_id, err_arm_id)) = census
+                    .result_branch_match_arms
+                    .get(&expression.node_id)
+                    .cloned()
+                {
+                    let pre_match_states = states.clone();
+                    if let Some(ok_arm) = arms.iter().find(|arm| arm.node_id == ok_arm_id) {
+                        if let Some(guard) = &ok_arm.guard {
+                            visit_expr(
+                                guard,
+                                OrdinaryMapOwnedGetResultUseContext::Observe,
+                                states,
+                                census,
+                            );
+                        }
+                        visit_expr(&ok_arm.body, context, states, census);
                     }
-                    visit_expr(&arm.body, context, states, census);
+                    if let Some(err_arm) = arms.iter().find(|arm| arm.node_id == err_arm_id) {
+                        let mut err_states = pre_match_states.clone();
+                        let mut err_census = DirectPrintSourceCensus {
+                            effects_are_finite: census.effects_are_finite,
+                            closed: census.closed,
+                            result_branch_match_arms: census.result_branch_match_arms.clone(),
+                            ..DirectPrintSourceCensus::default()
+                        };
+                        if let Some(guard) = &err_arm.guard {
+                            visit_expr(
+                                guard,
+                                OrdinaryMapOwnedGetResultUseContext::Observe,
+                                &mut err_states,
+                                &mut err_census,
+                            );
+                        }
+                        visit_expr(&err_arm.body, context, &mut err_states, &mut err_census);
+                        census.effects_are_finite &= err_census.effects_are_finite;
+                        census.closed &= err_census.closed;
+                        for (point, orig_state) in &pre_match_states {
+                            let Some(err_state) = err_states.get(point) else {
+                                continue;
+                            };
+                            let err_settlement_ok = if orig_state.binding_point.is_some()
+                                && orig_state.settlement.is_none()
+                            {
+                                matches!(
+                                    &err_state.settlement,
+                                    Some((
+                                        OrdinaryMapOwnedAnyV2ResultSettlementKind::ExplicitDrop,
+                                        _
+                                    ))
+                                )
+                            } else {
+                                err_state.settlement == orig_state.settlement
+                                    && err_state.binding_point == orig_state.binding_point
+                            };
+                            if !err_settlement_ok {
+                                if let Some(state) = states.get_mut(point) {
+                                    state.settle(
+                                        OrdinaryMapOwnedAnyV2ResultSettlementKind::DoubleSettlement,
+                                        &err_arm.node_id,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for arm in arms {
+                        if let Some(guard) = &arm.guard {
+                            visit_expr(
+                                guard,
+                                OrdinaryMapOwnedGetResultUseContext::Observe,
+                                states,
+                                census,
+                            );
+                        }
+                        visit_expr(&arm.body, context, states, census);
+                    }
                 }
             }
             ResolvedExprKind::Range { start, end } => {
@@ -20723,9 +23392,27 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         }
     }
 
+    let scope = OrdinaryMapV2LinearChainScope::collect(cfg, body, types);
+    let result_branch_match_arms = scope
+        .as_ref()
+        .filter(|chain| chain.is_pure_linear)
+        .map(|chain| {
+            chain
+                .steps
+                .iter()
+                .map(|step| {
+                    (
+                        step.match_expr.node_id.clone(),
+                        (step.ok_arm.node_id.clone(), step.err_arm.node_id.clone()),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let mut source_census = DirectPrintSourceCensus {
         effects_are_finite: true,
         closed: true,
+        result_branch_match_arms,
         ..DirectPrintSourceCensus::default()
     };
     visit_block(
@@ -20762,13 +23449,15 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
         );
     }
 
-    let direct_print_candidates = body
-        .root
-        .statements
+    let direct_print_statements: Vec<&ResolvedStmt> = scope.as_ref().map_or_else(
+        || body.root.statements.iter().collect(),
+        |chain| chain.combined_statements.clone(),
+    );
+    let direct_print_candidates = direct_print_statements
         .iter()
         .filter_map(|statement| match &statement.kind {
             ResolvedStmtKind::Expr(expression) => {
-                direct_print_observation(body, expression, &states)
+                direct_print_observation(scope.as_ref(), body, expression, &states)
             }
             _ => None,
         })
@@ -20780,11 +23469,32 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
     let new_binding_orders = new_action_point
         .into_iter()
         .flat_map(|point| {
-            body.root
-                .statements
-                .iter()
-                .enumerate()
-                .filter_map(move |(order, statement)| {
+            let mut found = Vec::new();
+            if let Some(chain) = scope.as_ref() {
+                if let Some((order_node, _, initializer)) = chain.binding_for_operation(point) {
+                    if matches!(
+                        &initializer.kind,
+                        ResolvedExprKind::Call(ResolvedCall {
+                            callee: ResolvedCallee::Builtin(name),
+                            arguments,
+                            permission: None,
+                            type_arguments,
+                            session,
+                            ..
+                        }) if name.as_str() == "map_new"
+                            && arguments.is_empty()
+                            && type_arguments.is_empty()
+                            && session.is_empty()
+                    ) {
+                        if let Some(order) = chain.timeline_order(order_node) {
+                            found.push(order);
+                        }
+                    }
+                }
+                return found;
+            }
+            found.extend(body.root.statements.iter().enumerate().filter_map(
+                move |(order, statement)| {
                     let ResolvedStmtKind::Bind {
                         pattern,
                         initializer: Some(initializer),
@@ -20818,30 +23528,37 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                             && session.is_empty()
                     )
                     .then_some(order)
-                })
+                },
+            ));
+            found
         })
         .collect::<Vec<_>>();
     let new_binding_order = match new_binding_orders.as_slice() {
         [order] => Some(*order),
         _ => None,
     };
-    let prefix_prints = new_binding_order
-        .into_iter()
-        .flat_map(|new_order| {
-            body.root
-                .statements
-                .iter()
-                .enumerate()
-                .take(new_order)
-                .filter_map(|(order, statement)| {
-                    let ResolvedStmtKind::Expr(expression) = &statement.kind else {
-                        return None;
-                    };
-                    direct_string_literal_print(types, expression)
-                        .then_some((order, expression.node_id.clone()))
-                })
-        })
-        .collect::<Vec<_>>();
+    let prefix_prints = if let Some(new_order) = new_binding_order {
+        direct_print_statements
+            .iter()
+            .enumerate()
+            .filter_map(|(order, statement)| {
+                let timeline_pos = scope
+                    .as_ref()
+                    .and_then(|chain| chain.timeline_order(&statement.node_id))
+                    .unwrap_or(order);
+                if timeline_pos >= new_order {
+                    return None;
+                }
+                let ResolvedStmtKind::Expr(expression) = &statement.kind else {
+                    return None;
+                };
+                direct_string_literal_print(types, expression)
+                    .then_some((order, expression.node_id.clone()))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let prefix_count_is_valid = prefix_prints.len() <= 1;
     let prefix_print_call = match prefix_prints.as_slice() {
         [(_, call)] => Some(call.clone()),
@@ -20929,6 +23646,7 @@ fn collect_ordinary_map_owned_any_v2_result_receipts(
                 exact_direct_print_size_observation(
                     cfg,
                     body,
+                    scope.as_ref(),
                     types,
                     size_action,
                     size_attempt,
@@ -21599,56 +24317,7 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         cfg: &CallableCfg,
         attempts: &BTreeSet<OrdinaryMapOwnedGetI32StringV1Attempt>,
     ) -> bool {
-        if attempts.is_empty() || !cfg.reachable.contains(&cfg.entry) {
-            return false;
-        }
-        let allowed_roles = [
-            "entry",
-            "if-then",
-            "if-else",
-            "if-join",
-            "match-arm",
-            "match-join",
-        ];
-        if cfg.reachable.iter().any(|id| {
-            !cfg.blocks.get(id).is_some_and(|block| {
-                id.0 .0
-                    .rsplit_once("/cfg:block:")
-                    .is_some_and(|(_, role)| allowed_roles.contains(&role))
-                    && matches!(
-                        &block.terminator,
-                        Terminator::Goto { .. }
-                            | Terminator::Branch { .. }
-                            | Terminator::Match { .. }
-                            | Terminator::Return { .. }
-                    )
-            })
-        }) || cfg.edges.values().any(|edge| {
-            cfg.reachable.contains(&edge.from)
-                && (!cfg.reachable.contains(&edge.to)
-                    || !matches!(
-                        edge.kind,
-                        EdgeKind::Then
-                            | EdgeKind::Else
-                            | EdgeKind::MatchArm
-                            | EdgeKind::Fallthrough
-                    ))
-        }) {
-            return false;
-        }
-        let mut point_owners = BTreeMap::<NodeId, usize>::new();
-        for (block, value) in &cfg.blocks {
-            if !cfg.reachable.contains(block) {
-                continue;
-            }
-            for point in &value.points {
-                *point_owners.entry(point.source.node.clone()).or_default() += 1;
-            }
-        }
-        attempts
-            .iter()
-            .all(|attempt| point_owners.get(&attempt.point) == Some(&1))
-            && Self::acyclic_cfg_order(cfg).is_some()
+        ordinary_map_supports_result_branch_cfg(cfg, attempts.iter().map(|attempt| &attempt.point))
     }
 
     fn result_branch_edges(
@@ -21662,84 +24331,13 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         crate::core::cfg::BasicBlockId,
         crate::core::cfg::BasicBlockId,
     )> {
-        let mut dispatches = cfg.blocks.iter().filter_map(|(id, block)| {
-            matches!(
-                &block.terminator,
-                Terminator::Match { scrutinee, .. }
-                    if scrutinee == &candidate.scrutinee_node
-            )
-            .then_some(id.clone())
-        });
-        let dispatch = dispatches.next()?;
-        if dispatches.next().is_some() {
-            return None;
-        }
-        let Terminator::Match { arms, .. } = &cfg.blocks.get(&dispatch)?.terminator else {
-            return None;
-        };
-        let edge_for = |arm: &NodeId| {
-            let mut matches = arms.iter().filter_map(|edge_id| {
-                let edge = cfg.edges.get(edge_id)?;
-                (edge.from == dispatch
-                    && edge.kind == EdgeKind::MatchArm
-                    && edge.source.node == *arm)
-                    .then_some((edge.id.clone(), edge.to.clone()))
-            });
-            let result = matches.next()?;
-            matches.next().is_none().then_some(result)
-        };
-        let (ok_edge, ok_entry) = edge_for(&candidate.ok_arm)?;
-        let (err_edge, err_entry) = edge_for(&candidate.err_arm)?;
-        if ok_edge == err_edge || ok_entry == err_entry {
-            return None;
-        }
-        let distances = |start: &crate::core::cfg::BasicBlockId| {
-            let mut values = BTreeMap::from([(start.clone(), 0usize)]);
-            let mut queue = std::collections::VecDeque::from([start.clone()]);
-            while let Some(block) = queue.pop_front() {
-                let distance = values.get(&block).copied()?;
-                for edge in cfg.successors(&block) {
-                    if !cfg.reachable.contains(&edge.to) || values.contains_key(&edge.to) {
-                        continue;
-                    }
-                    values.insert(edge.to.clone(), distance + 1);
-                    queue.push_back(edge.to.clone());
-                }
-            }
-            Some(values)
-        };
-        let ok_distance = distances(&ok_entry)?;
-        let err_distance = distances(&err_entry)?;
-        let mut common = ok_distance
-            .iter()
-            .filter_map(|(block, distance)| {
-                let err = err_distance.get(block)?;
-                block
-                    .0
-                     .0
-                    .rsplit_once("/cfg:block:")
-                    .is_some_and(|(_, role)| role == "match-join")
-                    .then_some((block.clone(), (*distance).max(*err), distance + err))
-            })
-            .collect::<Vec<_>>();
-        common.sort_by_key(|(_, max_distance, total_distance)| (*max_distance, *total_distance));
-        let (join, min_max, min_total) = common.first()?.clone();
-        if common
-            .iter()
-            .filter(|(_, max, total)| *max == min_max && *total == min_total)
-            .count()
-            != 1
-        {
-            return None;
-        }
-        let expected_join = crate::core::cfg::BasicBlockId(NodeId(format!(
-            "{}/cfg:block:match-join",
-            candidate.match_node.0
-        )));
-        if join != expected_join {
-            return None;
-        }
-        Some((dispatch, ok_edge, err_edge, ok_entry, err_entry, join))
+        ordinary_map_result_branch_edges(
+            cfg,
+            &candidate.scrutinee_node,
+            &candidate.match_node,
+            &candidate.ok_arm,
+            &candidate.err_arm,
+        )
     }
 
     fn result_branch_path_receipt(
@@ -21751,55 +24349,20 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         point_location: &BTreeMap<NodeId, (crate::core::cfg::BasicBlockId, usize)>,
         roots_on_edge: &BTreeMap<crate::core::cfg::EdgeId, BTreeSet<String>>,
     ) -> Option<crate::core::OrdinaryMapOwnedGetResultBranchPathReceipt> {
-        use crate::core::OrdinaryMapOwnedGetResultBranchPathReceipt as PathReceipt;
-
-        let mut path_edges = BTreeSet::from([entry_edge.clone()]);
-        let mut path_blocks = BTreeSet::new();
-        let mut exit_edges = BTreeSet::new();
-        let mut pending = vec![entry.clone()];
-        while let Some(block) = pending.pop() {
-            if block == *join || !path_blocks.insert(block.clone()) {
-                continue;
-            }
-            for edge in cfg.successors(&block) {
-                if edge.to == *join {
-                    path_edges.insert(edge.id.clone());
-                    exit_edges.insert(edge.id.clone());
-                } else {
-                    path_edges.insert(edge.id.clone());
-                    pending.push(edge.to.clone());
-                }
-            }
-        }
-        let roots_at_entry = roots_on_edge.get(entry_edge)?.clone();
-        let mut exit_roots = exit_edges
-            .iter()
-            .map(|edge| roots_on_edge.get(edge).cloned())
-            .collect::<Option<Vec<_>>>()?;
-        let roots_at_exit = exit_roots.pop()?;
-        if exit_roots.iter().any(|roots| roots != &roots_at_exit) {
-            return None;
-        }
-        let explicit_root_drops = actions
+        let drop_points = actions
             .iter()
             .filter(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::Drop)
-            .filter(|action| {
-                point_location
-                    .get(&action.point)
-                    .is_some_and(|(block, _)| path_blocks.contains(block))
-            })
             .map(|action| action.point.clone())
-            .collect();
-        Some(PathReceipt {
-            arm_entry_edge: entry_edge.clone(),
-            arm_entry: entry.clone(),
-            join: join.clone(),
-            path_edges,
-            exit_edges,
-            roots_at_entry,
-            roots_at_exit,
-            explicit_root_drops,
-        })
+            .collect::<Vec<_>>();
+        ordinary_map_result_branch_path_receipt(
+            cfg,
+            entry_edge,
+            entry,
+            join,
+            &drop_points,
+            point_location,
+            roots_on_edge,
+        )
     }
 
     fn result_branch_receipt(
@@ -21953,7 +24516,7 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
             "{}/cfg:block:match-arm",
             edge.source.node.0
         )));
-        if !cfg.reachable.contains(&arm) || edge.from != arm {
+        if !cfg.reachable.contains(&arm) || !cfg.reachable.contains(&edge.from) {
             return None;
         }
         let mut incoming = cfg
@@ -23030,29 +25593,7 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         payload_type: &ResolvedTypeId,
         result_type: &ResolvedTypeId,
     ) -> Option<(&'b ResolvedPattern, Option<ResolvedLocalId>)> {
-        let ResolvedPatternKind::Constructor { variant, fields } = &arm.pattern.kind else {
-            return None;
-        };
-        let [(field, payload)] = fields.as_slice() else {
-            return None;
-        };
-        if variant.0 != format!("builtin:variant:Result::{variant_name}")
-            || field.0 != format!("builtin:variant:Result::{variant_name}/payload:0")
-            || arm.guard.is_some()
-            || arm.pattern.ty != *result_type
-            || payload.ty != *payload_type
-        {
-            return None;
-        }
-        let local = match &payload.kind {
-            ResolvedPatternKind::Binding {
-                local,
-                by_reference: None,
-            } => Some(local.clone()),
-            ResolvedPatternKind::Wildcard => None,
-            _ => return None,
-        };
-        Some((payload, local))
+        result_arm_payload(arm, variant_name, payload_type, result_type)
     }
 
     fn result_payload_drop(arm: &MatchArm, local: &ResolvedLocalId) -> Option<NodeId> {
@@ -23086,14 +25627,9 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         arms: &[MatchArm],
     ) -> bool {
         use OrdinaryMapOwnedGetI32StringV1ActionKind as Kind;
-        let (ok_type, err_type) = match self.types.get(&scrutinee.ty) {
-            Some(ResolvedType::Result { ok, error }) => (ok.clone(), error.clone()),
-            Some(ResolvedType::Nominal {
-                item, arguments, ..
-            }) if item.as_str() == "builtin:type:Result" && arguments.len() == 2 => {
-                (arguments[0].clone(), arguments[1].clone())
-            }
-            _ => return false,
+        let Some((ok_type, err_type)) = resolve_result_ok_err_types(self.types, &scrutinee.ty)
+        else {
+            return false;
         };
         if !self.is_i32(&err_type) || arms.len() != 2 {
             return false;
@@ -23393,6 +25929,23 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         self.allowed_root_loads = allowed_loads;
         self.roots = roots;
         self.result_branch_candidates = result_branch_candidates;
+        for branch_receipt in [
+            ok_checker.string_match_receipt,
+            err_checker.string_match_receipt,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let duplicate = self
+                .string_match_receipt
+                .as_ref()
+                .is_some_and(|existing| existing.match_node != branch_receipt.match_node);
+            if duplicate {
+                self.invalid = true;
+            } else {
+                self.string_match_receipt = Some(branch_receipt);
+            }
+        }
         self.invalid = self.invalid || ok_checker.invalid || err_checker.invalid;
         true
     }
@@ -23668,6 +26221,36 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
         )
     }
 
+    fn is_tail_expression_in_expr(expression: &ResolvedExpr, target: &NodeId) -> bool {
+        if expression.node_id == *target {
+            return true;
+        }
+        match &expression.kind {
+            ResolvedExprKind::Block(block) | ResolvedExprKind::Scope { body: block, .. } => {
+                Self::is_tail_expression(block, target)
+            }
+            ResolvedExprKind::Match { arms, .. } => arms
+                .iter()
+                .any(|arm| Self::is_tail_expression_in_expr(&arm.body, target)),
+            ResolvedExprKind::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                Self::is_tail_expression(then_block, target)
+                    || Self::is_tail_expression(else_block, target)
+            }
+            _ => false,
+        }
+    }
+
+    fn is_tail_expression(block: &ResolvedBlock, target: &NodeId) -> bool {
+        block
+            .result
+            .as_deref()
+            .is_some_and(|result| Self::is_tail_expression_in_expr(result, target))
+    }
+
     /// Recognize only the direct owner-settling shape for a typed String get.
     /// The Map root ledger must already be closed at the match point, and the
     /// scrutinee must be the exact local bound directly from the unique
@@ -23685,7 +26268,7 @@ impl<'a> OrdinaryMapOwnedGetI32StringV1Checker<'a> {
             OrdinaryMapOwnedGetI32StringV1ProfileVersion as Profile,
         };
 
-        if self.body.root.result.as_deref()?.node_id != expression.node_id
+        if !Self::is_tail_expression(&self.body.root, &expression.node_id)
             || self.roots.is_empty()
             || self.roots.values().any(|dropped| !*dropped)
             || !self.is_i32(&expression.ty)
@@ -25132,6 +27715,23 @@ impl<'a> ActionEmitter<'a> {
                 ordinary_map_owned_get_i32_string_v1_operation_attempts;
             analysis.ordinary_map_owned_get_i32_string_v1_cfg_receipt =
                 ordinary_map_owned_get_i32_string_v1_cfg_receipt;
+            let ordinary_map_owned_any_v2_set_get_string_lineage_receipt =
+                set_get_string_lineage::collect(self.cfg, self.body, self.signature, self.types);
+            let mut ordinary_map_owned_any_v2_actions = ordinary_map_owned_any_v2_actions;
+            let mut ordinary_map_owned_any_v2_operation_attempts =
+                ordinary_map_owned_any_v2_operation_attempts;
+            let mut ordinary_map_owned_any_v2_cfg_receipt = ordinary_map_owned_any_v2_cfg_receipt;
+            if let Some(receipt) = ordinary_map_owned_any_v2_direct_print_result_receipt.as_ref() {
+                ordinary_map_owned_any_v2_actions.clear();
+                ordinary_map_owned_any_v2_cfg_receipt = None;
+                ordinary_map_owned_any_v2_operation_attempts = receipt.operations.clone();
+            } else if let Some(receipt) =
+                ordinary_map_owned_any_v2_direct_tuple_get_unpack_receipt.as_ref()
+            {
+                ordinary_map_owned_any_v2_actions.clear();
+                ordinary_map_owned_any_v2_cfg_receipt = None;
+                ordinary_map_owned_any_v2_operation_attempts = receipt.operations.clone();
+            }
             analysis.ordinary_map_owned_any_v2_actions = ordinary_map_owned_any_v2_actions;
             analysis.ordinary_map_owned_any_v2_operation_attempts =
                 ordinary_map_owned_any_v2_operation_attempts;
@@ -25153,7 +27753,7 @@ impl<'a> ActionEmitter<'a> {
             analysis.ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt =
                 ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt;
             analysis.ordinary_map_owned_any_v2_set_get_string_lineage_receipt =
-                set_get_string_lineage::collect(self.cfg, self.body, self.signature, self.types);
+                ordinary_map_owned_any_v2_set_get_string_lineage_receipt;
             analysis.ordinary_map_owned_get_any_tuple_result_v1_receipt =
                 owned_get_any_tuple_result::collect(
                     self.cfg,
@@ -31465,32 +34065,53 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
         (place.base == *local && place.projections.is_empty()).then_some(0)
     }
 
+    #[derive(Clone, Copy)]
+    struct NestedBindingSearch<'a> {
+        target: Option<&'a NodeId>,
+        target_local: Option<&'a ResolvedLocalId>,
+        match_ok_scrutinee: bool,
+    }
+
     fn find_nested_binding_initializer<'a>(
         body: &'a ResolvedBody,
         target: Option<&NodeId>,
         target_local: Option<&ResolvedLocalId>,
     ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
+        find_nested_binding_with_mode(body, target, target_local, false)
+    }
+
+    fn find_nested_ok_match_scrutinee<'a>(
+        body: &'a ResolvedBody,
+        target: &NodeId,
+    ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
+        find_nested_binding_with_mode(body, Some(target), None, true)
+    }
+
+    fn find_nested_binding_with_mode<'a>(
+        body: &'a ResolvedBody,
+        target: Option<&NodeId>,
+        target_local: Option<&ResolvedLocalId>,
+        match_ok_scrutinee: bool,
+    ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
         fn search_block<'a>(
             block: &'a ResolvedBlock,
-            target: Option<&NodeId>,
-            target_local: Option<&ResolvedLocalId>,
+            query: NestedBindingSearch<'_>,
         ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
             block
                 .statements
                 .iter()
-                .find_map(|statement| search_statement(statement, target, target_local))
+                .find_map(|statement| search_statement(statement, query))
                 .or_else(|| {
                     block
                         .result
                         .as_deref()
-                        .and_then(|result| search_expression(result, target, target_local))
+                        .and_then(|result| search_expression(result, query))
                 })
         }
 
         fn search_statement<'a>(
             statement: &'a ResolvedStmt,
-            target: Option<&NodeId>,
-            target_local: Option<&ResolvedLocalId>,
+            query: NestedBindingSearch<'_>,
         ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
             match &statement.kind {
                 S::Bind {
@@ -31504,26 +34125,32 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
                             ..
                         },
                     initializer: Some(initializer),
-                } if target.is_some_and(|target| initializer.node_id == *target)
-                    || target_local.is_some_and(|target_local| local == target_local) =>
+                } if query
+                    .target
+                    .is_some_and(|target| initializer.node_id == *target)
+                    || query
+                        .target_local
+                        .is_some_and(|target_local| local == target_local) =>
                 {
                     Some((local, initializer))
                 }
                 S::Bind { initializer, .. } => initializer
                     .as_ref()
-                    .and_then(|value| search_expression(value, target, target_local)),
+                    .and_then(|value| search_expression(value, query)),
                 S::Assign { value, .. }
                 | S::Expr(value)
                 | S::Contract {
                     condition: value, ..
-                } => search_expression(value, target, target_local),
-                S::Pinned { value, body, .. } => search_expression(value, target, target_local)
-                    .or_else(|| search_block(body, target, target_local)),
+                } => search_expression(value, query),
+                S::Pinned { value, body, .. } => {
+                    search_expression(value, query).or_else(|| search_block(body, query))
+                }
                 S::Return { value, .. } | S::Break(value) => value
                     .as_ref()
-                    .and_then(|value| search_expression(value, target, target_local)),
-                S::While { condition, body } => search_expression(condition, target, target_local)
-                    .or_else(|| search_block(body, target, target_local)),
+                    .and_then(|value| search_expression(value, query)),
+                S::While { condition, body } => {
+                    search_expression(condition, query).or_else(|| search_block(body, query))
+                }
                 S::WhileLet {
                     initializer, body, ..
                 }
@@ -31531,55 +34158,53 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
                     iterable: initializer,
                     body,
                     ..
-                } => search_expression(initializer, target, target_local)
-                    .or_else(|| search_block(body, target, target_local)),
+                } => search_expression(initializer, query).or_else(|| search_block(body, query)),
                 S::IfLet {
                     initializer,
                     then_block,
                     else_block,
                     ..
-                } => search_expression(initializer, target, target_local)
-                    .or_else(|| search_block(then_block, target, target_local))
+                } => search_expression(initializer, query)
+                    .or_else(|| search_block(then_block, query))
                     .or_else(|| {
                         else_block
                             .as_ref()
-                            .and_then(|block| search_block(block, target, target_local))
+                            .and_then(|block| search_block(block, query))
                     }),
-                S::Loop(body) | S::Scope { body, .. } => search_block(body, target, target_local),
+                S::Loop(body) | S::Scope { body, .. } => search_block(body, query),
                 S::Math(values) => values
                     .iter()
-                    .find_map(|value| search_expression(value, target, target_local)),
+                    .find_map(|value| search_expression(value, query)),
                 S::Drop(_) | S::Continue | S::NestedCallable(_) => None,
             }
         }
 
         fn search_expression<'a>(
             expression: &'a ResolvedExpr,
-            target: Option<&NodeId>,
-            target_local: Option<&ResolvedLocalId>,
+            query: NestedBindingSearch<'_>,
         ) -> Option<(&'a ResolvedLocalId, &'a ResolvedExpr)> {
             match &expression.kind {
                 E::FString(parts) => parts.iter().find_map(|part| match part {
                     crate::core::ir::ResolvedFStringPart::Text(_) => None,
                     crate::core::ir::ResolvedFStringPart::Interpolation(value) => {
-                        search_expression(value, target, target_local)
+                        search_expression(value, query)
                     }
                 }),
-                E::Project { value, projection } => search_expression(value, target, target_local)
-                    .or_else(|| match projection {
+                E::Project { value, projection } => {
+                    search_expression(value, query).or_else(|| match projection {
                         crate::core::ir::ResolvedValueProjection::Index(index) => {
-                            search_expression(index, target, target_local)
+                            search_expression(index, query)
                         }
                         crate::core::ir::ResolvedValueProjection::Field(_)
                         | crate::core::ir::ResolvedValueProjection::Tuple(_)
                         | crate::core::ir::ResolvedValueProjection::Dereference => None,
-                    }),
+                    })
+                }
                 E::Binary { left, right, .. }
                 | E::Range {
                     start: left,
                     end: right,
-                } => search_expression(left, target, target_local)
-                    .or_else(|| search_expression(right, target, target_local)),
+                } => search_expression(left, query).or_else(|| search_expression(right, query)),
                 E::Unary { operand, .. }
                 | E::TypeOf(operand)
                 | E::Old(operand)
@@ -31589,70 +34214,101 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
                 | E::Await(operand)
                 | E::OptionalChain {
                     receiver: operand, ..
-                } => search_expression(operand, target, target_local),
+                } => search_expression(operand, query),
                 E::Call(call) => call
                     .arguments
                     .iter()
-                    .find_map(|argument| search_expression(&argument.value, target, target_local)),
+                    .find_map(|argument| search_expression(&argument.value, query)),
                 E::Tuple(values) | E::List(values) | E::Set(values) => values
                     .iter()
-                    .find_map(|value| search_expression(value, target, target_local)),
+                    .find_map(|value| search_expression(value, query)),
                 E::Map(entries) => entries.iter().find_map(|(key, value)| {
-                    search_expression(key, target, target_local)
-                        .or_else(|| search_expression(value, target, target_local))
+                    search_expression(key, query).or_else(|| search_expression(value, query))
                 }),
                 E::Comprehension {
                     value,
                     iterable,
                     guard,
                     ..
-                } => search_expression(value, target, target_local)
-                    .or_else(|| search_expression(iterable, target, target_local))
+                } => search_expression(value, query)
+                    .or_else(|| search_expression(iterable, query))
                     .or_else(|| {
                         guard
                             .as_deref()
-                            .and_then(|guard| search_expression(guard, target, target_local))
+                            .and_then(|guard| search_expression(guard, query))
                     }),
                 E::Record { fields, rest, .. } => fields
                     .iter()
-                    .find_map(|field| search_expression(&field.value, target, target_local))
+                    .find_map(|field| search_expression(&field.value, query))
                     .or_else(|| {
                         rest.as_deref()
-                            .and_then(|value| search_expression(value, target, target_local))
+                            .and_then(|value| search_expression(value, query))
                     }),
                 E::Block(block) | E::Comptime(block) | E::Quote(block) => {
-                    search_block(block, target, target_local)
+                    search_block(block, query)
                 }
-                E::Scope { body, .. } => search_block(body, target, target_local),
+                E::Scope { body, .. } => search_block(body, query),
                 E::If {
                     condition,
                     then_block,
                     else_block,
-                } => search_expression(condition, target, target_local)
-                    .or_else(|| search_block(then_block, target, target_local))
-                    .or_else(|| search_block(else_block, target, target_local)),
-                E::Match { scrutinee, arms } => search_expression(scrutinee, target, target_local)
-                    .or_else(|| {
+                } => search_expression(condition, query)
+                    .or_else(|| search_block(then_block, query))
+                    .or_else(|| search_block(else_block, query)),
+                E::Match { scrutinee, arms } => {
+                    if query.match_ok_scrutinee
+                        && query
+                            .target
+                            .is_some_and(|target| scrutinee.node_id == *target)
+                    {
+                        let ok_arm = arms.iter().find_map(|arm| {
+                            if arm.guard.is_some() {
+                                return None;
+                            }
+                            let P::Constructor { variant, fields } = &arm.pattern.kind else {
+                                return None;
+                            };
+                            if variant.0 != "builtin:variant:Result::Ok" {
+                                return None;
+                            }
+                            let [(_, pattern)] = fields.as_slice() else {
+                                return None;
+                            };
+                            let P::Binding {
+                                local,
+                                by_reference: None,
+                            } = &pattern.kind
+                            else {
+                                return None;
+                            };
+                            Some(local)
+                        });
+                        if let Some(local) = ok_arm {
+                            return Some((local, scrutinee));
+                        }
+                    }
+                    search_expression(scrutinee, query).or_else(|| {
                         arms.iter().find_map(|arm| {
                             arm.guard
                                 .as_ref()
-                                .and_then(|guard| search_expression(guard, target, target_local))
-                                .or_else(|| search_expression(&arm.body, target, target_local))
+                                .and_then(|guard| search_expression(guard, query))
+                                .or_else(|| search_expression(&arm.body, query))
                         })
-                    }),
+                    })
+                }
                 E::Slice {
                     target: value,
                     start,
                     end,
-                } => search_expression(value, target, target_local)
+                } => search_expression(value, query)
                     .or_else(|| {
                         start
                             .as_deref()
-                            .and_then(|value| search_expression(value, target, target_local))
+                            .and_then(|value| search_expression(value, query))
                     })
                     .or_else(|| {
                         end.as_deref()
-                            .and_then(|value| search_expression(value, target, target_local))
+                            .and_then(|value| search_expression(value, query))
                     }),
                 // Callable bodies are not evaluated as part of their containing
                 // expression. The producer receipt rejects nested callable owners.
@@ -31667,7 +34323,14 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
             }
         }
 
-        search_block(&body.root, target, target_local)
+        search_block(
+            &body.root,
+            NestedBindingSearch {
+                target,
+                target_local,
+                match_ok_scrutinee,
+            },
+        )
     }
 
     fn references_function(body: &ResolvedBody, target: &NodeId) -> bool {
@@ -31969,8 +34632,11 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
     let mut producer_entries = Vec::new();
     for action in &producer_set_actions {
         let (result_local, payload_local, key, payload_literal) = (|| {
-            let (result_local, initializer) =
-                find_nested_binding_initializer(producer_body, Some(&action.point), None)?;
+            let (result_local, initializer) = if producer_return.is_some() {
+                find_nested_binding_initializer(producer_body, Some(&action.point), None)?
+            } else {
+                find_nested_ok_match_scrutinee(producer_body, &action.point)?
+            };
             let E::Call(call) = &initializer.kind else {
                 return None;
             };
@@ -32529,7 +35195,10 @@ fn collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
 fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
     receipt: &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerReceipt,
     producer_owner: &NodeId,
-    producer_return: &crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnReceipt,
+    producer_return: Option<&crate::core::OrdinaryMapOwnedAnyV2ValuesProducerReturnReceipt>,
+    producer_result: Option<
+        &crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesResultProducerReceipt,
+    >,
     cfgs: &BTreeMap<NodeId, CallableCfg>,
     bodies: &BTreeMap<NodeId, ResolvedBody>,
     signatures: &BTreeMap<NodeId, ResolvedSignature>,
@@ -32542,8 +35211,8 @@ fn ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
 ) -> bool {
     collect_ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt(
         producer_owner,
-        Some(producer_return),
-        None,
+        producer_return,
+        producer_result,
         cfgs,
         bodies,
         signatures,
@@ -32664,6 +35333,36 @@ func snapshot_values() -> List {
 "#
     }
 
+    fn values_result_producer_source() -> &'static str {
+        r#"
+func snapshot_values() -> List {
+    let payload = "owned value"
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "key", payload) {
+                Ok(root) => {
+                    let snapshot = values(root)
+                    drop(empty)
+                    drop(root)
+                    drop(payload)
+                    snapshot
+                },
+                Err(status) => {
+                    drop(empty)
+                    drop(payload)
+                    []
+                },
+            }
+        },
+        Err(status) => {
+            drop(payload)
+            []
+        },
+    }
+}
+"#
+    }
+
     fn checked_values_program(
         caller: &str,
         extra_items: &str,
@@ -32678,6 +35377,22 @@ func snapshot_values() -> List {
         );
         crate::core::check_program(&parse_stdlib(&source))
             .unwrap_or_else(|errors| panic!("Values caller fixture must check: {errors:?}"))
+    }
+
+    fn checked_values_result_program(
+        caller: &str,
+        extra_items: &str,
+        main_body: &str,
+    ) -> crate::core::CheckedProgram {
+        let source = format!(
+            "{}\n{}\n{}\nfunc main() -> i32 {{ {} }}",
+            values_result_producer_source(),
+            caller,
+            extra_items,
+            main_body
+        );
+        crate::core::check_program(&parse_stdlib(&source))
+            .unwrap_or_else(|errors| panic!("Values Result caller fixture must check: {errors:?}"))
     }
 
     fn map_root_producer_source() -> &'static str {
@@ -33321,7 +36036,7 @@ func main() -> i32 {
             [1, 2, 3],
             "map_new Err, map_set Err, and Values success settle all live owners"
         );
-        let mut branch_drop_names = receipt
+        let branch_drop_names = receipt
             .paths
             .iter()
             .map(|path| {
@@ -33342,7 +36057,6 @@ func main() -> i32 {
                 (path.kind, names)
             })
             .collect::<Vec<_>>();
-        branch_drop_names.sort();
         assert_eq!(
             branch_drop_names,
             [
@@ -33412,18 +36126,47 @@ func main() -> i32 {
             receipt.success_result
         );
 
+        let assert_incomplete_v2_rejected =
+            |mutated: &str, expect_producer: bool, message: &str| {
+                let checked = crate::core::check_program(&parse_stdlib(mutated))
+                    .expect("source checks before withholding canonical route receipt");
+                let producer_cfg = checked
+                    .resource_analysis(&producer_owner)
+                    .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref());
+                assert_eq!(
+                    producer_cfg
+                        .and_then(|cfg| cfg.values_result_producer_receipt.as_ref())
+                        .is_some(),
+                    expect_producer,
+                    "{message}: producer receipt expectation"
+                );
+                assert!(
+                    producer_cfg
+                        .and_then(|cfg| cfg.values_result_producer_caller_receipt.as_ref())
+                        .is_none(),
+                    "{message}: caller receipt must be withheld"
+                );
+                assert_eq!(
+                    crate::core::mir::classify_canonical_mir_route_admission(&checked)
+                        .ordinary_map_owned_any_v2,
+                    crate::core::mir::OrdinaryMapOwnedAnyV2Admission::IncompleteCoverage,
+                    "{message}: must remain in fail-closed IncompleteCoverage"
+                );
+                assert!(
+                    crate::core::mir::materialize_canonical_mir_route(&checked, None).is_err(),
+                    "{message}: missing receipt must remain a hard failure, not a legacy retry"
+                );
+            };
+
         let missing_new_error_drop = source.replace(
             "        Err(status) => {\n            drop(payload)\n            []\n        },",
             "        Err(status) => [],",
         );
         assert_ne!(missing_new_error_drop, source);
-        let diagnostics = crate::core::check_program(&parse_stdlib(&missing_new_error_drop))
-            .expect_err("map_new Err must settle the payload before returning an empty list");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0218")),
-            "missing branch receipt must remain a hard failure, not a legacy retry: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &missing_new_error_drop,
+            false,
+            "map_new Err must settle the payload before returning an empty list",
         );
 
         let missing_set_error_root_drop = source.replace(
@@ -33431,13 +36174,10 @@ func main() -> i32 {
             "                Err(status) => {\n                    drop(payload)\n                    []\n                },",
         );
         assert_ne!(missing_set_error_root_drop, source);
-        let diagnostics = crate::core::check_program(&parse_stdlib(&missing_set_error_root_drop))
-            .expect_err("map_set Err must settle the surviving Map root");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0218")),
-            "missing map_set Err root settlement must withhold the receipt: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &missing_set_error_root_drop,
+            false,
+            "map_set Err must settle the surviving Map root",
         );
 
         let missing_set_error_payload_drop = source.replace(
@@ -33445,14 +36185,10 @@ func main() -> i32 {
             "                Err(status) => {\n                    drop(empty)\n                    []\n                },",
         );
         assert_ne!(missing_set_error_payload_drop, source);
-        let diagnostics =
-            crate::core::check_program(&parse_stdlib(&missing_set_error_payload_drop))
-                .expect_err("map_set Err must settle the source String payload");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0218")),
-            "missing map_set Err payload settlement must withhold the receipt: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &missing_set_error_payload_drop,
+            false,
+            "map_set Err must settle the source String payload",
         );
 
         let duplicate_set_error_payload_drop = source.replace(
@@ -33460,14 +36196,10 @@ func main() -> i32 {
             "                    drop(payload)\n                    drop(payload)\n                    []\n                },",
         );
         assert_ne!(duplicate_set_error_payload_drop, source);
-        let diagnostics =
-            crate::core::check_program(&parse_stdlib(&duplicate_set_error_payload_drop))
-                .expect_err("a Result path cannot settle the same payload owner twice");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0304")),
-            "duplicate map_set Err payload settlement must remain a use-after-move failure: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &duplicate_set_error_payload_drop,
+            false,
+            "a Result path cannot settle the same payload owner twice",
         );
 
         let duplicate_set_error_root_drop = source.replace(
@@ -33475,13 +36207,10 @@ func main() -> i32 {
             "                    drop(empty)\n                    drop(empty)\n                    drop(payload)\n                    []\n                },",
         );
         assert_ne!(duplicate_set_error_root_drop, source);
-        let diagnostics = crate::core::check_program(&parse_stdlib(&duplicate_set_error_root_drop))
-            .expect_err("a Result path cannot settle the same Map root twice");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0304")),
-            "duplicate map_set Err root settlement must remain a use-after-move failure: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &duplicate_set_error_root_drop,
+            false,
+            "a Result path cannot settle the same Map root twice",
         );
 
         let missing_caller_snapshot_drop = source.replace(
@@ -33489,13 +36218,10 @@ func main() -> i32 {
             "    let count = snapshot.len()\n    count",
         );
         assert_ne!(missing_caller_snapshot_drop, source);
-        let diagnostics = crate::core::check_program(&parse_stdlib(&missing_caller_snapshot_drop))
-            .expect_err("the Values snapshot owner must be dropped in its direct caller");
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code.as_deref() == Some("E0218")),
-            "missing caller Drop must remain a hard ownership failure: {diagnostics:?}"
+        assert_incomplete_v2_rejected(
+            &missing_caller_snapshot_drop,
+            true,
+            "the Values snapshot owner must be dropped in its direct caller",
         );
     }
 
@@ -34714,20 +37440,35 @@ func main() -> i32 {
             r#"
 func main() -> i32 {
     let key = "prefix" + "\0suffix"
-    let source = map_new()
-    let inserted = map_set(source, key, 17)
     let string_key = key + ":text"
-    let inserted_string = map_set(inserted, string_key, "owned")
-    let removed = map_remove(inserted_string, key)
-    let size = map_size(source)
-    let present = has_key(inserted_string, string_key)
-    let integer = map_get_i32(source, key)
-    let text = map_get_string(removed, string_key)
-    drop(source)
-    drop(inserted)
-    drop(inserted_string)
-    drop(removed)
-    size
+    match map_new() {
+        Ok(source) => match map_set(source, key, 17) {
+            Ok(inserted) => match map_set(inserted, string_key, "owned") {
+                Ok(inserted_string) => {
+                    let removed = map_remove(inserted_string, key)
+                    let size = map_size(source)
+                    let present = has_key(inserted_string, string_key)
+                    let integer = map_get_i32(source, key)
+                    let text = map_get_string(removed, string_key)
+                    drop(source)
+                    drop(inserted)
+                    drop(inserted_string)
+                    drop(removed)
+                    size
+                },
+                Err(status) => {
+                    drop(source)
+                    drop(inserted)
+                    status
+                },
+            },
+            Err(status) => {
+                drop(source)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -34750,7 +37491,10 @@ func main() -> i32 {
             [
                 OrdinaryMapOwnedGetI32StringV1ActionKind::New,
                 OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
                 OrdinaryMapOwnedGetI32StringV1ActionKind::Set,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
+                OrdinaryMapOwnedGetI32StringV1ActionKind::Drop,
                 OrdinaryMapOwnedGetI32StringV1ActionKind::Remove,
                 OrdinaryMapOwnedGetI32StringV1ActionKind::Size,
                 OrdinaryMapOwnedGetI32StringV1ActionKind::HasKey,
@@ -34772,17 +37516,18 @@ func main() -> i32 {
                     .starts_with("ordinary-map-owned-get-i32-string-v1:")
         }));
         assert_eq!(actions[1].source_local.as_ref(), Some(&actions[0].local));
-        assert_eq!(actions[2].source_local.as_ref(), Some(&actions[1].local));
-        assert_eq!(actions[3].source_local.as_ref(), Some(&actions[2].local));
+        assert_eq!(actions[3].source_local.as_ref(), Some(&actions[1].local));
+        assert_eq!(actions[6].source_local.as_ref(), Some(&actions[3].local));
+        assert_eq!(actions[2].local, actions[0].local);
         assert_eq!(actions[4].local, actions[0].local);
-        assert_eq!(actions[5].local, actions[2].local);
+        assert_eq!(actions[5].local, actions[1].local);
         for action in [
             &actions[1],
-            &actions[2],
             &actions[3],
-            &actions[5],
             &actions[6],
-            &actions[7],
+            &actions[8],
+            &actions[9],
+            &actions[10],
         ] {
             assert!(
                 action.key.is_some(),
@@ -34812,7 +37557,7 @@ func main() -> i32 {
             Some(ResolvedType::Primitive(crate::core::PrimitiveType::I32))
         ));
         assert!(matches!(
-            actions[2]
+            actions[3]
                 .value_type
                 .as_ref()
                 .and_then(|ty| program.resolved_types().get(ty)),
@@ -34856,10 +37601,14 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let result = map_get(root, "missing")
-    drop(root)
-    0
+    match map_new() {
+        Ok(root) => {
+            let result = map_get(root, "missing")
+            drop(root)
+            0
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -34884,10 +37633,14 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let size = map_size(root)
-    drop(root)
-    size
+    match map_new() {
+        Ok(root) => {
+            let size = map_size(root)
+            drop(root)
+            size
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -34910,12 +37663,16 @@ func main() -> i32 {
             r#"
 func main() -> i32 {
     let key = "answer"
-    let root = map_new()
-    let result = map_get_i32(root, key)
-    drop(root)
-    match result {
-        Ok(value) => value,
-        Err(code) => code,
+    match map_new() {
+        Ok(root) => {
+            let result = map_get_i32(root, key)
+            drop(root)
+            match result {
+                Ok(value) => value,
+                Err(code) => code,
+            }
+        },
+        Err(status) => status,
     }
 }
 "#,
@@ -34943,20 +37700,30 @@ func main() -> i32 {
                 "temporary",
                 r#"
     let key = "answer"
-    let result = map_get_i32(map_new(), key)
-    0
+    match map_new() {
+        Ok(root) => {
+            let result = map_get_i32(map_remove(root, "k"), key)
+            drop(root)
+            0
+        },
+        Err(status) => status,
+    }
 "#,
             ),
             (
                 "alias after source drop",
                 r#"
     let key = "answer"
-    let root = map_new()
-    drop(root)
-    let alias = root
-    let result = map_get_i32(alias, key)
-    drop(alias)
-    0
+    match map_new() {
+        Ok(root) => {
+            drop(root)
+            let alias = root
+            let result = map_get_i32(alias, key)
+            drop(alias)
+            0
+        },
+        Err(status) => status,
+    }
 "#,
             ),
         ] {
@@ -35024,13 +37791,25 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let source = map_new()
-    let full = map_set(source, "text", "kept")
-    let alias = full
-    let result = map_get_string(alias, "text")
-    drop(full)
-    drop(result)
-    map_size(alias) - 1
+    match map_new() {
+        Ok(source) => match map_set(source, "text", "kept") {
+            Ok(full) => {
+                let alias = full
+                let result = map_get_string(alias, "text")
+                drop(source)
+                drop(full)
+                drop(result)
+                let size = map_size(alias)
+                drop(alias)
+                size - 1
+            },
+            Err(status) => {
+                drop(source)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -35047,7 +37826,7 @@ func main() -> i32 {
                 .iter()
                 .filter(|action| action.kind == OrdinaryMapOwnedGetI32StringV1ActionKind::Drop)
                 .count(),
-            3
+            4
         );
         assert!(analysis.has_ordinary_map_owned_get_i32_string_v1_receipt());
         assert!(
@@ -35063,21 +37842,30 @@ func main() -> i32 {
 func carry<T>(value: T) -> T { value }
 
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", "owned")
-    let pair = map_get(root, "key")
-    drop(empty)
-    drop(root)
+    match map_new() {
+        Ok(empty) => match map_set(empty, "key", "owned") {
+            Ok(root) => {
+                let pair = map_get(root, "key")
+                drop(empty)
+                drop(root)
 
-    let found = pair.0
-    let payload = pair.1
-    let carried = carry(payload)
-    let equal = if found { carried == "owned" } else { false }
-    drop(pair)
-    drop(payload)
-    drop(carried)
-    println(equal)
-    0
+                let found = pair.0
+                let payload = pair.1
+                let carried = carry(payload)
+                let equal = if found { carried == "owned" } else { false }
+                drop(pair)
+                drop(payload)
+                drop(carried)
+                println(equal)
+                0
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -35118,21 +37906,24 @@ func main() -> i32 {
             .reachable_edges
             .values()
             .any(|edge| { edge.kind == crate::core::cfg::EdgeKind::Fallthrough }));
-        let entry_points = &receipt
+        let non_if_points = receipt
             .reachable_blocks
-            .get(&receipt.entry)
-            .expect("entry fact")
-            .points;
-        assert!(receipt.action_points.iter().all(|point| {
-            entry_points
-                .iter()
-                .any(|(entry_point, _)| entry_point == point)
-        }));
-        assert!(receipt.attempts.iter().all(|attempt| {
-            entry_points
-                .iter()
-                .any(|(entry_point, _)| entry_point == &attempt.point)
-        }));
+            .iter()
+            .filter(|(block_id, _)| {
+                !block_id.0 .0.ends_with("/cfg:block:if-then")
+                    && !block_id.0 .0.ends_with("/cfg:block:if-else")
+                    && !block_id.0 .0.ends_with("/cfg:block:if-join")
+            })
+            .flat_map(|(_, block)| block.points.iter().map(|(point, _)| point))
+            .collect::<Vec<_>>();
+        assert!(receipt
+            .action_points
+            .iter()
+            .all(|point| non_if_points.contains(&point)));
+        assert!(receipt
+            .attempts
+            .iter()
+            .all(|attempt| non_if_points.contains(&&attempt.point)));
     }
 
     #[test]
@@ -35141,10 +37932,14 @@ func main() -> i32 {
             r#"
 func main() -> i32 {
     let size = if true {
-        let root = map_new()
-        let value = map_get_i32(root, "key")
-        drop(root)
-        1
+        match map_new() {
+            Ok(root) => {
+                let value = map_get_i32(root, "key")
+                drop(root)
+                1
+            },
+            Err(status) => status,
+        }
     } else {
         0
     }
@@ -35174,20 +37969,29 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", "owned")
-    let pair = map_get(root, "key")
-    drop(empty)
-    drop(root)
-    let payload = pair.1
-    let equal = match pair.0 {
-        true => payload == "owned",
-        false => false,
+    match map_new() {
+        Ok(empty) => match map_set(empty, "key", "owned") {
+            Ok(root) => {
+                let pair = map_get(root, "key")
+                drop(empty)
+                drop(root)
+                let payload = pair.1
+                let equal = match pair.0 {
+                    true => payload == "owned",
+                    false => false,
+                }
+                drop(pair)
+                drop(payload)
+                println(equal)
+                0
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
+        },
+        Err(status) => status,
     }
-    drop(pair)
-    drop(payload)
-    println(equal)
-    0
 }
 "#,
         );
@@ -35215,8 +38019,8 @@ func main() -> i32 {
         assert!(receipt.action_points.iter().all(|point| {
             receipt
                 .reachable_blocks
-                .get(&receipt.entry)
-                .is_some_and(|block| block.points.iter().any(|(node, _)| node == point))
+                .values()
+                .any(|block| block.points.iter().any(|(node, _)| node == point))
         }));
     }
 
@@ -35225,23 +38029,39 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "key", "owned")
-    let pair = map_get(root, "key")
-    drop(empty)
-    drop(root)
-    let value = match pair.0 {
-        true => {
-            let arm_empty = map_new()
-            let arm_root = map_set(arm_empty, "arm", 1)
-            drop(arm_empty)
-            drop(arm_root)
-            1
+    match map_new() {
+        Ok(empty) => match map_set(empty, "key", "owned") {
+            Ok(root) => {
+                let pair = map_get(root, "key")
+                drop(empty)
+                drop(root)
+                let value = match pair.0 {
+                    true => match map_new() {
+                        Ok(arm_empty) => match map_set(arm_empty, "arm", 1) {
+                            Ok(arm_root) => {
+                                drop(arm_empty)
+                                drop(arm_root)
+                                1
+                            },
+                            Err(status) => {
+                                drop(arm_empty)
+                                status
+                            },
+                        },
+                        Err(status) => status,
+                    },
+                    false => 0,
+                }
+                drop(pair)
+                value
+            },
+            Err(status) => {
+                drop(empty)
+                status
+            },
         },
-        false => 0,
+        Err(status) => status,
     }
-    drop(pair)
-    value
 }
 "#,
         );
@@ -35269,9 +38089,14 @@ func main() -> i32 {
 func main() -> i32 {
     let mut i = 0
     while i < 1 {
-        let root = map_new()
-        let value = map_get_i32(root, "key")
-        drop(root)
+        let _ignored = match map_new() {
+            Ok(root) => {
+                let value = map_get_i32(root, "key")
+                drop(root)
+                0
+            },
+            Err(status) => status,
+        }
         i = i + 1
     }
     0
@@ -35304,10 +38129,14 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "answer")
-    drop(root)
-    0
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "answer")
+            drop(root)
+            0
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -35341,12 +38170,16 @@ func main() -> i32 {
         let file = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let snapshot = values(root)
-    let count = snapshot.len()
-    drop(snapshot)
-    drop(root)
-    count
+    match map_new() {
+        Ok(root) => {
+            let snapshot = values(root)
+            let count = snapshot.len()
+            drop(snapshot)
+            drop(root)
+            count
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -37732,7 +40565,7 @@ func main() -> i32 {
             .iter()
             .all(|usage| usage.value_proof.digest == blake3::hash(expected).to_hex().to_string()));
         assert_eq!(receipt.key_source_drops.len(), 2);
-        assert_eq!(receipt.map_root_drops.len(), 3);
+        assert_eq!(receipt.map_root_drops.len(), 4);
         assert_eq!(receipt.pair_drop.local, receipt.pair.binding);
         assert_eq!(receipt.pair_snapshot_observation.found_tuple_index, 0);
         assert_eq!(receipt.pair_snapshot_observation.snapshot_tuple_index, 1);
@@ -37992,18 +40825,33 @@ type Label { text: string }
 func main() -> i32 {
     let key = "answer"
     let label = Label { text: "payload" }
-    let empty = map_new()
-    let updated = map_set(empty, key, label)
-    let present = has_key(updated, key)
-    let pair = map_get(updated, key)
-    let removed = map_remove(updated, key)
-    drop(pair)
-    drop(empty)
-    drop(updated)
-    drop(removed)
-    drop(label)
-    drop(key)
-    0
+    match map_new() {
+        Ok(empty) => match map_set(empty, key, label) {
+            Ok(updated) => {
+                let present = has_key(updated, key)
+                let pair = map_get(updated, key)
+                let removed = map_remove(updated, key)
+                drop(pair)
+                drop(empty)
+                drop(updated)
+                drop(removed)
+                drop(label)
+                drop(key)
+                0
+            },
+            Err(status) => {
+                drop(empty)
+                drop(label)
+                drop(key)
+                status
+            },
+        },
+        Err(status) => {
+            drop(label)
+            drop(key)
+            status
+        },
+    }
 }
 "#,
         );
@@ -38067,18 +40915,33 @@ type Label { text: string }
 func main() -> i32 {
     let key = "answer"
     let label = Label { text: "payload" }
-    let empty = map_new()
-    let updated = map_set(empty, key + "\0雪", label)
-    let present = has_key(updated, key + "\0雪")
-    let pair = map_get(updated, key + "\0雪")
-    let removed = map_remove(updated, key + "\0雪")
-    drop(pair)
-    drop(empty)
-    drop(updated)
-    drop(removed)
-    drop(label)
-    drop(key)
-    0
+    match map_new() {
+        Ok(empty) => match map_set(empty, key + "\0雪", label) {
+            Ok(updated) => {
+                let present = has_key(updated, key + "\0雪")
+                let pair = map_get(updated, key + "\0雪")
+                let removed = map_remove(updated, key + "\0雪")
+                drop(pair)
+                drop(empty)
+                drop(updated)
+                drop(removed)
+                drop(label)
+                drop(key)
+                0
+            },
+            Err(status) => {
+                drop(empty)
+                drop(label)
+                drop(key)
+                status
+            },
+        },
+        Err(status) => {
+            drop(label)
+            drop(key)
+            status
+        },
+    }
 }
 "#,
         );
@@ -38132,11 +40995,15 @@ func main() -> i32 {
         let get = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "answer")
-    drop(root)
-    drop(pair)
-    0
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "answer")
+            drop(root)
+            drop(pair)
+            0
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -38170,11 +41037,15 @@ func main() -> i32 {
         let keys_without_observation = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let all_keys = keys(root)
-    drop(root)
-    drop(all_keys)
-    0
+    match map_new() {
+        Ok(root) => {
+            let all_keys = keys(root)
+            drop(root)
+            drop(all_keys)
+            0
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -38192,10 +41063,14 @@ func main() -> i32 {
         let invalid_key = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let present = has_key(root, 42)
-    drop(root)
-    0
+    match map_new() {
+        Ok(root) => {
+            let present = has_key(root, 42)
+            drop(root)
+            0
+        },
+        Err(status) => status,
+    }
 }
 "#,
         );
@@ -38333,22 +41208,9 @@ func main() -> i32 {
 
     #[test]
     fn ordinary_map_owned_any_v2_keys_snapshot_checks_owned_escape_and_source_order() {
-        let source = parse(
-            r#"
-func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 41)
-    let snapshot = keys(root)
-    drop(empty)
-    drop(root)
-    let key = snapshot[0]
-    drop(snapshot)
-    println(key)
-    drop(key)
-    0
-}
-"#,
-        );
+        let source = parse(include_str!(
+            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_keys_snapshot.mimi"
+        ));
         let checked = crate::core::check_program(&source)
             .expect("the exact owned keys snapshot profile should typecheck");
         let owner = NodeId("function:main".into());
@@ -38738,25 +41600,9 @@ func main() -> i32 {
 
     #[test]
     fn ordinary_map_owned_any_v2_branch_local_persistent_set_diamond_receipt_is_exact() {
-        let source = r#"
-type Label { text: string }
-func main() -> i32 {
-    let payload = Label { text: "shared" }
-    let base = map_new()
-    let flag = true
-    if flag {
-        let left = map_set(base, "left", payload)
-        let left_size = map_size(left)
-        drop(left)
-    } else {
-        let right = map_set(base, "right", payload)
-        let right_size = map_size(right)
-        drop(right)
-    }
-    drop(base)
-    0
-}
-"#;
+        let source = include_str!(
+            "../../../tests/fixtures/mir_branch_local_persistent_map_set_diamond_true.mimi"
+        );
         let checked = crate::core::check_program(&parse(source))
             .expect("branch-local persistent Map Set source checks");
         let analysis = checked
@@ -38786,13 +41632,12 @@ func main() -> i32 {
 
         assert_eq!(branch.owner, NodeId("function:main".into()));
         assert_eq!(branch.split, flow.split);
-        assert_eq!(branch.join, flow.join);
+        assert_eq!(branch.outer_join, flow.join);
         assert_eq!(branch.arms.len(), 2);
+        assert_eq!(branch.result_branches.len(), 3);
         assert_ne!(branch.payload_local, branch.base_local);
         assert_eq!(branch.base_new.kind, OrdinaryMapOwnedAnyV2ActionKind::New);
         assert_eq!(branch.base_new.local, branch.base_local);
-        assert_eq!(branch.base_drop.kind, OrdinaryMapOwnedAnyV2ActionKind::Drop);
-        assert_eq!(branch.base_drop.local, branch.base_local);
         assert!(matches!(
             checked.resolved_types().get(&branch.payload_type),
             Some(ResolvedType::Nominal { item, arguments, .. })
@@ -38802,12 +41647,11 @@ func main() -> i32 {
             local: branch.base_local.clone(),
             resource: branch.base_new.root.clone(),
         };
-        assert_eq!(receipt.actions.len(), 8);
-        assert_eq!(receipt.attempts.len(), 8);
+        assert_eq!(receipt.actions.len(), 11);
+        assert_eq!(receipt.attempts.len(), 11);
         assert_eq!(flow.live_owners_out[&flow.split].len(), 1);
         assert!(flow.live_owners_out[&flow.split].contains(&base_owner));
-        assert_eq!(flow.live_owners_in[&flow.join].len(), 1);
-        assert!(flow.live_owners_in[&flow.join].contains(&base_owner));
+        assert!(flow.live_owners_in[&flow.join].is_empty());
         assert!(flow.live_owners_out[&flow.join].is_empty());
 
         let mut child_roots = BTreeSet::new();
@@ -38815,12 +41659,19 @@ func main() -> i32 {
         for (edge, arm) in &branch.arms {
             assert_eq!(edge, &arm.edge);
             assert_eq!(flow.reachable_edges[edge].to, arm.block);
-            assert_eq!(flow.reachable_edges[&arm.join_edge].to, flow.join);
+            assert_eq!(flow.reachable_edges[&arm.join_edge].to, branch.join);
             assert_eq!(arm.set.kind, OrdinaryMapOwnedAnyV2ActionKind::Set);
             assert_eq!(arm.size.kind, OrdinaryMapOwnedAnyV2ActionKind::Size);
             assert_eq!(arm.drop.kind, OrdinaryMapOwnedAnyV2ActionKind::Drop);
+            assert_eq!(arm.ok_base_drop.kind, OrdinaryMapOwnedAnyV2ActionKind::Drop);
+            assert_eq!(
+                arm.err_base_drop.kind,
+                OrdinaryMapOwnedAnyV2ActionKind::Drop
+            );
             assert_eq!(arm.size.local, arm.set.local);
             assert_eq!(arm.drop.local, arm.set.local);
+            assert_eq!(arm.ok_base_drop.local, branch.base_local);
+            assert_eq!(arm.err_base_drop.local, branch.base_local);
             assert_eq!(arm.set.source_local.as_ref(), Some(&branch.base_local));
             assert_eq!(arm.set.value.as_ref(), Some(&arm.payload_load));
             assert_eq!(arm.set.value_type.as_ref(), Some(&branch.payload_type));
@@ -38870,8 +41721,8 @@ func main() -> i32 {
             "different concrete record payload source in one arm",
             source
                 .replace(
-                    "    let base = map_new()",
-                    "    let other_payload = Label { text: \"other\" }\n    let base = map_new()",
+                    "    match map_new()",
+                    "    let other_payload = Label { text: \"other\" }\n    match map_new()",
                 )
                 .replace(
                     "map_set(base, \"right\", payload)",
@@ -38880,51 +41731,52 @@ func main() -> i32 {
         );
         assert_unreceipted(
             "size observes the base instead of its child",
-            source.replace("map_size(right)", "map_size(base)"),
+            source.replace(
+                "map_set(base, \"right\", payload) {\n                    Ok(child) => {\n                        map_size(child)",
+                "map_set(base, \"right\", payload) {\n                    Ok(child) => {\n                        map_size(base)",
+            ),
         );
         assert_unreceipted(
             "extra Map action in an arm",
             source.replace(
-                "        let left_size = map_size(left)",
-                "        let extra_size = map_size(base)\n        let left_size = map_size(left)",
+                "map_set(base, \"left\", payload) {\n                    Ok(child) => {\n                        map_size(child)",
+                "map_set(base, \"left\", payload) {\n                    Ok(child) => {\n                        map_size(base)\n                        map_size(child)",
             ),
         );
         assert_unreceipted(
             "wrong action order",
             source.replace(
-                "        let left_size = map_size(left)\n        drop(left)",
-                "        drop(left)\n        let left_size = map_size(left)",
+                "                        map_size(child)\n                        drop(child)",
+                "                        drop(child)\n                        map_size(child)",
             ),
         );
         assert_unreceipted(
             "child root escapes its arm edge",
-            source.replace("        drop(right)\n", ""),
+            source.replace("                        drop(child)\n", ""),
         );
         assert_unreceipted(
-            "base root is not dropped in the join",
-            source.replace("    drop(base)\n", ""),
+            "base root is not dropped in arm",
+            source.replace("                        drop(base)\n", ""),
         );
         assert_unreceipted(
             "result owner crosses the split",
-            source
-                .replace(
-                    "    let flag = true",
-                    "    let snapshot = values(base)\n    let flag = true",
-                )
-                .replace("    drop(base)\n", "    drop(snapshot)\n    drop(base)\n"),
+            source.replace(
+                "            let flag = true",
+                "            let snapshot = values(base)\n            drop(snapshot)\n            let flag = true",
+            ),
         );
         assert_unreceipted(
             "nested branch CFG",
             source.replace(
-                "        let left = map_set(base, \"left\", payload)",
-                "        if flag { println(0) }\n        let left = map_set(base, \"left\", payload)",
+                "                match map_set(base, \"left\", payload)",
+                "                if flag { println(0) }\n                match map_set(base, \"left\", payload)",
             ),
         );
         assert_unreceipted(
             "loop CFG",
             source.replace(
-                "        let left = map_set(base, \"left\", payload)",
-                "        while false { println(0) }\n        let left = map_set(base, \"left\", payload)",
+                "                match map_set(base, \"left\", payload)",
+                "                while false { println(0) }\n                match map_set(base, \"left\", payload)",
             ),
         );
     }
@@ -39008,12 +41860,16 @@ func main() -> i32 {
     fn ordinary_map_owned_any_v2_scalar_tail_source_rejects_non_scalar_or_owner_work() {
         let source = r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let found = pair.0
-    drop(pair)
-    drop(root)
-    if found { 1 } else { 0 }
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            if found { 1 } else { 0 }
+        }
+        Err(status) => status,
+    }
 }
 "#;
         let checked = crate::core::check_program(&parse(source)).unwrap();
@@ -39025,20 +41881,28 @@ func main() -> i32 {
         for (label, candidate) in [
             (
                 "late result settlement",
-                source.replace("    drop(pair)\n", "").replace(
-                    "    if found { 1 } else { 0 }",
-                    "    let n = if found { 1 } else { 0 }\n    drop(pair)\n    n",
-                ),
+                source
+                    .replace("            drop(pair)\n", "")
+                    .replace(
+                        "            if found { 1 } else { 0 }",
+                        "            let n = if found { 1 } else { 0 }\n            drop(pair)\n            n",
+                    ),
             ),
             (
                 "tail call",
-                source.replace("if found { 1 }", "if found { map_size(map_new()) }"),
+                source.replace(
+                    "if found { 1 }",
+                    "if found {\n                println(1)\n                1\n            }",
+                ),
             ),
             (
                 "tail projection",
                 source
-                    .replace("    drop(pair)\n", "")
-                    .replace("if found { 1 }", "if pair.0 { 1 }"),
+                    .replace("            drop(pair)\n", "")
+                    .replace(
+                        "            if found { 1 } else { 0 }",
+                        "            let out = if pair.0 { 1 } else { 0 }\n            drop(pair)\n            out",
+                    ),
             ),
             (
                 "match",
@@ -39050,8 +41914,8 @@ func main() -> i32 {
             (
                 "loop",
                 source.replace(
-                    "    if found { 1 } else { 0 }",
-                    "    while false { println(1) }\n    if found { 1 } else { 0 }",
+                    "            if found { 1 } else { 0 }",
+                    "            while false { println(1) }\n            if found { 1 } else { 0 }",
                 ),
             ),
         ] {
@@ -39079,32 +41943,33 @@ func main() -> i32 {
         let source = r#"
 func main() -> i32 {
     let key = "missing"
-    let root = map_new()
-    let pair = map_get(root, key)
-    let found = pair.0
-    drop(pair)
-    drop(root)
-    drop(key)
-    if found { 1 } else { 0 }
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, key)
+            let found = pair.0
+            drop(pair)
+            drop(root)
+            drop(key)
+            if found { 1 } else { 0 }
+        }
+        Err(status) => {
+            drop(key)
+            status
+        }
+    }
 }
 "#;
         let checked = crate::core::check_program(&parse(source)).unwrap();
         let analysis = checked
             .resource_analysis(&NodeId("function:main".into()))
             .unwrap();
-        let flow = analysis
+        let receipt = analysis
             .ordinary_map_owned_any_v2_cfg_receipt
             .as_ref()
-            .unwrap()
-            .flow
-            .as_ref()
             .unwrap();
-        let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(
-            tail,
-        ) = &flow.proof
-        else {
-            panic!("scalar source authority");
-        };
+        let tail = receipt
+            .settled_scalar_tail()
+            .expect("scalar source authority");
         assert_eq!(tail.string_drops.len(), 1);
         assert!(tail
             .string_drops
@@ -39113,10 +41978,9 @@ func main() -> i32 {
         for (label, candidate) in [
             (
                 "load after Drop in entry",
-                source.replace("    drop(key)\n", "").replace(
-                    "    let root = map_new()",
-                    "    drop(key)\n    let root = map_new()",
-                ),
+                source
+                    .replace("            drop(key)\n", "")
+                    .replace("    match map_new()", "    drop(key)\n    match map_new()"),
             ),
             (
                 "load after Drop in branch",
@@ -39127,27 +41991,30 @@ func main() -> i32 {
             ),
             (
                 "repeated Drop",
-                source.replace("    drop(key)\n", "    drop(key)\n    drop(key)\n"),
+                source.replace(
+                    "            drop(key)\n            if found",
+                    "            drop(key)\n            drop(key)\n            if found",
+                ),
             ),
             (
                 "assignment",
                 source.replace("let key =", "let mut key =").replace(
-                    "    drop(key)\n",
-                    "    key = \"different\"\n    drop(key)\n",
+                    "            drop(key)\n            if found",
+                    "            key = \"different\"\n            drop(key)\n            if found",
                 ),
             ),
             (
                 "projected Drop",
                 source.replace(
-                    "    let root = map_new()",
-                    "    let xs = [key]\n    drop(xs[0])\n    drop(xs)\n    let root = map_new()",
+                    "    match map_new()",
+                    "    let xs = [key]\n    drop(xs[0])\n    drop(xs)\n    match map_new()",
                 ),
             ),
             (
                 "capture",
                 source.replace(
-                    "    drop(key)\n",
-                    "    let reader = fn(ignored: i32) -> string { key }\n    drop(key)\n",
+                    "            drop(key)\n            if found",
+                    "            let reader = fn(ignored: i32) -> string { key }\n            drop(key)\n            if found",
                 ),
             ),
         ] {
@@ -39189,42 +42056,65 @@ func main() -> i32 {
             .flow
             .as_ref()
             .expect("three short-circuit branches receive an owner-free flow receipt");
+        let tail = receipt
+            .settled_scalar_tail()
+            .expect("Result-branch ZeroMissI32 carries settled scalar tail");
 
-        assert_eq!(receipt.actions.len(), 6);
-        assert_eq!(receipt.attempts.len(), 6);
+        assert_eq!(receipt.actions.len(), 7);
+        assert_eq!(receipt.attempts.len(), 7);
         assert_eq!(receipt.found_observation_receipts.len(), 2);
         assert_eq!(observation.owner, owner);
         assert_ne!(observation.formula_node, observation.return_node);
+        assert!(flow.reachable_blocks[&tail.return_block]
+            .points
+            .iter()
+            .any(|(point, kind)| {
+                point == &observation.return_node
+                    && *kind == crate::core::cfg::CfgPointKind::Expression
+            }));
         assert_eq!(
             flow.reachable_blocks
-                .iter()
-                .filter(|(_, block)| {
-                    matches!(block.terminator, Terminator::Return { .. })
-                        && block.points.iter().any(|(point, kind)| {
-                            point == &observation.return_node
-                                && *kind == crate::core::cfg::CfgPointKind::Expression
-                        })
+                .values()
+                .filter(|block| matches!(block.terminator, Terminator::Return { .. }))
+                .count(),
+            1,
+            "the Result-branch ZeroMissI32 graph exits at a single source Return block"
+        );
+        assert_eq!(
+            flow.reachable_blocks
+                .values()
+                .filter(|block| {
+                    block.points.iter().any(|(point, kind)| {
+                        point == &observation.return_node
+                            && *kind == crate::core::cfg::CfgPointKind::Expression
+                    })
                 })
                 .count(),
             1,
-            "the exact tail Load belongs to the unique source Return block"
+            "the exact tail Load belongs to the unique tail return block"
         );
         assert_ne!(
             observation.hit_observation.operation,
             observation.miss_observation.operation
         );
         assert_eq!(flow.entry, flow.split);
-        assert_eq!(flow.arm_edges.len(), 6);
+        assert_eq!(flow.arm_edges.len(), 4);
         assert_eq!(flow.reachable_blocks.len(), flow.live_owners_in.len());
         assert_eq!(flow.reachable_blocks.len(), flow.live_owners_out.len());
         assert_eq!(flow.reachable_edges.len(), flow.live_owners_on_edge.len());
-        assert!(flow.live_owners_in.values().all(BTreeSet::is_empty));
-        assert!(flow.live_owners_out.values().all(BTreeSet::is_empty));
-        assert!(flow.live_owners_on_edge.values().all(BTreeSet::is_empty));
+        assert!(flow.live_owners_out[&tail.split_block].is_empty());
+        assert!(flow.live_owners_in[&tail.return_block].is_empty());
+        assert!(flow.live_owners_out[&tail.return_block].is_empty());
 
         for selector in &observation.branch_selectors {
-            assert!(flow.arm_edges.contains(&selector.then_edge));
-            assert!(flow.arm_edges.contains(&selector.else_edge));
+            assert!(flow.reachable_edges.contains_key(&selector.then_edge));
+            assert!(flow.reachable_edges.contains_key(&selector.else_edge));
+            if selector.block != tail.split_block {
+                assert!(flow.live_owners_in[&selector.block].is_empty());
+            }
+            assert!(flow.live_owners_out[&selector.block].is_empty());
+            assert!(flow.live_owners_on_edge[&selector.then_edge].is_empty());
+            assert!(flow.live_owners_on_edge[&selector.else_edge].is_empty());
             assert_eq!(
                 flow.reachable_edges[&selector.then_edge].to,
                 selector.then_target
@@ -39259,8 +42149,8 @@ func main() -> i32 {
         );
 
         let extra_map_action = source.replace(
-            "let miss_pair = map_get(root, \"absent\")\n\n    drop(empty)",
-            "let miss_pair = map_get(root, \"absent\")\n    let ignored_size = map_size(root)\n\n    drop(empty)",
+            "let miss_pair = map_get(root, \"absent\")\n\n        drop(empty)",
+            "let miss_pair = map_get(root, \"absent\")\n        let ignored_size = map_size(root)\n\n        drop(empty)",
         );
         assert_ne!(
             extra_map_action, source,
@@ -39280,19 +42170,27 @@ func main() -> i32 {
         let branch_owner_action = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let flag = true
-    let observed = if flag {
-        let branch_root = map_new()
-        drop(branch_root)
-        map_size(root)
-    } else {
-        map_size(root)
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let flag = true
+            let observed = if flag {
+                match map_new() {
+                    Ok(branch_root) => {
+                        drop(branch_root)
+                        map_size(root)
+                    }
+                    Err(_status) => map_size(root),
+                }
+            } else {
+                map_size(root)
+            }
+            drop(pair)
+            drop(root)
+            observed
+        }
+        Err(status) => status,
     }
-    drop(pair)
-    drop(root)
-    observed
 }
 "#,
         );
@@ -39306,16 +42204,20 @@ func main() -> i32 {
         let one_arm_result_drop = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let flag = true
-    if flag {
-        drop(pair)
-    } else {
-        map_size(root)
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let flag = true
+            if flag {
+                drop(pair)
+            } else {
+                map_size(root)
+            }
+            drop(root)
+            0
+        }
+        Err(status) => status,
     }
-    drop(root)
-    0
 }
 "#,
         );
@@ -39332,16 +42234,20 @@ func main() -> i32 {
         let looped = parse(
             r#"
 func main() -> i32 {
-    let root = map_new()
-    let pair = map_get(root, "missing")
-    let flag = false
-    while flag {
-        map_size(root)
-        break
+    match map_new() {
+        Ok(root) => {
+            let pair = map_get(root, "missing")
+            let flag = false
+            while flag {
+                map_size(root)
+                break
+            }
+            drop(pair)
+            drop(root)
+            0
+        }
+        Err(status) => status,
     }
-    drop(pair)
-    drop(root)
-    0
 }
 "#,
         );
@@ -40638,7 +43544,7 @@ func direct_caller() -> i32 {
     fn ordinary_map_owned_any_v2_values_crosscall_string_receipt_is_separate_and_exact() {
         use crate::core::ownership::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerProfileVersion as ProfileVersion;
 
-        let checked = checked_values_program(
+        let checked = checked_values_result_program(
             r#"
 func direct_caller() -> bool {
     let snapshot = snapshot_values()
@@ -40657,26 +43563,32 @@ func direct_caller() -> bool {
             .resource_analysis(&producer_owner)
             .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
             .expect("producer V2 CFG receipt");
-        let producer_return = producer_cfg_receipt
-            .values_producer_return_receipt
+        let producer_result = producer_cfg_receipt
+            .values_result_producer_receipt
             .as_ref()
-            .expect("producer return receipt remains independently exact");
+            .expect("Result producer receipt remains independently exact");
         let caller_receipt = producer_cfg_receipt
             .values_crosscall_string_caller_receipt
             .as_ref()
             .expect("unique cross-call String caller receipt");
 
-        assert_eq!(caller_receipt.profile_version, ProfileVersion::V1);
+        assert_eq!(caller_receipt.profile_version, ProfileVersion::V3);
         assert_eq!(caller_receipt.producer_owner, producer_owner);
         assert_eq!(
             caller_receipt.producer_values_operation,
-            producer_return.values_operation
+            producer_result.values_operation
         );
-        assert_eq!(caller_receipt.producer_return, producer_return.return_value);
+        assert_eq!(
+            caller_receipt.producer_return,
+            producer_result.success_result
+        );
         assert_eq!(caller_receipt.call_target, producer_owner);
         assert_eq!(caller_receipt.expected_string, "owned value");
-        assert!(caller_receipt.producer_result_receipt.is_none());
-        assert_eq!(caller_receipt.snapshot_type, producer_return.snapshot_type);
+        assert_eq!(
+            caller_receipt.producer_result_receipt.as_ref(),
+            Some(producer_result)
+        );
+        assert_eq!(caller_receipt.snapshot_type, producer_result.snapshot_type);
         assert_eq!(
             caller_receipt.string_type,
             crate::core::ir::primitive_type_id(crate::core::PrimitiveType::String)
@@ -40723,7 +43635,8 @@ func direct_caller() -> bool {
             ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 caller_receipt,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40738,7 +43651,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_projection,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40753,7 +43667,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_expected,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40776,21 +43691,24 @@ func direct_caller() -> bool {
             .resource_analysis(&producer_owner)
             .and_then(|analysis| analysis.ordinary_map_owned_any_v2_cfg_receipt.as_ref())
             .expect("producer V2 CFG receipt");
-        let producer_return = producer_cfg_receipt
-            .values_producer_return_receipt
+        let producer_result = producer_cfg_receipt
+            .values_result_producer_receipt
             .as_ref()
-            .expect("producer return receipt remains independently exact");
+            .expect("Result producer receipt remains independently exact");
         let caller_receipt = producer_cfg_receipt
             .values_crosscall_string_caller_receipt
             .as_ref()
             .expect("unique two-entry cross-call String caller receipt");
 
-        assert_eq!(caller_receipt.profile_version, ProfileVersion::V2);
+        assert_eq!(caller_receipt.profile_version, ProfileVersion::V4);
         assert_eq!(caller_receipt.values_element_count, 2);
         assert_eq!(caller_receipt.index_value, 1);
         assert_eq!(caller_receipt.producer_sorted_keys, ["a", "b"]);
         assert_eq!(caller_receipt.expected_string, "second value");
-        assert!(caller_receipt.producer_result_receipt.is_none());
+        assert_eq!(
+            caller_receipt.producer_result_receipt.as_ref(),
+            Some(producer_result)
+        );
         assert_eq!(caller_receipt.producer_set_temporary_settlements.len(), 4);
         assert_eq!(
             caller_receipt
@@ -40838,16 +43756,16 @@ func direct_caller() -> bool {
             assert_eq!(expected_source, Some(&settlement.source_node));
             assert_eq!(expected_type, Some(&settlement.owner_type));
         }
-        assert_eq!(producer_return.root_settlements.len(), 3);
-        assert_eq!(producer_return.payload_settlements.len(), 2);
-        assert!(producer_return
+        assert_eq!(producer_result.root_settlements.len(), 6);
+        assert_eq!(producer_result.payload_settlements.len(), 8);
+        assert!(producer_result
             .root_settlements
             .iter()
-            .all(|settlement| settlement.drop_place_index == 0));
-        assert!(producer_return
+            .all(|settlement| settlement.place_index == 0));
+        assert!(producer_result
             .payload_settlements
             .iter()
-            .all(|settlement| settlement.drop_place_index == 0));
+            .all(|settlement| settlement.place_index == 0));
         assert!(producer_cfg_receipt.values_unpack_receipts.is_empty());
 
         let (cfgs, bodies, signatures, analyses) = values_receipt_inputs(&checked);
@@ -40855,7 +43773,8 @@ func direct_caller() -> bool {
             ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 caller_receipt,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40874,7 +43793,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_index,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40894,7 +43814,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_temporary_role,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40915,7 +43836,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_temporary_type,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40936,7 +43858,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &forged_temporary_source,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -40956,7 +43879,8 @@ func direct_caller() -> bool {
             !ordinary_map_owned_any_v2_values_crosscall_string_caller_receipt_is_exact(
                 &missing_temporary_source,
                 &producer_owner,
-                producer_return,
+                None,
+                Some(producer_result),
                 &cfgs,
                 &bodies,
                 &signatures,
@@ -41190,8 +44114,11 @@ func direct_caller() -> bool {
             .get(&producer_owner)
             .expect("typed producer callable");
         let mut body = callable.body.clone();
-        let ResolvedExprKind::Match { arms, .. } = &mut body.root.result.as_mut().unwrap().kind
-        else {
+        let root_match_expr = match &mut body.root.result.as_mut().unwrap().kind {
+            ResolvedExprKind::Cast { value, .. } => value.as_mut(),
+            _ => body.root.result.as_mut().unwrap(),
+        };
+        let ResolvedExprKind::Match { arms, .. } = &mut root_match_expr.kind else {
             panic!("the source-bound outer map_new match is required");
         };
         let error_arm = arms
@@ -41336,7 +44263,7 @@ func direct_caller() -> bool {
         for (label, caller, extra_items) in callers {
             let source = format!(
                 "{}\n{}\n{}\nfunc main() -> i32 {{ if direct_caller() {{ 0 }} else {{ 1 }} }}",
-                values_producer_source(),
+                values_result_producer_source(),
                 caller,
                 extra_items
             );

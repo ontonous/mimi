@@ -142,13 +142,35 @@ fn direct_drop(statement: &ResolvedStmt, local: &ResolvedLocalId) -> Option<Bran
     })
 }
 
-fn empty_list(expression: &ResolvedExpr, types: &ResolvedTypeTable) -> bool {
+fn is_values_list_type(types: &ResolvedTypeTable, ty: &ResolvedTypeId) -> bool {
+    matches!(
+        types.get(ty),
+        Some(ResolvedType::Nominal { item, arguments, .. })
+            if item.as_str() == "builtin:type:List"
+                && arguments.len() == 1
+                && matches!(
+                    types.get(&arguments[0]),
+                    Some(ResolvedType::DynamicAny { capability })
+                        if capability == "type.dynamic_value"
+                )
+    )
+}
+
+fn empty_list(
+    expression: &ResolvedExpr,
+    types: &ResolvedTypeTable,
+    expect_values_list: bool,
+) -> bool {
     matches!(&expression.kind, ResolvedExprKind::List(items) if items.is_empty())
-        && matches!(
-            types.get(&expression.ty),
-            Some(ResolvedType::Nominal { item, arguments, .. })
-                if item.as_str() == "builtin:type:List" && arguments.is_empty()
-        )
+        && if expect_values_list {
+            is_values_list_type(types, &expression.ty)
+        } else {
+            matches!(
+                types.get(&expression.ty),
+                Some(ResolvedType::Nominal { item, arguments, .. })
+                    if item.as_str() == "builtin:type:List" && arguments.is_empty()
+            )
+        }
 }
 
 fn direct_load(expression: &ResolvedExpr, local: &ResolvedLocalId, ty: &ResolvedTypeId) -> bool {
@@ -418,6 +440,7 @@ struct RecursiveBuild<'a> {
     snapshot_binding_point: Option<NodeId>,
     snapshot_local: Option<ResolvedLocalId>,
     snapshot_type: Option<ResolvedTypeId>,
+    outer_surface_return_type: Option<ResolvedTypeId>,
     surface_return_type: Option<ResolvedTypeId>,
     success_result: Option<NodeId>,
     actions: Vec<OrdinaryMapOwnedAnyV2Action>,
@@ -436,7 +459,7 @@ impl RecursiveBuild<'_> {
             return None;
         }
         let view = set_view(expression, input_root, self.body, self.types, self.i32_type)?;
-        let (output_root_type, _) = result_parts(self.types, &view.match_expression.ty)?;
+        let (output_root_type, _) = result_parts(self.types, &view.call.result)?;
         if self.body.locals.get(&view.output_root)?.ty != *output_root_type
             || view.output_root == *input_root
             || view.error_local == view.output_root
@@ -527,7 +550,11 @@ impl RecursiveBuild<'_> {
             .collect::<Vec<_>>();
         let err_drops = drop_sequence(err_block, &err_drop_locals)?;
         let err_result = err_block.result.as_deref()?;
-        if !empty_list(err_result, self.types) {
+        if !empty_list(
+            err_result,
+            self.types,
+            self.outer_surface_return_type.is_some(),
+        ) {
             return None;
         }
         let mut err_path = arm_path.to_vec();
@@ -620,23 +647,32 @@ impl RecursiveBuild<'_> {
                 .map(|(statement, local)| direct_drop(statement, local))
                 .collect::<Option<Vec<_>>>()?;
             let return_expression = ok_block.result.as_deref()?;
-            let ResolvedExprKind::Cast { value, conversion } = &return_expression.kind else {
-                return None;
-            };
-            if conversion.kind != crate::core::ir::CheckedConversionKind::ContainerErase
-                || conversion.from != snapshot_type
-                || !direct_load(value, snapshot_local, &snapshot_type)
-                || value.ty != snapshot_type
-                || !matches!(self.types.get(&conversion.to), Some(ResolvedType::Nominal { item, arguments, .. }) if item.as_str() == "builtin:type:List" && arguments.is_empty())
-                || return_expression.ty != conversion.to
-            {
-                return None;
+            if let Some(outer_surface) = &self.outer_surface_return_type {
+                if !direct_load(return_expression, snapshot_local, &snapshot_type)
+                    || return_expression.ty != snapshot_type
+                {
+                    return None;
+                }
+                self.surface_return_type = Some(outer_surface.clone());
+            } else {
+                let ResolvedExprKind::Cast { value, conversion } = &return_expression.kind else {
+                    return None;
+                };
+                if conversion.kind != crate::core::ir::CheckedConversionKind::ContainerErase
+                    || conversion.from != snapshot_type
+                    || !direct_load(value, snapshot_local, &snapshot_type)
+                    || value.ty != snapshot_type
+                    || !matches!(self.types.get(&conversion.to), Some(ResolvedType::Nominal { item, arguments, .. }) if item.as_str() == "builtin:type:List" && arguments.is_empty())
+                    || return_expression.ty != conversion.to
+                {
+                    return None;
+                }
+                self.surface_return_type = Some(conversion.to.clone());
             }
             self.values_operation = Some(values_expression.node_id.clone());
             self.snapshot_binding_point = Some(ok_block.statements[0].node_id.clone());
             self.snapshot_local = Some(snapshot_local.clone());
             self.snapshot_type = Some(snapshot_type);
-            self.surface_return_type = Some(conversion.to.clone());
             self.success_result = Some(return_expression.node_id.clone());
             self.paths.push(BranchPath {
                 arm_path: ok_path,
@@ -720,10 +756,24 @@ pub(super) fn collect(
         })
         .collect::<Option<Vec<_>>>()?;
     let root_result = body.root.result.as_deref()?;
+    let (match_expr, outer_surface_return_type) = match &root_result.kind {
+        ResolvedExprKind::Match { .. } => (root_result, None),
+        ResolvedExprKind::Cast { value, conversion }
+            if conversion.kind == crate::core::ir::CheckedConversionKind::ContainerErase
+                && conversion.to == signature.result
+                && root_result.ty == conversion.to
+                && is_values_list_type(types, &conversion.from)
+                && value.ty == conversion.from
+                && matches!(&value.kind, ResolvedExprKind::Match { .. }) =>
+        {
+            (value.as_ref(), Some(conversion.to.clone()))
+        }
+        _ => return None,
+    };
     let ResolvedExprKind::Match {
         scrutinee: new_call_expr,
         arms: new_arms,
-    } = &root_result.kind
+    } = &match_expr.kind
     else {
         return None;
     };
@@ -754,7 +804,7 @@ pub(super) fn collect(
     let new_err_expected = payload_locals.clone();
     let new_err_drops = drop_sequence(new_err_block, &new_err_expected)?;
     let new_err_result = new_err_block.result.as_deref()?;
-    if !empty_list(new_err_result, types) {
+    if !empty_list(new_err_result, types, outer_surface_return_type.is_some()) {
         return None;
     }
     let mut new_action = super::OrdinaryMapOwnedAnyV2Checker::build_action(
@@ -796,6 +846,7 @@ pub(super) fn collect(
         snapshot_binding_point: None,
         snapshot_local: None,
         snapshot_type: None,
+        outer_surface_return_type,
         surface_return_type: None,
         success_result: None,
         actions: vec![new_action],
@@ -1011,7 +1062,7 @@ pub(super) fn collect(
         profile_version,
         owner: body.owner.clone(),
         map_new_operation: new_call_expr.node_id.clone(),
-        map_new_match: root_result.node_id.clone(),
+        map_new_match: match_expr.node_id.clone(),
         map_new_ok_arm: new_ok_arm.node_id.clone(),
         map_new_ok_pattern: new_ok_pattern.node_id.clone(),
         initial_root: initial_root.clone(),

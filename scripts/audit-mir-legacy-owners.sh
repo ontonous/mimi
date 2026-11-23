@@ -1605,7 +1605,7 @@ bytecode_narrow_map_any_route_binding() {
     # profiles, typed route-token variants, and VM anchors. Check both public
     # adapters and the shared receipt validation path explicitly.
     local result_profile_context result_route_token_context wrapper_context
-    result_profile_context="$(sed -n '/^fn compile_mir_program_with_values_result_crosscall_string_caller_profile(/,/^pub fn compile_mir_program_with_map_root_producer_caller_route(/p' "$mir_source")"
+    result_profile_context="$(sed -n '/^fn validate_result_route_receipt(/,/^pub fn compile_mir_program_with_map_root_producer_caller_route(/p' "$mir_source")"
     result_route_token_context="$(sed -n '/fn expected_profile(self)/,/^    }/p' "$mir_source")"
     for spec in \
         'compile_mir_program_with_values_result_crosscall_string_caller_route|ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_CROSSCALL_STRING_CALLER_PROFILE|false|ValuesResultCrosscallStringCaller' \
@@ -1619,6 +1619,7 @@ bytecode_narrow_map_any_route_binding() {
             audit_failed=1
         fi
         if ! printf '%s\n' "$result_profile_context" | rg -F 'validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(' >/dev/null \
+            || ! printf '%s\n' "$result_profile_context" | rg -F 'validate_result_route_receipt(' >/dev/null \
             || ! printf '%s\n' "$result_profile_context" | rg -F 'if receipt.profile != expected_profile' >/dev/null \
             || ! printf '%s\n' "$result_profile_context" | rg -F '.validate_against_program(program)' >/dev/null \
             || ! printf '%s\n' "$result_profile_context" | rg -F 'receipt.manifest_round_trip()' >/dev/null \
@@ -1778,7 +1779,7 @@ bytecode_observer_v1_route_receipt_binding() {
     observer_anchor_context="$(printf '%s\n' "$inner_context" | sed -n '/if let (Some(route_receipt), Some(checker_receipts)) = (/,/observer_bindings,/p')"
     profile_context="$(sed -n '/^impl CanonicalMirRouteProfile {/,/^    \/\/\/ Return whether checker-owned/p' "$route_source")"
     main_profile_context="$(sed -n '/^pub(crate) fn route_receipt_profile_for_checked(/,/^}/p' "$dispatcher")"
-    # Strip only the three newer Result-branch prefix guards (and explanatory
+    # Strip only the Result-branch prefix guards (and explanatory
     # leading comments inside that prefix) after validating each guard
     # independently below, leaving the established ordered selector contract intact.
     main_profile_context_without_result="$(printf '%s\n' "$main_profile_context" | awk '
@@ -1795,18 +1796,27 @@ bytecode_observer_v1_route_receipt_binding() {
             print line3
             next
         }
-        /^[[:space:]]*if checked$/ {
-            if (getline line2 <= 0) { print; exit }
-            if (getline line3 <= 0) { print; print line2; exit }
-            if (getline line4 <= 0) { print; print line2; print line3; exit }
-            if (line2 ~ /\.resource_analyses\(\)$/ && line3 ~ /\.values\(\)$/ && line4 ~ /\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)$/) {
+        /^[[:space:]]*if admission\.ordinary_map_owned_any_v2_values_result_(crosscall_string_caller_v4|crosscall_string_caller_v3|producer_caller)\(\) \{/ {
+            while (getline body > 0 && body !~ /^[[:space:]]*}[[:space:]]*$/) {}
+            next
+        }
+        /^[[:space:]]*if !admission\.ordinary_map_owned_any_v2\.is_direct_print_result\(\)$/ {
+            buf = $0 "\n"
+            matched = 0
+            while (getline line > 0) {
+                buf = buf line "\n"
+                if (line ~ /\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)$/) {
+                    matched = 1
+                }
+                if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
+                    break
+                }
+            }
+            if (matched) {
                 while (getline body > 0 && body !~ /^[[:space:]]*}[[:space:]]*$/) {}
                 next
             }
-            print
-            print line2
-            print line3
-            print line4
+            printf "%s", buf
             next
         }
         /if admission\.ordinary_map_owned_any_v2$/ {
@@ -1896,7 +1906,10 @@ bytecode_observer_v1_route_receipt_binding() {
         || [ "$values_crosscall_v1_selector_count" -ne 1 ] \
         || [ "$values_crosscall_v2_selector_count" -ne 1 ] \
         || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\s*\.ordinary_map_owned_any_v2\s*\.ordinary_map_owned_any_v2_values_local_index_i32_result_branch\(\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_LOCAL_INDEX_I32_RESULT_BRANCH_PROFILE;\s*\}' >/dev/null \
-        || ! printf '%s\n' "$main_profile_context" | rg -U 'if checked\s*\.resource_analyses\(\)\s*\.values\(\)\s*\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1\s*\.as_str\(\);\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller\s*\.as_str\(\);\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\.ordinary_map_owned_any_v2_values_result_producer_caller\(\)\s*\{\s*return mimi::core::mir::CanonicalMirRouteProfile::\s*OrdinaryMapOwnedAnyV2ValuesResultProducerCaller\s*\.as_str\(\);\s*\}' >/dev/null \
+        || ! printf '%s\n' "$main_profile_context" | rg -U 'if !admission\.ordinary_map_owned_any_v2\.is_direct_print_result\(\)[\s\S]*?checked\s*\.resource_analyses\(\)\s*\.values\(\)\s*\.any\(\|analysis\| analysis\.has_ordinary_map_owned_get_result_branch_v3_receipt\(\)\)\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND;\s*\}' >/dev/null \
         || ! printf '%s\n' "$main_profile_context" | rg -U 'if admission\.ordinary_map_owned_any_v2\s*==\s*mimi::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult\s*\{\s*return mimi::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;\s*\}' >/dev/null \
         || ! printf '%s\n' "$main_profile_context_without_result" | rg -U "$main_profile_pattern" >/dev/null \
         || ! printf '%s\n' "$main_route_context" | rg -U "$main_route_pattern" >/dev/null \

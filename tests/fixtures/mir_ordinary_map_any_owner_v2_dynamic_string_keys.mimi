@@ -5,41 +5,38 @@ func main() -> i32 {
     let key = base_key + "!"
     let label = Label { text: "payload" }
     match map_new() {
-        Ok(empty) => {
-            match map_set(empty, base_key + "!", label) {
-                Ok(populated) => {
-                    let present = has_key(populated, key)
-                    let computed_present = has_key(populated, base_key + "!")
-                    let pair = map_get(populated, base_key + "!")
-                    let removed = map_remove(populated, base_key + "!")
-                    let removed_present = has_key(removed, key)
-                    let _remaining_size = map_size(removed)
-                    drop(pair)
-                    drop(empty)
-                    drop(populated)
-                    drop(removed)
-                    drop(label)
-                    drop(key)
-                    drop(base_key)
-                    println(present)
-                    println(computed_present)
-                    println(removed_present)
-                    0
-                },
-                Err(status) => {
-                    drop(empty)
-                    drop(label)
-                    drop(key)
-                    drop(base_key)
-                    status
-                },
-            }
-        },
-        Err(status) => {
+        Ok(empty) => match map_set(empty, base_key + "!", label) {
+            Ok(populated) => {
+            let present = has_key(populated, key)
+            let computed_present = has_key(populated, base_key + "!")
+            let pair = map_get(populated, base_key + "!")
+            let removed = map_remove(populated, base_key + "!")
+            let removed_present = has_key(removed, key)
+            let _remaining_size = map_size(removed)
+            drop(empty)
+            drop(populated)
+            drop(removed)
             drop(label)
             drop(key)
             drop(base_key)
+            let pair_found = pair.0
+            let snapshot = pair.1 as Label
+            drop(pair)
+            let snapshot_ok = pair_found == (snapshot.text == "payload")
+            drop(snapshot)
+            println(present)
+            println(computed_present)
+            println(removed_present)
+            println(snapshot_ok)
+            0
+            }
+            Err(status) => {
+        drop(empty)
+        status
+            }
+        }
+        Err(status) => {
             status
-        },
+        }
     }
 }

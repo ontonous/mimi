@@ -46,8 +46,8 @@ fn keys_snapshot_checked_route_executes_in_reference_after_owner_drops() {
     assert_eq!(source_receipt.static_key_utf8.as_slice(), b"answer");
     assert_eq!(
         main.ownership.checker_ordinary_map_owned_any_v2.len(),
-        5,
-        "New, Set, Keys, and the two Map-root drops are all receipted"
+        6,
+        "New, Set, Keys, two Ok Map-root drops, and the Err Map-root drop are all receipted"
     );
 
     let reference = reference::MirReferenceInterpreter::new(&canonical)
@@ -11099,13 +11099,28 @@ func main() -> i32 {
     function
         .validate()
         .expect("all typed Map operations match their private Checker key receipts");
-    let entry = function.blocks.get(&function.entry).expect("entry block");
-    let keyed_operations = entry
-        .instructions
-        .iter()
+    let set_block = function
+        .blocks
+        .values()
+        .find(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { .. }
+                        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { .. }
+                        | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { .. }
+                )
+            })
+        })
+        .expect("set/get block");
+    let keyed_operations = function
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
         .filter_map(|instruction| {
             let key = match &instruction.kind {
                 MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Set { key, .. }
+                | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1SetResult { key, .. }
                 | MirInstructionKind::OrdinaryMapOwnedGetI32StringV1GetI32 { key, .. } => key,
                 _ => return None,
             };
@@ -11116,13 +11131,15 @@ func main() -> i32 {
     let key = keyed_operations[0].1;
     assert!(key.as_str().starts_with("local:"));
     assert!(keyed_operations.iter().all(|(_, used)| *used == key));
-    assert!(!entry.instructions.iter().any(|instruction| {
-        matches!(
-            &instruction.kind,
-            MirInstructionKind::Clone { result, .. } if result == key
-        )
+    assert!(!function.blocks.values().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::Clone { result, .. } if result == key
+            )
+        })
     }));
-    let last_keyed_operation = entry
+    let last_keyed_operation = set_block
         .instructions
         .iter()
         .rposition(|instruction| {
@@ -11131,7 +11148,7 @@ func main() -> i32 {
                 .any(|(operation, _)| operation.id == instruction.id)
         })
         .expect("last keyed operation");
-    assert!(!entry.instructions[..=last_keyed_operation]
+    assert!(!set_block.instructions[..=last_keyed_operation]
         .iter()
         .any(|instruction| matches!(&instruction.kind, MirInstructionKind::Drop { value } if value == key)));
 
@@ -11198,38 +11215,53 @@ func main() -> i32 {
         .expect("owned-get CFG receipt");
     assert_eq!(
         cfg_receipt.profile_version,
-        crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::EntryClosedTailV1
+        crate::core::OrdinaryMapOwnedGetI32StringV1CfgProfileVersion::ResultBranchV3
     );
 
     let mut reordered = function.clone();
-    let drop_instructions = reordered
-        .ownership
-        .checker_ordinary_map_owned_get_i32_string_v1
+    let drop_block_id = reordered
+        .blocks
         .iter()
-        .filter(|action| action.kind == crate::core::OrdinaryMapOwnedGetI32StringV1ActionKind::Drop)
-        .map(|action| action.instruction.clone())
+        .find_map(|(block_id, block)| {
+            let has_both = block
+                .instructions
+                .iter()
+                .filter(|instruction| {
+                    matches!(
+                        &instruction.kind,
+                        MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+                    )
+                })
+                .count()
+                == 2;
+            has_both.then(|| block_id.clone())
+        })
+        .expect("inner Ok block holding both Map drop instructions");
+    let drop_instructions = reordered.blocks[&drop_block_id]
+        .instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| {
+            matches!(
+                &instruction.kind,
+                MirInstructionKind::OrdinaryMapOwnedGetI32StringV1Drop { .. }
+            )
+        })
+        .map(|(index, instruction)| (index, instruction.id.clone()))
         .collect::<Vec<_>>();
     assert_eq!(drop_instructions.len(), 2, "two independent Map roots");
 
-    let first_index = reordered.blocks[&reordered.entry]
-        .instructions
-        .iter()
-        .position(|instruction| instruction.id == drop_instructions[0])
-        .expect("first Map drop instruction");
-    let second_index = reordered.blocks[&reordered.entry]
-        .instructions
-        .iter()
-        .position(|instruction| instruction.id == drop_instructions[1])
-        .expect("second Map drop instruction");
+    let first_index = drop_instructions[0].0;
+    let second_index = drop_instructions[1].0;
     assert!(first_index < second_index);
     reordered
         .blocks
-        .get_mut(&reordered.entry)
-        .expect("entry block")
+        .get_mut(&drop_block_id)
+        .expect("drop block")
         .instructions
         .swap(first_index, second_index);
 
-    let instruction_order = reordered.blocks[&reordered.entry]
+    let instruction_order = reordered.blocks[&drop_block_id]
         .instructions
         .iter()
         .enumerate()
@@ -11251,7 +11283,7 @@ func main() -> i32 {
     assert!(
         errors.iter().any(|error| error
             .message
-            .contains("entry MIR action order disagrees with Checker CFG point order")),
+            .contains("source action order disagrees with MIR instruction order")),
         "expected Checker point-rank rejection, got {errors:?}"
     );
 }
@@ -11790,6 +11822,7 @@ func main() -> i32 {
                     let snapshot = map_get_string(alias, "text")
                     drop(snapshot)
                     let size = map_size(alias)
+                    drop(alias)
                     size - 1
                 },
                 Err(status) => { drop(source); status },
@@ -11864,6 +11897,7 @@ func main() -> i32 {
                     let text = snapshot.unwrap()
                     drop(snapshot)
                     drop(text)
+                    drop(mixed)
                     0
                 },
                 Err(status) => { drop(empty); status },
@@ -11936,7 +11970,9 @@ func main() -> i32 {
             .any(|error| error.message.contains("use after consuming")),
         "{errors:?}"
     );
+    let route_receipt = program.route_receipt(super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
     let value = super::reference::MirReferenceInterpreter::new(&program)
+        .with_route_receipt(&route_receipt)
         .execute(&NodeId("function:main".into()), &[])
         .expect("the source Result and projected String have independent destruction");
     assert_eq!(value, super::reference::MirRuntimeValue::Int(0));
@@ -12000,14 +12036,24 @@ func main() -> i32 {
         .any(|error| { error.message.contains("scalar-tail source return") }));
 
     let mut wrong_load = function.clone();
-    let condition = match &wrong_load.blocks[&wrong_load.entry].terminator {
-        MirTerminator::Branch { condition, .. } => condition.clone(),
-        _ => panic!("the source if is the first selector"),
-    };
-    let instruction = wrong_load.blocks.get_mut(&wrong_load.entry).unwrap().instructions
-        .iter_mut().find(|instruction| {
+    let (split_block_id, condition) = wrong_load
+        .blocks
+        .iter()
+        .find_map(|(block_id, block)| match &block.terminator {
+            MirTerminator::Branch { condition, .. } => Some((block_id.clone(), condition.clone())),
+            _ => None,
+        })
+        .expect("the scalar branch selector");
+    let instruction = wrong_load
+        .blocks
+        .get_mut(&split_block_id)
+        .unwrap()
+        .instructions
+        .iter_mut()
+        .find(|instruction| {
             matches!(&instruction.kind, MirInstructionKind::Clone { result, .. } if result == &condition)
-        }).unwrap();
+        })
+        .unwrap();
     if let MirInstructionKind::Clone { source, .. } = &mut instruction.kind {
         *source = alternate_flag;
     }
@@ -12070,29 +12116,46 @@ func main() -> i32 {
     );
     let program = reference::MirProgram::from_checked_program(&checked).unwrap();
     let function = &program.functions()[&NodeId("function:main".into())];
-    let flow = function
+    let cfg_receipt = function
         .ownership
         .checker_ordinary_map_owned_any_v2_cfg_receipt
         .as_ref()
-        .unwrap()
-        .flow
-        .as_ref()
         .unwrap();
-    let crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::SettledScalarBranchTailV1(tail) =
-        &flow.proof
-    else {
-        panic!("scalar source authority");
-    };
+    let tail = cfg_receipt
+        .settled_scalar_tail()
+        .expect("scalar source authority");
     let (binding, drop) = tail.string_drops.first_key_value().unwrap();
     let value = MirValueId::new(format!("local:{}", binding.0 .0)).unwrap();
     let id = format!("inst:drop.{}:{}", drop.place_index, drop.point.0);
-    assert!(function.blocks[&function.entry].instructions.iter().any(|instruction| {
-        instruction.id.as_str() == id && matches!(&instruction.kind, MirInstructionKind::Drop { value: actual } if actual == &value)
+    let expected_condition = MirValueId::new(format!("expr:{}", tail.first_condition.0)).unwrap();
+    let split_mir = function
+        .blocks
+        .iter()
+        .find(|(_, block)| {
+            matches!(&block.terminator, MirTerminator::Branch { condition, .. } if condition == &expected_condition)
+        })
+        .map(|(block_id, _)| block_id.clone())
+        .expect("scalar branch selector");
+    assert!(function.blocks[&split_mir].instructions.iter().any(|instruction| {
+        instruction.id.as_str() == id
+            && matches!(&instruction.kind, MirInstructionKind::Drop { value: actual } if actual == &value)
     }));
+    let err_arm_blocks: std::collections::BTreeSet<String> =
+        match cfg_receipt.flow.as_ref().map(|flow| &flow.proof) {
+            Some(crate::core::ownership::OrdinaryMapOwnedAnyV2CfgFlowProof::ResultBranchV1(
+                branches,
+            )) => branches
+                .iter()
+                .map(|branch| format!("bb:match.arm:{}", branch.err_arm.0))
+                .collect(),
+            _ => std::collections::BTreeSet::new(),
+        };
     assert!(function
         .blocks
         .iter()
-        .filter(|(block, _)| *block != &function.entry)
+        .filter(|(block_id, _)| {
+            *block_id != &split_mir && !err_arm_blocks.contains(block_id.as_str())
+        })
         .all(|(_, block)| !block
             .instructions
             .iter()

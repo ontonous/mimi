@@ -8984,6 +8984,7 @@ pub(crate) fn validate_proof_worklist(
         use crate::core::ir::TypedCallEffectAuthority;
 
         let new_result_receipt = function.ownership.ordinary_map_new_result_receipt();
+        let set_result_receipt = function.ownership.ordinary_map_set_lineage_receipt();
         let set_get_i32_receipt = function
             .ownership
             .ordinary_map_set_get_i32_lineage_receipt();
@@ -9044,6 +9045,87 @@ pub(crate) fn validate_proof_worklist(
                     .is_some_and(|value| value.ty == super::types::ordinary_map_owned_any_v2_type_id())
                 && expected_result.as_ref().is_ok_and(|result| {
                     function.values.get(result).is_some_and(|value| value.ty == receipt.status_type)
+                })
+        });
+        let set_result_new_bridge = set_result_receipt.is_some_and(|receipt| {
+            let expected_result =
+                MirValueId::new(format!("local:{}", receipt.new_result_local.0 .0));
+            let expected_instruction = super::MirInstructionId::new(format!(
+                "inst:ordinary_map_set_lineage:new_result:{}",
+                receipt.new_operation.0
+            ));
+            matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_new")
+                && call.call_node == receipt.new_operation
+                && call.result_type == receipt.new_result_type
+                && expected_instruction.is_ok_and(|instruction| instruction == call.instruction)
+                && expected_result
+                    .as_ref()
+                    .is_ok_and(|result| call.result.as_ref() == Some(result))
+                && call.arguments.is_empty()
+                && expected_result.as_ref().is_ok_and(|result| {
+                    function.values.get(result).is_some_and(|value| {
+                        value.ty == super::types::ordinary_map_owned_any_v2_root_result_type_id()
+                    })
+                })
+        });
+        let set_result_set_bridge = set_result_receipt.is_some_and(|receipt| {
+            let expected_result =
+                MirValueId::new(format!("local:{}", receipt.set_result_local.0 .0));
+            let root = MirValueId::new(format!("local:{}", receipt.initial_root_local.0 .0));
+            let key = MirValueId::new("literal:ordinary_map_set_lineage:answer");
+            let value = MirValueId::new("literal:ordinary_map_set_lineage:42");
+            let expected_instruction = super::MirInstructionId::new(format!(
+                "inst:ordinary_map_set_lineage:set_result:{}",
+                receipt.set_operation.0
+            ));
+            matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_set")
+                && call.call_node == receipt.set_operation
+                && call.result_type == receipt.set_result_type
+                && expected_instruction.is_ok_and(|instruction| instruction == call.instruction)
+                && expected_result
+                    .as_ref()
+                    .is_ok_and(|result| call.result.as_ref() == Some(result))
+                && call.arguments.len() == 3
+                && root
+                    .as_ref()
+                    .is_ok_and(|root| call.arguments[0].value == *root)
+                && call.arguments[0].expression.origin == receipt.set_receiver
+                && call.arguments[0].expression.ty == receipt.initial_root_type
+                && key.as_ref().is_ok_and(|key| call.arguments[1].value == *key)
+                && value
+                    .as_ref()
+                    .is_ok_and(|value| call.arguments[2].value == *value)
+        });
+        let set_result_size_bridge = set_result_receipt.is_some_and(|receipt| {
+            let expected_result = MirValueId::new(format!("local:{}", receipt.size_local.0 .0));
+            let expected_root =
+                MirValueId::new(format!("local:{}", receipt.updated_root_local.0 .0));
+            let expected_instruction = super::MirInstructionId::new(format!(
+                "inst:ordinary_map_set_lineage:size:{}",
+                receipt.size_operation.0
+            ));
+            let i32_type = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+            matches!(&call.callee, ResolvedCallee::Builtin(builtin) if builtin.as_str() == "map_size")
+                && call.call_node == receipt.size_operation
+                && call.result_type == i32_type
+                && expected_instruction.is_ok_and(|instruction| instruction == call.instruction)
+                && expected_result
+                    .as_ref()
+                    .is_ok_and(|result| call.result.as_ref() == Some(result))
+                && call.arguments.len() == 1
+                && expected_root
+                    .as_ref()
+                    .is_ok_and(|root| call.arguments[0].value == *root)
+                && call.arguments[0].expression.origin == receipt.size_receiver
+                && call.arguments[0].expression.ty == receipt.updated_root_type
+                && function.values.get(&call.arguments[0].value).is_some_and(|value| {
+                    value.ty == super::types::ordinary_map_owned_any_v2_type_id()
+                })
+                && expected_result.as_ref().is_ok_and(|result| {
+                    function
+                        .values
+                        .get(result)
+                        .is_some_and(|value| value.ty == i32_type)
                 })
         });
         let set_get_i32_new_bridge = set_get_i32_receipt.is_some_and(|receipt| {
@@ -9296,6 +9378,13 @@ pub(crate) fn validate_proof_worklist(
                 true
             }
             ResolvedCallee::Builtin(builtin)
+                if (builtin.as_str() == "map_new" && set_result_new_bridge)
+                    || (builtin.as_str() == "map_set" && set_result_set_bridge)
+                    || (builtin.as_str() == "map_size" && set_result_size_bridge) =>
+            {
+                true
+            }
+            ResolvedCallee::Builtin(builtin)
                 if (builtin.as_str() == "map_new" && set_get_i32_new_bridge)
                     || (builtin.as_str() == "map_set" && set_get_i32_set_bridge)
                     || (builtin.as_str() == "map_get_i32" && set_get_i32_get_bridge) =>
@@ -9356,7 +9445,9 @@ pub(crate) fn validate_proof_worklist(
             validate_expression(&guard.condition, function, catalog, true, errors);
         }
         for (index, argument) in call.arguments.iter().enumerate() {
-            let new_result_size_argument = new_result_size_bridge && index == 0;
+            let new_result_size_argument =
+                (new_result_size_bridge || set_result_set_bridge || set_result_size_bridge)
+                    && index == 0;
             let source_ty = argument.expression.expression_types.get(&Vec::new());
             if source_ty != Some(&argument.conversion.from)
                 || (!new_result_size_argument
@@ -9511,6 +9602,32 @@ pub(crate) fn validate_proof_worklist(
                 (
                     ResolvedCallee::Builtin(builtin),
                     super::MirInstructionKind::OrdinaryMapOwnedAnyV2New { result },
+                ) if builtin.as_str() == "map_new" && set_result_new_bridge => {
+                    call.result.as_ref() == Some(result) && expected_arguments.is_empty()
+                }
+                (
+                    ResolvedCallee::Builtin(builtin),
+                    super::MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult {
+                        result,
+                        source,
+                        key,
+                        value,
+                    },
+                ) if builtin.as_str() == "map_set" && set_result_set_bridge => {
+                    call.result.as_ref() == Some(result)
+                        && expected_arguments.as_slice()
+                            == [source.clone(), key.clone(), value.clone()]
+                }
+                (
+                    ResolvedCallee::Builtin(builtin),
+                    super::MirInstructionKind::OrdinaryMapOwnedAnyV2Size { result, root },
+                ) if builtin.as_str() == "map_size" && set_result_size_bridge => {
+                    call.result.as_ref() == Some(result)
+                        && expected_arguments.as_slice() == std::slice::from_ref(root)
+                }
+                (
+                    ResolvedCallee::Builtin(builtin),
+                    super::MirInstructionKind::OrdinaryMapOwnedAnyV2New { result },
                 ) if builtin.as_str() == "map_new" && set_get_i32_new_bridge => {
                     call.result.as_ref() == Some(result) && expected_arguments.is_empty()
                 }
@@ -9636,6 +9753,8 @@ pub(crate) fn validate_proof_worklist(
             })
             .count();
         if !new_result_new_bridge
+            && !set_result_new_bridge
+            && !set_result_set_bridge
             && !set_get_i32_new_bridge
             && !set_get_string_new_bridge
             && !set_get_any_i32_new_bridge

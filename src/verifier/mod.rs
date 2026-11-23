@@ -133,6 +133,12 @@ pub fn verify_mir(
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
         ));
     }
+    if mir_program_has_ordinary_map_owned_any_v2_values_result_producer_caller_signal(program) {
+        return Err(format!(
+            "{}: ordinary Map/Any owner-v2 Values Result producer/caller requires its exact CheckedProgram-bound verifier route",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        ));
+    }
     if crate::core::mir::validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_mir_route(
         program,
     )
@@ -680,6 +686,38 @@ pub fn verify_mir_with_ordinary_map_owned_any_v2_values_local_index_i32_result_b
         receipt,
         &source_hash,
         "verify_mir_with_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route",
+    )?;
+    Ok(results)
+}
+
+/// Verify the Checker-bound owned-Get ResultBranchV3 island after validating
+/// the exact CheckedProgram/MIR identity and whole-program capabilities.
+/// Unbound `ResultBranchV3` graphs continue to be rejected at generic entries.
+pub fn verify_mir_with_ordinary_map_owned_get_result_branch_v3_route(
+    checked: &crate::core::CheckedProgram,
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
+        checked, program, receipt,
+    )
+    .map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: owned-Get ResultBranchV3 whole-program capability rejected the route: {errors:?}"
+        )
+    })?;
+    let results = mir::verify_program_with_ordinary_map_owned_get_result_branch_v3_route(
+        checked,
+        program,
+        source_hash.clone(),
+        receipt,
+    )?;
+    validate_mir_result_provenance(
+        &results,
+        receipt,
+        &source_hash,
+        "verify_mir_with_ordinary_map_owned_get_result_branch_v3_route",
     )?;
     Ok(results)
 }
@@ -1980,6 +2018,82 @@ pub fn verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_
     Ok(results)
 }
 
+/// Verify the exact Result-branch Values producer and length-observing caller
+/// route against its CheckedProgram-bound receipt.
+pub fn verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+    checked: &crate::core::CheckedProgram,
+    program: &crate::core::mir::reference::MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE;
+    if receipt.profile != profile {
+        return Err(format!(
+            "{}: Values Result producer/caller verifier requires exact profile '{profile}', found '{}'",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            receipt.profile
+        ));
+    }
+    checked
+        .validate_backend(crate::core::BackendProfile::Verifier)
+        .map_err(format_check_errors)?;
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            format!(
+                "{}: Values Result producer/caller route receipt rejected: {message}",
+                crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+            )
+        })?;
+    let expected =
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked, program,
+        )
+        .map_err(|message| {
+            format!(
+                "{}: Values Result producer/caller Checker/MIR route rejected: {message}",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })?;
+    if &expected != receipt {
+        return Err(format!(
+            "{}: Values Result producer/caller supplied route receipt differs from the Checker-bound receipt",
+            crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+        program,
+    )
+    .map_err(|message| {
+        format!(
+            "{}: Values Result producer/caller MIR census rejected: {message}",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })?;
+    validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+        checked, program, receipt,
+    )
+    .map_err(|errors| {
+        format!(
+            "MIR-CAPABILITY-001: Values Result producer/caller verifier capability rejected the graph: {errors:?}"
+        )
+    })?;
+    let results =
+        mir::verify_program_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked,
+            program,
+            receipt,
+            source_hash.clone(),
+        )?;
+    validate_mir_result_provenance(
+        &results,
+        receipt,
+        &source_hash,
+        "verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route",
+    )?;
+    Ok(results)
+}
+
 /// Verify the exact source-bound heterogeneous Values slice: UTF-8-sorted
 /// entries `b -> String`, then `a -> i32`, selecting String index one. The raw
 /// MIR receipt API intentionally cannot authorize this owner transfer.
@@ -2485,6 +2599,46 @@ fn mir_program_has_ordinary_map_owned_any_v2_values_result_crosscall_string_call
             .is_ok_and(|receipts| !receipts.is_empty())
 }
 
+fn mir_program_has_ordinary_map_owned_any_v2_values_result_producer_caller_signal(
+    program: &crate::core::mir::reference::MirProgram,
+) -> bool {
+    let values_ty = crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id();
+    let has_result_set = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.kind,
+                    crate::core::mir::MirInstructionKind::OrdinaryMapOwnedAnyV2SetResult { .. }
+                )
+            })
+        })
+    });
+    let has_values_len = program.functions().values().any(|function| {
+        function.blocks.values().any(|block| {
+            block.instructions.iter().any(|instruction| {
+                matches!(
+                    &instruction.kind,
+                    crate::core::mir::MirInstructionKind::ListOp {
+                        operation: crate::core::mir::MirListOperation::Len,
+                        list,
+                        ..
+                    } if function.values.get(list).is_some_and(|value| value.ty == values_ty)
+                )
+            })
+        })
+    });
+    (has_result_set
+        && has_values_len
+        && mir_program_has_ordinary_map_owned_any_v2_values_producer_caller_signal(program))
+        || crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+            program,
+        )
+        .is_ok()
+        || program
+            .ordinary_map_owned_any_v2_values_result_producer_caller_receipts()
+            .is_ok_and(|receipts| !receipts.is_empty())
+}
+
 fn mir_program_has_record_unit_string_field_output(
     program: &crate::core::mir::reference::MirProgram,
 ) -> bool {
@@ -2704,6 +2858,16 @@ fn validate_ordinary_map_owned_any_v2_receipt_binding(
     {
         return Err(format!(
             "{}: ordinary Map/Any owner-v2 Values Result caller requires its exact V3/V4 CheckedProgram-aware verifier API (receipt_profile='{}')",
+            crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+            receipt.profile
+        ));
+    }
+    if receipt.profile
+        == crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_VALUES_RESULT_PRODUCER_CALLER_PROFILE
+        || mir_program_has_ordinary_map_owned_any_v2_values_result_producer_caller_signal(program)
+    {
+        return Err(format!(
+            "{}: ordinary Map/Any owner-v2 Values Result producer/caller requires its exact CheckedProgram-aware verifier API (receipt_profile='{}')",
             crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
             receipt.profile
         ));
@@ -3313,6 +3477,20 @@ pub fn validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_cr
     )
 }
 
+/// Run the whole-program verifier capability gate for the Result-branch Values
+/// producer and its length-observing caller.
+pub fn validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+    checked: &crate::core::CheckedProgram,
+    program: &crate::core::mir::reference::MirProgram,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), Vec<String>> {
+    mir_capability::validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+        checked,
+        program,
+        route_receipt,
+    )
+}
+
 /// Run the whole-program verifier capability gate for the exact
 /// Checker-sealed immutable i32-zero Values index route.
 pub fn validate_mir_capabilities_with_ordinary_map_owned_any_v2_values_local_index_i32_route(
@@ -3393,6 +3571,21 @@ pub fn validate_mir_capabilities_with_ordinary_map_owned_any_v2_map_root_get_any
     route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
 ) -> Result<(), Vec<String>> {
     mir_capability::validate_mir_capabilities_with_ordinary_map_owned_any_v2_map_root_get_any_caller_route(
+        checked,
+        program,
+        route_receipt,
+    )
+}
+
+/// Run the whole-program capability gate for the Checker-bound owned-Get
+/// ResultBranchV3 island. The raw capability API keeps `NewResult`,
+/// `SetResult`, `Result<V1Root, i32>`, and CFG block-parameter roots closed.
+pub fn validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
+    checked: &crate::core::CheckedProgram,
+    program: &crate::core::mir::reference::MirProgram,
+    route_receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), Vec<String>> {
+    mir_capability::validate_mir_capabilities_with_ordinary_map_owned_get_result_branch_v3_route(
         checked,
         program,
         route_receipt,
@@ -3627,7 +3820,7 @@ pub(super) fn enforce_ordinary_map_owned_any_v2_coverage(
         ),
         crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesResultProducerCaller => (
             "ValuesResultProducerCaller",
-            "NotInTrustedSubset: a CheckedProgram-aware Result producer/caller theorem route is not implemented",
+            "the exact ValuesResultProducerCaller verifier receipt is required",
         ),
         crate::core::mir::OrdinaryMapOwnedAnyV2Admission::DynamicKeysGet => {
             // The exact CheckedProgram-aware route verifier is the only
@@ -4769,6 +4962,33 @@ fn verify_checked_ordinary_map_owned_any_v2_values_result_crosscall_string_calle
     }
 }
 
+fn verify_checked_ordinary_map_owned_any_v2_values_result_producer_caller(
+    program: &crate::core::CheckedProgram,
+    source_hash: String,
+) -> Result<Vec<VerificationResult>, String> {
+    let route =
+        crate::core::mir::materialize_canonical_mir_route(program, None).map_err(|error| {
+            let code = error
+                .diagnostic_code()
+                .unwrap_or(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE);
+            format!("{code}: Result-branch Values producer/caller verifier route failed: {error}")
+        })?;
+    let receipt = route
+        .ordinary_map_owned_any_v2_values_result_producer_caller_route_receipt
+        .ok_or_else(|| {
+            format!(
+                "{}: Result-branch Values producer/caller admission did not materialize its exact verifier receipt",
+                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })?;
+    verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+        program,
+        &route.program,
+        &receipt,
+        source_hash,
+    )
+}
+
 pub fn verify_checked(
     program: &crate::core::CheckedProgram,
     source_hash: String,
@@ -4811,6 +5031,14 @@ pub fn verify_checked(
             program,
             source_hash,
             true,
+        );
+    }
+    if admission.ordinary_map_owned_any_v2
+        == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesResultProducerCaller
+    {
+        return verify_checked_ordinary_map_owned_any_v2_values_result_producer_caller(
+            program,
+            source_hash,
         );
     }
     if z3_available
@@ -8480,6 +8708,14 @@ pub fn verify_checked_dual(
             true,
         );
     }
+    if admission.ordinary_map_owned_any_v2
+        == crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesResultProducerCaller
+    {
+        return verify_checked_ordinary_map_owned_any_v2_values_result_producer_caller(
+            program,
+            source_hash,
+        );
+    }
     let actor_compatibility = is_actor_proof_compatibility(program);
     if !z3_available {
         if actor_compatibility {
@@ -8677,10 +8913,10 @@ pub fn verify_checked_dual(
             );
         }
         crate::core::mir::OrdinaryMapOwnedAnyV2Admission::ValuesResultProducerCaller => {
-            return Err(format!(
-                "{}: NotInTrustedSubset: Result Values producer/caller has Checker and MIR receipts, but no implemented Z3 theorem consumer",
-                crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE
-            ));
+            return verify_checked_ordinary_map_owned_any_v2_values_result_producer_caller(
+                program,
+                source_hash,
+            );
         }
         crate::core::mir::OrdinaryMapOwnedAnyV2Admission::MapRootProducerCaller => {
             let route = crate::core::mir::materialize_canonical_mir_route(program, None).map_err(
@@ -11594,18 +11830,45 @@ enum VerdictClass {
     Proven,
     Disproven,
     Inconclusive,
-    /// NoObligations / InfrastructureError — the engine attempted no proof;
-    /// never counts as a divergence counterpart.
+    /// No verification condition existed on this side; the other engine may
+    /// still discharge the shared obligation.
     NoOpinion,
+    /// Solver/encoding infrastructure failed. This is handled before the
+    /// semantic divergence comparison and can never be neutralized by a proof
+    /// from the other engine.
+    InfrastructureError,
 }
 
 fn verdict_class(status: &VerifStatus) -> VerdictClass {
     match status {
         VerifStatus::Proven => VerdictClass::Proven,
         VerifStatus::Disproven => VerdictClass::Disproven,
-        VerifStatus::NoObligations | VerifStatus::InfrastructureError => VerdictClass::NoOpinion,
+        VerifStatus::NoObligations => VerdictClass::NoOpinion,
+        VerifStatus::InfrastructureError => VerdictClass::InfrastructureError,
         _ => VerdictClass::Inconclusive,
     }
+}
+
+fn reject_dual_proof_after_infrastructure_error(
+    mut infrastructure_result: VerificationResult,
+    other_engine: &str,
+) -> VerificationResult {
+    // InfrastructureError means this engine could not establish a verdict.
+    // The other engine's proof does not repair a failed verification attempt.
+    infrastructure_result.artifact = None;
+    infrastructure_result.constraint_count = 0;
+    infrastructure_result.trusted_subset_domain = None;
+    let detail = infrastructure_result.message.trim();
+    infrastructure_result.message = if detail.is_empty() {
+        format!(
+            "dual verification discarded any proof from the other engine ({other_engine}) because this result is InfrastructureError"
+        )
+    } else {
+        format!(
+            "{detail}; dual verification discarded any proof from the other engine ({other_engine}) because this result is InfrastructureError"
+        )
+    };
+    infrastructure_result
 }
 
 fn source_provenance_conflict(
@@ -11656,6 +11919,9 @@ fn discard_batch_provenance_artifact(mut result: VerificationResult) -> Verifica
     if result.artifact.is_none() {
         return result;
     }
+    let was_infrastructure_error = result.status == VerifStatus::InfrastructureError;
+    let prior_message = result.message.clone();
+    let prior_diagnostic = result.diagnostic.clone();
     let span = result
         .diagnostic
         .as_ref()
@@ -11664,19 +11930,29 @@ fn discard_batch_provenance_artifact(mut result: VerificationResult) -> Verifica
     result.status = VerifStatus::InfrastructureError;
     result.trusted_subset_domain = None;
     result.constraint_count = 0;
-    result.message = format!(
+    let provenance_message = format!(
         "[{}] mixed source provenance mismatch in merged batch for '{}'; merged proof discarded",
         crate::diagnostic::codes::E0439,
         result.func_name
     );
-    result.diagnostic = Some(crate::diagnostic::Diagnostic::error(
+    result.message = if was_infrastructure_error && !prior_message.trim().is_empty() {
+        format!("{}; {provenance_message}", prior_message.trim())
+    } else {
+        provenance_message
+    };
+    let provenance_diagnostic = crate::diagnostic::Diagnostic::error(
         format!(
             "{}: merged verification results for '{}' came from different source snapshots",
             crate::diagnostic::codes::E0439,
             result.func_name
         ),
         span,
-    ));
+    );
+    result.diagnostic = if was_infrastructure_error {
+        prior_diagnostic.or(Some(provenance_diagnostic))
+    } else {
+        Some(provenance_diagnostic)
+    };
     result.artifact = None;
     result
 }
@@ -11685,8 +11961,11 @@ fn discard_batch_provenance_artifact(mut result: VerificationResult) -> Verifica
 ///
 /// Rules:
 /// - both agree (same class) → primary (resolved) result wins;
-/// - one side is NoOpinion → the other side's result wins silently (no proof
-///   was attempted on the silent side, so there is nothing to disagree with);
+/// - one side is NoObligations → the other side's result wins silently (no
+///   verification condition existed on the silent side);
+/// - either side is InfrastructureError → preserve that failure and discard
+///   all proof artifacts; a proof from the other engine cannot repair a failed
+///   verification attempt;
 /// - both sides carry different non-empty source hashes → the merged result
 ///   is InfrastructureError with no artifact, even when verdict classes agree;
 /// - classes disagree → fail-closed: Disproven beats Inconclusive beats
@@ -11707,6 +11986,14 @@ fn merge_engine_verdicts_with_secondary_label(
     // Normalize the inputs before matching names.  This closes the gap where
     // an unmatched Flow-only result could otherwise smuggle a proof from a
     // different source snapshot into the merged batch.
+    let primary_had_infrastructure_error = primary
+        .iter()
+        .map(|result| result.status == VerifStatus::InfrastructureError)
+        .collect::<Vec<_>>();
+    let secondary_had_infrastructure_error = secondary
+        .iter()
+        .map(|result| result.status == VerifStatus::InfrastructureError)
+        .collect::<Vec<_>>();
     let batch_source_conflict = batch_source_provenance_conflict(&primary, &secondary);
     let primary = if batch_source_conflict {
         primary
@@ -11733,9 +12020,16 @@ fn merge_engine_verdicts_with_secondary_label(
             .or_insert(index);
     }
     let mut consumed: Vec<bool> = vec![false; secondary.len()];
-    for mut result in primary {
+    for (primary_index, mut result) in primary.into_iter().enumerate() {
         let Some(&sec_index) = secondary_by_name.get(&result.func_name) else {
-            merged.push(result);
+            if result.status == VerifStatus::InfrastructureError {
+                merged.push(reject_dual_proof_after_infrastructure_error(
+                    result,
+                    secondary_label,
+                ));
+            } else {
+                merged.push(result);
+            }
             continue;
         };
         consumed[sec_index] = true;
@@ -11772,8 +12066,58 @@ fn merge_engine_verdicts_with_secondary_label(
             merged.push(result);
             continue;
         }
+        let original_primary_infrastructure_error = primary_had_infrastructure_error[primary_index];
+        let original_secondary_infrastructure_error = secondary_had_infrastructure_error[sec_index];
+        if original_primary_infrastructure_error || original_secondary_infrastructure_error {
+            // Batch source normalization can turn a Proven peer into a
+            // synthetic InfrastructureError. Preserve the result that
+            // carried the actual engine failure instead of always preferring
+            // the primary result after normalization.
+            let mut infrastructure_result = if original_primary_infrastructure_error {
+                result
+            } else {
+                flow_result.clone()
+            };
+            if original_primary_infrastructure_error && original_secondary_infrastructure_error {
+                let secondary_detail = flow_result.message.trim();
+                if !secondary_detail.is_empty()
+                    && !infrastructure_result.message.contains(secondary_detail)
+                {
+                    infrastructure_result.message = format!(
+                        "{}; secondary engine ({secondary_label}) also reported: {secondary_detail}",
+                        infrastructure_result.message
+                    );
+                }
+                if infrastructure_result.diagnostic.is_none() {
+                    infrastructure_result.diagnostic = flow_result.diagnostic.clone();
+                }
+            }
+            merged.push(reject_dual_proof_after_infrastructure_error(
+                infrastructure_result,
+                if original_primary_infrastructure_error {
+                    secondary_label
+                } else {
+                    "resolved"
+                },
+            ));
+            continue;
+        }
+        if result.status == VerifStatus::InfrastructureError {
+            merged.push(reject_dual_proof_after_infrastructure_error(
+                result,
+                secondary_label,
+            ));
+            continue;
+        }
+        if flow_result.status == VerifStatus::InfrastructureError {
+            merged.push(reject_dual_proof_after_infrastructure_error(
+                flow_result.clone(),
+                "resolved",
+            ));
+            continue;
+        }
         if primary_class == VerdictClass::NoOpinion {
-            // Resolved engine attempted no proof — take the flow verdict.
+            // Resolved had no obligations — take the Flow verdict.
             merged.push(flow_result.clone());
             continue;
         }
@@ -11826,11 +12170,19 @@ fn merge_engine_verdicts_with_secondary_label(
         result.artifact = None; // a divergent verdict is no proof
         merged.push(result);
     }
-    // Functions verified ONLY by the flow engine (e.g. call-site obligations
-    // the resolved engine does not model yet) pass through untouched.
+    // Functions verified only by Flow (e.g. call-site obligations the
+    // Resolved engine does not model yet) pass through; infrastructure
+    // failures still revoke any attached proof artifact.
     for (index, result) in secondary.iter().enumerate() {
         if !consumed[index] {
-            merged.push(result.clone());
+            if result.status == VerifStatus::InfrastructureError {
+                merged.push(reject_dual_proof_after_infrastructure_error(
+                    result.clone(),
+                    "resolved",
+                ));
+            } else {
+                merged.push(result.clone());
+            }
         }
     }
     merged
@@ -13141,7 +13493,7 @@ mod ordinary_map_owned_any_v2_persistent_root_alias_replacement_route_tests {
             assert_eq!(
                 result.status,
                 VerifStatus::Disproven,
-                "{entry} must not convert the reachable Map capacity trap to a proof"
+                "{entry} must not convert the reachable Map capacity trap to a proof: {result:#?}"
             );
             assert!(
                 result
@@ -13321,30 +13673,44 @@ mod direct_print_route_tests {
         assert_eq!(
             crate::core::mir::classify_canonical_mir_route_admission(&checked)
                 .ordinary_map_owned_any_v2,
-            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::DirectPrint
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::DirectPrintResult
         );
 
         let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
-            .expect("materialize exact DirectPrint route");
-        let profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE;
-        assert!(route.materialized_ordinary_map_owned_any_v2_direct_print_candidate);
+            .expect("materialize exact DirectPrintResult route");
+        let execution_profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_PROFILE;
+        let l2_profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE;
+        assert!(route.materialized_ordinary_map_owned_any_v2_direct_print_result_candidate);
         let canonical = route.program;
-        let receipt = canonical.route_receipt(profile);
-        receipt
+        let execution_receipt = canonical.route_receipt(execution_profile);
+        execution_receipt
             .validate_against_program(&canonical)
-            .expect("DirectPrint route receipt binds the exact MIR");
-        crate::core::mir::validate_ordinary_map_owned_any_v2_direct_print_mir_route(&canonical)
-            .expect("the MIR carries the exact Checker GetAny/println/Drop shape");
-        validate_ordinary_map_owned_any_v2_receipt_binding(&canonical, &receipt)
-            .expect("verifier accepts the exact DirectPrint profile");
+            .expect("DirectPrintResult execution receipt binds the exact MIR");
+        let l2_receipt = canonical.route_receipt(l2_profile);
+        l2_receipt
+            .validate_against_program(&canonical)
+            .expect("DirectPrintResult L2 route receipt binds the exact MIR");
+        crate::core::mir::validate_ordinary_map_owned_any_v2_direct_print_result_route(
+            &checked, &canonical,
+        )
+        .expect("the MIR carries the exact Checker Result GetAny/println/Drop shape");
         assert!(
             validate_mir_capabilities(&canonical).is_err(),
-            "the generic verifier capability path must still reject unreceipted DirectPrint"
+            "the generic verifier capability path must still reject unreceipted DirectPrintResult"
         );
-        validate_mir_capabilities_with_direct_print_route_receipt(&canonical, &receipt)
-            .expect("the exact DirectPrint receipt authorizes the complete MIR capability gate");
+        validate_mir_capabilities_with_ordinary_map_owned_any_v2_direct_print_result_route(
+            &checked,
+            &canonical,
+            &l2_receipt,
+        )
+        .expect(
+            "the exact DirectPrintResult L2 receipt authorizes the complete MIR capability gate",
+        );
 
         for wrong_profile in [
+            execution_profile,
             crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_ISLAND,
             crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE,
             crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE,
@@ -13352,45 +13718,50 @@ mod direct_print_route_tests {
         ] {
             let wrong_receipt = canonical.route_receipt(wrong_profile);
             assert!(
-                validate_ordinary_map_owned_any_v2_receipt_binding(&canonical, &wrong_receipt,)
-                    .is_err(),
-                "DirectPrint MIR must not borrow {wrong_profile}"
-            );
-            assert!(
-                validate_mir_capabilities_with_direct_print_route_receipt(
+                validate_mir_capabilities_with_ordinary_map_owned_any_v2_direct_print_result_route(
+                    &checked,
                     &canonical,
                     &wrong_receipt,
                 )
                 .is_err(),
-                "DirectPrint capability must reject route profile {wrong_profile}"
+                "DirectPrintResult capability must reject route profile {wrong_profile}"
             );
         }
 
-        if is_z3_available() {
-            let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-            assert!(
-                verify_mir_with_route_receipt(&canonical, &receipt, source_hash.clone())
-                    .expect("verifier consumes the exact DirectPrint receipt")
-                    .is_empty()
-            );
-            assert!(verify_mir(&canonical, source_hash)
-                .expect("the convenience verifier infers DirectPrint")
-                .is_empty());
-            let checked_source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
-            assert!(verify_checked(&checked, checked_source_hash.clone())
-                .expect("checked verifier uses the exact DirectPrint consumer profile")
-                .is_empty());
-            assert!(verify_checked_dual(&checked, checked_source_hash)
-                .expect("dual checked verifier uses the exact DirectPrint consumer profile")
-                .is_empty());
-        }
+        let source_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+        assert!(
+            verify_mir_with_route_receipt(&canonical, &l2_receipt, source_hash.clone()).is_err(),
+            "the MIR-only verifier entry must reject DirectPrintResult"
+        );
+        assert!(
+            verify_mir(&canonical, source_hash.clone()).is_err(),
+            "the raw generic MIR verifier must reject DirectPrintResult"
+        );
+        let direct_results = verify_mir_with_ordinary_map_owned_any_v2_direct_print_result_route(
+            &checked,
+            &canonical,
+            &l2_receipt,
+            source_hash.clone(),
+        )
+        .expect("verifier consumes the exact DirectPrintResult L2 receipt");
+        assert_eq!(direct_results.len(), 1);
+        assert_eq!(direct_results[0].status, VerifStatus::NoObligations);
+
+        let checked_results = verify_checked(&checked, source_hash.clone())
+            .expect("checked verifier uses the exact DirectPrintResult consumer profile");
+        assert_eq!(checked_results.len(), 1);
+        assert_eq!(checked_results[0].status, VerifStatus::NoObligations);
+        let dual_results = verify_checked_dual(&checked, source_hash)
+            .expect("dual checked verifier uses the exact DirectPrintResult consumer profile");
+        assert_eq!(dual_results.len(), 1);
+        assert_eq!(dual_results[0].status, VerifStatus::NoObligations);
     }
 
     #[test]
     fn direct_print_route_receipt_rejects_resealed_operation_mutation() {
         let (_source, checked) = fixture();
         let route = crate::core::mir::materialize_canonical_mir_route(&checked, None)
-            .expect("materialize exact DirectPrint route");
+            .expect("materialize exact DirectPrintResult route");
         let mut forged = route.program;
         let (owner, mut function, instruction_id) = forged
             .functions()
@@ -13410,23 +13781,33 @@ mod direct_print_route_tests {
                     })
                     .map(|instruction| (owner.clone(), function.clone(), instruction.id.clone()))
             })
-            .expect("Checker-lowered DirectPrint instruction");
+            .expect("Checker-lowered DirectPrintResult instruction");
         let instruction = function
             .blocks
             .values_mut()
             .flat_map(|block| &mut block.instructions)
             .find(|instruction| instruction.id == instruction_id)
-            .expect("same DirectPrint instruction in owner");
+            .expect("same DirectPrintResult instruction in owner");
         instruction.kind = crate::core::mir::MirInstructionKind::Nop;
         forged.replace_function_for_test_only(function);
-        let resealed =
-            forged.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE);
-        assert!(
-            validate_ordinary_map_owned_any_v2_receipt_binding(&forged, &resealed).is_err(),
-            "a fresh whole-MIR digest cannot replace the exact DirectPrint receipt"
+        let resealed = forged.route_receipt(
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_RESULT_L2_VERIFIER_PROFILE,
         );
         assert!(
-            verify_mir_with_route_receipt(&forged, &resealed, String::new()).is_err(),
+            crate::core::mir::validate_ordinary_map_owned_any_v2_direct_print_result_route(
+                &checked, &forged,
+            )
+            .is_err(),
+            "a fresh whole-MIR digest cannot replace the exact DirectPrintResult receipt"
+        );
+        assert!(
+            verify_mir_with_ordinary_map_owned_any_v2_direct_print_result_route(
+                &checked,
+                &forged,
+                &resealed,
+                String::new(),
+            )
+            .is_err(),
             "the public verifier rejects the operation mutation before proof analysis"
         );
         assert_eq!(owner.0, "function:main");
@@ -13438,21 +13819,9 @@ mod ordinary_map_owned_any_v2_keys_snapshot_verifier_route_tests {
     use super::*;
 
     fn fixture() -> (String, crate::core::CheckedProgram) {
-        let source = r#"
-func main() -> i32 {
-    let empty = map_new()
-    let root = map_set(empty, "answer", 41)
-    let snapshot = keys(root)
-    drop(empty)
-    drop(root)
-    let key = snapshot[0]
-    drop(snapshot)
-    println(key)
-    drop(key)
-    0
-}
-"#
-        .to_owned();
+        let source =
+            include_str!("../../tests/fixtures/mir_ordinary_map_any_owner_v2_keys_snapshot.mimi")
+                .to_owned();
         let file = parse_memory_source(&source, "verifier-keys-snapshot")
             .expect("parse KeysSnapshot verifier fixture");
         let checked = crate::core::check_program(&file).expect("check KeysSnapshot fixture");
@@ -13783,19 +14152,46 @@ mod ordinary_map_owned_any_v2_branch_local_set_diamond_route_tests {
         type Label { text: string }
         func main() -> i32 {
             let payload = Label { text: "shared" }
-            let base = map_new()
-            let flag = true
-            if flag {
-                let left = map_set(base, "left", payload)
-                let left_size = map_size(left)
-                drop(left)
-            } else {
-                let right = map_set(base, "right", payload)
-                let right_size = map_size(right)
-                drop(right)
+            match map_new() {
+                Ok(base) => {
+                    let flag = true
+                    if flag {
+                        match map_set(base, "left", payload) {
+                            Ok(child) => {
+                                map_size(child)
+                                drop(child)
+                                drop(base)
+                                drop(payload)
+                                0
+                            },
+                            Err(status) => {
+                                drop(base)
+                                drop(payload)
+                                status
+                            },
+                        }
+                    } else {
+                        match map_set(base, "right", payload) {
+                            Ok(child) => {
+                                map_size(child)
+                                drop(child)
+                                drop(base)
+                                drop(payload)
+                                0
+                            },
+                            Err(status) => {
+                                drop(base)
+                                drop(payload)
+                                status
+                            },
+                        }
+                    }
+                },
+                Err(status) => {
+                    drop(payload)
+                    status
+                },
             }
-            drop(base)
-            0
         }
     "#;
 
@@ -13831,7 +14227,7 @@ mod ordinary_map_owned_any_v2_branch_local_set_diamond_route_tests {
         crate::core::mir::validate_ordinary_map_owned_any_v2_branch_local_set_diamond_mir_route(
             &canonical,
         )
-        .expect("the MIR census is exactly New=1, Set=2, Size=2, Drop=3");
+        .expect("the MIR census is exactly New=1, Set=2, Size=2, Drop=6");
         validate_mir_capabilities_with_ordinary_map_owned_any_v2_branch_local_set_diamond_route(
             &checked, &canonical, &receipt,
         )

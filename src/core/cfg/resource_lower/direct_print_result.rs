@@ -638,7 +638,27 @@ pub(super) fn collect(
             result_local: None,
         });
     }
-    if operations != &expected_operations {
+    let expected_root_results = BTreeMap::from([
+        (new_expression.node_id.clone(), initial_root_local.clone()),
+        (set_expression.node_id.clone(), updated_root_local.clone()),
+    ]);
+    let expected_drops = BTreeSet::from([
+        (
+            set_ok_old_root_drop.node_id.clone(),
+            initial_root_local.clone(),
+        ),
+        (root_get_drop.node_id.clone(), updated_root_local.clone()),
+        (
+            set_error_input_drop.node_id.clone(),
+            initial_root_local.clone(),
+        ),
+    ]);
+    if !super::operations_match_expected_result_branch_l1(
+        operations,
+        &expected_operations,
+        &expected_root_results,
+        &expected_drops,
+    ) {
         return None;
     }
 

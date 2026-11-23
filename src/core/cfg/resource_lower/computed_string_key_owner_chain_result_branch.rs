@@ -470,6 +470,8 @@ pub(super) fn collect(
             (populated_root.clone(), false),
         ]),
         returned_map_root_candidates: BTreeMap::new(),
+        result_branch_candidates: Vec::new(),
+        result_branch_depth: 0,
         temporary_roots: BTreeMap::new(),
         temporary_root_receipts: Vec::new(),
         allowed_root_loads: BTreeSet::new(),

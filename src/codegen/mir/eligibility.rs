@@ -496,6 +496,18 @@ fn validate_mir_native_with_direct_print_result_authorization(
     )
 }
 
+fn validate_mir_native_with_values_result_authorization(
+    program: &MirProgram,
+    authorization: Option<super::NativeValuesResultAuthorization>,
+) -> Result<(), Vec<Diagnostic>> {
+    reject_verifier_only_program(program)?;
+    validate_native_validator_with_ffi_preflight(
+        program,
+        true,
+        NativeMirValidator::with_values_result_authorization(program, authorization),
+    )
+}
+
 /// Preflight the nested Result DirectPrint profile against the exact checked
 /// source receipt, dedicated MIR route validator, and native L1 shape. This
 /// profile never consults the older flat DirectPrint receipt or broad owner-v2
@@ -1429,7 +1441,10 @@ pub fn validate_checked_mir_native_values_result_crosscall_string_caller_route(
             .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
             .diagnostic()]
         })?;
-    validate_mir_native(program)
+    validate_mir_native_with_values_result_authorization(
+        program,
+        Some(super::NativeValuesResultAuthorization::CrosscallStringCaller),
+    )
 }
 
 /// Preflight the separately versioned Result-branch Values/String caller V4
@@ -1519,7 +1534,87 @@ pub fn validate_checked_mir_native_values_result_crosscall_string_caller_index1_
             .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
             .diagnostic()]
         })?;
-    validate_mir_native(program)
+    validate_mir_native_with_values_result_authorization(
+        program,
+        Some(super::NativeValuesResultAuthorization::CrosscallStringCaller),
+    )
+}
+
+/// Preflight the Result-branch Values producer and length-observing caller
+/// route before native code generation creates LLVM declarations.
+pub fn validate_checked_mir_native_values_result_producer_caller_route(
+    checked: &crate::core::CheckedProgram,
+    program: &MirProgram,
+    receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+) -> Result<(), Vec<Diagnostic>> {
+    reject_verifier_only_program(program)?;
+    checked.validate_backend(crate::core::BackendProfile::Native)?;
+    let route = CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller;
+    if receipt.profile != route.profile() {
+        return Err(vec![NativeMirError::new(
+            format!("{} route receipt", route.label()),
+            format!(
+                "exact dedicated profile '{}' required, got '{}'",
+                route.profile(),
+                receipt.profile
+            ),
+        )
+        .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+        .diagnostic()]);
+    }
+    receipt
+        .validate_against_program(program)
+        .map_err(|message| {
+            vec![NativeMirError::new(
+                "mir-program",
+                format!(
+                    "{}: canonical route receipt rejected: {message}",
+                    crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE
+                ),
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+            .diagnostic()]
+        })?;
+    let checked_receipt =
+        crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+            checked, program,
+        )
+        .map_err(|message| {
+            vec![NativeMirError::new(
+                format!("{} route receipt", route.label()),
+                format!(
+                    "{}: {} native route rejected: {message}",
+                    crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE,
+                    route.label()
+                ),
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            .diagnostic()]
+        })?;
+    if !checked_receipt.same_semantic_identity(receipt) {
+        return Err(vec![NativeMirError::new(
+            format!("{} route receipt", route.label()),
+            "the supplied native receipt differs from the CheckedProgram/MIR route identity",
+        )
+        .with_code(crate::core::mir::MIR_ROUTE_RECEIPT_ERROR_CODE)
+        .diagnostic()]);
+    }
+    super::ordinary_map_owned_any_v2::
+        validate_ordinary_map_owned_any_v2_values_result_producer_caller_native_contract(
+            program,
+        )
+        .map_err(|messages| {
+            vec![NativeMirError::new(
+                "ValuesResultProducerCaller native contract",
+                messages.join("; "),
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            .diagnostic()]
+        })?;
+    validate_mir_native_with_values_result_authorization(
+        program,
+        Some(super::NativeValuesResultAuthorization::ProducerCaller),
+    )
 }
 
 /// Preflight the exact CheckedProgram/MIR Map-root producer-caller profile
@@ -1938,6 +2033,7 @@ enum CheckedOrdinaryMapOwnedAnyV2Route {
     ValuesCrosscallStringCallerIndex1,
     ValuesResultCrosscallStringCaller,
     ValuesResultCrosscallStringCallerIndex1,
+    ValuesResultProducerCaller,
     MapRootProducerCaller,
     MapRootGetAnyCaller,
     BranchLocalSetDiamond,
@@ -2011,6 +2107,7 @@ impl CheckedOrdinaryMapOwnedAnyV2Route {
             Self::ValuesCrosscallStringCallerIndex1 => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1.as_str(),
             Self::ValuesResultCrosscallStringCaller => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller.as_str(),
             Self::ValuesResultCrosscallStringCallerIndex1 => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1.as_str(),
+            Self::ValuesResultProducerCaller => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller.as_str(),
             Self::MapRootProducerCaller => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller.as_str(),
             Self::MapRootGetAnyCaller => crate::core::mir::CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller.as_str(),
             Self::BranchLocalSetDiamond => {
@@ -2051,6 +2148,7 @@ impl CheckedOrdinaryMapOwnedAnyV2Route {
             Self::ValuesResultCrosscallStringCallerIndex1 => {
                 "ValuesResultCrosscallStringCallerIndex1V4"
             }
+            Self::ValuesResultProducerCaller => "ValuesResultProducerCaller",
             Self::MapRootProducerCaller => "MapRootProducerCaller",
             Self::MapRootGetAnyCaller => "MapRootGetAnyCaller",
             Self::BranchLocalSetDiamond => "BranchLocalSetDiamond",
@@ -2222,6 +2320,12 @@ impl CheckedOrdinaryMapOwnedAnyV2Route {
                         ))
                     }
                 })?
+            }
+            Self::ValuesResultProducerCaller => {
+                crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+                    checked, program,
+                )
+                .map(|_| ())
             }
             Self::MapRootProducerCaller => {
                 crate::core::mir::validate_ordinary_map_owned_any_v2_map_root_producer_caller_route(
@@ -2671,6 +2775,17 @@ impl<'ctx> CodeGenerator<'ctx> {
                     )
                     .is_ok()
             });
+        let exact_values_result_producer_caller_receipt = checker_authorized_route
+            == Some(CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller)
+            && route_receipt.is_some_and(|receipt| {
+                receipt.profile
+                    == CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller.profile()
+                    && receipt.validate_against_program(program).is_ok()
+                    && crate::core::mir::validate_ordinary_map_owned_any_v2_values_result_producer_caller_mir_route(
+                        program,
+                    )
+                    .is_ok()
+            });
         let exact_map_root_producer_caller_receipt = checker_authorized_route
             == Some(CheckedOrdinaryMapOwnedAnyV2Route::MapRootProducerCaller)
             && route_receipt.is_some_and(|receipt| {
@@ -2812,6 +2927,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             && !exact_values_crosscall_string_caller_index1_receipt
             && !exact_values_result_crosscall_string_caller_v3_receipt
             && !exact_values_result_crosscall_string_caller_v4_receipt
+            && !exact_values_result_producer_caller_receipt
             && !exact_map_root_producer_caller_receipt
             && !exact_map_root_get_any_caller_receipt
             && !exact_get_or_default_i32_receipt
@@ -2840,13 +2956,30 @@ impl<'ctx> CodeGenerator<'ctx> {
             )
             .diagnostic()]);
         }
-        validate_mir_native_with_checked_get_bool(
-            program,
-            exact_checked_get_receipt,
-            exact_dynamic_keys_get_receipt,
-        )?;
+        let values_result_authorization = if exact_values_result_crosscall_string_caller_v3_receipt
+            || exact_values_result_crosscall_string_caller_v4_receipt
+        {
+            Some(super::NativeValuesResultAuthorization::CrosscallStringCaller)
+        } else if exact_values_result_producer_caller_receipt {
+            Some(super::NativeValuesResultAuthorization::ProducerCaller)
+        } else {
+            None
+        };
+        if values_result_authorization.is_some() {
+            validate_mir_native_with_values_result_authorization(
+                program,
+                values_result_authorization,
+            )?;
+        } else {
+            validate_mir_native_with_checked_get_bool(
+                program,
+                exact_checked_get_receipt,
+                exact_dynamic_keys_get_receipt,
+            )?;
+        }
 
         NativeMirEmitter::new(self, program, exact_dynamic_keys_get_receipt)
+            .with_values_result_authorization(values_result_authorization)
             .compile()
             .map_err(|error| vec![error.diagnostic()])?;
         self.mir_native_compiled_digest = Some(mir_digest);
@@ -2992,6 +3125,10 @@ impl<'ctx> CodeGenerator<'ctx> {
             == CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultCrosscallStringCallerIndex1.profile()
         {
             Some(CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultCrosscallStringCallerIndex1)
+        } else if receipt.profile
+            == CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller.profile()
+        {
+            Some(CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller)
         } else if receipt.profile
             == CheckedOrdinaryMapOwnedAnyV2Route::MapRootProducerCaller.profile()
         {
@@ -3200,6 +3337,16 @@ impl<'ctx> CodeGenerator<'ctx> {
             return Err(vec![NativeMirError::new(
                 "ValuesResultCrosscallStringCallerIndex1V4 route receipt",
                 "ValuesResultCrosscallStringCallerIndex1V4 requires its dedicated CheckedProgram native route entry",
+            )
+            .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
+            .diagnostic()]);
+        }
+        if receipt.profile
+            == CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller.profile()
+        {
+            return Err(vec![NativeMirError::new(
+                "ValuesResultProducerCaller route receipt",
+                "ValuesResultProducerCaller requires its dedicated CheckedProgram native route entry",
             )
             .with_code(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)
             .diagnostic()]);
@@ -4677,6 +4824,29 @@ impl<'ctx> CodeGenerator<'ctx> {
         result
     }
 
+    /// Compile the Result-branch Values producer and length-observing caller
+    /// route after verifying both the Checker/MIR receipt pair and the
+    /// whole-program native contract.
+    pub fn compile_checked_mir_native_with_values_result_producer_caller_route(
+        &mut self,
+        checked: &crate::core::CheckedProgram,
+        program: &MirProgram,
+        receipt: &crate::core::mir::CanonicalMirRouteReceipt,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.shared_dynamic_any_preflight_passed = false;
+        validate_checked_mir_native_values_result_producer_caller_route(checked, program, receipt)?;
+        let authorized_route = CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller;
+        let result = self.compile_mir_native_with_route_receipt_inner(
+            program,
+            receipt,
+            Some(authorized_route),
+        );
+        if result.is_ok() && self.shared {
+            self.shared_dynamic_any_preflight_passed = true;
+        }
+        result
+    }
+
     /// Compile the exact persistent Map-root producer and its unique direct
     /// caller. The dedicated Checker/MIR receipt binds the returned owner ABI,
     /// caller observation, and final settlement before native emission.
@@ -5760,17 +5930,20 @@ mod tests {
         assert_eq!(
             crate::core::mir::classify_canonical_mir_route_admission(&checked)
                 .ordinary_map_owned_any_v2,
-            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControl
+            crate::core::mir::OrdinaryMapOwnedAnyV2Admission::MapSetDropControlResult
         );
         let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
             .expect("MapSetDropControl lowers to MIR");
-        let profile = crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE;
+        let profile =
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_RESULT_BRANCH_PROFILE;
         let receipt = mir.route_receipt(profile);
         let context = inkwell::context::Context::create();
         let mut native =
             crate::codegen::CodeGenerator::new(&context, "map_set_drop_control_native_eligibility");
         native
-            .compile_checked_mir_native_with_map_set_drop_control_route(&checked, &mir, &receipt)
+            .compile_checked_mir_native_with_map_set_drop_control_result_route(
+                &checked, &mir, &receipt,
+            )
             .expect("the exact Checker receipt admits this narrow native route");
         let expected_digest = mir.canonical_digest();
         assert_eq!(
@@ -5802,13 +5975,34 @@ mod tests {
         let mut wrong_profile =
             crate::codegen::CodeGenerator::new(&context, "map_set_drop_control_wrong_profile");
         let error = wrong_profile
-            .compile_checked_mir_native_with_map_set_drop_control_route(&checked, &mir, &forged)
+            .compile_checked_mir_native_with_map_set_drop_control_result_route(
+                &checked, &mir, &forged,
+            )
             .expect_err("the control adapter cannot borrow IsEmpty's profile identity");
         assert_eq!(
             error[0].code.as_deref(),
             Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
         );
         assert!(wrong_profile.mir_native_compiled_digest.is_none());
+
+        let legacy_receipt = mir.route_receipt(
+            crate::core::mir::ORDINARY_MAP_OWNED_ANY_V2_MAP_SET_DROP_CONTROL_PROFILE,
+        );
+        let context = inkwell::context::Context::create();
+        let mut legacy_emitter =
+            crate::codegen::CodeGenerator::new(&context, "map_set_drop_control_legacy_gate");
+        let error = legacy_emitter
+            .compile_checked_mir_native_with_map_set_drop_control_route(
+                &checked,
+                &mir,
+                &legacy_receipt,
+            )
+            .expect_err("the legacy no-result control adapter must reject the Result fixture");
+        assert_eq!(
+            error[0].code.as_deref(),
+            Some(MIR_ROUTE_COVERAGE_ERROR_CODE)
+        );
+        assert!(legacy_emitter.mir_native_compiled_digest.is_none());
     }
 
     #[test]
@@ -6975,6 +7169,7 @@ fn checked_managed_any_unpack_coverage_for_route(
             | CheckedOrdinaryMapOwnedAnyV2Route::ValuesCrosscallStringCallerIndex1
             | CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultCrosscallStringCaller
             | CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultCrosscallStringCallerIndex1
+            | CheckedOrdinaryMapOwnedAnyV2Route::ValuesResultProducerCaller
             | CheckedOrdinaryMapOwnedAnyV2Route::MapRootProducerCaller
             | CheckedOrdinaryMapOwnedAnyV2Route::MapRootGetAnyCaller
             | CheckedOrdinaryMapOwnedAnyV2Route::GetOrDefaultI32

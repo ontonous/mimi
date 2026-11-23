@@ -301,12 +301,13 @@ pub(crate) fn ordinary_map_owned_any_v2_root_result_type_id() -> ResolvedTypeId 
 /// Result envelopes carrying owner-v2 values cannot use generic Clone glue.
 /// Keep this identity predicate shared by validation and glue materialization
 /// so a later recursive materialization pass cannot silently reopen cloning.
-fn is_no_implicit_clone_result_type(id: &ResolvedTypeId) -> bool {
+pub(crate) fn is_no_implicit_clone_result_type(id: &ResolvedTypeId) -> bool {
     id == &ordinary_map_owned_any_v2_root_result_type_id()
         || id == &ordinary_map_owned_any_v2_get_any_result_envelope_type_id()
+        || id == &ordinary_map_owned_get_i32_string_v1_root_result_type_id()
 }
 
-fn ordinary_map_owned_any_v2_source_record_type_id() -> Result<ResolvedTypeId, String> {
+pub(crate) fn ordinary_map_owned_any_v2_source_record_type_id() -> Result<ResolvedTypeId, String> {
     let item = NominalTypeId::new("builtin:type:Record")
         .map_err(|error| format!("canonical Map source Record identity is invalid: {error}"))?;
     let mut types = ResolvedTypeTable::default();
@@ -10257,6 +10258,63 @@ impl MirTypeCatalog {
         Ok(())
     }
 
+    /// Returns `true` when values of `ty` own at least one canonical
+    /// `OwnedString`, either directly or transitively inside a non-copy
+    /// product `Aggregate` (`Record` / `Tuple`) with complete drop glue.
+    pub fn owns_managed_string_drop_target(&self, ty: &ResolvedTypeId) -> bool {
+        fn visit(
+            catalog: &MirTypeCatalog,
+            ty: &ResolvedTypeId,
+            visiting: &mut BTreeSet<ResolvedTypeId>,
+        ) -> Option<bool> {
+            if !visiting.insert(ty.clone()) {
+                return None;
+            }
+            if catalog.validate_owned_string(ty).is_ok() {
+                visiting.remove(ty);
+                return Some(true);
+            }
+            let descriptor = catalog.get(ty)?;
+            if descriptor.ownership == MirOwnership::Copy {
+                visiting.remove(ty);
+                return Some(false);
+            }
+            let result = if matches!(
+                descriptor.kind,
+                MirTypeKind::Nominal | MirTypeKind::Tuple { .. }
+            ) && descriptor.ownership == MirOwnership::Move
+                && descriptor.glue.drop == MirGlueKind::Aggregate
+                && catalog
+                    .validate_aggregate_glue(ty, MirGlueOperation::Drop)
+                    .is_ok()
+            {
+                if let Some(plan) = &descriptor.drop_plan {
+                    let mut has_owned_string = false;
+                    let mut all_children_safe = true;
+                    for field in &plan.fields {
+                        match visit(catalog, &field.ty, visiting) {
+                            Some(true) => has_owned_string = true,
+                            Some(false) => {}
+                            None => {
+                                all_children_safe = false;
+                                break;
+                            }
+                        }
+                    }
+                    all_children_safe.then_some(has_owned_string)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            visiting.remove(ty);
+            result
+        }
+
+        visit(self, ty, &mut BTreeSet::new()).unwrap_or(false)
+    }
+
     /// Validate one move-owned payload that a tagged variant projection may
     /// transfer out without introducing residual ownership state. The managed
     /// payload island admits owned `String` and `List<Copy scalar>` handles;
@@ -12282,7 +12340,9 @@ impl MirTypeCatalog {
             return Err("Result-branch empty Values result has no canonical List layout".into());
         };
         let expected_element = ordinary_map_owned_any_v2_values_element_type_id();
-        if descriptor.kind != MirTypeKind::List || element != &expected_element {
+        if descriptor.kind != MirTypeKind::OrdinaryMapOwnedAnyV2Values
+            || element != &expected_element
+        {
             return Err("Result-branch empty Values result is not exact List<DynamicAny>".into());
         }
         Ok(MirListConstructContract {

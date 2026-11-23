@@ -650,6 +650,120 @@ pub(super) fn native_ordinary_map_new_result_llvm_type<'ctx>(
     Ok(context.struct_type(&fields, false).into())
 }
 
+/// Native ABI for the independently receipted ResultBranchV3 owned-get root
+/// carrier (`Result<v1-root, i32>`). Deliberately kept separate from
+/// `native_variant_abi` so arbitrary non-Copy Results keep failing closed.
+pub(super) fn native_ordinary_map_owned_get_result_branch_v3_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let receipt = function
+        .ownership
+        .ordinary_map_owned_get_result_branch_v3_receipt()
+        .ok_or_else(|| {
+            NativeMirError::new(
+                function.owner.0.clone(),
+                "native ResultBranchV3 ABI has no Checker source receipt",
+            )
+        })?;
+    if receipt.owner != function.owner {
+        return Err(NativeMirError::new(
+            function.owner.0.clone(),
+            "native ResultBranchV3 ABI receipt owner differs from MIR function",
+        ));
+    }
+    let result_ty =
+        crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native ResultBranchV3 ABI is outside the exact Result<v1-root, i32> shape",
+        ));
+    }
+    let descriptor = catalog
+        .get(ty)
+        .ok_or_else(|| NativeMirError::new(ty.as_str(), "ResultBranchV3 TypeDesc is absent"))?;
+    let MirLayout::Result {
+        ok,
+        error,
+        variants,
+    } = &descriptor.layout
+    else {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native ResultBranchV3 TypeDesc is not a Result layout",
+        ));
+    };
+    if ok != &crate::core::mir::types::ordinary_map_owned_get_i32_string_v1_type_id()
+        || error != &crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32)
+    {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "native ResultBranchV3 Result payload differs from Result<v1-root, i32>",
+        ));
+    }
+    let mut payload_fields = Vec::with_capacity(2);
+    for (name, expected_type, physical_field) in [("Ok", ok, 1), ("Err", error, 2)] {
+        let id = crate::core::NodeId(format!("builtin:variant:Result::{name}"));
+        let variant = variants
+            .iter()
+            .find(|variant| variant.id == id)
+            .ok_or_else(|| {
+                NativeMirError::new(
+                    ty.as_str(),
+                    format!("ResultBranchV3 {name} variant is absent"),
+                )
+            })?;
+        let field = match variant.fields.as_slice() {
+            [field] if field.ty == *expected_type => field,
+            _ => {
+                return Err(NativeMirError::new(
+                    ty.as_str(),
+                    format!("ResultBranchV3 {name} payload differs from its canonical TypeDesc"),
+                ));
+            }
+        };
+        payload_fields.push(NativeVariantPayloadSlot {
+            variant: variant.id.clone(),
+            field: field.id.clone(),
+            physical_field,
+            ty: field.ty.clone(),
+        });
+    }
+    let first_payload_type = ok.clone();
+    Ok((
+        NativeVariantAbi {
+            tag_field: 0,
+            payload_field: 1,
+            payload_types: vec![ok.clone(), error.clone()],
+            payload_fields,
+        },
+        first_payload_type,
+    ))
+}
+
+/// Physical `{ i8, i64, i32 }` layout for only the Checker-bound ResultBranchV3
+/// owned-get root result carrier.
+pub(super) fn native_ordinary_map_owned_get_result_branch_v3_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) =
+        native_ordinary_map_owned_get_result_branch_v3_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
 /// Native ABI for the independent New/SetResult SetLineage profile. Its
 /// source authority is the complete SetLineage receipt; it must not borrow
 /// the standalone NewResult receipt as route authorization.
@@ -888,6 +1002,43 @@ pub(super) fn native_ordinary_map_set_drop_control_result_llvm_type<'ctx>(
 ) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
     let (variant_abi, _) =
         native_ordinary_map_set_drop_control_result_variant_abi(function, catalog, ty)?;
+    let mut fields = vec![context.i8_type().into()];
+    fields.extend(
+        variant_abi
+            .payload_types
+            .iter()
+            .map(|payload| native_basic_type(context, catalog, payload))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(context.struct_type(&fields, false).into())
+}
+
+pub(super) fn native_ordinary_map_result_branch_v1_variant_abi(
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<(NativeVariantAbi, crate::core::ResolvedTypeId), NativeMirError> {
+    let result_ty = crate::core::mir::types::ordinary_map_owned_any_v2_root_result_type_id();
+    if ty != &result_ty {
+        return Err(NativeMirError::new(
+            ty.as_str(),
+            "ResultBranchV1 ABI requires the exact Result<owner-v2 root, i32> TypeDesc",
+        ));
+    }
+    crate::core::mir::validate_ordinary_map_owned_any_v2_result_branch_v1_types(catalog, function)
+        .map_err(|message| NativeMirError::new(function.owner.0.clone(), message))?;
+    let root_ty = crate::core::mir::types::ordinary_map_owned_any_v2_type_id();
+    let error_ty = crate::core::ir::primitive_type_id(crate::core::PrimitiveType::I32);
+    native_exact_ordinary_map_result_variant_abi(catalog, ty, &root_ty, &error_ty)
+}
+
+pub(super) fn native_ordinary_map_result_branch_v1_llvm_type<'ctx>(
+    context: &'ctx Context,
+    function: &MirFunction,
+    catalog: &MirTypeCatalog,
+    ty: &crate::core::ResolvedTypeId,
+) -> Result<BasicTypeEnum<'ctx>, NativeMirError> {
+    let (variant_abi, _) = native_ordinary_map_result_branch_v1_variant_abi(function, catalog, ty)?;
     let mut fields = vec![context.i8_type().into()];
     fields.extend(
         variant_abi

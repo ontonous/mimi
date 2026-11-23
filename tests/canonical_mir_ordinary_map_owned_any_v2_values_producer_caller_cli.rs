@@ -12,13 +12,26 @@ const EXPECTED_RUN_STDOUT: &[u8] = b"1\n";
 const INCOMPLETE_VALUES_PRODUCER_CALLER_SOURCE: &str = r#"
 func snapshot_values() -> List {
     let payload = "owned value"
-    let empty = map_new()
-    let root = map_set(empty, "key", payload)
-    let snapshot = values(root)
-    drop(empty)
-    drop(root)
-    drop(payload)
-    snapshot
+    match map_new() {
+        Ok(empty) => match map_set(empty, "key", payload) {
+            Ok(root) => {
+                let snapshot = values(root)
+                drop(empty)
+                drop(root)
+                drop(payload)
+                snapshot
+            }
+            Err(_) => {
+                drop(empty)
+                drop(payload)
+                []
+            }
+        }
+        Err(_) => {
+            drop(payload)
+            []
+        }
+    }
 }
 
 func direct_caller() -> i32 {
@@ -216,15 +229,29 @@ fn route_identity(
         .split_whitespace()
         .map(|field| field.split_once('=').expect("route field key=value").0)
         .collect::<Vec<_>>();
-    assert_eq!(
-        route_field_order,
-        [
+    let expected_route_fields: &[&str] = if consumer == "build" {
+        &[
+            "consumer",
+            "mode",
+            "checker_profile",
+            "build_route_profile",
+            "mir_digest",
+            "mir_route_identity_digest",
+            "receipt_identity_digest",
+            "build_route_identity_digest",
+        ]
+    } else {
+        &[
             "consumer",
             "mode",
             "checker_profile",
             "mir_digest",
             "receipt_identity_digest",
-        ],
+        ]
+    };
+    assert_eq!(
+        route_field_order.as_slice(),
+        expected_route_fields,
         "{label} route census field contract changed"
     );
     assert_eq!(values.get("consumer").copied(), Some(consumer), "{label}");
@@ -462,7 +489,7 @@ fn result_values_producer_without_len_is_rejected_for_default_and_explicit_consu
         );
         assert!(
             stderr.contains("incomplete ordinary Map/Any owner-v2 attempt")
-                && stderr.contains("unreceipted Values producer/caller intent"),
+                && stderr.contains("unreceipted Values producer/caller"),
             "{label} must identify the absent exact producer/caller receipt:\n{stderr}"
         );
         for forbidden in [
@@ -546,7 +573,7 @@ fn incomplete_values_producer_caller_intent_never_uses_legacy_or_generic_route()
             "{label} must reject before legacy or generic collection dispatch:\n{stderr}"
         );
         assert!(
-            stderr.contains("unreceipted Values producer/caller intent"),
+            stderr.contains("unreceipted Values producer/caller"),
             "{label} must identify the missing exact producer/caller receipt:\n{stderr}"
         );
         for forbidden in [

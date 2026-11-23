@@ -874,6 +874,7 @@ fn assert_native_build_receipt(
     expected: &(String, String, String),
     consumer: &str,
     mode: &str,
+    expected_root_owners: &str,
 ) {
     let stderr = text(&output.stderr);
     let lines = stderr
@@ -986,7 +987,7 @@ fn assert_native_build_receipt(
     );
     assert_eq!(
         fields.get("root_owners"),
-        Some(&"function:main"),
+        Some(&expected_root_owners),
         "{mode} native receipt root owners"
     );
     for field in [
@@ -1155,6 +1156,7 @@ fn assert_cli_values_mixed_snapshot_routes(mimi: &Path, source: &Path) {
             &identity,
             if direct { "explicit-mir" } else { "default" },
             mode,
+            "function:main",
         );
         if let Some(expected) = &shared_identity {
             assert_eq!(&identity, expected, "{mode} changed route identity");
@@ -1291,6 +1293,7 @@ fn assert_cli_values_snapshot_remove_routes(mimi: &Path, source: &Path) {
             &identity,
             if direct { "explicit-mir" } else { "default" },
             mode,
+            "function:main",
         );
         if let Some(expected) = &shared_identity {
             assert_eq!(&identity, expected, "{mode} changed route identity");
@@ -1447,6 +1450,7 @@ fn assert_cli_checked_get_branch_tail_routes(mimi: &Path, source: &Path, source_
             &identity,
             if direct { "explicit-mir" } else { "default" },
             mode,
+            "function:main",
         );
         if let Some(expected) = &shared_identity {
             assert_eq!(&identity, expected, "{mode} changed route identity");
@@ -1522,7 +1526,12 @@ fn assert_cli_checked_get_branch_tail_routes(mimi: &Path, source: &Path, source_
     }
 }
 
-fn assert_cli_computed_key_get_routes(mimi: &Path, source: &Path, source_digest: &str) {
+fn assert_cli_computed_key_get_routes(
+    mimi: &Path,
+    source: &Path,
+    source_digest: &str,
+    expected_root_owners: &str,
+) {
     const PROFILE: &str = "map-any-owner-v2-computed-key-get-v1";
     const EXPECTED_OUTPUT: &str = "";
     const EXPECTED_PATHS: [&str; 6] = [
@@ -1630,6 +1639,7 @@ fn assert_cli_computed_key_get_routes(mimi: &Path, source: &Path, source_digest:
             &identity,
             if direct { "explicit-mir" } else { "default" },
             mode,
+            expected_root_owners,
         );
         if let Some(expected) = &shared_identity {
             assert_eq!(&identity, expected, "{mode} changed route identity");
@@ -1895,7 +1905,7 @@ fn map_any_owner_v2_exact_computed_key_get_uses_its_production_profile() {
         );
     };
     let source_digest = assert_read_only_receipt(&mimi, &source);
-    assert_cli_computed_key_get_routes(&mimi, &source, &source_digest);
+    assert_cli_computed_key_get_routes(&mimi, &source, &source_digest, "function:main");
 }
 
 #[test]
@@ -1910,7 +1920,12 @@ fn map_any_owner_v2_computed_key_string_get_uses_its_receipted_production_route(
         );
     };
     let source_digest = assert_read_only_receipt(&mimi, &source);
-    assert_cli_computed_key_get_routes(&mimi, &source, &source_digest);
+    assert_cli_computed_key_get_routes(
+        &mimi,
+        &source,
+        &source_digest,
+        "function:main,function:probe",
+    );
 }
 
 #[test]
@@ -1979,15 +1994,18 @@ fn map_any_owner_v2_checked_get_carried_result_diamond_stays_fail_closed() {
     let mimi = mimi_bin();
     let fixture_text = std::fs::read_to_string(checked_get_settled_branch_tail_fixture())
         .expect("read settled-tail CheckedGet fixture");
-    let drop_before_selector = "    drop(pair)\n    let observed = if found";
+    let drop_before_selector = "        drop(pair)\n        let observed = if found";
     assert_eq!(
         fixture_text.matches(drop_before_selector).count(),
         1,
         "the carried-result mutation has one exact pair-settlement anchor"
     );
     let near_miss_text = fixture_text
-        .replace(drop_before_selector, "    let observed = if found")
-        .replace("    observed\n}", "    drop(pair)\n    observed\n}");
+        .replace(drop_before_selector, "        let observed = if found")
+        .replace(
+            "        observed\n",
+            "        drop(pair)\n        observed\n",
+        );
     assert_ne!(
         fixture_text, near_miss_text,
         "the carried-result mutation applies"

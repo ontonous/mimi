@@ -643,8 +643,22 @@ pub(super) fn collect(
         receiver_local: Some(terminal.final_root.clone()),
         result_local: Some(pair_local.clone()),
     });
+    let mut expected_root_results =
+        BTreeMap::from([(new_scrutinee.node_id.clone(), initial_root_local.clone())]);
+    let mut expected_drops =
+        BTreeSet::from([(get_root_drop.node_id.clone(), terminal.final_root.clone())]);
+    for set in &sets {
+        expected_root_results.insert(set.operation.clone(), set.output_root_local.clone());
+        expected_drops.insert((set.ok_input_drop.clone(), set.input_root_local.clone()));
+        expected_drops.insert((set.error_input_drop.clone(), set.input_root_local.clone()));
+    }
     reject_when!(
-        operations != &expected_operations,
+        !super::operations_match_expected_result_branch_l1(
+            operations,
+            &expected_operations,
+            &expected_root_results,
+            &expected_drops,
+        ),
         "Map operation attempt inventory"
     );
     let mut expected_locals = BTreeSet::from([
@@ -947,7 +961,7 @@ pub(super) fn collect(
         pair_drop: terminal.pair_drop.node_id.clone(),
         unpack_drop: terminal.unpack_drop.node_id.clone(),
         selected_winning_set,
-        operations: operations.clone(),
+        operations: expected_operations,
         cfg: ManagedAnyCfgReceipt::from_cfg(cfg, body),
     })
 }

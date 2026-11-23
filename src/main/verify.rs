@@ -586,6 +586,52 @@ pub(crate) fn verify(
             )
         })?;
     }
+    let admission = mimi::core::mir::classify_canonical_mir_route_admission(&checked_program);
+    for (admitted, expected_profile, label, preflight) in [
+        (
+            admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3(),
+            mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+                .as_str(),
+            "ValuesResultCrosscallStringCaller",
+            crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller
+                as fn(&mimi::core::resolved::CheckedProgram, &mimi::core::mir::reference::MirProgram) -> Result<(), String>,
+        ),
+        (
+            admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4(),
+            mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+                .as_str(),
+            "ValuesResultCrosscallStringCallerIndex1",
+            crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1
+                as fn(&mimi::core::resolved::CheckedProgram, &mimi::core::mir::reference::MirProgram) -> Result<(), String>,
+        ),
+        (
+            admission.ordinary_map_owned_any_v2_values_result_producer_caller(),
+            mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+                .as_str(),
+            "ValuesResultProducerCaller",
+            crate::canonical_dispatch::preflight_ordinary_map_owned_any_v2_values_result_producer_caller
+                as fn(&mimi::core::resolved::CheckedProgram, &mimi::core::mir::reference::MirProgram) -> Result<(), String>,
+        ),
+    ] {
+        let receipt_matches = canonical_receipt_profile == expected_profile;
+        if admitted != receipt_matches {
+            return Err(format!(
+                "canonical {label} verifier route rejected: Checker admission/profile mismatch (admitted={admitted}, profile={canonical_receipt_profile})"
+            ));
+        }
+        if receipt_matches {
+            let program = canonical.as_ref().ok_or_else(|| {
+                format!(
+                    "canonical {label} verifier route rejected: Checker admission has no canonical MIR receipt to validate"
+                )
+            })?;
+            preflight(&checked_program, program)
+                .map_err(|reason| format!("canonical {label} verifier route rejected: {reason}"))?;
+        }
+    }
     let map_root_producer_caller_admitted =
         mimi::core::mir::classify_canonical_mir_route_admission(&checked_program)
             .ordinary_map_owned_any_v2_map_root_producer_caller();
@@ -1007,6 +1053,39 @@ pub(crate) fn verify(
                     .as_str()
             {
                 mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_crosscall_string_caller_index1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_index1_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                    &checked_program,
+                    &canonical,
+                    &receipt,
+                    source_hash,
+                )?
+            } else if canonical_receipt_profile
+                == mimi::core::mir::CanonicalMirRouteProfile::
+                    OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+                    .as_str()
+            {
+                mimi::verifier::verify_mir_with_ordinary_map_owned_any_v2_values_result_producer_caller_route(
                     &checked_program,
                     &canonical,
                     &receipt,

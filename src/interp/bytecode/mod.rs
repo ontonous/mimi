@@ -70,6 +70,7 @@ pub use mir::{
     compile_mir_program_with_values_producer_caller_route,
     compile_mir_program_with_values_result_crosscall_string_caller_index1_route,
     compile_mir_program_with_values_result_crosscall_string_caller_route,
+    compile_mir_program_with_values_result_producer_caller_route,
     compile_mir_program_with_values_snapshot_replacement_route,
 };
 pub use registry::{BuiltinCategory, BuiltinDesc, BuiltinRegistry};

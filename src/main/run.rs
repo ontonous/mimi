@@ -623,6 +623,39 @@ fn run_once(
             )
         } else if receipt_profile
             == mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+                .as_str()
+        {
+            // V4 Result-branch index-one String unpack has its own CheckedProgram-bound
+            // bytecode anchor distinct from V3 and straight-line V1/V2.
+            mimi::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_index1_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+                .as_str()
+        {
+            // V3 Result-branch index-zero String unpack has its own CheckedProgram-bound
+            // bytecode anchor distinct from V4 and straight-line V1/V2.
+            mimi::interp::bytecode::compile_mir_program_with_values_result_crosscall_string_caller_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::CanonicalMirRouteProfile::
+                OrdinaryMapOwnedAnyV2ValuesResultProducerCaller
+                .as_str()
+        {
+            // Result-branch one-length Values producer/caller has its own CheckedProgram-bound
+            // bytecode anchor distinct from V3/V4 unpack and straight-line V1/V2.
+            mimi::interp::bytecode::compile_mir_program_with_values_result_producer_caller_route(
+                &checked_program,
+                &canonical,
+            )
+        } else if receipt_profile
+            == mimi::core::mir::CanonicalMirRouteProfile::
                 OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
                 .as_str()
         {
