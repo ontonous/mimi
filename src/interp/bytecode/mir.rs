@@ -28308,7 +28308,9 @@ mod tests {
         "#;
         let (_, checked) = parse_and_check(source).expect("Any/String comparison source check");
         let mir = MirProgram::from_checked_program(&checked).expect("Any/String comparison MIR");
-        let bytecode = compile_mir_program(&mir).expect("Any/String comparison bytecode");
+        let bytecode =
+            compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(&checked, &mir)
+                .expect("Any/String comparison bytecode");
         let comparisons = bytecode
             .functions
             .iter()
@@ -28356,7 +28358,9 @@ mod tests {
         "#;
         let (_, checked) = parse_and_check(source).expect("Any/String comparison source check");
         let mir = MirProgram::from_checked_program(&checked).expect("Any/String comparison MIR");
-        let bytecode = compile_mir_program(&mir).expect("Any/String comparison bytecode");
+        let bytecode =
+            compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(&checked, &mir)
+                .expect("Any/String comparison bytecode");
 
         let mut valid_vm = BytecodeVM::new(Arc::clone(&bytecode));
         let valid = valid_vm
@@ -28432,7 +28436,9 @@ mod tests {
         "#;
         let (_, checked) = parse_and_check(source).expect("i32 Any/String source check");
         let mir = MirProgram::from_checked_program(&checked).expect("i32 Any/String MIR");
-        let bytecode = compile_mir_program(&mir).expect("i32 Any/String bytecode");
+        let bytecode =
+            compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(&checked, &mir)
+                .expect("i32 Any/String bytecode");
         assert!(bytecode
             .functions
             .iter()

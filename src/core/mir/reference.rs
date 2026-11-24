@@ -28002,73 +28002,81 @@ mod tests {
     }
 
     const MANAGED_ANY_PRINTLN_SOURCE: &str = r#"
+func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-        println("prefix")
-        let empty_result = map_new()
-        match empty_result {
-            Ok(empty) => {
-            let root_result = map_set(empty, "k\0🧪", "owned\0🧪值")
-            match root_result {
+    println("prefix")
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "k\0🧪", "owned\0🧪值") {
                 Ok(root) => {
-                let pair = map_get(root, "k\0🧪")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
-            },
-            Err(status) => {
-                drop(empty)
-                status
-            },
+                    let pair = map_get(root, "k\0🧪")
+                    let payload = pair.1
+                    let carried = carry(payload)
+                    drop(empty)
+                    drop(root)
+                    println(carried)
+                    drop(pair)
+                    drop(payload)
+                    drop(carried)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
             }
         },
-        Err(status) => {
-            status
-        },
-        }
+        Err(status) => { status },
+    }
 }
 "#;
 
     const MANAGED_ANY_PRINTLN_I32_SOURCE: &str = r#"
+func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-        let empty_result = map_new()
-        match empty_result {
-            Ok(empty) => {
-            let root_result = map_set(empty, "zero", 42)
-            match root_result {
+    match map_new() {
+        Ok(empty) => {
+            match map_set(empty, "zero", 42) {
                 Ok(root) => {
-                let pair = map_get(root, "zero")
-                drop(empty)
-                drop(root)
-                println(pair.1)
-                drop(pair)
-                0
-            },
-            Err(status) => {
-                drop(empty)
-                status
-            },
+                    let pair = map_get(root, "zero")
+                    let payload = pair.1
+                    let carried = carry(payload)
+                    drop(empty)
+                    drop(root)
+                    println(carried)
+                    drop(pair)
+                    drop(payload)
+                    drop(carried)
+                    0
+                },
+                Err(status) => {
+                    drop(empty)
+                    status
+                },
             }
         },
-        Err(status) => {
-            status
-        },
-        }
+        Err(status) => { status },
+    }
 }
 "#;
 
     #[test]
     fn reference_managed_any_println_preserves_i32_string_bytes_and_source_owners() {
         let (string_main, string_program) = canonical_program_with_main(MANAGED_ANY_PRINTLN_SOURCE);
-        let string_interpreter = MirReferenceInterpreter::new(&string_program);
+        let string_receipt =
+            string_program.route_receipt(super::super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+        let string_interpreter =
+            MirReferenceInterpreter::new(&string_program).with_route_receipt(&string_receipt);
         let string_observation = string_interpreter
             .execute_with_output(&string_main, &[])
             .expect("the receipted String Any println operation executes");
         assert_eq!(string_observation.value, MirRuntimeValue::Int(0));
 
         let (i32_main, i32_program) = canonical_program_with_main(MANAGED_ANY_PRINTLN_I32_SOURCE);
-        let i32_interpreter = MirReferenceInterpreter::new(&i32_program);
+        let i32_receipt =
+            i32_program.route_receipt(super::super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+        let i32_interpreter =
+            MirReferenceInterpreter::new(&i32_program).with_route_receipt(&i32_receipt);
         let i32_observation = i32_interpreter
             .execute_with_output(&i32_main, &[])
             .expect("the receipted i32 Any println operation executes");
@@ -28117,7 +28125,10 @@ func main() -> i32 {
             MirManagedAnyValue::from_i32(17).with_test_descriptor(1, 2),
         ];
         for forged in forged_values {
-            let interpreter = MirReferenceInterpreter::new(&program);
+            let route_receipt =
+                program.route_receipt(super::super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+            let interpreter =
+                MirReferenceInterpreter::new(&program).with_route_receipt(&route_receipt);
             *interpreter.output.borrow_mut() = "already printed\n".into();
             let mut values = HashMap::from([(
                 source.clone(),
@@ -28186,7 +28197,10 @@ func main() -> i32 {
                 }
             }
 
-            let interpreter = MirReferenceInterpreter::new(&program);
+            let route_receipt =
+                program.route_receipt(super::super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+            let interpreter =
+                MirReferenceInterpreter::new(&program).with_route_receipt(&route_receipt);
             let error = interpreter
                 .execute_with_output(&main, &[])
                 .expect_err("the exact Any Checker seal is required before execution");
@@ -28438,7 +28452,10 @@ func main() -> i32 { 0 }
             "#
             );
             let (main, program) = canonical_program_with_main(&source);
-            let interpreter = MirReferenceInterpreter::new(&program);
+            let route_receipt =
+                program.route_receipt(super::super::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+            let interpreter =
+                MirReferenceInterpreter::new(&program).with_route_receipt(&route_receipt);
             let value = interpreter
                 .execute(&NodeId("function:snapshot".into()), &[])
                 .expect("owned snapshot after Map drop");
@@ -30854,11 +30871,9 @@ func main() -> i32 {
         let source = r#"
 func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-    let empty_result = map_new()
-    match empty_result {
+    match map_new() {
         Ok(empty) => {
-            let root_result = map_set(empty, "zero", 0)
-            match root_result {
+            match map_set(empty, "zero", 0) {
                 Ok(root) => {
                     let pair = map_get(root, "zero")
                     drop(empty)
@@ -31327,11 +31342,9 @@ func main() -> i32 {
         let source_with_identity_call = r#"
 func carry<T>(value: T) -> T { value }
 func main() -> i32 {
-        let empty_result = map_new()
-        match empty_result {
+        match map_new() {
             Ok(empty) => {
-            let root_result = map_set(empty, "zero", 0)
-            match root_result {
+            match map_set(empty, "zero", 0) {
                 Ok(root) => {
                 let pair = map_get(root, "zero")
                 drop(empty)
@@ -31355,11 +31368,9 @@ func main() -> i32 {
 "#;
         let source_without_identity_call = r#"
 func main() -> i32 {
-        let empty_result = map_new()
-        match empty_result {
+        match map_new() {
             Ok(empty) => {
-            let root_result = map_set(empty, "zero", 0)
-            match root_result {
+            match map_set(empty, "zero", 0) {
                 Ok(root) => {
                 let pair = map_get(root, "zero")
                 drop(empty)

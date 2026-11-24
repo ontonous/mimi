@@ -932,15 +932,53 @@ mod tests {
             .unwrap_or_else(|errors| panic!("canonical MIR fixture checks: {errors:?}"));
         let mir = crate::core::mir::reference::MirProgram::from_checked_program(&checked)
             .expect("canonical MIR fixture lowers");
-        mir::compile_mir_program(&mir).expect("canonical MIR fixture emits bytecode")
+        let has_result_branch_v3 = mir.functions().values().any(|function| {
+            function
+                .ownership
+                .ordinary_map_owned_get_result_branch_v3_receipt()
+                .is_some()
+        });
+        if has_result_branch_v3 {
+            mir::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked, &mir,
+            )
+            .expect("canonical ResultBranchV3 MIR fixture emits bytecode")
+        } else {
+            mir::compile_mir_program(&mir).expect("canonical MIR fixture emits bytecode")
+        }
     }
 
     #[test]
     fn canonical_mir_managed_any_println_formats_i32_and_preserves_the_source_owner() {
-        // Keep this route to one MapGet owner and print its Any field directly.
-        let source = include_str!(
-            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_i32.mimi"
-        );
+        // Keep this route to one MapGet owner carried through a sealed identity call.
+        let source = r#"
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "answer", 42) {
+                            Ok(root) => {
+                                let pair = map_get(root, "answer")
+                                let payload = pair.1
+                                let carried = carry(payload)
+                                drop(empty)
+                                drop(root)
+                                println(carried)
+                                drop(pair)
+                                drop(payload)
+                                drop(carried)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
+            }
+        "#;
         let bytecode = compile_canonical_mir_source(source);
         let println_ops = bytecode
             .functions
@@ -969,16 +1007,21 @@ mod tests {
     #[test]
     fn canonical_mir_managed_any_println_preserves_string_nul_and_utf8_bytes() {
         let source = r#"
+            func carry<T>(value: T) -> T { value }
             func main() -> i32 {
                 match map_new() {
                     Ok(empty) => {
                         match map_set(empty, "k", "owned\0🧪值") {
                             Ok(root) => {
                                 let pair = map_get(root, "k")
+                                let payload = pair.1
+                                let carried = carry(payload)
                                 drop(empty)
                                 drop(root)
-                                println(pair.1)
+                                println(carried)
                                 drop(pair)
+                                drop(payload)
+                                drop(carried)
                                 0
                             },
                             Err(status) => {
@@ -1015,6 +1058,7 @@ mod tests {
     #[test]
     fn canonical_mir_managed_any_println_missing_or_forged_receipt_fails_before_stdout() {
         let source = r#"
+            func carry<T>(value: T) -> T { value }
             func main() -> i32 {
                 println("prefix must not escape preflight")
                 match map_new() {
@@ -1022,10 +1066,14 @@ mod tests {
                         match map_set(empty, "k", "payload") {
                             Ok(root) => {
                                 let pair = map_get(root, "k")
+                                let payload = pair.1
+                                let carried = carry(payload)
                                 drop(empty)
                                 drop(root)
-                                println(pair.1)
+                                println(carried)
                                 drop(pair)
+                                drop(payload)
+                                drop(carried)
                                 0
                             },
                             Err(status) => {
@@ -1084,9 +1132,34 @@ mod tests {
 
     #[test]
     fn canonical_mir_managed_any_println_invalid_runtime_descriptor_emits_no_partial_output() {
-        let source = include_str!(
-            "../../../tests/fixtures/mir_ordinary_map_any_owner_v2_direct_print_hit_string.mimi"
-        );
+        let source = r#"
+            func carry<T>(value: T) -> T { value }
+            func main() -> i32 {
+                match map_new() {
+                    Ok(empty) => {
+                        match map_set(empty, "answer", "borrowed String λ") {
+                            Ok(root) => {
+                                let pair = map_get(root, "answer")
+                                let payload = pair.1
+                                let carried = carry(payload)
+                                drop(empty)
+                                drop(root)
+                                println(carried)
+                                drop(pair)
+                                drop(payload)
+                                drop(carried)
+                                0
+                            },
+                            Err(status) => {
+                                drop(empty)
+                                status
+                            },
+                        }
+                    },
+                    Err(status) => status,
+                }
+            }
+        "#;
         let bytecode = compile_canonical_mir_source(source);
         let main = bytecode.entry;
         let forged_any = crate::interp::value::CanonicalManagedAnyI32StringV1::from_string(

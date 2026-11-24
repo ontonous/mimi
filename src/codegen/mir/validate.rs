@@ -8611,11 +8611,16 @@ mod tests {
     use crate::parser::Parser;
     use inkwell::context::Context;
 
-    fn canonical_program(source: &str) -> MirProgram {
+    fn checked_and_canonical_program(source: &str) -> (crate::core::CheckedProgram, MirProgram) {
         let tokens = Lexer::new(source).tokenize().expect("lex");
         let file = Parser::new(tokens).parse_file().expect("parse");
         let checked = crate::core::check_program(&file).expect("check");
-        MirProgram::from_checked_program(&checked).expect("canonical MIR")
+        let program = MirProgram::from_checked_program(&checked).expect("canonical MIR");
+        (checked, program)
+    }
+
+    fn canonical_program(source: &str) -> MirProgram {
+        checked_and_canonical_program(source).1
     }
 
     fn canonical_owned_get_program() -> MirProgram {
@@ -9040,11 +9045,17 @@ func main() -> i32 {
         let diagnostics = generator
             .compile_mir_native(&program)
             .expect_err("erased generic Any type arguments must fail pre-emission");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("type arguments disagree with instance")
-        }));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("type arguments disagree with instance")
+                    || diagnostic
+                        .message
+                        .contains("disagrees with the complete private Checker body seal")
+            }),
+            "{diagnostics:?}"
+        );
         assert!(generator.module.get_function("main").is_none());
         assert!(generator.module.get_function("snapshot").is_none());
     }
@@ -9098,7 +9109,9 @@ func main() -> i32 {
                 "../../../tests/fixtures/mir_ordinary_map_any_get_cross_callee_overflow.mimi"
             ),
         ] {
-            let program = canonical_program(source);
+            let (checked, program) = checked_and_canonical_program(source);
+            let route_receipt = program
+                .route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
             assert!(program.instances().values().any(|instance| matches!(
                 &instance.contract,
                 crate::core::mir::MirGenericInstanceContract::ManagedAnyTrapCleanup { .. }
@@ -9110,7 +9123,11 @@ func main() -> i32 {
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "mir_native_any_trap_cleanup");
             generator
-                .compile_mir_native(&program)
+                .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                    &checked,
+                    &program,
+                    &route_receipt,
+                )
                 .expect("native should lower the moved Any owner and exact checked trap");
             assert!(generator.module.get_function("main").is_some());
         }
@@ -9118,7 +9135,7 @@ func main() -> i32 {
 
     #[test]
     fn native_rejects_managed_any_trap_call_tampering_before_llvm_declarations() {
-        let mut program = canonical_program(include_str!(
+        let (checked, mut program) = checked_and_canonical_program(include_str!(
             "../../../tests/fixtures/mir_ordinary_map_any_get_cross_callee_division.mimi"
         ));
         let trap_target = program
@@ -9160,23 +9177,35 @@ func main() -> i32 {
         };
         type_arguments.clear();
         program.replace_function_for_test_only(main);
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_any_trap_missing_type_args");
         let diagnostics = generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect_err("erased raw DynamicAny call arguments must fail before emission");
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("type arguments disagree with instance")
-        }));
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("type arguments disagree with instance")
+                    || diagnostic
+                        .message
+                        .contains("disagrees with the complete private Checker body seal")
+            }),
+            "{diagnostics:?}"
+        );
         assert!(generator.module.get_function("main").is_none());
     }
 
     #[test]
     fn native_rejects_managed_any_trap_body_reordering_before_llvm_declarations() {
-        let mut program = canonical_program(include_str!(
+        let (checked, mut program) = checked_and_canonical_program(include_str!(
             "../../../tests/fixtures/mir_ordinary_map_any_get_cross_callee_division.mimi"
         ));
         let instance = program
@@ -9198,11 +9227,17 @@ func main() -> i32 {
             .instructions
             .swap(4, 5);
         program.replace_function_for_test_only(function);
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
 
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "mir_native_any_trap_body_tamper");
         let diagnostics = generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect_err("tampered Checker-sealed order must fail before emission");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic

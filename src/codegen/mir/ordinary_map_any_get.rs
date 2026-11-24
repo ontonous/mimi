@@ -1013,13 +1013,18 @@ func main() -> i32 {
 }
 "#;
 
-    fn program(source: &str) -> MirProgram {
+    fn checked_and_program(source: &str) -> (crate::core::CheckedProgram, MirProgram) {
         let tokens = crate::lexer::Lexer::new(source).tokenize().expect("lex");
         let file = crate::parser::Parser::new(tokens)
             .parse_file()
             .expect("parse");
         let checked = crate::core::check_program(&file).expect("checked ordinary Any source");
-        MirProgram::from_checked_program(&checked).expect("sealed ordinary Any MIR")
+        let program = MirProgram::from_checked_program(&checked).expect("sealed ordinary Any MIR");
+        (checked, program)
+    }
+
+    fn program(source: &str) -> MirProgram {
+        checked_and_program(source).1
     }
     fn strict_memcheck(generator: &CodeGenerator<'_>, expected_exit: i32, expected_output: &str) {
         if std::process::Command::new("valgrind")
@@ -1076,10 +1081,13 @@ func main() -> i32 {
     }
     #[test]
     fn ordinary_map_any_get_snapshot_escape_is_one_mir_across_reference_vm_native() {
-        let program = program(SNAPSHOT_SOURCE);
+        let (checked, program) = checked_and_program(SNAPSHOT_SOURCE);
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         let digest = program.canonical_digest();
         super::super::validate_mir_native(&program).expect("snapshot native preflight");
         let observed = MirReferenceInterpreter::new(&program)
+            .with_route_receipt(&route_receipt)
             .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
             .expect("reference owned snapshot escape");
         assert_eq!(observed.value, MirRuntimeValue::Int(0));
@@ -1087,7 +1095,12 @@ func main() -> i32 {
             observed.output,
             "true\ndetached\nfalse\n0\ntrue\n0\ntrue\n\n"
         );
-        let bytecode = compile_mir_program(&program).expect("snapshot AST-free bytecode");
+        let bytecode =
+            crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+            )
+            .expect("snapshot AST-free bytecode");
         assert!(bytecode.ast.is_none());
         let mut vm = BytecodeVM::new(bytecode);
         assert_eq!(
@@ -1098,7 +1111,11 @@ func main() -> i32 {
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "ordinary_map_any_snapshot_escape");
         generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect("same MIR native owner ABI");
         generator
             .module
@@ -1134,12 +1151,18 @@ func main() -> i32 {
 
     #[test]
     fn managed_any_string_equality_is_length_aware_borrowed_and_wrong_kind_is_false() {
-        let program = program(ANY_STRING_EQUALITY_SOURCE);
+        let (checked, program) = checked_and_program(ANY_STRING_EQUALITY_SOURCE);
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         let expected = "true\ntrue\ntrue\ntrue\nfalse\ntrue\n";
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "managed_any_string_equality");
         generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect("exact ManagedAny/String equality native profile");
         generator
             .module
@@ -1169,12 +1192,18 @@ func main() -> i32 {
     #[test]
     fn managed_any_println_checks_tag_then_preserves_exact_payload_bytes() {
         let expected = "true\ntrue\nowned\0🧪值\ntrue\n0\n";
-        let program = program(MANAGED_ANY_PRINTLN_SOURCE);
+        let (checked, program) = checked_and_program(MANAGED_ANY_PRINTLN_SOURCE);
+        let route_receipt =
+            program.route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         super::super::validate_mir_native(&program).expect("exact Any println native preflight");
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "managed_any_println");
         generator
-            .compile_mir_native(&program)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked,
+                &program,
+                &route_receipt,
+            )
             .expect("receipted Any println native profile");
         generator
             .module
@@ -1476,7 +1505,7 @@ func main() -> i32 {
         for (helper, main_tail, expected_code) in [
             (
                 "",
-                "let number = if pair.0 { transferred } else { 0 }\n    drop(transferred)\n    drop(pair)\n    number",
+                "if pair.0 {\n        drop(pair)\n        return transferred\n        0\n    } else {\n        drop(transferred)\n        drop(pair)\n        0\n    }",
                 "E0800",
             ),
             (
@@ -1527,19 +1556,32 @@ func main() -> i32 {{
 }}
 "#
             );
-            let program = program(&source);
-            let reference = MirReferenceInterpreter::new(&program);
+            let (checked_program, program) = checked_and_program(&source);
+            let route_receipt = program
+                .route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
+            let reference =
+                MirReferenceInterpreter::new(&program).with_route_receipt(&route_receipt);
             reference
                 .execute_with_output(&crate::core::NodeId("function:main".into()), &[])
                 .expect_err("reference kind/callee trap");
             assert_eq!(reference.captured_output(), "77\n");
-            let mut vm = BytecodeVM::new(compile_mir_program(&program).expect("trap bytecode"));
+            let mut vm = BytecodeVM::new(
+                crate::interp::bytecode::compile_mir_program_with_ordinary_map_owned_get_result_branch_v3_route(
+                    &checked_program,
+                    &program,
+                )
+                .expect("trap bytecode"),
+            );
             vm.run_value().expect_err("VM kind/callee trap");
             assert_eq!(vm.take_stdout(), "77\n");
             let context = Context::create();
             let mut generator = CodeGenerator::new(&context, "ordinary_map_any_owned_callee_trap");
             generator
-                .compile_mir_native(&program)
+                .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                    &checked_program,
+                    &program,
+                    &route_receipt,
+                )
                 .expect("typed trap module");
             generator.module.verify().expect("trap module verifies");
             let native = crate::tests::link_and_observe_canonical_mir(&generator)
@@ -1566,7 +1608,11 @@ func main() -> i32 {{
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "ordinary_map_any_checked_gate");
         generator
-            .compile_checked_mir_native_with_route_receipt(&checked_source, &program, &receipt)
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &checked_source,
+                &program,
+                &receipt,
+            )
             .expect("only exact checked conversion coverage authorizes native owner reads");
         generator
             .module
@@ -1594,11 +1640,23 @@ func main() -> i32 {
         );
         let context = Context::create();
         let mut generator = CodeGenerator::new(&context, "ordinary_map_any_foreign_checked_gate");
-        let errors = generator
-            .compile_checked_mir_native_with_route_receipt(&foreign, &program, &receipt)
+        let preflight_errors = generator
+            .preflight_native_dynamic_any_unpack(&foreign)
             .expect_err("uncovered bool conversion must preserve native E0722");
         assert!(
-            errors.iter().any(|e| e.code.as_deref() == Some("E0722")),
+            preflight_errors
+                .iter()
+                .any(|e| e.code.as_deref() == Some("E0722")),
+            "{preflight_errors:#?}"
+        );
+        let errors = generator
+            .compile_checked_mir_native_with_ordinary_map_owned_get_result_branch_v3_route(
+                &foreign, &program, &receipt,
+            )
+            .expect_err("uncovered CheckedProgram must be rejected by ResultBranchV3 native gate");
+        assert!(
+            errors.iter().any(|e| e.code.as_deref()
+                == Some(crate::core::mir::MIR_ROUTE_COVERAGE_ERROR_CODE)),
             "{errors:#?}"
         );
         assert!(

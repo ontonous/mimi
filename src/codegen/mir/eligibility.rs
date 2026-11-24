@@ -3593,7 +3593,13 @@ impl<'ctx> CodeGenerator<'ctx> {
         )
         .map_err(|error| vec![error.diagnostic()])?;
         validate_mir_native(program)?;
-        self.preflight_native_dynamic_any_unpack(checked)?;
+        if let Err(original_error) = self.preflight_native_dynamic_any_unpack(checked) {
+            if receipt.validate_against_program(program).is_err()
+                || checked_managed_any_unpack_coverage(checked, program).is_err()
+            {
+                return Err(original_error);
+            }
+        }
 
         let mir_digest = program.canonical_digest();
         if let Some(compiled_digest) = self.mir_native_compiled_digest.as_deref() {

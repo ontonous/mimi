@@ -10310,6 +10310,24 @@ impl MirTypeCatalog {
                             })
                             .collect()
                     } else if function.values.get(scrutinee).is_some_and(|value| {
+                        value.ty
+                            == super::types::ordinary_map_owned_get_i32_string_v1_root_result_type_id()
+                    }) {
+                        if function
+                            .ownership
+                            .checker_ordinary_map_owned_get_i32_string_v1_cfg_receipt
+                            .is_none()
+                        {
+                            return Err(
+                                "typed owned-get ManagedAny operation has no Map-specific Checker receipt"
+                                    .into(),
+                            );
+                        }
+                        return Err(
+                            "typed owned-get ManagedAny Result SwitchMove requires an exact ResultBranchV3 Checker receipt and non-Managed bindings"
+                                .into(),
+                        );
+                    } else if function.values.get(scrutinee).is_some_and(|value| {
                         value.ty == super::types::ordinary_map_owned_any_v2_root_result_type_id()
                     }) && ordinary_map_owned_any_v2_result_branch_for_scrutinee(
                         function, scrutinee,
@@ -11650,14 +11668,7 @@ impl MirTypeCatalog {
                         result,
                         kind: MirAggregateKind::Tuple,
                         fields,
-                    } if managed_values.contains(result)
-                        && function
-                            .values
-                            .get(result)
-                            .is_some_and(|value| {
-                                value.ty == ordinary_map_owned_any_v2_values_type_id()
-                            }) =>
-                    {
+                    } if managed_values.contains(result) => {
                         if fields.iter().any(|field| {
                             function.values.get(field).is_some_and(|value| {
                                 value.ty == super::types::ordinary_map_owned_any_v2_type_id()
@@ -12911,7 +12922,30 @@ impl MirTypeCatalog {
                             .transpose()
                             .map_err(|error| error.to_string())?
                     };
-                    if actual_value != &expected_value {
+                    let matched_return_unpack = actual_value.as_ref().is_some_and(|actual_id| {
+                        value.is_some()
+                            && actual_id.as_str().starts_with("return.unpack:")
+                            && mir_block.instructions.iter().any(|instruction| {
+                                matches!(
+                                    &instruction.kind,
+                                    MirInstructionKind::ManagedAny {
+                                        result: Some(res),
+                                        operation: MirManagedAnyOperation::UnpackI32
+                                            | MirManagedAnyOperation::UnpackString,
+                                        contract: Some(contract),
+                                        ..
+                                    } if res == actual_id
+                                        && contract.owner == function.owner
+                                        && actual_id.as_str()
+                                            == format!("return.unpack:{}", contract.origin.0)
+                                        && source_block
+                                            .points
+                                            .iter()
+                                            .any(|point| point.source.node == contract.origin)
+                                )
+                            })
+                    });
+                    if actual_value != &expected_value && !matched_return_unpack {
                         return Err("ManagedAny MIR Return value disagrees with its exact Checker return node".into());
                     }
                 }
@@ -15169,8 +15203,11 @@ func main() -> i32 {
 
         let mut forged_program = program.clone();
         forged_program.replace_function_for_test_only(forged_function);
+        let route_receipt = forged_program
+            .route_receipt(crate::core::mir::ORDINARY_MAP_OWNED_GET_I32_STRING_V1_ISLAND);
         let interpreter =
-            crate::core::mir::reference::MirReferenceInterpreter::new(&forged_program);
+            crate::core::mir::reference::MirReferenceInterpreter::new(&forged_program)
+                .with_route_receipt(&route_receipt);
         let error = interpreter
             .execute_with_output(&NodeId("function:main".into()), &[])
             .expect_err("the source-bound MIR snapshot cannot be dropped before Println");
@@ -17947,14 +17984,23 @@ func main() -> i32 {
             if mutation == "missing" {
                 forged
                     .ownership
-                    .checker_ordinary_map_owned_any_v2_values_caller_receipt = None;
+                    .checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt = None;
+                if let Some(seal) = forged.ownership.checker_managed_any.as_mut() {
+                    seal.v2_values_result_producer_caller = None;
+                }
             } else if mutation == "receipt" {
                 forged
                     .ownership
-                    .checker_ordinary_map_owned_any_v2_values_caller_receipt
+                    .checker_ordinary_map_owned_any_v2_values_result_producer_caller_receipt
                     .as_mut()
                     .unwrap()
-                    .call_target = NodeId("function:forged".into());
+                    .producer_target = NodeId("function:forged".into());
+                if let Some(seal) = forged.ownership.checker_managed_any.as_mut() {
+                    seal.v2_values_result_producer_caller
+                        .as_mut()
+                        .unwrap()
+                        .producer_target = NodeId("function:forged".into());
+                }
             } else {
                 let instruction = forged.blocks.values_mut().flat_map(|block| &mut block.instructions).find(|instruction| matches!(&instruction.kind, MirInstructionKind::Call { result: Some(result), .. } if caller.values.get(result).is_some_and(|value| value.ty == ordinary_map_owned_any_v2_values_type_id()))).expect("Values producer Call");
                 let MirInstructionKind::Call {

@@ -2468,7 +2468,7 @@ mod tests {
                 parsed_module(
                     "/workspace/main.mimi",
                     "workspace:main.mimi",
-                    "use apps::left as shared;\nuse apps::right as shared;\nfunc main() -> i32 { 0 }",
+                    "use apps::left as dup_alias;\nuse apps::right as dup_alias;\nfunc main() -> i32 { 0 }",
                 ),
             ),
         ]);

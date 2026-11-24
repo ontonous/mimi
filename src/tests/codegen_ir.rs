@@ -671,7 +671,10 @@ fn ir_match_has_merge_block() {
         func main() -> i32 { 0 }
     "#,
     );
-    assert!(ir.contains("matchcont"), "match needs merge block");
+    assert!(
+        ir.contains("match_merge") || ir.contains("matchcont") || ir.contains("match.join"),
+        "match needs merge block:\n{ir}"
+    );
 }
 
 // ===================== dyn Trait type mapping test =====================

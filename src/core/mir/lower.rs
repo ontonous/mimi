@@ -16242,6 +16242,192 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         }
     }
 
+    fn lower_bind_statement(
+        &mut self,
+        node_id: &NodeId,
+        pattern: &ResolvedPattern,
+        initializer: &ResolvedExpr,
+    ) {
+        if self.lower_typed_session_pair_bind(node_id, pattern, initializer) {
+            return;
+        }
+        if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
+            if self.lower_closure_binding(local, initializer)
+                || self.lower_checker_map_binding(local, initializer)
+            {
+                return;
+            }
+        }
+        let value = self.lower_expr(initializer);
+        if matches!(pattern.kind, ResolvedPatternKind::Tuple(_))
+            && self.value_contains_managed_any(&value)
+        {
+            self.lower_managed_any_tuple_pattern(pattern, &value, node_id);
+            self.emit(
+                node_id,
+                "drop.managed_tuple_initializer",
+                MirInstructionKind::Drop { value },
+            );
+            return;
+        }
+        if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
+            if let Ok(destination) = self.local_value(local) {
+                self.emit(
+                    node_id,
+                    "bind",
+                    MirInstructionKind::Move {
+                        result: destination,
+                        source: value,
+                    },
+                );
+            }
+        } else if matches!(pattern.kind, ResolvedPatternKind::Wildcard) {
+            if self.value_contains_managed_any(&value) {
+                let drop_instruction = self.managed_any_instruction(
+                    node_id,
+                    None,
+                    value,
+                    super::MirManagedAnyOperation::Drop,
+                );
+                self.emit(node_id, "drop.managed-any", drop_instruction);
+            } else if let Some(catalog) = self.type_catalog {
+                if let Some(descriptor) = self.values.get(&value).and_then(|v| catalog.get(&v.ty)) {
+                    if matches!(
+                        descriptor.ownership,
+                        super::types::MirOwnership::Copy
+                            | super::types::MirOwnership::SharedBorrow
+                            | super::types::MirOwnership::WeakBorrow
+                    ) {
+                        // Discarded copy/borrowed value needs no destination move or drop.
+                    } else if descriptor.ownership == super::types::MirOwnership::Move
+                        && descriptor.glue.supports_drop()
+                        && !matches!(
+                            descriptor.glue.drop,
+                            super::types::MirGlueKind::OrdinaryMapOwnedAnyV2
+                                | super::types::MirGlueKind::OrdinaryMapOwnedAnyV2Values
+                        )
+                    {
+                        self.emit(
+                            node_id,
+                            "bind.wildcard.drop",
+                            MirInstructionKind::Drop { value },
+                        );
+                    } else {
+                        self.error(
+                            node_id,
+                            "wildcard bind pattern cannot discard non-droppable or linear value in MIR Phase 0",
+                        );
+                    }
+                } else {
+                    self.error(
+                        node_id,
+                        "wildcard bind pattern value has no canonical TypeDesc in MIR Phase 0",
+                    );
+                }
+            } else {
+                let is_copy_primitive = self.values.get(&value).is_some_and(|v| {
+                    [
+                        PrimitiveType::I8,
+                        PrimitiveType::I16,
+                        PrimitiveType::I32,
+                        PrimitiveType::I64,
+                        PrimitiveType::I128,
+                        PrimitiveType::U8,
+                        PrimitiveType::U16,
+                        PrimitiveType::U32,
+                        PrimitiveType::U64,
+                        PrimitiveType::U128,
+                        PrimitiveType::Isize,
+                        PrimitiveType::Usize,
+                        PrimitiveType::F32,
+                        PrimitiveType::F64,
+                        PrimitiveType::Bool,
+                        PrimitiveType::Char,
+                        PrimitiveType::Unit,
+                    ]
+                    .into_iter()
+                    .any(|primitive| v.ty == primitive_type_id(primitive))
+                });
+                if !is_copy_primitive {
+                    self.error(
+                        node_id,
+                        "only a direct binding pattern is supported in MIR Phase 0",
+                    );
+                }
+            }
+        } else {
+            self.error(
+                node_id,
+                "only a direct binding pattern is supported in MIR Phase 0",
+            );
+        }
+    }
+
+    fn lower_drop_statement(
+        &mut self,
+        node_id: &NodeId,
+        places: &[crate::core::ir::ResolvedPlace],
+    ) {
+        for (index, place) in places.iter().enumerate() {
+            if !place.projections.is_empty() {
+                self.error(
+                    node_id,
+                    "projected drop requires aggregate glue and remains fail-closed",
+                );
+                continue;
+            }
+            if self.lower_checker_map_drop(node_id, &place.base, index) {
+                continue;
+            }
+            let consumes_values_owned_string =
+                self.checker_receipted_owned_string_drop(node_id, index, &place.base);
+            match self.local_value(&place.base) {
+                Ok(value) if consumes_values_owned_string => self.emit(
+                    node_id,
+                    &format!("drop.{index}"),
+                    MirInstructionKind::Drop { value },
+                ),
+                Ok(value)
+                    if self.values.get(&value).is_some_and(|descriptor| {
+                        descriptor.ty == crate::core::ir::primitive_type_id(PrimitiveType::String)
+                    }) =>
+                {
+                    // Free String Drop is a source-level no-op on
+                    // the binding. Lower the evaluated value as a
+                    // temporary clone and release that temporary,
+                    // preserving the local owner for subsequent
+                    // reads (including ManagedAny == String).
+                    let Some(temporary) =
+                        self.id(&format!("drop.string.temporary.{index}"), node_id)
+                    else {
+                        continue;
+                    };
+                    let string_type = crate::core::ir::primitive_type_id(PrimitiveType::String);
+                    self.insert_value(temporary.clone(), string_type, node_id);
+                    self.emit(
+                        node_id,
+                        &format!("drop.string.clone.{index}"),
+                        MirInstructionKind::Clone {
+                            result: temporary.clone(),
+                            source: value,
+                        },
+                    );
+                    self.emit(
+                        node_id,
+                        &format!("drop.string.temporary.{index}"),
+                        MirInstructionKind::Drop { value: temporary },
+                    );
+                }
+                Ok(value) => self.emit(
+                    node_id,
+                    &format!("drop.{index}"),
+                    MirInstructionKind::Drop { value },
+                ),
+                Err(errors) => self.errors.extend(errors),
+            }
+        }
+    }
+
     fn lower_root(&mut self, root: &ResolvedBlock) {
         for statement in &root.statements {
             if self.current_is_terminated() {
@@ -16256,123 +16442,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     pattern,
                     initializer: Some(initializer),
                 } => {
-                    if self.lower_typed_session_pair_bind(&statement.node_id, pattern, initializer)
-                    {
-                        continue;
-                    }
-                    if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
-                        if self.lower_closure_binding(local, initializer) {
-                            continue;
-                        }
-                        if self.lower_checker_map_binding(local, initializer) {
-                            continue;
-                        }
-                    }
-                    let value = self.lower_expr(initializer);
-                    if matches!(pattern.kind, ResolvedPatternKind::Tuple(_))
-                        && self.value_contains_managed_any(&value)
-                    {
-                        self.lower_managed_any_tuple_pattern(pattern, &value, &statement.node_id);
-                        self.emit(
-                            &statement.node_id,
-                            "drop.managed_tuple_initializer",
-                            MirInstructionKind::Drop { value },
-                        );
-                        continue;
-                    }
-                    if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
-                        if let Ok(destination) = self.local_value(local) {
-                            self.emit(
-                                &statement.node_id,
-                                "bind",
-                                MirInstructionKind::Move {
-                                    result: destination,
-                                    source: value,
-                                },
-                            );
-                        }
-                    } else if matches!(pattern.kind, ResolvedPatternKind::Wildcard) {
-                        if self.value_contains_managed_any(&value) {
-                            let drop_instruction = self.managed_any_instruction(
-                                &statement.node_id,
-                                None,
-                                value,
-                                super::MirManagedAnyOperation::Drop,
-                            );
-                            self.emit(&statement.node_id, "drop.managed-any", drop_instruction);
-                        } else if let Some(catalog) = self.type_catalog {
-                            if let Some(descriptor) =
-                                self.values.get(&value).and_then(|v| catalog.get(&v.ty))
-                            {
-                                if matches!(
-                                    descriptor.ownership,
-                                    super::types::MirOwnership::Copy
-                                        | super::types::MirOwnership::SharedBorrow
-                                        | super::types::MirOwnership::WeakBorrow
-                                ) {
-                                    // Discarded copy/borrowed value needs no destination move or drop.
-                                } else if descriptor.ownership == super::types::MirOwnership::Move
-                                    && descriptor.glue.supports_drop()
-                                    && !matches!(
-                                        descriptor.glue.drop,
-                                        super::types::MirGlueKind::OrdinaryMapOwnedAnyV2
-                                            | super::types::MirGlueKind::OrdinaryMapOwnedAnyV2Values
-                                    )
-                                {
-                                    self.emit(
-                                        &statement.node_id,
-                                        "bind.wildcard.drop",
-                                        MirInstructionKind::Drop { value },
-                                    );
-                                } else {
-                                    self.error(
-                                        &statement.node_id,
-                                        "wildcard bind pattern cannot discard non-droppable or linear value in MIR Phase 0",
-                                    );
-                                }
-                            } else {
-                                self.error(
-                                    &statement.node_id,
-                                    "wildcard bind pattern value has no canonical TypeDesc in MIR Phase 0",
-                                );
-                            }
-                        } else {
-                            let is_copy_primitive = self.values.get(&value).is_some_and(|v| {
-                                [
-                                    PrimitiveType::I8,
-                                    PrimitiveType::I16,
-                                    PrimitiveType::I32,
-                                    PrimitiveType::I64,
-                                    PrimitiveType::I128,
-                                    PrimitiveType::U8,
-                                    PrimitiveType::U16,
-                                    PrimitiveType::U32,
-                                    PrimitiveType::U64,
-                                    PrimitiveType::U128,
-                                    PrimitiveType::Isize,
-                                    PrimitiveType::Usize,
-                                    PrimitiveType::F32,
-                                    PrimitiveType::F64,
-                                    PrimitiveType::Bool,
-                                    PrimitiveType::Char,
-                                    PrimitiveType::Unit,
-                                ]
-                                .into_iter()
-                                .any(|primitive| v.ty == primitive_type_id(primitive))
-                            });
-                            if !is_copy_primitive {
-                                self.error(
-                                    &statement.node_id,
-                                    "only a direct binding pattern is supported in MIR Phase 0",
-                                );
-                            }
-                        }
-                    } else {
-                        self.error(
-                            &statement.node_id,
-                            "only a direct binding pattern is supported in MIR Phase 0",
-                        );
-                    }
+                    self.lower_bind_statement(&statement.node_id, pattern, initializer);
                 }
                 ResolvedStmtKind::Bind { .. } => {
                     self.error(
@@ -16507,75 +16577,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     }
                 }
                 ResolvedStmtKind::Drop(places) => {
-                    for (index, place) in places.iter().enumerate() {
-                        if !place.projections.is_empty() {
-                            self.error(
-                                &statement.node_id,
-                                "projected drop requires aggregate glue and remains fail-closed",
-                            );
-                            continue;
-                        }
-                        if self.lower_checker_map_drop(&statement.node_id, &place.base, index) {
-                            continue;
-                        }
-                        let consumes_values_owned_string = self
-                            .checker_receipted_owned_string_drop(
-                                &statement.node_id,
-                                index,
-                                &place.base,
-                            );
-                        match self.local_value(&place.base) {
-                            Ok(value) if consumes_values_owned_string => self.emit(
-                                &statement.node_id,
-                                &format!("drop.{index}"),
-                                MirInstructionKind::Drop { value },
-                            ),
-                            Ok(value)
-                                if self.values.get(&value).is_some_and(|descriptor| {
-                                    descriptor.ty
-                                        == crate::core::ir::primitive_type_id(PrimitiveType::String)
-                                }) =>
-                            {
-                                // Free String Drop is a source-level no-op on
-                                // the binding. Lower the evaluated value as a
-                                // temporary clone and release that temporary,
-                                // preserving the local owner for subsequent
-                                // reads (including ManagedAny == String).
-                                let Some(temporary) = self.id(
-                                    &format!("drop.string.temporary.{index}"),
-                                    &statement.node_id,
-                                ) else {
-                                    continue;
-                                };
-                                let string_type =
-                                    crate::core::ir::primitive_type_id(PrimitiveType::String);
-                                self.insert_value(
-                                    temporary.clone(),
-                                    string_type,
-                                    &statement.node_id,
-                                );
-                                self.emit(
-                                    &statement.node_id,
-                                    &format!("drop.string.clone.{index}"),
-                                    MirInstructionKind::Clone {
-                                        result: temporary.clone(),
-                                        source: value,
-                                    },
-                                );
-                                self.emit(
-                                    &statement.node_id,
-                                    &format!("drop.string.temporary.{index}"),
-                                    MirInstructionKind::Drop { value: temporary },
-                                );
-                            }
-                            Ok(value) => self.emit(
-                                &statement.node_id,
-                                &format!("drop.{index}"),
-                                MirInstructionKind::Drop { value },
-                            ),
-                            Err(errors) => self.errors.extend(errors),
-                        }
-                    }
+                    self.lower_drop_statement(&statement.node_id, places);
                 }
                 ResolvedStmtKind::Scope {
                     kind: crate::core::ir::ResolvedScopeKind::Lexical,
@@ -23457,6 +23459,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
     }
 
     fn lower_block_expr(&mut self, block: &ResolvedBlock) -> Option<MirValueId> {
+        let values_before_block: BTreeSet<MirValueId> = self.values.keys().cloned().collect();
         for statement in &block.statements {
             if self.current_is_terminated() {
                 self.error(
@@ -23470,31 +23473,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     pattern,
                     initializer: Some(initializer),
                 } => {
-                    if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
-                        // Keep nested/loop block bindings on the same
-                        // checker-owned Map receipt path as root-scope
-                        // bindings. In particular, a loop-local `map_new()`
-                        // must not be lowered as a generic Move after its
-                        // dedicated owner instruction has been emitted.
-                        if self.lower_closure_binding(local, initializer)
-                            || self.lower_checker_map_binding(local, initializer)
-                        {
-                            continue;
-                        }
-                    }
-                    let value = self.lower_expr(initializer);
-                    if let ResolvedPatternKind::Binding { local, .. } = &pattern.kind {
-                        if let Ok(destination) = self.local_value(local) {
-                            self.emit(
-                                &statement.node_id,
-                                "bind",
-                                MirInstructionKind::Move {
-                                    result: destination,
-                                    source: value,
-                                },
-                            );
-                        }
-                    }
+                    self.lower_bind_statement(&statement.node_id, pattern, initializer);
                 }
                 ResolvedStmtKind::Expr(expression) => {
                     if self.is_statement_if(expression) {
@@ -23560,30 +23539,7 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                     self.terminate(MirTerminator::Return { value });
                 }
                 ResolvedStmtKind::Drop(places) => {
-                    for (index, place) in places.iter().enumerate() {
-                        if !place.projections.is_empty() {
-                            self.error(
-                                &statement.node_id,
-                                "projected drop requires aggregate glue and remains fail-closed",
-                            );
-                            continue;
-                        }
-                        if self.lower_checker_map_drop(&statement.node_id, &place.base, index) {
-                            continue;
-                        }
-                        let value = match self.local_value(&place.base) {
-                            Ok(value) => value,
-                            Err(errors) => {
-                                self.errors.extend(errors);
-                                continue;
-                            }
-                        };
-                        self.emit(
-                            &statement.node_id,
-                            &format!("drop.{index}"),
-                            MirInstructionKind::Drop { value },
-                        );
-                    }
+                    self.lower_drop_statement(&statement.node_id, places);
                 }
                 ResolvedStmtKind::Contract { .. } | ResolvedStmtKind::Math(_) => {}
                 ResolvedStmtKind::Scope {
@@ -23603,13 +23559,44 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
                 ),
             }
         }
-        block.result.as_deref().map(|result| {
-            if self.transition_result_is_multi_target_union() {
-                self.lower_multi_target_union_return(result)
-            } else {
-                self.lower_return_expr(result)
-            }
-        })
+        let result = if !self.current_is_terminated() {
+            block.result.as_deref().map(|result| {
+                if self.transition_result_is_multi_target_union() {
+                    self.lower_multi_target_union_return(result)
+                } else {
+                    self.lower_return_expr(result)
+                }
+            })
+        } else {
+            None
+        };
+        if !self.current_is_terminated() {
+            let scope_cleanup_node = self
+                .blocks
+                .get(&self.current)
+                .and_then(|mir_block| {
+                    mir_block.instructions.iter().rev().find_map(|inst| {
+                        self.managed_any_origins
+                            .get(&inst.id)
+                            .filter(|origin| *origin != &self.body.owner)
+                            .cloned()
+                    })
+                })
+                .or_else(|| block.result.as_deref().map(|res| res.node_id.clone()))
+                .or_else(|| {
+                    block
+                        .statements
+                        .last()
+                        .map(|statement| statement.node_id.clone())
+                })
+                .unwrap_or_else(|| block.node_id.clone());
+            self.emit_managed_any_scope_drops(
+                Some(&values_before_block),
+                result.as_ref(),
+                &scope_cleanup_node,
+            );
+        }
+        result
     }
 
     fn fallback_value(&mut self, expression: &ResolvedExpr) -> MirValueId {
@@ -24988,6 +24975,15 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
     }
 
     fn emit_end_of_body_managed_any_drops(&mut self, returned: Option<&MirValueId>, node: &NodeId) {
+        self.emit_managed_any_scope_drops(None, returned, node);
+    }
+
+    fn emit_managed_any_scope_drops(
+        &mut self,
+        excluded_values: Option<&BTreeSet<MirValueId>>,
+        returned: Option<&MirValueId>,
+        node: &NodeId,
+    ) {
         if self.type_catalog.is_none() {
             return;
         }
@@ -25153,7 +25149,10 @@ impl<'a: 'body, 'body> Lowerer<'a, 'body> {
         let mut remaining = Vec::new();
         let mut inconsistent = Vec::new();
         for value in self.values.keys().rev() {
-            if !self.value_contains_managed_any(value) || returned == Some(value) {
+            if excluded_values.is_some_and(|excluded| excluded.contains(value))
+                || !self.value_contains_managed_any(value)
+                || returned == Some(value)
+            {
                 continue;
             }
             let states = owner_states_at_current(value);
