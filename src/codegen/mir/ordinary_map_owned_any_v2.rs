@@ -38,6 +38,97 @@ const V2_STATUS_CAPACITY: i32 = 3;
 const V2_STATUS_SIZE_OVERFLOW: i32 = 17;
 const V2_SIZE_FAILURE_ERROR: &str = "[E0800] ordinary Map/Any owner-v2 Size failed";
 
+#[derive(Default)]
+struct V2InstructionCensus {
+    new: usize,
+    set: usize,
+    set_any_result: usize,
+    set_result: usize,
+    remove: usize,
+    size: usize,
+    contains: usize,
+    get_any: usize,
+    unpack: usize,
+    println: usize,
+    values_unpack: usize,
+    values: usize,
+    keys: usize,
+    keys_unpack: usize,
+    is_empty: usize,
+    drop: usize,
+    dynamic_arg0: usize,
+}
+
+impl V2InstructionCensus {
+    fn from_instructions<'a>(
+        instructions: impl IntoIterator<Item = &'a crate::core::mir::MirInstruction>,
+    ) -> Self {
+        use crate::core::mir::MirInstructionKind as Instruction;
+        let mut census = Self::default();
+        for instruction in instructions {
+            match &instruction.kind {
+                Instruction::OrdinaryMapOwnedAnyV2New { .. } => census.new += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Set { .. } => census.set += 1,
+                Instruction::OrdinaryMapOwnedAnyV2SetAnyResult { .. } => census.set_any_result += 1,
+                Instruction::OrdinaryMapOwnedAnyV2SetResult { .. } => census.set_result += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Remove { .. } => census.remove += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Size { .. } => census.size += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Contains { .. } => census.contains += 1,
+                Instruction::OrdinaryMapOwnedAnyV2GetAny { .. } => census.get_any += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Unpack { .. } => census.unpack += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Println { .. } => census.println += 1,
+                Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. } => census.values_unpack += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Values { .. } => census.values += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Keys { .. } => census.keys += 1,
+                Instruction::OrdinaryMapOwnedAnyV2KeysUnpack { .. } => census.keys_unpack += 1,
+                Instruction::OrdinaryMapOwnedAnyV2IsEmpty { .. } => census.is_empty += 1,
+                Instruction::OrdinaryMapOwnedAnyV2Drop { .. } => census.drop += 1,
+                Instruction::OrdinaryMapOwnedAnyV2DynamicArg0 { .. } => census.dynamic_arg0 += 1,
+                _ => {}
+            }
+        }
+        census
+    }
+
+    fn from_program(program: &MirProgram) -> Self {
+        Self::from_instructions(
+            program
+                .functions()
+                .values()
+                .flat_map(|function| function.blocks.values())
+                .flat_map(|block| &block.instructions),
+        )
+    }
+
+    fn from_function(function: &MirFunction) -> Self {
+        Self::from_instructions(
+            function
+                .blocks
+                .values()
+                .flat_map(|block| &block.instructions),
+        )
+    }
+
+    fn basic_total(&self) -> usize {
+        self.new
+            + self.set
+            + self.remove
+            + self.size
+            + self.contains
+            + self.get_any
+            + self.unpack
+            + self.println
+            + self.values_unpack
+            + self.values
+            + self.is_empty
+            + self.drop
+    }
+
+    fn result_total(&self) -> usize {
+        self.basic_total() + self.set_any_result + self.set_result
+    }
+}
+
 fn native_direct_tuple_root_result_abi<'ctx>(
     context: &'ctx inkwell::context::Context,
     function: &MirFunction,
@@ -5426,8 +5517,6 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_mixed_snapshot_native_co
 pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_native_contract(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
-    use crate::core::mir::MirInstructionKind as Instruction;
-
     let exact =
         crate::core::mir::validate_ordinary_map_owned_any_v2_values_local_index_i32_mir_route(
             program,
@@ -5475,40 +5564,14 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_native_c
         .functions()
         .get(&exact.owner)
         .ok_or_else(|| vec!["ValuesLocalIndexI32 owner function is absent from MIR".into()])?;
-    let instructions = function
-        .blocks
-        .values()
-        .flat_map(|block| &block.instructions)
-        .collect::<Vec<_>>();
-    let count = |predicate: &dyn Fn(&Instruction) -> bool| {
-        instructions
-            .iter()
-            .filter(|instruction| predicate(&instruction.kind))
-            .count()
-    };
-    let map_root_new = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2New { .. }));
-    let map_root_set = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Set { .. }));
-    let map_root_values =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Values { .. }));
-    let map_root_drops =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Drop { .. }));
-    let total_v2_actions = count(&|kind| {
-        matches!(
-            kind,
-            Instruction::OrdinaryMapOwnedAnyV2New { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Set { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Remove { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Size { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Contains { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2GetAny { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Unpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Println { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Values { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2IsEmpty { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Drop { .. }
-        )
-    });
+    let census = V2InstructionCensus::from_function(function);
+    let (map_root_new, map_root_set, map_root_values, map_root_drops, total_v2_actions) = (
+        census.new,
+        census.set,
+        census.values,
+        census.drop,
+        census.basic_total(),
+    );
     if map_root_new != 1
         || map_root_set != 1
         || map_root_values != 1
@@ -5621,41 +5684,24 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_b
         .values()
         .flat_map(|block| &block.instructions)
         .collect::<Vec<_>>();
-    let count = |predicate: &dyn Fn(&Instruction) -> bool| {
-        instructions
-            .iter()
-            .filter(|instruction| predicate(&instruction.kind))
-            .count()
-    };
-    let new_count = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2New { .. }));
-    let set_any_result_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2SetAnyResult { .. }));
-    let values_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Values { .. }));
-    let unpack_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }));
-    let root_drop_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Drop { .. }));
-    let old_set_count = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Set { .. }));
-    let all_v2_operations = count(&|kind| {
-        matches!(
-            kind,
-            Instruction::OrdinaryMapOwnedAnyV2New { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Set { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2SetAnyResult { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2SetResult { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Remove { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Size { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Contains { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2GetAny { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Unpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Println { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Values { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2IsEmpty { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Drop { .. }
-        )
-    });
+    let census = V2InstructionCensus::from_function(function);
+    let (
+        new_count,
+        set_any_result_count,
+        values_count,
+        unpack_count,
+        root_drop_count,
+        old_set_count,
+        all_v2_operations,
+    ) = (
+        census.new,
+        census.set_any_result,
+        census.values,
+        census.values_unpack,
+        census.drop,
+        census.set,
+        census.result_total(),
+    );
     let operation_shapes_match = instructions.iter().any(|instruction| {
         matches!(
             &instruction.kind,
@@ -5738,38 +5784,7 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_b
         .iter()
         .filter_map(|(name, passed)| (!passed).then_some(*name))
         .collect::<Vec<_>>();
-    if cfg.owner != owner
-        || branch.owner != owner
-        || branch.profile_version != BranchVersion::V2
-        || branch.cfg.owner != owner
-        || !path_shapes_match
-        || branch.key_literal != "answer"
-        || branch.payload_literal != 41
-        || branch.payload_type != i32_type
-        || function.owner != owner
-        || !function.parameters.is_empty()
-        || function.parameter_permissions.as_deref() != Some(&[])
-        || function.result != i32_type
-        || function.values.get(&new_result).map(|value| &value.ty) != Some(&root_result_type)
-        || function.values.get(&set_result).map(|value| &value.ty) != Some(&root_result_type)
-        || function.values.get(&initial_root).map(|value| &value.ty) != Some(&root_type)
-        || function.values.get(&populated_root).map(|value| &value.ty) != Some(&root_type)
-        || function.values.get(&key).map(|value| &value.ty) != Some(&string_type)
-        || function.values.get(&payload).map(|value| &value.ty) != Some(&i32_type)
-        || function.values.get(&snapshot).map(|value| &value.ty)
-            != Some(&crate::core::mir::types::ordinary_map_owned_any_v2_values_type_id())
-        || function.values.get(&index).map(|value| &value.ty) != Some(&i32_type)
-        || function.values.get(&unpack_result).map(|value| &value.ty) != Some(&i32_type)
-        || function.values.get(&unpack_local).map(|value| &value.ty) != Some(&i32_type)
-        || !operation_shapes_match
-        || new_count != 1
-        || set_any_result_count != 1
-        || values_count != 1
-        || unpack_count != 1
-        || root_drop_count != 3
-        || old_set_count != 0
-        || all_v2_operations != 7
-    {
+    if !failed_native_shape_checks.is_empty() {
         return Err(vec![format!(
             "ValuesLocalIndexI32ResultBranch native route does not match its exact three-path New/SetAnyResult/i32-Values graph (failed_checks={failed_native_shape_checks:?}, counts={new_count}/{set_any_result_count}/{values_count}/{unpack_count}/{root_drop_count}/{old_set_count}/{all_v2_operations})"
         )]);
@@ -5888,8 +5903,6 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_local_index_i32_result_b
 pub(super) fn validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_native_contract(
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
-    use crate::core::mir::MirInstructionKind as Instruction;
-
     crate::core::mir::validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_mir_route(
         program,
     )
@@ -5910,41 +5923,14 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_heterogeneous_string_ind
             "ValuesHeterogeneousStringIndex1 native route must bind one explicitly dropped String unpack".into(),
         ]);
     }
-    let instructions = program
-        .functions()
-        .values()
-        .flat_map(|function| function.blocks.values())
-        .flat_map(|block| &block.instructions)
-        .collect::<Vec<_>>();
-    let count = |predicate: &dyn Fn(&Instruction) -> bool| {
-        instructions
-            .iter()
-            .filter(|instruction| predicate(&instruction.kind))
-            .count()
-    };
-    let new_count = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2New { .. }));
-    let set_count = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Set { .. }));
-    let values_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Values { .. }));
-    let root_drop_count =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Drop { .. }));
-    let total_v2_count = count(&|kind| {
-        matches!(
-            kind,
-            Instruction::OrdinaryMapOwnedAnyV2New { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Set { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Remove { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Size { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Contains { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2GetAny { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Unpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Println { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2ValuesUnpack { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Values { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2IsEmpty { .. }
-                | Instruction::OrdinaryMapOwnedAnyV2Drop { .. }
-        )
-    });
+    let census = V2InstructionCensus::from_program(program);
+    let (new_count, set_count, values_count, root_drop_count, total_v2_count) = (
+        census.new,
+        census.set,
+        census.values,
+        census.drop,
+        census.basic_total(),
+    );
     if new_count != 1
         || set_count != 2
         || values_count != 1
@@ -5975,8 +5961,6 @@ pub(super) fn validate_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_na
 pub(super) fn validate_ordinary_map_owned_any_v2_keys_snapshot_native_contract(
     program: &MirProgram,
 ) -> Result<crate::core::OrdinaryMapOwnedAnyV2KeysSnapshotReceipt, Vec<String>> {
-    use crate::core::mir::MirInstructionKind as Instruction;
-
     let witness =
         crate::core::mir::validate_ordinary_map_owned_any_v2_keys_snapshot_mir_route(program)
             .map_err(|message| vec![message])?;
@@ -5995,29 +5979,8 @@ pub(super) fn validate_ordinary_map_owned_any_v2_keys_snapshot_native_contract(
         .functions()
         .get(&witness.owner)
         .ok_or_else(|| vec!["KeysSnapshot native owner is absent from MIR".into()])?;
-    let instructions = function
-        .blocks
-        .values()
-        .flat_map(|block| &block.instructions)
-        .collect::<Vec<_>>();
-    let keys = instructions
-        .iter()
-        .filter(|instruction| {
-            matches!(
-                instruction.kind,
-                Instruction::OrdinaryMapOwnedAnyV2Keys { .. }
-            )
-        })
-        .count();
-    let unpacks = instructions
-        .iter()
-        .filter(|instruction| {
-            matches!(
-                instruction.kind,
-                Instruction::OrdinaryMapOwnedAnyV2KeysUnpack { .. }
-            )
-        })
-        .count();
+    let census = V2InstructionCensus::from_function(function);
+    let (keys, unpacks) = (census.keys, census.keys_unpack);
     if keys != 1 || unpacks != 1 {
         return Err(vec![format!(
             "KeysSnapshot native consumer requires one Keys and one index-zero KeysUnpack (found {keys}/{unpacks})"
@@ -6032,8 +5995,6 @@ pub(super) fn validate_ordinary_map_owned_any_v2_keys_snapshot_native_contract(
 pub(super) fn validate_ordinary_map_owned_any_v2_dynamic_keys_get_native_contract(
     program: &MirProgram,
 ) -> Result<crate::core::OrdinaryMapOwnedAnyV2DynamicKeysGetReceipt, Vec<String>> {
-    use crate::core::mir::MirInstructionKind as Instruction;
-
     let witness =
         crate::core::mir::validate_ordinary_map_owned_any_v2_dynamic_keys_get_mir_route(program)
             .map_err(|message| vec![message])?;
@@ -6050,20 +6011,8 @@ pub(super) fn validate_ordinary_map_owned_any_v2_dynamic_keys_get_native_contrac
         .functions()
         .get(&witness.owner)
         .ok_or_else(|| vec!["DynamicKeysGet native owner is absent from MIR".into()])?;
-    let instructions = function
-        .blocks
-        .values()
-        .flat_map(|block| &block.instructions)
-        .collect::<Vec<_>>();
-    let count = |predicate: &dyn Fn(&Instruction) -> bool| {
-        instructions
-            .iter()
-            .filter(|instruction| predicate(&instruction.kind))
-            .count()
-    };
-    let arg0 = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2DynamicArg0 { .. }));
-    let keys = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Keys { .. }));
-    let unpack = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2KeysUnpack { .. }));
+    let census = V2InstructionCensus::from_function(function);
+    let (arg0, keys, unpack) = (census.dynamic_arg0, census.keys, census.keys_unpack);
     if arg0 != 1 || keys != 1 || unpack != 1 {
         return Err(vec![format!(
             "DynamicKeysGet native consumer requires one argv[0], Keys, and KeysUnpack operation (found {arg0}/{keys}/{unpack})"
@@ -6841,8 +6790,6 @@ pub(super) fn validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain
     checked: &crate::core::CheckedProgram,
     program: &MirProgram,
 ) -> Result<(), Vec<String>> {
-    use crate::core::mir::MirInstructionKind as Instruction;
-
     crate::core::mir::validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain_route(
         checked, program,
     )
@@ -6850,28 +6797,19 @@ pub(super) fn validate_ordinary_map_owned_any_v2_computed_string_key_owner_chain
     let anchors = computed_string_key_owner_chain_native_anchors(checked, program)
         .map_err(|message| vec![message])?;
     let has_result_branch = anchors.result_branch.is_some();
-    let owners = program
-        .functions()
-        .values()
-        .flat_map(|function| function.blocks.values())
-        .flat_map(|block| &block.instructions)
-        .map(|instruction| &instruction.kind)
-        .collect::<Vec<_>>();
-    let count = |predicate: &dyn Fn(&Instruction) -> bool| {
-        owners.iter().filter(|kind| predicate(kind)).count()
-    };
-    let new = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2New { .. }));
-    let set = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Set { .. }));
-    let set_any_result =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2SetAnyResult { .. }));
-    let set_result =
-        count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2SetResult { .. }));
-    let has_key = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Contains { .. }));
-    let get_any = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2GetAny { .. }));
-    let remove = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Remove { .. }));
-    let size = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Size { .. }));
-    let root_drop = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Drop { .. }));
-    let unpack = count(&|kind| matches!(kind, Instruction::OrdinaryMapOwnedAnyV2Unpack { .. }));
+    let census = V2InstructionCensus::from_program(program);
+    let (new, set, set_any_result, set_result, has_key, get_any, remove, size, root_drop, unpack) = (
+        census.new,
+        census.set,
+        census.set_any_result,
+        census.set_result,
+        census.contains,
+        census.get_any,
+        census.remove,
+        census.size,
+        census.drop,
+        census.unpack,
+    );
     let expected_root_drops = anchors
         .result_branch
         .as_ref()

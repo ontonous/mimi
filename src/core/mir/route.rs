@@ -1262,13 +1262,25 @@ pub fn validate_ordinary_map_owned_any_v2_get_or_default_i32_mir_route(
 /// This creates a canonical semantic identity for audit and adversarial
 /// receipt tests only; default/explicit build routing and every executable
 /// backend keep their own production gates closed.
+fn validate_l1_core_mir_route_with(
+    program: &MirProgram,
+    profile: &str,
+    validate_profile: fn(&MirProgram) -> Result<(), String>,
+) -> Result<CanonicalMirRouteReceipt, String> {
+    validate_profile(program)?;
+    let route = program.route_receipt(profile);
+    route.validate_against_program(program)?;
+    Ok(route)
+}
+
 pub fn validate_ordinary_map_new_result_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_new_result_l1_core_mir_profile(program)?;
-    let route = program.route_receipt(ORDINARY_MAP_NEW_RESULT_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_NEW_RESULT_L1_CORE_PROFILE,
+        validate_ordinary_map_new_result_l1_core_mir_profile,
+    )
 }
 
 /// Independently validate the exact, isolated Core MIR graph produced from
@@ -1278,10 +1290,11 @@ pub fn validate_ordinary_map_new_result_l1_core_mir_route(
 pub fn validate_ordinary_map_set_result_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_set_result_l1_core_mir_profile(program)?;
-    let route = program.route_receipt(ORDINARY_MAP_SET_RESULT_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_SET_RESULT_L1_CORE_PROFILE,
+        validate_ordinary_map_set_result_l1_core_mir_profile,
+    )
 }
 
 /// Independently validate the exact, isolated Checker-bound Map
@@ -1290,10 +1303,11 @@ pub fn validate_ordinary_map_set_result_l1_core_mir_route(
 pub fn validate_ordinary_map_set_get_i32_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_set_get_i32_l1_core_mir_profile(program)?;
-    let route = program.route_receipt(ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_SET_GET_I32_L1_CORE_PROFILE,
+        validate_ordinary_map_set_get_i32_l1_core_mir_profile,
+    )
 }
 
 /// Independently validate the isolated String-specific Checker-bound Map
@@ -1302,10 +1316,11 @@ pub fn validate_ordinary_map_set_get_i32_l1_core_mir_route(
 pub fn validate_ordinary_map_set_get_string_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_set_get_string_l1_core_mir_profile(program)?;
-    let route = program.route_receipt(ORDINARY_MAP_SET_GET_STRING_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_SET_GET_STRING_L1_CORE_PROFILE,
+        validate_ordinary_map_set_get_string_l1_core_mir_profile,
+    )
 }
 
 /// Validate the exact isolated Result-aware public GetAny graph. This MIR
@@ -1315,10 +1330,11 @@ pub fn validate_ordinary_map_set_get_string_l1_core_mir_route(
 pub fn validate_ordinary_map_set_get_any_i32_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_set_get_any_i32_l1_core_mir_profile(program)?;
-    let route = program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L1_CORE_PROFILE,
+        validate_ordinary_map_set_get_any_i32_l1_core_mir_profile,
+    )
 }
 
 /// Validate the independent Result-valued `map_get_any` Core MIR receipt.
@@ -1327,11 +1343,11 @@ pub fn validate_ordinary_map_set_get_any_i32_l1_core_mir_route(
 pub fn validate_ordinary_map_set_get_any_result_i32_l1_core_mir_route(
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    validate_ordinary_map_set_get_any_result_i32_l1_core_profile(program)?;
-    let route =
-        program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L1_CORE_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
+    validate_l1_core_mir_route_with(
+        program,
+        ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L1_CORE_PROFILE,
+        validate_ordinary_map_set_get_any_result_i32_l1_core_profile,
+    )
 }
 
 /// Replay the fixed legacy tuple-valued `map_get` source receipt against the
@@ -1902,101 +1918,127 @@ pub fn validate_ordinary_map_direct_tuple_get_unpack_l2_verifier_profile(
     Ok(())
 }
 
-/// Validate the Checker-bound SetResult L2 verifier projection.
-/// This route is deliberately distinct from the execution profile and from
-/// the L1 audit receipt. Its exact source and MIR receipts authorize the
-/// symbolic verifier to reason about both Result tags and status payloads.
-///
-pub fn validate_ordinary_map_set_result_l2_verifier_route(
-    checked: &CheckedProgram,
-    program: &MirProgram,
-) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
-
-    let owner = crate::core::NodeId("function:main".into());
-    let callable = checked
-        .callable(&owner)
-        .ok_or_else(|| "ordinary Map SetResult L2 verifier requires function:main".to_string())?;
+fn validate_checked_verifier_backend(checked: &CheckedProgram, label: &str) -> Result<(), String> {
     checked
-        .validate_backend(BackendProfile::Verifier)
+        .validate_backend(crate::core::BackendProfile::Verifier)
         .map_err(|diagnostics| {
             format!(
-                "ordinary Map SetResult L2 verifier rejected CheckedProgram backend requirements: {}",
+                "{label} verifier rejected CheckedProgram backend requirements: {}",
                 diagnostics
                     .into_iter()
                     .map(|diagnostic| diagnostic.to_string())
                     .collect::<Vec<_>>()
                     .join("; ")
             )
-        })?;
-    validate_ordinary_map_set_result_l2_verifier_profile(program)?;
+        })
+}
 
+fn validate_single_main_proof_source_census(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+    owner: &crate::core::NodeId,
+    label: &str,
+) -> Result<(), String> {
     let source_census = program.proof_source_census();
+    // The checked directory includes stdlib/prelude callables; the projection's
+    // user surface is exactly the one materialized callable, function:main.
     let materialized_count = source_census
         .checked_callables()
         .filter(|entry| !entry.materialized_owners().is_empty())
         .count();
     let materialized_main = source_census
         .checked_callables()
-        .any(|entry| entry.owner() == &owner && !entry.materialized_owners().is_empty());
+        .any(|entry| entry.owner() == owner && !entry.materialized_owners().is_empty());
     if materialized_count != 1
         || !materialized_main
         || !source_census.matches_checked_program(checked, program.functions(), program.instances())
     {
-        return Err(
-            "ordinary Map SetResult L2 verifier source census differs from the complete CheckedProgram".into(),
-        );
+        return Err(format!(
+            "{label} verifier source census differs from the complete CheckedProgram"
+        ));
     }
+    Ok(())
+}
 
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_set_lineage_receipt
-        .as_ref()
-        .ok_or_else(|| {
-            "CheckedProgram has no exact ordinary Map SetResult lineage receipt".to_string()
-        })?;
-    crate::core::cfg::validate_ordinary_map_owned_any_v2_set_lineage_receipt(
+fn validate_map_result_l2_verifier_route_with<R, E: std::fmt::Debug>(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+    label: &str,
+    profile_name: &str,
+    validate_profile: fn(&MirProgram) -> Result<(), String>,
+    extract_receipt: fn(&crate::core::ResourceAnalysis) -> Option<&R>,
+    validate_receipt: fn(
+        &R,
+        &crate::core::cfg::CallableCfg,
+        &crate::core::ir::ResolvedBody,
+        &crate::core::ir::ResolvedSignature,
+        &crate::core::ResolvedTypeTable,
+    ) -> Result<(), String>,
+    build_catalog: fn(&CheckedProgram, &R) -> Result<super::types::MirTypeCatalog, E>,
+    lower_expected_fn: fn(&crate::core::ResolvedCallable, &R) -> Result<super::MirFunction, String>,
+) -> Result<CanonicalMirRouteReceipt, String> {
+    let owner = crate::core::NodeId("function:main".into());
+    let callable = checked
+        .callable(&owner)
+        .ok_or_else(|| format!("{label} verifier requires function:main"))?;
+    validate_checked_verifier_backend(checked, label)?;
+    validate_profile(program)?;
+    validate_single_main_proof_source_census(checked, program, &owner, label)?;
+
+    let source_receipt = extract_receipt(&callable.resources)
+        .ok_or_else(|| format!("CheckedProgram has no exact {label} receipt"))?;
+    validate_receipt(
         source_receipt,
         &callable.cfg,
         &callable.body,
         &callable.signature,
         checked.resolved_types(),
     )?;
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_set_result(
-        checked,
-        source_receipt,
-    )
-    .map_err(|errors| {
-        format!(
-            "ordinary Map SetResult L2 verifier could not rebuild Checker TypeDesc catalog: {errors:?}"
-        )
+    let expected_catalog = build_catalog(checked, source_receipt).map_err(|errors| {
+        format!("{label} verifier could not rebuild Checker TypeDesc catalog: {errors:?}")
     })?;
     if program.type_catalog() != &expected_catalog {
-        return Err(
-            "ordinary Map SetResult L2 verifier TypeDesc catalog differs from the exact CheckedProgram".into(),
-        );
+        return Err(format!(
+            "{label} verifier TypeDesc catalog differs from the exact CheckedProgram"
+        ));
     }
-    let expected_function = super::lower::ordinary_map_set_result_function_with_checked_proofs(
-        callable,
-        source_receipt,
-    )
-    .map_err(|message| {
-        format!(
-            "ordinary Map SetResult L2 verifier could not lower exact checked contracts/worklist: {message}"
-        )
+    let expected_function = lower_expected_fn(callable, source_receipt).map_err(|message| {
+        format!("{label} verifier could not lower exact checked contracts/worklist: {message}")
     })?;
-    let actual_function = program.functions().get(&owner).ok_or_else(|| {
-        "ordinary Map SetResult L2 verifier MIR is missing function:main".to_string()
-    })?;
+    let actual_function = program
+        .functions()
+        .get(&owner)
+        .ok_or_else(|| format!("{label} verifier MIR is missing function:main"))?;
     if actual_function != &expected_function {
-        return Err(
-            "ordinary Map SetResult L2 verifier graph differs from the exact Checker lineage projection".into(),
-        );
+        return Err(format!(
+            "{label} verifier contracts/proof-worklist/MIR graph differ from the exact CheckedProgram"
+        ));
     }
 
-    let route = program.route_receipt(ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE);
+    let route = program.route_receipt(profile_name);
     route.validate_against_program(program)?;
     Ok(route)
+}
+
+pub fn validate_ordinary_map_set_result_l2_verifier_route(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+) -> Result<CanonicalMirRouteReceipt, String> {
+    validate_map_result_l2_verifier_route_with(
+        checked,
+        program,
+        "ordinary Map SetResult L2",
+        ORDINARY_MAP_SET_RESULT_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_set_result_l2_verifier_profile,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_set_lineage_receipt
+                .as_ref()
+        },
+        crate::core::cfg::validate_ordinary_map_owned_any_v2_set_lineage_receipt,
+        super::types::MirTypeCatalog::for_ordinary_map_set_result,
+        super::lower::ordinary_map_set_result_function_with_checked_proofs,
+    )
 }
 
 /// Validate a Checker-bound, verifier-only L2 projection of the pending
@@ -2008,109 +2050,41 @@ pub fn validate_ordinary_map_new_result_l2_verifier_route(
     checked: &CheckedProgram,
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
-
-    let owner = crate::core::NodeId("function:main".into());
-    if !checked.callables().contains_key(&owner) {
-        return Err(
-            "ordinary Map NewResult L2 verifier requires the checked function:main callable".into(),
-        );
-    }
-    checked
-        .validate_backend(BackendProfile::Verifier)
-        .map_err(|diagnostics| {
-            format!(
-                "ordinary Map NewResult L2 verifier rejected CheckedProgram backend requirements: {}",
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        })?;
-    validate_ordinary_map_new_result_l2_verifier_profile(program)?;
-
-    let source_census = program.proof_source_census();
-    // The checked directory includes stdlib/prelude callables; the projection's
-    // user surface is exactly the one materialized callable, function:main.
-    let materialized_count = source_census
-        .checked_callables()
-        .filter(|entry| !entry.materialized_owners().is_empty())
-        .count();
-    let materialized_main = source_census
-        .checked_callables()
-        .any(|entry| entry.owner() == &owner && !entry.materialized_owners().is_empty());
-    if materialized_count != 1
-        || !materialized_main
-        || !source_census.matches_checked_program(checked, program.functions(), program.instances())
-    {
-        return Err(
-            "ordinary Map NewResult L2 verifier source census differs from the complete CheckedProgram".into(),
-        );
-    }
-
-    let callable = checked.callable(&owner).ok_or_else(|| {
-        "ordinary Map NewResult L2 verifier has no checked main callable".to_string()
-    })?;
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_new_result_receipt
-        .as_ref()
-        .ok_or_else(|| "CheckedProgram has no exact ordinary Map NewResult receipt".to_string())?;
-    crate::core::cfg::validate_ordinary_map_owned_any_v2_new_result_receipt(
-        source_receipt,
-        &callable.cfg,
-        &callable.body,
-        &callable.signature,
-        checked.resolved_types(),
-    )?;
-
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_new_result(
+    validate_map_result_l2_verifier_route_with(
         checked,
-        source_receipt,
+        program,
+        "ordinary Map NewResult L2",
+        ORDINARY_MAP_NEW_RESULT_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_new_result_l2_verifier_profile,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_new_result_receipt
+                .as_ref()
+        },
+        crate::core::cfg::validate_ordinary_map_owned_any_v2_new_result_receipt,
+        super::types::MirTypeCatalog::for_ordinary_map_new_result,
+        super::lower::ordinary_map_new_result_function_with_checked_proofs,
     )
-    .map_err(|errors| {
-        format!(
-            "ordinary Map NewResult L2 verifier could not rebuild Checker TypeDesc catalog: {errors:?}"
-        )
-    })?;
-    if program.type_catalog() != &expected_catalog {
-        return Err(
-            "ordinary Map NewResult L2 verifier TypeDesc catalog differs from the exact CheckedProgram".into(),
-        );
-    }
-    let expected_function = super::lower::ordinary_map_new_result_function_with_checked_proofs(
-        callable,
-        source_receipt,
-    )?;
-    let actual_function = program.functions().get(&owner).ok_or_else(|| {
-        "ordinary Map NewResult L2 verifier MIR is missing function:main".to_string()
-    })?;
-    if actual_function != &expected_function {
-        return Err(
-            "ordinary Map NewResult L2 verifier contracts/proof-worklist/MIR graph differ from the exact CheckedProgram".into(),
-        );
-    }
-
-    let route = program.route_receipt(ORDINARY_MAP_NEW_RESULT_L2_VERIFIER_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
 }
 
 /// Semantic validator used both by the dedicated route constructor above and
 /// by `CanonicalMirRouteReceipt::validate_against_program`. Keeping the
 /// profile-specific check in one function ensures a hand-built digest receipt
 /// cannot claim this route without carrying the exact Checker-bound graph.
+fn reject_l1_proof_state(function: &super::MirFunction, label: &str) -> Result<(), String> {
+    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
+        return Err(format!(
+            "{label} does not admit verifier contracts or proof worklists"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_ordinary_map_new_result_l1_core_mir_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_new_result_core_mir_graph(program)?;
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "ordinary Map NewResult L1 audit profile does not admit verifier contracts or proof worklists".into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "ordinary Map NewResult L1 audit profile")
 }
 
 /// Profile-specific graph check shared with route-receipt replay. A hand-built
@@ -2120,12 +2094,7 @@ pub(crate) fn validate_ordinary_map_set_result_l1_core_mir_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_set_result_core_mir_graph(program)?;
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "ordinary Map SetResult L1 audit profile does not admit verifier contracts or proof worklists".into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "ordinary Map SetResult L1 audit profile")
 }
 
 /// Profile-specific graph check shared with route-receipt replay. Exact MIR
@@ -2134,76 +2103,27 @@ pub(crate) fn validate_ordinary_map_set_get_i32_l1_core_mir_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_set_get_i32_core_mir_graph(program)?;
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "ordinary Map Set/Get-i32 L1 audit profile does not admit verifier contracts or proof worklists".into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "ordinary Map Set/Get-i32 L1 audit profile")
 }
 
 pub(crate) fn validate_ordinary_map_set_get_any_i32_l1_core_mir_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err("Result-aware Set/GetAny-i32 L1 route requires an executable MIR graph".into());
-    }
-    let main = crate::core::NodeId("function:main".into());
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "Result-aware Set/GetAny-i32 L1 route requires exactly function:main, found {} functions",
-            program.functions().len()
-        ));
-    };
-    if *owner != &main || function.owner != main || !program.instances().is_empty() {
-        return Err(
-            "Result-aware Set/GetAny-i32 L1 route has a non-main owner or generic instance".into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("Result-aware Set/GetAny-i32 MIR function validation failed: {errors:?}")
-    })?;
-    super::receipt::validate_ordinary_map_set_get_any_i32_result_types(
-        function,
-        program.type_catalog(),
+    let function = validate_single_main_executable_mir_graph(
+        program,
+        "Result-aware Set/GetAny-i32 L1 route",
+        super::receipt::validate_ordinary_map_set_get_any_i32_result_types,
     )?;
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "Result-aware Set/GetAny-i32 L1 route does not admit contracts or proof worklists"
-                .into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "Result-aware Set/GetAny-i32 L1 route")
 }
 
 pub(crate) fn validate_ordinary_map_set_get_any_result_i32_l1_core_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err(
-            "Result-valued Set/GetAny-i32 L1 route requires an executable MIR graph".into(),
-        );
-    }
-    let main = crate::core::NodeId("function:main".into());
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "Result-valued Set/GetAny-i32 L1 route requires exactly function:main, found {} functions",
-            program.functions().len()
-        ));
-    };
-    if *owner != &main || function.owner != main || !program.instances().is_empty() {
-        return Err(
-            "Result-valued Set/GetAny-i32 L1 route has a non-main owner or generic instance".into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("Result-valued Set/GetAny-i32 MIR function validation failed: {errors:?}")
-    })?;
-    super::receipt::validate_ordinary_map_set_get_any_result_i32_result_types(
-        function,
-        program.type_catalog(),
+    let function = validate_single_main_executable_mir_graph(
+        program,
+        "Result-valued Set/GetAny-i32 L1 route",
+        super::receipt::validate_ordinary_map_set_get_any_result_i32_result_types,
     )?;
     let source_receipt = function
         .ownership
@@ -2213,31 +2133,20 @@ pub(crate) fn validate_ordinary_map_set_get_any_result_i32_l1_core_profile(
         })?;
     let expected =
         super::lower::ordinary_map_set_get_any_result_i32_result_function(source_receipt)?;
-    if *function != &expected {
+    if *function != expected {
         return Err(
             "Result-valued Set/GetAny-i32 L1 MIR graph differs from its exact source receipt"
                 .into(),
         );
     }
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "Result-valued Set/GetAny-i32 L1 route does not admit contracts or proof worklists"
-                .into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "Result-valued Set/GetAny-i32 L1 route")
 }
 
 pub(crate) fn validate_ordinary_map_set_get_string_l1_core_mir_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_set_get_string_core_mir_graph(program)?;
-    if !function.contracts.is_empty() || function.proof_worklist.is_some() {
-        return Err(
-            "ordinary Map Set/Get-String L1 audit profile does not admit verifier contracts or proof worklists".into(),
-        );
-    }
-    Ok(())
+    reject_l1_proof_state(function, "ordinary Map Set/Get-String L1 audit profile")
 }
 
 pub(crate) fn validate_ordinary_map_set_get_string_l2_verifier_profile(
@@ -2277,15 +2186,7 @@ pub(crate) fn validate_ordinary_map_set_get_string_l2_verifier_profile(
                 .into(),
         );
     }
-    program.validate_proof_source_census().map_err(|error| {
-        format!("ordinary Map Set/Get-String L2 proof source census rejected: {error:?}")
-    })?;
-    program
-        .validate_owner_proof_worklist(&function.owner)
-        .map_err(|error| {
-            format!("ordinary Map Set/Get-String L2 proof coverage rejected: {error:?}")
-        })?;
-    Ok(())
+    validate_proof_census_and_worklist(program, &function.owner, "ordinary Map Set/Get-String L2")
 }
 
 fn ordinary_map_set_get_string_exact_result_domain(expression: &super::MirContractExpr) -> bool {
@@ -2328,19 +2229,25 @@ fn ordinary_map_set_get_string_exact_result_domain(expression: &super::MirContra
     })
 }
 
+fn validate_proof_census_and_worklist(
+    program: &MirProgram,
+    owner: &crate::core::NodeId,
+    label: &str,
+) -> Result<(), String> {
+    program
+        .validate_proof_source_census()
+        .map_err(|error| format!("{label} proof source census rejected: {error:?}"))?;
+    program
+        .validate_owner_proof_worklist(owner)
+        .map_err(|error| format!("{label} contracts/proof-worklist rejected: {error:?}"))?;
+    Ok(())
+}
+
 pub(crate) fn validate_ordinary_map_set_get_i32_l2_verifier_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_set_get_i32_core_mir_graph(program)?;
-    program.validate_proof_source_census().map_err(|error| {
-        format!("ordinary Map Set/Get-i32 L2 proof source census rejected: {error:?}")
-    })?;
-    program
-        .validate_owner_proof_worklist(&function.owner)
-        .map_err(|error| {
-            format!("ordinary Map Set/Get-i32 L2 contracts/proof-worklist rejected: {error:?}")
-        })?;
-    Ok(())
+    validate_proof_census_and_worklist(program, &function.owner, "ordinary Map Set/Get-i32 L2")
 }
 
 /// The SetResult L2 profile replays the exact lineage shape and proof-source
@@ -2349,15 +2256,8 @@ pub(crate) fn validate_ordinary_map_set_get_i32_l2_verifier_profile(
 pub(crate) fn validate_ordinary_map_set_result_l2_verifier_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
-    let _function = validate_ordinary_map_set_result_core_mir_graph(program)?;
-    program.validate_proof_source_census().map_err(|error| {
-        format!("ordinary Map SetResult L2 proof source census rejected: {error:?}")
-    })?;
-    let owner = crate::core::NodeId("function:main".into());
-    program
-        .validate_owner_proof_worklist(&owner)
-        .map_err(|error| format!("ordinary Map SetResult L2 proof coverage rejected: {error:?}"))?;
-    Ok(())
+    let function = validate_ordinary_map_set_result_core_mir_graph(program)?;
+    validate_proof_census_and_worklist(program, &function.owner, "ordinary Map SetResult L2")
 }
 
 /// Semantic verifier-profile check used by the standalone Checker-aware L2
@@ -2368,151 +2268,77 @@ pub(crate) fn validate_ordinary_map_new_result_l2_verifier_profile(
     program: &MirProgram,
 ) -> Result<(), String> {
     let function = validate_ordinary_map_new_result_core_mir_graph(program)?;
-    program.validate_proof_source_census().map_err(|error| {
-        format!("ordinary Map NewResult L2 proof source census rejected: {error:?}")
-    })?;
-    program
-        .validate_owner_proof_worklist(&function.owner)
-        .map_err(|error| {
-            format!("ordinary Map NewResult L2 contracts/proof-worklist rejected: {error:?}")
-        })?;
-    Ok(())
+    validate_proof_census_and_worklist(program, &function.owner, "ordinary Map NewResult L2")
+}
+
+fn validate_single_main_executable_mir_graph<'a>(
+    program: &'a MirProgram,
+    label: &str,
+    validate_shapes: fn(&super::MirFunction, &super::types::MirTypeCatalog) -> Result<(), String>,
+) -> Result<&'a super::MirFunction, String> {
+    if program.purpose() != super::reference::MirProgramPurpose::Executable {
+        return Err(format!("{label} requires an executable program"));
+    }
+    let functions = program.functions().iter().collect::<Vec<_>>();
+    let [(owner, function)] = functions.as_slice() else {
+        return Err(format!(
+            "{label} requires exactly one callable, found {}",
+            program.functions().len()
+        ));
+    };
+    let main = crate::core::NodeId("function:main".into());
+    if *owner != &main || function.owner != main {
+        return Err(format!("{label} requires the sole owner function:main"));
+    }
+    if !program.instances().is_empty() {
+        return Err(format!("{label} does not admit generic MIR instances"));
+    }
+    function
+        .validate()
+        .map_err(|errors| format!("{label} MIR function validation failed: {errors:?}"))?;
+    validate_shapes(function, program.type_catalog())
+        .map_err(|message| format!("{label} shape rejected: {message}"))?;
+    Ok(*function)
 }
 
 fn validate_ordinary_map_new_result_core_mir_graph(
     program: &MirProgram,
 ) -> Result<&super::MirFunction, String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err("ordinary Map NewResult Core MIR route requires an executable program".into());
-    }
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "ordinary Map NewResult Core MIR route requires exactly one callable, found {}",
-            program.functions().len()
-        ));
-    };
-    let main = crate::core::NodeId("function:main".into());
-    if *owner != &main || function.owner != main {
-        return Err(
-            "ordinary Map NewResult Core MIR route requires the sole owner function:main".into(),
-        );
-    }
-    if !program.instances().is_empty() {
-        return Err(
-            "ordinary Map NewResult Core MIR route does not admit generic MIR instances".into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("ordinary Map NewResult Core MIR function validation failed: {errors:?}")
-    })?;
-    super::validate_ordinary_map_new_result_types(function, program.type_catalog())
-        .map_err(|message| format!("ordinary Map NewResult Core MIR shape rejected: {message}"))
-        .map(|()| *function)
+    validate_single_main_executable_mir_graph(
+        program,
+        "ordinary Map NewResult Core MIR route",
+        super::validate_ordinary_map_new_result_types,
+    )
 }
 
 fn validate_ordinary_map_set_result_core_mir_graph(
     program: &MirProgram,
 ) -> Result<&super::MirFunction, String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err("ordinary Map SetResult Core MIR route requires an executable program".into());
-    }
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "ordinary Map SetResult Core MIR route requires exactly one callable, found {}",
-            program.functions().len()
-        ));
-    };
-    let main = crate::core::NodeId("function:main".into());
-    if *owner != &main || function.owner != main {
-        return Err(
-            "ordinary Map SetResult Core MIR route requires the sole owner function:main".into(),
-        );
-    }
-    if !program.instances().is_empty() {
-        return Err(
-            "ordinary Map SetResult Core MIR route does not admit generic MIR instances".into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("ordinary Map SetResult Core MIR function validation failed: {errors:?}")
-    })?;
-    super::validate_ordinary_map_set_result_types(function, program.type_catalog())
-        .map_err(|message| format!("ordinary Map SetResult Core MIR shape rejected: {message}"))
-        .map(|()| *function)
+    validate_single_main_executable_mir_graph(
+        program,
+        "ordinary Map SetResult Core MIR route",
+        super::validate_ordinary_map_set_result_types,
+    )
 }
 
 fn validate_ordinary_map_set_get_i32_core_mir_graph(
     program: &MirProgram,
 ) -> Result<&super::MirFunction, String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err(
-            "ordinary Map Set/Get-i32 Core MIR route requires an executable program".into(),
-        );
-    }
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "ordinary Map Set/Get-i32 Core MIR route requires exactly one callable, found {}",
-            program.functions().len()
-        ));
-    };
-    let main = crate::core::NodeId("function:main".into());
-    if *owner != &main || function.owner != main {
-        return Err(
-            "ordinary Map Set/Get-i32 Core MIR route requires the sole owner function:main".into(),
-        );
-    }
-    if !program.instances().is_empty() {
-        return Err(
-            "ordinary Map Set/Get-i32 Core MIR route does not admit generic MIR instances".into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("ordinary Map Set/Get-i32 Core MIR function validation failed: {errors:?}")
-    })?;
-    super::validate_ordinary_map_set_get_i32_result_types(function, program.type_catalog())
-        .map_err(|message| format!("ordinary Map Set/Get-i32 Core MIR shape rejected: {message}"))
-        .map(|()| *function)
+    validate_single_main_executable_mir_graph(
+        program,
+        "ordinary Map Set/Get-i32 Core MIR route",
+        super::validate_ordinary_map_set_get_i32_result_types,
+    )
 }
 
 fn validate_ordinary_map_set_get_string_core_mir_graph(
     program: &MirProgram,
 ) -> Result<&super::MirFunction, String> {
-    if program.purpose() != super::reference::MirProgramPurpose::Executable {
-        return Err(
-            "ordinary Map Set/Get-String Core MIR route requires an executable program".into(),
-        );
-    }
-    let functions = program.functions().iter().collect::<Vec<_>>();
-    let [(owner, function)] = functions.as_slice() else {
-        return Err(format!(
-            "ordinary Map Set/Get-String Core MIR route requires exactly one callable, found {}",
-            program.functions().len()
-        ));
-    };
-    let main = crate::core::NodeId("function:main".into());
-    if *owner != &main || function.owner != main {
-        return Err(
-            "ordinary Map Set/Get-String Core MIR route requires the sole owner function:main"
-                .into(),
-        );
-    }
-    if !program.instances().is_empty() {
-        return Err(
-            "ordinary Map Set/Get-String Core MIR route does not admit generic MIR instances"
-                .into(),
-        );
-    }
-    function.validate().map_err(|errors| {
-        format!("ordinary Map Set/Get-String Core MIR function validation failed: {errors:?}")
-    })?;
-    super::validate_ordinary_map_set_get_string_result_types(function, program.type_catalog())
-        .map_err(|message| {
-            format!("ordinary Map Set/Get-String Core MIR shape rejected: {message}")
-        })
-        .map(|()| *function)
+    validate_single_main_executable_mir_graph(
+        program,
+        "ordinary Map Set/Get-String Core MIR route",
+        super::validate_ordinary_map_set_get_string_result_types,
+    )
 }
 
 /// Production execution profile for the recoverable ordinary Map NewResult
@@ -2611,25 +2437,90 @@ pub fn has_ordinary_map_set_get_string_route_candidate(program: &CheckedProgram)
 /// ordinary Map NewResult receipt and validate the full L1 Core MIR route.
 /// The returned program is the contract-free executable graph; verifier
 /// capability must use [`materialize_ordinary_map_new_result_verifier_route`].
-pub fn materialize_ordinary_map_new_result_route(
+fn materialize_map_l1_route_with<E: std::fmt::Debug>(
     program: &CheckedProgram,
+    label: &str,
+    source_census: Option<fn(&CheckedProgram) -> Result<(), String>>,
+    require_contract_free: bool,
+    build_mir: fn(&CheckedProgram, &crate::core::NodeId) -> Result<MirProgram, E>,
+    validate_l1: fn(&MirProgram) -> Result<CanonicalMirRouteReceipt, String>,
 ) -> Result<MirProgram, String> {
+    if let Some(check_census) = source_census {
+        check_census(program).map_err(|reason| {
+            format!(
+                "{}: {label} route rejected its full CheckedProgram census: {reason}",
+                super::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })?;
+    }
     let owner = crate::core::NodeId("function:main".into());
-    let canonical =
-        super::reference::MirProgram::from_checked_program_map_new_result(program, &owner)
-            .map_err(|error| {
-                format!(
-            "{}: ordinary Map NewResult execution route rejected its Checker receipt: {error:?}",
+    if require_contract_free {
+        let callable = program
+            .callable(&owner)
+            .ok_or_else(|| format!("{label} route has no checked function:main"))?;
+        if callable.has_proof_obligations() || !callable.body.contract_proof_roots().is_empty() {
+            return Err(format!(
+                "{label} execution route requires a contract-free source; use its L2 verifier projection for Ensures"
+            ));
+        }
+    }
+    let canonical = build_mir(program, &owner).map_err(|error| {
+        format!(
+            "{}: {label} execution route rejected its Checker receipt: {error:?}",
             super::MIR_ROUTE_COVERAGE_ERROR_CODE
         )
-            })?;
-    validate_ordinary_map_new_result_l1_core_mir_route(&canonical).map_err(|reason| {
+    })?;
+    validate_l1(&canonical).map_err(|reason| {
         format!(
-            "{}: ordinary Map NewResult execution route failed its L1 Core MIR validation: {reason}",
+            "{}: {label} execution route failed its L1 Core MIR validation: {reason}",
             super::MIR_ROUTE_COVERAGE_ERROR_CODE
         )
     })?;
     Ok(canonical)
+}
+
+fn materialize_map_l2_verifier_route_with<E: std::fmt::Debug>(
+    program: &CheckedProgram,
+    label: &str,
+    source_census: Option<fn(&CheckedProgram) -> Result<(), String>>,
+    build_mir: fn(&CheckedProgram, &crate::core::NodeId) -> Result<MirProgram, E>,
+    validate_l2: fn(&CheckedProgram, &MirProgram) -> Result<CanonicalMirRouteReceipt, String>,
+) -> Result<MirProgram, String> {
+    if let Some(check_census) = source_census {
+        check_census(program).map_err(|reason| {
+            format!(
+                "{}: {label} verifier route rejected its full CheckedProgram census: {reason}",
+                super::MIR_ROUTE_COVERAGE_ERROR_CODE
+            )
+        })?;
+    }
+    let owner = crate::core::NodeId("function:main".into());
+    let canonical = build_mir(program, &owner).map_err(|error| {
+        format!(
+            "{}: {label} verifier route rejected its Checker receipt: {error:?}",
+            super::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })?;
+    validate_l2(program, &canonical).map_err(|reason| {
+        format!(
+            "{}: {label} verifier route failed its L2 validation: {reason}",
+            super::MIR_ROUTE_COVERAGE_ERROR_CODE
+        )
+    })?;
+    Ok(canonical)
+}
+
+pub fn materialize_ordinary_map_new_result_route(
+    program: &CheckedProgram,
+) -> Result<MirProgram, String> {
+    materialize_map_l1_route_with(
+        program,
+        "ordinary Map NewResult",
+        None,
+        false,
+        super::reference::MirProgram::from_checked_program_map_new_result,
+        validate_ordinary_map_new_result_l1_core_mir_route,
+    )
 }
 
 /// Materialize the exact Checker-issued fallible Map Set lineage and validate
@@ -2637,22 +2528,14 @@ pub fn materialize_ordinary_map_new_result_route(
 pub fn materialize_ordinary_map_set_result_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical =
-        super::reference::MirProgram::from_checked_program_map_set_result(program, &owner)
-            .map_err(|error| {
-                format!(
-            "{}: ordinary Map SetResult execution route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-            })?;
-    validate_ordinary_map_set_result_l1_core_mir_route(&canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map SetResult execution route failed its L1 Core MIR validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
+    materialize_map_l1_route_with(
+        program,
+        "ordinary Map SetResult",
+        None,
+        false,
+        super::reference::MirProgram::from_checked_program_map_set_result,
+        validate_ordinary_map_set_result_l1_core_mir_route,
+    )
 }
 
 /// Materialize the isolated executable MIR graph for the exact Checker-issued
@@ -2660,22 +2543,14 @@ pub fn materialize_ordinary_map_set_result_route(
 pub fn materialize_ordinary_map_set_get_i32_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical =
-        super::reference::MirProgram::from_checked_program_map_set_get_i32_result(program, &owner)
-            .map_err(|error| {
-                format!(
-            "{}: ordinary Map Set/Get-i32 execution route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-            })?;
-    validate_ordinary_map_set_get_i32_l1_core_mir_route(&canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/Get-i32 execution route failed its L1 Core MIR validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
+    materialize_map_l1_route_with(
+        program,
+        "ordinary Map Set/Get-i32",
+        None,
+        false,
+        super::reference::MirProgram::from_checked_program_map_set_get_i32_result,
+        validate_ordinary_map_set_get_i32_l1_core_mir_route,
+    )
 }
 
 /// Materialize the exact Result-aware public `map_get -> (bool, Any) ->
@@ -2684,35 +2559,14 @@ pub fn materialize_ordinary_map_set_get_i32_route(
 pub fn materialize_ordinary_map_set_get_any_i32_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    validate_ordinary_map_set_get_any_i32_checked_source_census(program).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/GetAny-i32 route rejected its full CheckedProgram census: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    let owner = crate::core::NodeId("function:main".into());
-    let callable = program.callable(&owner).ok_or_else(|| {
-        "ordinary Map Set/GetAny-i32 route has no checked function:main".to_string()
-    })?;
-    if callable.has_proof_obligations() || !callable.body.contract_proof_roots().is_empty() {
-        return Err(
-            "ordinary Map Set/GetAny-i32 execution route requires a contract-free source; use its L2 verifier projection for Ensures".into(),
-        );
-    }
-    let canonical = MirProgram::from_checked_program_map_set_get_any_i32_result(program, &owner)
-        .map_err(|error| {
-            format!(
-                "{}: ordinary Map Set/GetAny-i32 execution route rejected its Checker receipt: {error:?}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        })?;
-    validate_ordinary_map_set_get_any_i32_l1_core_mir_route(&canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/GetAny-i32 execution route failed L1 Core MIR validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
+    materialize_map_l1_route_with(
+        program,
+        "ordinary Map Set/GetAny-i32",
+        Some(validate_ordinary_map_set_get_any_i32_checked_source_census),
+        true,
+        MirProgram::from_checked_program_map_set_get_any_i32_result,
+        validate_ordinary_map_set_get_any_i32_l1_core_mir_route,
+    )
 }
 
 /// Materialize the exact fallible `map_new -> map_set -> map_get_any` graph
@@ -2722,62 +2576,28 @@ pub fn materialize_ordinary_map_set_get_any_i32_route(
 pub fn materialize_ordinary_map_set_get_any_result_i32_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    validate_ordinary_map_set_get_any_result_i32_checked_source_census(program).map_err(
-        |reason| {
-            format!(
-                "{}: Result-valued Set/GetAny-i32 route rejected its full CheckedProgram census: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    let owner = crate::core::NodeId("function:main".into());
-    let callable = program.callable(&owner).ok_or_else(|| {
-        "Result-valued Set/GetAny-i32 route has no checked function:main".to_string()
-    })?;
-    if callable.has_proof_obligations() || !callable.body.contract_proof_roots().is_empty() {
-        return Err(
-            "Result-valued Set/GetAny-i32 execution route requires a contract-free source; use its L2 verifier projection for Ensures".into(),
-        );
-    }
-    let canonical = MirProgram::from_checked_program_map_set_get_any_result_i32(program, &owner)
-        .map_err(|error| {
-            format!(
-                "{}: Result-valued Set/GetAny-i32 execution route rejected its Checker receipt: {error:?}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        })?;
-    validate_ordinary_map_set_get_any_result_i32_l1_core_mir_route(&canonical).map_err(
-        |reason| {
-            format!(
-                "{}: Result-valued Set/GetAny-i32 execution route failed L1 Core MIR validation: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    Ok(canonical)
+    materialize_map_l1_route_with(
+        program,
+        "Result-valued Set/GetAny-i32",
+        Some(validate_ordinary_map_set_get_any_result_i32_checked_source_census),
+        true,
+        MirProgram::from_checked_program_map_set_get_any_result_i32,
+        validate_ordinary_map_set_get_any_result_i32_l1_core_mir_route,
+    )
 }
 
 /// Materialize and validate the exact Checker-bound New/Set/Get-String graph.
 pub fn materialize_ordinary_map_set_get_string_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = super::reference::MirProgram::from_checked_program_map_set_get_string_result(
-        program, &owner,
+    materialize_map_l1_route_with(
+        program,
+        "ordinary Map Set/Get-String",
+        None,
+        false,
+        super::reference::MirProgram::from_checked_program_map_set_get_string_result,
+        validate_ordinary_map_set_get_string_l1_core_mir_route,
     )
-    .map_err(|error| {
-        format!(
-            "{}: ordinary Map Set/Get-String execution route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    validate_ordinary_map_set_get_string_l1_core_mir_route(&canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/Get-String execution route failed its L1 Core MIR validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
 }
 
 /// Materialize the isolated L2 verifier projection for the exact
@@ -2786,23 +2606,13 @@ pub fn materialize_ordinary_map_set_get_string_route(
 pub fn materialize_ordinary_map_new_result_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = super::reference::MirProgram::from_checked_program_map_new_result_for_verifier(
-        program, &owner,
+    materialize_map_l2_verifier_route_with(
+        program,
+        "ordinary Map NewResult",
+        None,
+        super::reference::MirProgram::from_checked_program_map_new_result_for_verifier,
+        validate_ordinary_map_new_result_l2_verifier_route,
     )
-    .map_err(|error| {
-        format!(
-            "{}: ordinary Map NewResult verifier route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    validate_ordinary_map_new_result_l2_verifier_route(program, &canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map NewResult verifier route failed its L2 validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
 }
 
 /// Materialize the exact SetResult L2 verifier route from its Checker-issued
@@ -2810,23 +2620,13 @@ pub fn materialize_ordinary_map_new_result_verifier_route(
 pub fn materialize_ordinary_map_set_result_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = super::reference::MirProgram::from_checked_program_map_set_result_for_verifier(
-        program, &owner,
+    materialize_map_l2_verifier_route_with(
+        program,
+        "ordinary Map SetResult",
+        None,
+        super::reference::MirProgram::from_checked_program_map_set_result_for_verifier,
+        validate_ordinary_map_set_result_l2_verifier_route,
     )
-    .map_err(|error| {
-        format!(
-            "{}: ordinary Map SetResult verifier route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    validate_ordinary_map_set_result_l2_verifier_route(program, &canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map SetResult verifier route failed its L2 validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
 }
 
 /// Materialize the exact Set/Get-i32 verifier projection, including checked
@@ -2834,18 +2634,13 @@ pub fn materialize_ordinary_map_set_result_verifier_route(
 pub fn materialize_ordinary_map_set_get_i32_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = super::reference::MirProgram::from_checked_program_map_set_get_i32_for_verifier(
-        program, &owner,
+    materialize_map_l2_verifier_route_with(
+        program,
+        "ordinary Map Set/Get-i32",
+        None,
+        super::reference::MirProgram::from_checked_program_map_set_get_i32_for_verifier,
+        validate_ordinary_map_set_get_i32_l2_verifier_route,
     )
-    .map_err(|error| format!("{}: ordinary Map Set/Get-i32 verifier route rejected its Checker receipt: {error:?}", super::MIR_ROUTE_COVERAGE_ERROR_CODE))?;
-    validate_ordinary_map_set_get_i32_l2_verifier_route(program, &canonical).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/Get-i32 verifier route failed its L2 validation: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    Ok(canonical)
 }
 
 /// Materialize the source-bound L2 capability projection for public
@@ -2855,29 +2650,13 @@ pub fn materialize_ordinary_map_set_get_i32_verifier_route(
 pub fn materialize_ordinary_map_set_get_any_i32_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    validate_ordinary_map_set_get_any_i32_checked_source_census(program).map_err(|reason| {
-        format!(
-            "{}: ordinary Map Set/GetAny-i32 verifier route rejected its full CheckedProgram census: {reason}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = MirProgram::from_checked_program_map_set_get_any_i32_for_verifier(program, &owner)
-        .map_err(|error| {
-            format!(
-                "{}: ordinary Map Set/GetAny-i32 verifier route rejected its Checker receipt: {error:?}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        })?;
-    validate_ordinary_map_set_get_any_i32_l2_verifier_route(program, &canonical).map_err(
-        |reason| {
-            format!(
-                "{}: ordinary Map Set/GetAny-i32 verifier route failed L2 validation: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    Ok(canonical)
+    materialize_map_l2_verifier_route_with(
+        program,
+        "ordinary Map Set/GetAny-i32",
+        Some(validate_ordinary_map_set_get_any_i32_checked_source_census),
+        MirProgram::from_checked_program_map_set_get_any_i32_for_verifier,
+        validate_ordinary_map_set_get_any_i32_l2_verifier_route,
+    )
 }
 
 /// Materialize the exact Result-valued GetAny verifier projection. Its L2
@@ -2886,33 +2665,13 @@ pub fn materialize_ordinary_map_set_get_any_i32_verifier_route(
 pub fn materialize_ordinary_map_set_get_any_result_i32_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    validate_ordinary_map_set_get_any_result_i32_checked_source_census(program).map_err(
-        |reason| {
-            format!(
-                "{}: Result-valued Set/GetAny-i32 verifier route rejected its full CheckedProgram census: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical = MirProgram::from_checked_program_map_set_get_any_result_i32_for_verifier(
-        program, &owner,
+    materialize_map_l2_verifier_route_with(
+        program,
+        "Result-valued Set/GetAny-i32",
+        Some(validate_ordinary_map_set_get_any_result_i32_checked_source_census),
+        MirProgram::from_checked_program_map_set_get_any_result_i32_for_verifier,
+        validate_ordinary_map_set_get_any_result_i32_l2_verifier_route,
     )
-    .map_err(|error| {
-        format!(
-            "{}: Result-valued Set/GetAny-i32 verifier route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        )
-    })?;
-    validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(program, &canonical).map_err(
-        |reason| {
-            format!(
-                "{}: Result-valued Set/GetAny-i32 verifier route failed L2 validation: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    Ok(canonical)
 }
 
 /// Materialize the Checker-bound String L2 verifier projection. Its direct
@@ -2921,24 +2680,13 @@ pub fn materialize_ordinary_map_set_get_any_result_i32_verifier_route(
 pub fn materialize_ordinary_map_set_get_string_verifier_route(
     program: &CheckedProgram,
 ) -> Result<MirProgram, String> {
-    let owner = crate::core::NodeId("function:main".into());
-    let canonical =
-        super::reference::MirProgram::from_checked_program_map_set_get_string_for_verifier(
-            program, &owner,
-        )
-        .map_err(|error| format!(
-            "{}: ordinary Map Set/Get-String verifier route rejected its Checker receipt: {error:?}",
-            super::MIR_ROUTE_COVERAGE_ERROR_CODE
-        ))?;
-    validate_ordinary_map_set_get_string_l2_verifier_route(program, &canonical).map_err(
-        |reason| {
-            format!(
-                "{}: ordinary Map Set/Get-String verifier route failed its L2 validation: {reason}",
-                super::MIR_ROUTE_COVERAGE_ERROR_CODE
-            )
-        },
-    )?;
-    Ok(canonical)
+    materialize_map_l2_verifier_route_with(
+        program,
+        "ordinary Map Set/Get-String",
+        None,
+        super::reference::MirProgram::from_checked_program_map_set_get_string_for_verifier,
+        validate_ordinary_map_set_get_string_l2_verifier_route,
+    )
 }
 
 /// Validate the CheckedProgram-bound String L2 proof census, exact contract,
@@ -2947,63 +2695,21 @@ pub fn validate_ordinary_map_set_get_string_l2_verifier_route(
     checked: &CheckedProgram,
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
-
-    let owner = crate::core::NodeId("function:main".into());
-    checked
-        .validate_backend(BackendProfile::Verifier)
-        .map_err(|diagnostics| format!("ordinary Map Set/Get-String L2 verifier rejected CheckedProgram backend requirements: {}", diagnostics.into_iter().map(|diagnostic| diagnostic.to_string()).collect::<Vec<_>>().join("; ")))?;
-    validate_ordinary_map_set_get_string_l2_verifier_profile(program)?;
-    let census = program.proof_source_census();
-    let materialized_count = census
-        .checked_callables()
-        .filter(|entry| !entry.materialized_owners().is_empty())
-        .count();
-    let materialized_main = census
-        .checked_callables()
-        .any(|entry| entry.owner() == &owner && !entry.materialized_owners().is_empty());
-    if materialized_count != 1
-        || !materialized_main
-        || !census.matches_checked_program(checked, program.functions(), program.instances())
-    {
-        return Err("ordinary Map Set/Get-String L2 verifier source census differs from the complete CheckedProgram".into());
-    }
-    let callable = checked.callable(&owner).ok_or_else(|| {
-        "ordinary Map Set/Get-String L2 verifier has no checked main callable".to_string()
-    })?;
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_set_get_string_lineage_receipt
-        .as_ref()
-        .ok_or_else(|| {
-            "CheckedProgram has no exact ordinary Map Set/Get-String receipt".to_string()
-        })?;
-    crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_string_lineage_receipt(
-        source_receipt,
-        &callable.cfg,
-        &callable.body,
-        &callable.signature,
-        checked.resolved_types(),
-    )?;
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_set_get_string_result(
+    validate_map_result_l2_verifier_route_with(
         checked,
-        source_receipt,
+        program,
+        "ordinary Map Set/Get-String L2",
+        ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_set_get_string_l2_verifier_profile,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_set_get_string_lineage_receipt
+                .as_ref()
+        },
+        crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_string_lineage_receipt,
+        super::types::MirTypeCatalog::for_ordinary_map_set_get_string_result,
+        super::lower::ordinary_map_set_get_string_result_function_with_checked_proofs,
     )
-    .map_err(|errors| format!("ordinary Map Set/Get-String L2 verifier could not rebuild Checker TypeDesc catalog: {errors:?}"))?;
-    if program.type_catalog() != &expected_catalog {
-        return Err("ordinary Map Set/Get-String L2 verifier TypeDesc catalog differs from the exact CheckedProgram".into());
-    }
-    let expected_function =
-        super::lower::ordinary_map_set_get_string_result_function_with_checked_proofs(
-            callable,
-            source_receipt,
-        )?;
-    if program.functions().get(&owner) != Some(&expected_function) {
-        return Err("ordinary Map Set/Get-String L2 verifier contracts/proof-worklist/MIR graph differs from the exact CheckedProgram".into());
-    }
-    let route = program.route_receipt(ORDINARY_MAP_SET_GET_STRING_L2_VERIFIER_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
 }
 
 /// Validate the exact CheckedProgram-aware Set/Get-i32 verifier projection.
@@ -3011,59 +2717,95 @@ pub fn validate_ordinary_map_set_get_i32_l2_verifier_route(
     checked: &CheckedProgram,
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
+    validate_map_result_l2_verifier_route_with(
+        checked,
+        program,
+        "ordinary Map Set/Get-i32 L2",
+        ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_set_get_i32_l2_verifier_profile,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_set_get_i32_lineage_receipt
+                .as_ref()
+        },
+        crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_i32_lineage_receipt,
+        super::types::MirTypeCatalog::for_ordinary_map_set_get_i32_result,
+        super::lower::ordinary_map_set_get_i32_result_function_with_checked_proofs,
+    )
+}
 
+fn validate_get_any_l2_verifier_route_with<R, E: std::fmt::Debug>(
+    checked: &CheckedProgram,
+    program: &MirProgram,
+    label: &str,
+    profile_name: &str,
+    validate_source_census: fn(&CheckedProgram) -> Result<(), String>,
+    extract_receipt: fn(&crate::core::ResourceAnalysis) -> Option<&R>,
+    build_catalog: fn(&CheckedProgram, &R) -> Result<super::types::MirTypeCatalog, E>,
+    lower_with_proofs: fn(&crate::core::ResolvedCallable, &R) -> Result<super::MirFunction, String>,
+    lower_without_proofs: fn(&R) -> Result<super::MirFunction, String>,
+) -> Result<CanonicalMirRouteReceipt, String> {
+    validate_checked_verifier_backend(checked, label)?;
+    validate_source_census(checked)?;
     let owner = crate::core::NodeId("function:main".into());
-    checked
-        .validate_backend(BackendProfile::Verifier)
-        .map_err(|diagnostics| format!("ordinary Map Set/Get-i32 L2 verifier rejected CheckedProgram backend requirements: {}", diagnostics.into_iter().map(|diagnostic| diagnostic.to_string()).collect::<Vec<_>>().join("; ")))?;
-    validate_ordinary_map_set_get_i32_l2_verifier_profile(program)?;
-
-    let census = program.proof_source_census();
-    let materialized_count = census
-        .checked_callables()
-        .filter(|entry| !entry.materialized_owners().is_empty())
-        .count();
-    let materialized_main = census
-        .checked_callables()
-        .any(|entry| entry.owner() == &owner && !entry.materialized_owners().is_empty());
-    if materialized_count != 1
-        || !materialized_main
-        || !census.matches_checked_program(checked, program.functions(), program.instances())
+    let callable = checked
+        .callable(&owner)
+        .ok_or_else(|| format!("{label} has no checked main callable"))?;
+    let source_receipt = extract_receipt(&callable.resources)
+        .ok_or_else(|| format!("{label} has no Checker lineage receipt"))?;
+    if program.purpose() != super::reference::MirProgramPurpose::Executable
+        || program.functions().len() != 1
+        || !program.functions().contains_key(&owner)
+        || !program.instances().is_empty()
     {
-        return Err("ordinary Map Set/Get-i32 L2 verifier source census differs from the complete CheckedProgram".into());
+        return Err(format!(
+            "{label} requires one executable main MIR graph and no generic instances"
+        ));
     }
-
-    let callable = checked.callable(&owner).ok_or_else(|| {
-        "ordinary Map Set/Get-i32 L2 verifier has no checked main callable".to_string()
+    let expected_catalog = build_catalog(checked, source_receipt).map_err(|errors| {
+        format!("{label} could not rebuild its Checker TypeDesc catalog: {errors:?}")
     })?;
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_set_get_i32_lineage_receipt
-        .as_ref()
-        .ok_or_else(|| {
-            "CheckedProgram has no exact ordinary Map Set/Get-i32 receipt".to_string()
-        })?;
-    crate::core::cfg::validate_ordinary_map_owned_any_v2_set_get_i32_lineage_receipt(
-        source_receipt,
-        &callable.cfg,
-        &callable.body,
-        &callable.signature,
-        checked.resolved_types(),
-    )?;
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_set_get_i32_result(checked, source_receipt).map_err(|errors| format!("ordinary Map Set/Get-i32 L2 verifier could not rebuild Checker TypeDesc catalog: {errors:?}"))?;
     if program.type_catalog() != &expected_catalog {
-        return Err("ordinary Map Set/Get-i32 L2 verifier TypeDesc catalog differs from the exact CheckedProgram".into());
+        return Err(format!(
+            "{label} TypeDesc catalog differs from the exact CheckedProgram"
+        ));
     }
-    let expected_function =
-        super::lower::ordinary_map_set_get_i32_result_function_with_checked_proofs(
-            callable,
-            source_receipt,
-        )?;
+    let expected_function = if callable.has_proof_obligations() {
+        lower_with_proofs(callable, source_receipt)?
+    } else {
+        lower_without_proofs(source_receipt)?
+    };
     if program.functions().get(&owner) != Some(&expected_function) {
-        return Err("ordinary Map Set/Get-i32 L2 verifier contracts/proof-worklist/MIR graph differ from the exact CheckedProgram".into());
+        return Err(format!(
+            "{label} MIR contracts, status branches, cleanup or proof artifact differ from the exact Checker receipt"
+        ));
     }
-    let route = program.route_receipt(ORDINARY_MAP_SET_GET_I32_L2_VERIFIER_PROFILE);
+    program
+        .validate_proof_source_census()
+        .map_err(|error| format!("{label} proof source census rejected: {error:?}"))?;
+    if callable.has_proof_obligations() {
+        let function = program
+            .functions()
+            .get(&owner)
+            .expect("validated main function");
+        if function.contracts.len() != 1
+            || function.contracts[0].kind != super::MirContractKind::Ensures
+            || function.proof_worklist.is_none()
+        {
+            return Err(format!(
+                "{label} proof fixture must have one direct Ensures and a Checker-rooted proof artifact"
+            ));
+        }
+        program
+            .validate_owner_proof_worklist(&owner)
+            .map_err(|error| format!("{label} proof worklist rejected: {error:?}"))?;
+    } else if expected_function.proof_worklist.is_some() || !expected_function.contracts.is_empty()
+    {
+        return Err(format!(
+            "contract-free {label} capability preflight unexpectedly contains proof state"
+        ));
+    }
+    let route = program.route_receipt(profile_name);
     route.validate_against_program(program)?;
     Ok(route)
 }
@@ -3078,99 +2820,21 @@ pub fn validate_ordinary_map_set_get_any_i32_l2_verifier_route(
     checked: &CheckedProgram,
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
-
-    checked
-        .validate_backend(BackendProfile::Verifier)
-        .map_err(|diagnostics| {
-            format!(
-                "ordinary Map Set/GetAny-i32 L2 verifier rejected CheckedProgram backend requirements: {}",
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        })?;
-    validate_ordinary_map_set_get_any_i32_checked_source_census(checked)?;
-    let owner = crate::core::NodeId("function:main".into());
-    let callable = checked
-        .callable(&owner)
-        .ok_or_else(|| "ordinary Map Set/GetAny-i32 L2 has no checked main".to_string())?;
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt
-        .as_ref()
-        .ok_or_else(|| {
-            "ordinary Map Set/GetAny-i32 L2 has no Checker lineage receipt".to_string()
-        })?;
-    if program.purpose() != super::reference::MirProgramPurpose::Executable
-        || program.functions().len() != 1
-        || !program.functions().contains_key(&owner)
-        || !program.instances().is_empty()
-    {
-        return Err("ordinary Map Set/GetAny-i32 L2 requires one executable main MIR graph and no generic instances".into());
-    }
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_set_get_any_i32_result(
+    validate_get_any_l2_verifier_route_with(
         checked,
-        source_receipt,
+        program,
+        "ordinary Map Set/GetAny-i32 L2",
+        ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_set_get_any_i32_checked_source_census,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_set_get_any_i32_lineage_receipt
+                .as_ref()
+        },
+        super::types::MirTypeCatalog::for_ordinary_map_set_get_any_i32_result,
+        super::lower::ordinary_map_set_get_any_i32_result_function_with_checked_proofs,
+        super::lower::ordinary_map_set_get_any_i32_result_function,
     )
-    .map_err(|errors| {
-        format!(
-            "ordinary Map Set/GetAny-i32 L2 could not rebuild its Checker TypeDesc catalog: {errors:?}"
-        )
-    })?;
-    if program.type_catalog() != &expected_catalog {
-        return Err(
-            "ordinary Map Set/GetAny-i32 L2 TypeDesc catalog differs from the exact CheckedProgram"
-                .into(),
-        );
-    }
-    let expected_function = if callable.has_proof_obligations() {
-        super::lower::ordinary_map_set_get_any_i32_result_function_with_checked_proofs(
-            callable,
-            source_receipt,
-        )?
-    } else {
-        super::lower::ordinary_map_set_get_any_i32_result_function(source_receipt)?
-    };
-    if program.functions().get(&owner) != Some(&expected_function) {
-        return Err(
-            "ordinary Map Set/GetAny-i32 L2 MIR contracts, status branches, cleanup or proof artifact differ from the exact Checker receipt".into(),
-        );
-    }
-    program.validate_proof_source_census().map_err(|error| {
-        format!("ordinary Map Set/GetAny-i32 L2 proof source census rejected: {error:?}")
-    })?;
-    if callable.has_proof_obligations() {
-        let function = program
-            .functions()
-            .get(&owner)
-            .expect("validated main function");
-        if function.contracts.len() != 1
-            || function.contracts[0].kind != super::MirContractKind::Ensures
-            || function.proof_worklist.is_none()
-        {
-            return Err(
-                "ordinary Map Set/GetAny-i32 L2 proof fixture must have one direct Ensures and a Checker-rooted proof artifact".into(),
-            );
-        }
-        program
-            .validate_owner_proof_worklist(&owner)
-            .map_err(|error| {
-                format!("ordinary Map Set/GetAny-i32 L2 proof worklist rejected: {error:?}")
-            })?;
-    } else if expected_function.proof_worklist.is_some() || !expected_function.contracts.is_empty()
-    {
-        return Err(
-            "contract-free Set/GetAny-i32 capability preflight unexpectedly contains proof state"
-                .into(),
-        );
-    }
-    let route =
-        program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_I32_L2_VERIFIER_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
 }
 
 /// Validate the complete Checker-bound L2 projection for the independent
@@ -3181,100 +2845,21 @@ pub fn validate_ordinary_map_set_get_any_result_i32_l2_verifier_route(
     checked: &CheckedProgram,
     program: &MirProgram,
 ) -> Result<CanonicalMirRouteReceipt, String> {
-    use crate::core::BackendProfile;
-
-    checked
-        .validate_backend(BackendProfile::Verifier)
-        .map_err(|diagnostics| {
-            format!(
-                "Result-valued Set/GetAny-i32 L2 verifier rejected CheckedProgram backend requirements: {}",
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            )
-        })?;
-    validate_ordinary_map_set_get_any_result_i32_checked_source_census(checked)?;
-    let owner = crate::core::NodeId("function:main".into());
-    let callable = checked.callable(&owner).ok_or_else(|| {
-        "Result-valued Set/GetAny-i32 L2 has no checked main callable".to_string()
-    })?;
-    let source_receipt = callable
-        .resources
-        .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt
-        .as_ref()
-        .ok_or_else(|| {
-            "Result-valued Set/GetAny-i32 L2 has no Checker lineage receipt".to_string()
-        })?;
-    if program.purpose() != super::reference::MirProgramPurpose::Executable
-        || program.functions().len() != 1
-        || !program.functions().contains_key(&owner)
-        || !program.instances().is_empty()
-    {
-        return Err(
-            "Result-valued Set/GetAny-i32 L2 requires one executable main MIR graph and no generic instances".into(),
-        );
-    }
-    let expected_catalog = super::types::MirTypeCatalog::for_ordinary_map_set_get_any_result_i32(
+    validate_get_any_l2_verifier_route_with(
         checked,
-        source_receipt,
+        program,
+        "Result-valued Set/GetAny-i32 L2",
+        ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE,
+        validate_ordinary_map_set_get_any_result_i32_checked_source_census,
+        |resources| {
+            resources
+                .ordinary_map_owned_any_v2_set_get_any_result_i32_lineage_receipt
+                .as_ref()
+        },
+        super::types::MirTypeCatalog::for_ordinary_map_set_get_any_result_i32,
+        super::lower::ordinary_map_set_get_any_result_i32_result_function_with_checked_proofs,
+        super::lower::ordinary_map_set_get_any_result_i32_result_function,
     )
-    .map_err(|errors| {
-        format!(
-            "Result-valued Set/GetAny-i32 L2 could not rebuild its dedicated Checker TypeDesc catalog: {errors:?}"
-        )
-    })?;
-    if program.type_catalog() != &expected_catalog {
-        return Err(
-            "Result-valued Set/GetAny-i32 L2 TypeDesc catalog differs from the exact CheckedProgram"
-                .into(),
-        );
-    }
-    let expected_function = if callable.has_proof_obligations() {
-        super::lower::ordinary_map_set_get_any_result_i32_result_function_with_checked_proofs(
-            callable,
-            source_receipt,
-        )?
-    } else {
-        super::lower::ordinary_map_set_get_any_result_i32_result_function(source_receipt)?
-    };
-    if program.functions().get(&owner) != Some(&expected_function) {
-        return Err(
-            "Result-valued Set/GetAny-i32 L2 MIR contracts, status branches, cleanup or proof artifact differ from the exact Checker receipt".into(),
-        );
-    }
-    program.validate_proof_source_census().map_err(|error| {
-        format!("Result-valued Set/GetAny-i32 L2 proof source census rejected: {error:?}")
-    })?;
-    if callable.has_proof_obligations() {
-        let function = program
-            .functions()
-            .get(&owner)
-            .expect("validated main function");
-        if function.contracts.len() != 1
-            || function.contracts[0].kind != super::MirContractKind::Ensures
-            || function.proof_worklist.is_none()
-        {
-            return Err(
-                "Result-valued Set/GetAny-i32 L2 proof route requires one direct Ensures and Checker-rooted proof artifact".into(),
-            );
-        }
-        program
-            .validate_owner_proof_worklist(&owner)
-            .map_err(|error| {
-                format!("Result-valued Set/GetAny-i32 L2 proof worklist rejected: {error:?}")
-            })?;
-    } else if expected_function.proof_worklist.is_some() || !expected_function.contracts.is_empty()
-    {
-        return Err(
-            "contract-free Result-valued Set/GetAny-i32 capability preflight unexpectedly contains proof state".into(),
-        );
-    }
-    let route =
-        program.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_SET_GET_ANY_RESULT_I32_L2_VERIFIER_PROFILE);
-    route.validate_against_program(program)?;
-    Ok(route)
 }
 
 /// Independently derive and validate the one exact typed receipt for the
@@ -45453,13 +45038,13 @@ fn materialize_canonical_mir_route_impl(
         .functions()
         .values()
         .any(|function| function.ownership.has_checker_map_any_owner_actions());
-    let materialized_ordinary_map_owned_any_v2_candidate = admission
-        .ordinary_map_owned_any_v2_complete()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
+    let has_v2_actions = canonical.functions().values().any(|function| {
+        function
+            .ownership
+            .has_checker_ordinary_map_owned_any_v2_actions()
+    });
+    let materialized_ordinary_map_owned_any_v2_candidate =
+        admission.ordinary_map_owned_any_v2_complete() && has_v2_actions;
     let materialized_ordinary_map_owned_any_v2_direct_print_candidate = admission
         .ordinary_map_owned_any_v2_direct_print()
         && canonical.functions().values().any(|function| {
@@ -45472,20 +45057,10 @@ fn materialize_canonical_mir_route_impl(
                 })
             })
         });
-    let materialized_ordinary_map_owned_any_v2_checked_get_candidate = admission
-        .ordinary_map_owned_any_v2_checked_get()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_computed_key_get_candidate = admission
-        .ordinary_map_owned_any_v2_computed_key_get()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
+    let materialized_ordinary_map_owned_any_v2_checked_get_candidate =
+        admission.ordinary_map_owned_any_v2_checked_get() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_computed_key_get_candidate =
+        admission.ordinary_map_owned_any_v2_computed_key_get() && has_v2_actions;
     let materialized_ordinary_map_owned_any_v2_computed_string_key_owner_chain_candidate = admission
         .ordinary_map_owned_any_v2_computed_string_key_owner_chain()
         && canonical.functions().values().any(|function| {
@@ -45507,165 +45082,113 @@ fn materialize_canonical_mir_route_impl(
                 .ordinary_map_owned_any_v2_direct_print_result_receipt()
                 .is_some()
         });
-    let materialized_ordinary_map_owned_any_v2_zero_miss_i32_candidate = admission
-        .ordinary_map_owned_any_v2_zero_miss_i32()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_removed_key_checked_miss_candidate = admission
-        .ordinary_map_owned_any_v2_removed_key_checked_miss()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_values_field_move_candidate = admission
-        .ordinary_map_owned_any_v2_values_field_move()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_values_snapshot_replacement_candidate = admission
-        .ordinary_map_owned_any_v2_values_snapshot_replacement()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_candidate = admission
-        .ordinary_map_owned_any_v2_values_mixed_snapshot()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_candidate = admission
-        .ordinary_map_owned_any_v2_values_mixed_snapshot_remove()
-        && canonical.functions().values().any(|function| {
-            function
-                .ownership
-                .has_checker_ordinary_map_owned_any_v2_actions()
-        });
-    let ordinary_map_owned_any_v2_values_producer_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_producer_caller()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_values_producer_caller_route(program, &canonical)
-                .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller,
-                    stage: CanonicalMirRouteFailureStage::Coverage,
-                    message: format!(
-                        "Values producer-caller MIR route receipt rejected: {message}"
-                    ),
-                })?,
-        )
-    } else {
-        None
-    };
-    let ordinary_map_owned_any_v2_values_crosscall_string_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_crosscall_string_caller()
-    {
-        let crosscall_profile =
-            if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {
-                CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
-            } else {
-                CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller
-            };
-        Some(
-            validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
-                program, &canonical,
-            )
+    let materialized_ordinary_map_owned_any_v2_zero_miss_i32_candidate =
+        admission.ordinary_map_owned_any_v2_zero_miss_i32() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_removed_key_checked_miss_candidate =
+        admission.ordinary_map_owned_any_v2_removed_key_checked_miss() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_values_field_move_candidate =
+        admission.ordinary_map_owned_any_v2_values_field_move() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_values_snapshot_replacement_candidate =
+        admission.ordinary_map_owned_any_v2_values_snapshot_replacement() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_candidate =
+        admission.ordinary_map_owned_any_v2_values_mixed_snapshot() && has_v2_actions;
+    let materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_candidate =
+        admission.ordinary_map_owned_any_v2_values_mixed_snapshot_remove() && has_v2_actions;
+    let attach_validated_receipt = |enabled: bool,
+                                    profile: CanonicalMirRouteProfile,
+                                    label: &str,
+                                    validate: &dyn Fn() -> Result<
+        CanonicalMirRouteReceipt,
+        String,
+    >|
+     -> Result<
+        Option<CanonicalMirRouteReceipt>,
+        CanonicalMirRouteMaterializationError,
+    > {
+        if !enabled {
+            return Ok(None);
+        }
+        validate()
+            .map(Some)
             .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile: crosscall_profile,
+                profile,
                 stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!(
-                    "Values cross-call String caller MIR route receipt rejected: {message}"
-                ),
-            })?,
-        )
-    } else {
-        None
+                message: format!("{label}: {message}"),
+            })
     };
-    let ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3()
-        || admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
-                program, &canonical,
-            )
-            .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile: if admission
-                    .ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4()
-                {
-                    CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
-                } else {
-                    CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
-                },
-                stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!(
-                    "Values Result-branch cross-call String caller MIR route receipt rejected: {message}"
-                ),
-            })?,
-        )
-    } else {
-        None
-    };
-    let ordinary_map_owned_any_v2_values_result_producer_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_result_producer_caller()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
-                program, &canonical,
-            )
-            .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller,
-                stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!(
-                    "Values Result-branch producer-caller MIR route receipt rejected: {message}"
-                ),
-            })?,
-        )
-    } else {
-        None
-    };
+    let ordinary_map_owned_any_v2_values_producer_caller_route_receipt = attach_validated_receipt(
+        admission.ordinary_map_owned_any_v2_values_producer_caller(),
+        CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesProducerCaller,
+        "Values producer-caller MIR route receipt rejected",
+        &|| validate_ordinary_map_owned_any_v2_values_producer_caller_route(program, &canonical),
+    )?;
+    let crosscall_profile =
+        if admission.ordinary_map_owned_any_v2_values_crosscall_string_caller_index1() {
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCallerIndex1
+        } else {
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesCrosscallStringCaller
+        };
+    let ordinary_map_owned_any_v2_values_crosscall_string_caller_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_values_crosscall_string_caller(),
+            crosscall_profile,
+            "Values cross-call String caller MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_values_crosscall_string_caller_route(
+                    program, &canonical,
+                )
+            },
+        )?;
+    let result_crosscall_profile =
+        if admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4() {
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCallerIndex1
+        } else {
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultCrosscallStringCaller
+        };
+    let ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v3()
+                || admission.ordinary_map_owned_any_v2_values_result_crosscall_string_caller_v4(),
+            result_crosscall_profile,
+            "Values Result-branch cross-call String caller MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_values_result_crosscall_string_caller_route(
+                    program, &canonical,
+                )
+            },
+        )?;
+    let ordinary_map_owned_any_v2_values_result_producer_caller_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_values_result_producer_caller(),
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesResultProducerCaller,
+            "Values Result-branch producer-caller MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_values_result_producer_caller_route(
+                    program, &canonical,
+                )
+            },
+        )?;
     let materialized_ordinary_map_owned_any_v2_values_producer_caller_candidate =
         ordinary_map_owned_any_v2_values_producer_caller_route_receipt.is_some();
-    let ordinary_map_owned_any_v2_map_root_get_any_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_map_root_get_any_caller()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_map_root_get_any_caller_route(program, &canonical)
-                .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller,
-                stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!("Map-root GetAny-caller MIR route receipt rejected: {message}"),
-            })?,
-        )
-    } else {
-        None
-    };
+    let ordinary_map_owned_any_v2_map_root_get_any_caller_route_receipt = attach_validated_receipt(
+        admission.ordinary_map_owned_any_v2_map_root_get_any_caller(),
+        CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootGetAnyCaller,
+        "Map-root GetAny-caller MIR route receipt rejected",
+        &|| validate_ordinary_map_owned_any_v2_map_root_get_any_caller_route(program, &canonical),
+    )?;
     let materialized_ordinary_map_owned_any_v2_map_root_get_any_caller_candidate =
         ordinary_map_owned_any_v2_map_root_get_any_caller_route_receipt.is_some();
-    let ordinary_map_owned_any_v2_map_root_producer_caller_route_receipt = if admission
-        .ordinary_map_owned_any_v2_map_root_producer_caller()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_map_root_producer_caller_route(program, &canonical)
-                .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller,
-                    stage: CanonicalMirRouteFailureStage::Coverage,
-                    message: format!(
-                        "Map-root producer-caller MIR route receipt rejected: {message}"
-                    ),
-                })?,
-        )
-    } else {
-        None
-    };
+    let ordinary_map_owned_any_v2_map_root_producer_caller_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_map_root_producer_caller(),
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2MapRootProducerCaller,
+            "Map-root producer-caller MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_map_root_producer_caller_route(
+                    program, &canonical,
+                )
+            },
+        )?;
     let materialized_ordinary_map_owned_any_v2_map_root_producer_caller_candidate =
         ordinary_map_owned_any_v2_map_root_producer_caller_route_receipt.is_some();
     let materialized_ordinary_map_owner_lifecycle_i32_string_v1_candidate = admission
@@ -46449,83 +45972,50 @@ fn materialize_canonical_mir_route_impl(
             None
         };
 
-    let ordinary_map_owned_any_v2_checked_get_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_checked_get_candidate {
-            validate_ordinary_map_owned_any_v2_checked_get_route(&canonical).map_err(
-                |message| CanonicalMirRouteMaterializationError::Complete {
-                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CheckedGet,
-                    stage: CanonicalMirRouteFailureStage::Coverage,
-                    message: format!("CheckedGet MIR route receipt rejected: {message}"),
-                },
-            )?;
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE))
-        } else {
-            None
-        };
+    let ordinary_map_owned_any_v2_checked_get_route_receipt = attach_validated_receipt(
+        materialized_ordinary_map_owned_any_v2_checked_get_candidate,
+        CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2CheckedGet,
+        "CheckedGet MIR route receipt rejected",
+        &|| {
+            validate_ordinary_map_owned_any_v2_checked_get_route(&canonical)?;
+            Ok(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_CHECKED_GET_PROFILE))
+        },
+    )?;
     let ordinary_map_owned_any_v2_direct_print_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_direct_print_candidate {
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE))
-        } else {
-            None
-        };
-    let ordinary_map_owned_any_v2_direct_print_result_route_receipt =
-        if admission.ordinary_map_owned_any_v2_direct_print_result() {
-            Some(
-                validate_ordinary_map_owned_any_v2_direct_print_result_route(program, &canonical)
-                    .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult,
-                    stage: CanonicalMirRouteFailureStage::Coverage,
-                    message: format!(
-                        "nested Result DirectPrint MIR route receipt rejected: {message}"
-                    ),
-                })?,
-            )
-        } else {
-            None
-        };
-    let ordinary_map_owned_any_v2_computed_key_get_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_computed_key_get_candidate {
-            validate_ordinary_map_owned_any_v2_computed_key_get_mir_route(&canonical).map_err(
-                |message| CanonicalMirRouteMaterializationError::Complete {
-                    profile: CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedKeyGet,
-                    stage: CanonicalMirRouteFailureStage::Coverage,
-                    message: format!("ComputedKeyGet MIR route receipt rejected: {message}"),
-                },
-            )?;
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE))
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_direct_print_candidate
+            .then(|| canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_DIRECT_PRINT_PROFILE));
+    let ordinary_map_owned_any_v2_direct_print_result_route_receipt = attach_validated_receipt(
+        admission.ordinary_map_owned_any_v2_direct_print_result(),
+        CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2DirectPrintResult,
+        "nested Result DirectPrint MIR route receipt rejected",
+        &|| validate_ordinary_map_owned_any_v2_direct_print_result_route(program, &canonical),
+    )?;
+    let ordinary_map_owned_any_v2_computed_key_get_route_receipt = attach_validated_receipt(
+        materialized_ordinary_map_owned_any_v2_computed_key_get_candidate,
+        CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ComputedKeyGet,
+        "ComputedKeyGet MIR route receipt rejected",
+        &|| {
+            validate_ordinary_map_owned_any_v2_computed_key_get_mir_route(&canonical)?;
+            Ok(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_COMPUTED_KEY_GET_PROFILE))
+        },
+    )?;
     let ordinary_map_owned_any_v2_zero_miss_i32_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_zero_miss_i32_candidate {
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE))
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_zero_miss_i32_candidate
+            .then(|| canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_ZERO_MISS_I32_PROFILE));
     let ordinary_map_owned_any_v2_removed_key_checked_miss_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_removed_key_checked_miss_candidate {
-            Some(
+        attach_validated_receipt(
+            materialized_ordinary_map_owned_any_v2_removed_key_checked_miss_candidate,
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RemovedKeyCheckedMiss,
+            "RemovedKeyCheckedMiss route receipt rejected",
+            &|| {
                 validate_ordinary_map_owned_any_v2_removed_key_checked_miss_route(
                     program, &canonical,
                 )
-                .map_err(|message| {
-                    CanonicalMirRouteMaterializationError::Complete {
-                        profile:
-                            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2RemovedKeyCheckedMiss,
-                        stage: CanonicalMirRouteFailureStage::Coverage,
-                        message: format!("RemovedKeyCheckedMiss route receipt rejected: {message}"),
-                    }
-                })?,
-            )
-        } else {
-            None
-        };
+            },
+        )?;
     let ordinary_map_owned_any_v2_values_field_move_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_values_field_move_candidate {
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE))
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_values_field_move_candidate
+            .then(|| canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_FIELD_MOVE_PROFILE));
     let ordinary_map_owned_any_v2_values_local_index_i32_route_receipt = if admission
         .ordinary_map_owned_any_v2_values_local_index_i32()
     {
@@ -46540,82 +46030,46 @@ fn materialize_canonical_mir_route_impl(
     } else {
         None
     };
-    let ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_local_index_i32_result_branch()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
-                program, &canonical,
-            )
-            .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile:
-                    CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranch,
-                stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!(
-                    "ValuesLocalIndexI32 Result-branch MIR route receipt rejected: {message}"
-                ),
-            })?,
-        )
-    } else {
-        None
-    };
-    let ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route_receipt = if admission
-        .ordinary_map_owned_any_v2_values_heterogeneous_string_index1()
-    {
-        Some(
-            validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route(
-                program, &canonical,
-            )
-            .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                profile:
-                    CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesHeterogeneousStringIndex1,
-                stage: CanonicalMirRouteFailureStage::Coverage,
-                message: format!(
-                    "ValuesHeterogeneousStringIndex1 MIR route receipt rejected: {message}"
-                ),
-            })?,
-        )
-    } else {
-        None
-    };
+    let ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_values_local_index_i32_result_branch(),
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesLocalIndexI32ResultBranch,
+            "ValuesLocalIndexI32 Result-branch MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_values_local_index_i32_result_branch_route(
+                    program, &canonical,
+                )
+            },
+        )?;
+    let ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route_receipt =
+        attach_validated_receipt(
+            admission.ordinary_map_owned_any_v2_values_heterogeneous_string_index1(),
+            CanonicalMirRouteProfile::OrdinaryMapOwnedAnyV2ValuesHeterogeneousStringIndex1,
+            "ValuesHeterogeneousStringIndex1 MIR route receipt rejected",
+            &|| {
+                validate_ordinary_map_owned_any_v2_values_heterogeneous_string_index1_route(
+                    program, &canonical,
+                )
+            },
+        )?;
     let ordinary_map_owned_any_v2_values_snapshot_replacement_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_values_snapshot_replacement_candidate {
-            Some(
-                canonical
-                    .route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE),
-            )
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_values_snapshot_replacement_candidate.then(|| {
+            canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_SNAPSHOT_REPLACEMENT_PROFILE)
+        });
     let ordinary_map_owned_any_v2_values_mixed_snapshot_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_candidate {
-            Some(canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE))
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_candidate.then(|| {
+            canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_PROFILE)
+        });
     let ordinary_map_owned_any_v2_values_mixed_snapshot_remove_route_receipt =
-        if materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_candidate {
-            Some(
-                canonical
-                    .route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE),
-            )
-        } else {
-            None
-        };
-    let ordinary_map_owner_lifecycle_observer_v1_route_receipt =
-        if materialized_ordinary_map_owner_lifecycle_observer_v1_candidate {
-            Some(
-                canonical
-                    .ordinary_map_owner_lifecycle_observer_v1_route_receipt()
-                    .map_err(|message| CanonicalMirRouteMaterializationError::Complete {
-                        profile: CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1,
-                        stage: CanonicalMirRouteFailureStage::Coverage,
-                        message: format!("ordinary Map observer route receipt rejected: {message}"),
-                    })?,
-            )
-        } else {
-            None
-        };
+        materialized_ordinary_map_owned_any_v2_values_mixed_snapshot_remove_candidate.then(|| {
+            canonical.route_receipt(ORDINARY_MAP_OWNED_ANY_V2_VALUES_MIXED_SNAPSHOT_REMOVE_PROFILE)
+        });
+    let ordinary_map_owner_lifecycle_observer_v1_route_receipt = attach_validated_receipt(
+        materialized_ordinary_map_owner_lifecycle_observer_v1_candidate,
+        CanonicalMirRouteProfile::OrdinaryMapOwnerLifecycleObserverV1,
+        "ordinary Map observer route receipt rejected",
+        &|| canonical.ordinary_map_owner_lifecycle_observer_v1_route_receipt(),
+    )?;
 
     Ok(CanonicalMirRouteMaterialization {
         program: canonical,
